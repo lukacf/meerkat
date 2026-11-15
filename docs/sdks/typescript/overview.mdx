@@ -522,6 +522,37 @@ one `sent` row per distinct resolution), and
 `parseReasoningEffortResolution(...)` the resolution `run_started`,
 `run_resumed` and `request_reasoning_effort_resolved` carry.
 
+A turn that would change the model identity of a session that has unfinished
+work is not queued behind that work (the rule of the JSON-RPC turn requests:
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+It rejects at once with a `MeerkatError`
+whose `code` is `"-32002"` (session busy) and whose `details` are
+`{ kind: "reasoning_effort_change_needs_idle_session" }`; nothing is stored
+for the turn. The one `kind` covers every cause. On a session that holds a
+provider-neutral level: a turn that sets, changes or clears the level, or
+that changes the model, the provider, the self-hosted server, the provider
+parameters or the auth binding (a level named inside `providerParams`
+replaces those parameters, so it is one of these even when the level is the
+same). On a session that holds no level: a turn that sets one. Plain turns,
+and turns that repeat the session's level with `reasoningEffort`, queue as
+before. This is not a level refusal, so `reasoningEffortRefusal(error)`
+returns `undefined` for it; a level the model does not accept is still
+answered with its refusal first. Wait for the running turn's answer, then
+send the turn again; do not poll. A later release is planned to queue such a
+turn.
+
+```typescript
+const runningTurn = session.turn("Summarize the report"); // a turn in flight
+try {
+  await session.turn("Think harder", { reasoningEffort: "high" });
+} catch (error) {
+  const kind = (error as { details?: { kind?: unknown } }).details?.kind;
+  if (kind !== "reasoning_effort_change_needs_idle_session") throw error;
+  await runningTurn; // the turn that was in flight
+  await session.turn("Think harder", { reasoningEffort: "high" });
+}
+```
+
 `grantGatedTools` gates built-in tool families and tool names: the session
 mounts them hidden and refuses their calls until `grantTool(sessionId, { family
 }, { durationMs })` or `grantTool(sessionId, { tool }, { expiresAtMs })` opens
@@ -672,6 +703,42 @@ run, including durable steers that joined it. `receipt.outcome` is `stopped`
 (with `contributors`), `not_current` (the run is no longer current; nothing
 was touched), or `not_stoppable`. `mob.stopMemberRun(agentIdentity, runId,
 reason)` does the same for one mob member.
+
+### recallInput()
+
+From 0.9.15.
+
+```typescript
+async recallInput(
+  selector:
+    | { inputId: string; idempotencyKey?: never }
+    | { idempotencyKey: string; inputId?: never },
+): Promise<RecallInputResult>
+```
+
+Sends `session/recall_input`. It withdraws one input of the session, only
+while it is still queued: name it by the `inputId` its submit answered or by
+the `idempotencyKey` it was submitted under. The selector names exactly one
+of the two: one that names both or neither rejects with `INVALID_ARGS`
+before anything is sent. `recall.outcome` is `abandoned`
+(the input was queued and is now withdrawn: its terminal is `cancelled` and no
+run will take it; `attempt_count` is `0` when no run attempt was counted for
+it), `not_queued`
+(a run holds it: nothing was touched and the run is not interrupted; `phase`
+says where it is and `run_id`, when the runtime has one, names the run that
+holds it) or `already_terminal` (it already ended;
+`terminal` is its terminal class, `cancelled` for a second recall). The list
+of outcomes can grow: keep an outcome you do not know as it is (the method
+resolves with it unchanged and does not reject). An input
+the session does not hold rejects with the invalid-params code. The recall is
+session-level (any queued input of the session, whoever submitted it) and
+withdraws everything the queue coalesced into the input; see
+[`session/recall_input`](/api/rpc#session%2Frecall_input). A server that
+does not serve the method (0.9.0 through 0.9.14; an older server is refused
+when the SDK connects) answers method not found, and
+the call rejects with `MeerkatError` whose `code` is `"-32601"`; the method
+does not read the server's contract version or capabilities first, and the
+refused call changes nothing.
 
 ### compact()
 

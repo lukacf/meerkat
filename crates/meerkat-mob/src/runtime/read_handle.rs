@@ -38,6 +38,12 @@ impl MobReadHandle {
 
     /// The mob's lifecycle as observed without asking its actor:
     /// [`MobHandle::lifecycle_observation`].
+    ///
+    /// Inside the pre-activation hook of a resume the observation's
+    /// `owed_intent` is `None` for a Stop, Complete, Reset, retirement of
+    /// every member or not yet admitted Destroy the mob's log leaves open:
+    /// the resume applies it to the machine after the hook. The same read
+    /// handle, kept past the hook, reports it once the resume has returned.
     pub fn lifecycle_observation(&self) -> super::MobLifecycleObservation {
         self.handle.lifecycle_observation()
     }

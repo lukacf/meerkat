@@ -44,6 +44,7 @@ export const CONSOLE_RPC_METHODS = {
   gatingPending: "meta/gating/pending",
   gatingAudit: "meta/gating/audit",
   gatingDecide: "meta/gating/decide",
+  gatingQuestions: "meta/gating/questions",
   decisionsList: "meta/decisions/list",
   decisionsRendering: "meta/decisions/rendering",
   consoleAttention: "meta/console/attention",

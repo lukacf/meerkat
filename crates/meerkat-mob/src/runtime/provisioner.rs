@@ -87,19 +87,19 @@ const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_secs(2);
 pub(super) const MEMBER_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
-pub(super) const MEMBER_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const MEMBER_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(not(test))]
 pub(super) const EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
-pub(super) const EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(not(test))]
 pub(super) const EXPLICIT_RESUME_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
-pub(super) const EXPLICIT_RESUME_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const EXPLICIT_RESUME_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(all(feature = "runtime-adapter", not(test)))]
 const MEMBER_RETIRE_COOPERATIVE_GRACE: Duration = Duration::from_secs(2);

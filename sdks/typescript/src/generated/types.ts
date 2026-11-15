@@ -673,6 +673,27 @@ export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" 
 
 export type WireCompactionRequestOutcome = "requested" | "already_requested";
 
+export interface WireQueuedInputRecallAbandoned {
+  attempt_count?: number;
+  input_id: string;
+  outcome: "abandoned";
+}
+
+export interface WireQueuedInputRecallNotQueued {
+  input_id: string;
+  outcome: "not_queued";
+  phase: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  run_id?: string | null;
+}
+
+export interface WireQueuedInputRecallAlreadyTerminal {
+  input_id: string;
+  outcome: "already_terminal";
+  terminal: WireInputTerminalOutcome;
+}
+
+export type WireQueuedInputRecall = WireQueuedInputRecallAbandoned | WireQueuedInputRecallNotQueued | WireQueuedInputRecallAlreadyTerminal;
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }
@@ -1174,7 +1195,39 @@ export interface WirePresentationAudienceUnknown {
 
 export type WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown;
 
+export interface WireAskUserAnswerChoice {
+  choice_id: string;
+  kind: "choice";
+}
+
+export interface WireAskUserAnswerFreeText {
+  kind: "free_text";
+  text: string;
+}
+
+export interface WireAskUserAnswerUnanswered {
+  kind: "unanswered";
+}
+
+export interface WireAskUserAnswerUnknown {
+  kind: "unknown";
+}
+
+export type WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown;
+
+export interface WireDecisionAnswerAskUser {
+  answers: Record<string, unknown>[];
+  kind: "ask_user";
+}
+
+export interface WireDecisionAnswerUnknown {
+  kind: "unknown";
+}
+
+export type WireDecisionAnswer = WireDecisionAnswerAskUser | WireDecisionAnswerUnknown;
+
 export interface WireDecisionEvidenceHuman {
+  answer?: WireDecisionAnswer | null;
   approve: boolean;
   approver_id: string;
   assurance: WireDecisionAssurance;
@@ -1714,6 +1767,16 @@ export interface SessionInputStateResult {
   state?: Record<string, unknown> | null;
 }
 
+export interface RecallInputParams {
+  selector: SessionInputStateSelector;
+  session_id: string;
+}
+
+export interface RecallInputResult {
+  recall: WireQueuedInputRecall;
+  session_id: string;
+}
+
 export interface RealmIdParams {
   realm_id: string;
 }
@@ -2144,6 +2207,11 @@ export interface WirePresentationRecord {
   message_ref: string;
   parts_shown: WireCanonicalPart[];
   subject_digest: string;
+}
+
+export interface WireAskUserQuestionAnswer {
+  answer: WireAskUserAnswer;
+  question_id: string;
 }
 
 export interface WireDecisionOutcome {

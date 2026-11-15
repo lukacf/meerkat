@@ -16096,8 +16096,7 @@ ForceCancelRunning(agent_identity) ==
     /\ (IF ((agent_identity \in DOMAIN member_placement) = FALSE) THEN TRUE ELSE mob_machine_placed_carrier_binding_active(member_placement, current_placed_spawn_host_binding_generations, host_bind_phase, host_binding_generations, agent_identity))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ active_run_count' = 0
-    /\ UnchangedFrame_32a29b476dd4aede
+    /\ UnchangedFrame_c428e187b00bc7e6
 
 
 ForceCancelRunningRuntimeNotLive(agent_identity) ==
@@ -18903,8 +18902,7 @@ CancelAllWorkRunning(agent_identity, agent_runtime_id, fence_token) ==
     /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ active_run_count' = 0
-    /\ UnchangedFrame_32a29b476dd4aede
+    /\ UnchangedFrame_c428e187b00bc7e6
 
 
 ResolveCancelAllWorkRejectionStopped(agent_identity, agent_runtime_id, fence_token) ==

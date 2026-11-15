@@ -84,8 +84,11 @@ live_comms_mobs_live.md and comms in live_comms_mobs_comms.md.
   delivery scope from an earlier incarnation gets `IncarnationMismatch`. Such
   a store no longer stops a server's other mobs from restoring. After a
   restart, the session that created a mob with the agent mob tools manages
-  it again (not a creating member reset to a later generation since; an
-  operator grant restores manage).
+  it again, and so does a creating member's same-session successor (not a
+  creating member that was reset onto a fresh session, or retired and
+  seated again later; an operator grant restores manage). The successor
+  clause is newer than the rest of this item: 0.9.4 through 0.9.14 gave the
+  grant to the recorded generation only.
 
 ## Admission close (Rust hosts)
 

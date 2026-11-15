@@ -236,7 +236,11 @@ impl super::MobHandle {
     /// ([`IdentityChangeRefusal::InvalidRequest`]), a reserved name, and
     /// every refusal of a change's admission (a changes hold, a candidate
     /// composition, a decision's permit that does not bind the change, an
-    /// agent's grant that does not admit the member's role).
+    /// agent's grant that does not admit the member's role). A spec that
+    /// takes an approval branch's label or its identity prefix, and so an
+    /// open approval branch adopted as a worker, is refused
+    /// [`crate::MobError::ApprovalBranchReserved`], with nothing written:
+    /// no seat could follow such a record.
     pub async fn adopt_identity(
         &self,
         adoption: IdentityAdoption,

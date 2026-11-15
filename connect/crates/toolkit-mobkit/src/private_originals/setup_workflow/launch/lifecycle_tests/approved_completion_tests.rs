@@ -20,23 +20,14 @@ async fn completion_case(cancel: bool) {
             .prepare_workflow_parent_source(&c.parent.original)
             .await
             .unwrap();
-        let p = source
-            .submit_authenticated_original(c.parent.clone())
-            .await
-            .unwrap();
+        let p = submit_planning_parent(source, &c.parent).await;
         finish(&c, "planning_parent", &p).await;
         f.probe.as_ref().unwrap().arm_next_input();
         let admitted_a = f.submit().await;
         f.finish(&admitted_a).await.unwrap();
         let dispatch = f.probe.as_ref().unwrap().captured();
         let a = source.acquisition_original(&dispatch).await.unwrap();
-        let planning = source
-            .prepare_workflow_planning(
-                &c.parent.original,
-                c.lead.clone(),
-                c.terms.clone(),
-                c.lineage.clone(),
-            )
+        let planning = prepare_planning(source, &c.parent.original, &c.lead, &c.terms, &c.lineage)
             .await
             .unwrap();
         let (_, selected_member, _) = source.selected_source_route(&a.reference.route).unwrap();

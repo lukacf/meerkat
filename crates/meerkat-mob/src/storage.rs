@@ -108,6 +108,28 @@ impl MobDefinitionSnapshot {
     }
 }
 
+/// Why [`MobStorage::read_definition_snapshot`] refused or failed to read a
+/// mob store's definition. The reader never creates, migrates or otherwise
+/// writes a store file, whatever the outcome.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobDefinitionSnapshotReadError {
+    /// No store exists at the path.
+    #[error("no mob store exists at {}", path.display())]
+    StoreMissing { path: std::path::PathBuf },
+    /// The file is not a mob store this build reads: it carries no mob
+    /// schema, a schema from a newer build, or a schema this build does not
+    /// recognize.
+    #[error("{} is not a mob store this build reads: {detail}", path.display())]
+    ForeignSchema {
+        path: std::path::PathBuf,
+        detail: String,
+    },
+    /// The store could not be read.
+    #[error("mob store read failed: {0}")]
+    Read(#[from] crate::store::MobStoreError),
+}
+
 /// Storage bundle for a mob.
 ///
 /// Contains both the mob event store (structural state) and session
@@ -624,6 +646,42 @@ impl MobStorage {
     ) -> Result<Option<MobDefinitionSnapshot>, crate::store::MobStoreError> {
         let events = self.events.replay_all().await?;
         Self::current_definition_snapshot_for_log(&events)
+    }
+
+    /// Read the canonical definition of the persistent mob store at `path`
+    /// with no running mob: the snapshot
+    /// [`Self::created_definition_snapshot`] mints for an opened storage
+    /// (the current definition, its epoch and the cursor of the event that
+    /// set it), selected the same way from the same journal, read in one
+    /// read transaction. The epoch is the `expected_revision`
+    /// [`Self::update_definition`] takes.
+    ///
+    /// It opens the file read-only and never creates, migrates or otherwise
+    /// writes the store file, as [`Self::read_member_binding_history`] does:
+    /// no store is made for a missing path, a store an older release wrote
+    /// is read as it is (opening it with [`Self::persistent`] migrates it),
+    /// no fence is taken, and the process registers no observer for the
+    /// path. The files beside the store are SQLite's: a persistent mob store
+    /// is in WAL mode, which SQLite reads through its shared-memory index
+    /// also on a read-only open, so reading a store whose writer closed
+    /// cleanly leaves the store's `-wal` and `-shm` files beside it, the log
+    /// empty, and where SQLite cannot create them (a read-only directory) it
+    /// cannot read such a store. A missing
+    /// file is [`MobDefinitionSnapshotReadError::StoreMissing`]; a file that
+    /// is not a mob store this build reads (no mob schema, a schema from a
+    /// newer build, an unrecognized schema) is
+    /// [`MobDefinitionSnapshotReadError::ForeignSchema`]. A store that holds
+    /// no mob answers `None`.
+    ///
+    /// The answer is what the journal held when it was read. An update or a
+    /// resume after it can move the definition; the update's
+    /// compare-and-swap refuses a revision that is no longer current.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_definition_snapshot(
+        path: impl AsRef<Path>,
+    ) -> Result<Option<MobDefinitionSnapshot>, MobDefinitionSnapshotReadError> {
+        let events = crate::store::read_definition_journal_at(path.as_ref().to_path_buf()).await?;
+        Ok(Self::current_definition_snapshot_for_log(&events)?)
     }
 
     /// Replay structural events together with their authoritative definition.
@@ -1834,6 +1892,147 @@ mod tests {
         assert_eq!(
             storage.created_definition().await.unwrap(),
             Some(epoch_three)
+        );
+    }
+
+    /// The path reader answers the definition a resume would take: the
+    /// current revision with its epoch and event cursor, the snapshot the
+    /// storage itself mints, and it leaves the database file as it is.
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn the_definition_snapshot_reader_answers_the_current_revision_with_its_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mob.db");
+        let storage = MobStorage::persistent(&database).unwrap();
+        let definition = valid_definition("definition-read");
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        storage
+            .specs
+            .put_spec(&definition.id, &definition, None)
+            .await
+            .unwrap();
+        let created = MobStorage::read_definition_snapshot(&database)
+            .await
+            .expect("read the created store")
+            .expect("the store holds a definition");
+        assert_eq!((created.definition(), created.epoch()), (&definition, 1));
+
+        let mut epoch_two = definition.clone();
+        epoch_two.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        storage
+            .update_definition(1, epoch_two.clone())
+            .await
+            .unwrap();
+        let mut epoch_three = epoch_two;
+        epoch_three.image_generation_provider = Some(meerkat_core::Provider::Gemini);
+        let committed = storage
+            .update_definition(2, epoch_three.clone())
+            .await
+            .unwrap();
+        drop(storage);
+
+        let before = std::fs::read(&database).unwrap();
+        let read = MobStorage::read_definition_snapshot(&database)
+            .await
+            .expect("read the updated store")
+            .expect("the store holds a definition");
+        assert_eq!(read.definition(), &epoch_three);
+        assert_eq!(read.epoch(), 3);
+        assert_eq!(read.event_cursor(), committed.event_cursor);
+        assert_eq!(
+            std::fs::read(&database).unwrap(),
+            before,
+            "the reader leaves the database file as it is"
+        );
+        let storage = MobStorage::persistent(&database).unwrap();
+        assert_eq!(
+            storage.created_definition_snapshot().await.unwrap(),
+            Some(read),
+            "it is the snapshot the storage itself mints"
+        );
+    }
+
+    /// The path reader does not write the store file. A persistent mob store
+    /// is in WAL mode, and SQLite reads such a database through its
+    /// shared-memory index even on a read-only open: reading a store whose
+    /// writer closed cleanly, one file, leaves the store's `-wal` and `-shm`
+    /// files beside it, the log empty. Nothing else appears.
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn the_definition_snapshot_reader_leaves_the_store_file_alone_and_sqlite_sidecars_beside_it()
+     {
+        let written = tempfile::tempdir().unwrap();
+        let source = written.path().join("mob.db");
+        let storage = MobStorage::persistent(&source).unwrap();
+        let definition = valid_definition("definition-read-sidecars");
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        drop(storage);
+        // A store whose writer closed cleanly is one file: fold the log into
+        // the store file and take that file alone.
+        {
+            let conn = rusqlite::Connection::open(&source).unwrap();
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal", "a persistent mob store is in WAL mode");
+            let busy: i64 = conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(busy, 0, "the log is folded into the store file");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mob.db");
+        std::fs::copy(&source, &database).unwrap();
+        let before = std::fs::read(&database).unwrap();
+
+        let read = MobStorage::read_definition_snapshot(&database)
+            .await
+            .expect("read the cleanly closed store")
+            .expect("the store holds a definition");
+
+        assert_eq!(read.definition(), &definition);
+        assert_eq!(
+            std::fs::read(&database).unwrap(),
+            before,
+            "the reader does not write the store file"
+        );
+        let mut beside: Vec<String> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "mob.db")
+            .collect();
+        beside.sort();
+        assert_eq!(
+            beside,
+            ["mob.db-shm", "mob.db-wal"],
+            "SQLite leaves the store's sidecars, and nothing else"
+        );
+        assert_eq!(
+            std::fs::metadata(directory.path().join("mob.db-wal"))
+                .unwrap()
+                .len(),
+            0,
+            "nothing is written to the store's log"
         );
     }
 

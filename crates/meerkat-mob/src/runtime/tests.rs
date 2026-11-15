@@ -8,6 +8,8 @@ mod created_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod declared_apply_rows;
 mod ensure_convergence_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod event_log_reads;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;
@@ -36,6 +38,8 @@ mod member_tool_grant_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_wake_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod owed_lifecycle_intent;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;
@@ -43,6 +47,8 @@ mod poisoned_scope_rows;
 mod respawn_abandonment_replay_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32"), unix))]
+mod rewind_fork_seam_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod rotation_intent_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -218,6 +224,15 @@ async fn retire_to_terminal(handle: &MobHandle, identity: &AgentIdentity) -> Res
     handle
         .retire_joining_saga_until_terminal_for_test(identity.clone())
         .await
+}
+
+/// How long a row waits for a caller answer that arrives when a test-build
+/// retire or resume window ends (`MEMBER_RETIRE_TOTAL_TIMEOUT`,
+/// `EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT`, `EXPLICIT_RESUME_PROGRESS_TIMEOUT`
+/// in `provisioner.rs`): the window, then slack for a loaded run. It only
+/// turns a hang into a failure, and it follows the window's value.
+const fn past_window(window: Duration) -> Duration {
+    window.saturating_add(Duration::from_secs(20))
 }
 
 struct TestPeerProjectionAuthorityState {
@@ -5926,6 +5941,158 @@ impl MockSessionService {
     }
 }
 
+impl MockSessionService {
+    /// The member check of a member rewind read, as the persistent service
+    /// decides it first: the persisted session under `session_id` when it
+    /// is bound to `member_binding`, `None` when no session is persisted
+    /// under the id, and not found for every other session (another
+    /// member's, nobody's, or one without session metadata).
+    async fn member_rewind_session(
+        &self,
+        session_id: &SessionId,
+        member_binding: &meerkat_core::MobMemberBinding,
+    ) -> Result<Option<Session>, SessionError> {
+        let Some(session) = self.persisted_session_clone(session_id).await else {
+            return Ok(None);
+        };
+        let bound = session
+            .session_metadata()
+            .and_then(|metadata| metadata.mob_member_binding);
+        if bound.as_ref() != Some(member_binding) {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+        Ok(Some(session))
+    }
+
+    /// The persisted source of a member rewind fork, as the persistent
+    /// service reads it, its answers in the owner's order: the member
+    /// check, then the busy answer for a source that is running a turn,
+    /// then an archived session only when it is read as a lineage session.
+    async fn member_rewind_source(
+        &self,
+        request: &meerkat_core::service::MemberRewindForkRequest,
+    ) -> Result<Session, SessionError> {
+        let session_id = &request.source_session_id;
+        let not_found = || SessionError::NotFound {
+            id: session_id.clone(),
+        };
+        let session = self
+            .member_rewind_session(session_id, &request.member_binding)
+            .await?;
+        if self.active_sessions.read().await.contains(session_id) {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        let archived = self.archived_session_ids.read().await.contains(session_id);
+        if archived && request.source != meerkat_core::service::MemberRewindSource::ArchivedLineage
+        {
+            return Err(not_found());
+        }
+        session.ok_or_else(not_found)
+    }
+
+    /// The child a member rewind fork of `request` commits, and the
+    /// evidence it must show. Nothing is stored. The refusals are the
+    /// persistent service's, in its order: the source read, a source
+    /// without build state, the source's unanswered end, the complete
+    /// boundary, the inherited instruction policy, and, for the preflight
+    /// only (as in the owner), a comms name that is not the member
+    /// binding's. The owner's blob preflight has no counterpart here: the
+    /// double holds no blob store.
+    async fn planned_member_rewind_child(
+        &self,
+        request: &meerkat_core::service::MemberRewindForkRequest,
+        preflight: bool,
+    ) -> Result<(meerkat_core::service::MemberRewindForkEvidence, Session), SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let source_session_id = &request.source_session_id;
+        let source = self.member_rewind_source(request).await?;
+        let mut metadata = source
+            .session_metadata()
+            .ok_or_else(|| SessionError::NotFound {
+                id: source_session_id.clone(),
+            })?;
+        let build_state = source
+            .try_build_state()
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?
+            .ok_or_else(|| SessionError::fork_source_build_state_missing(source_session_id))?;
+        if request.message_count == source.messages().len() {
+            let pending = meerkat_core::pending_continuation::resolve_pending_continuation(
+                meerkat_core::pending_continuation::observe_session_tail(source.messages()),
+                0,
+            )
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+            if matches!(
+                pending.disposition,
+                meerkat_core::pending_continuation::PendingContinuationDisposition::RunPending
+            ) {
+                return Err(SessionError::Busy {
+                    id: source_session_id.clone(),
+                });
+            }
+        }
+        let mut child = source
+            .fork_at_complete_boundary_with_identity(
+                request.message_count,
+                request.planned_child_session_id.clone(),
+            )
+            .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        child
+            .apply_fork_instruction_policies(
+                source_session_id,
+                meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+                meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+            )
+            .map_err(SessionError::ForkInstructionRefused)?;
+        let member_comms_name = request
+            .member_binding
+            .comms_name()
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?
+            .to_string();
+        if preflight && metadata.comms_name.as_deref() != Some(member_comms_name.as_str()) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "session {source_session_id} carries a comms name that is not its member binding's"
+                )),
+            ));
+        }
+        let evidence = meerkat_core::service::MemberRewindForkEvidence {
+            prefix_message_count: request.message_count,
+            prefix_digest: child
+                .transcript_prefix_digest(request.message_count)
+                .map_err(|error| SessionError::Unsupported(error.to_string()))?,
+            tool_access_policy: metadata.tooling.tool_access_policy.clone(),
+            auth_binding: metadata.auth_binding.clone(),
+            realm_id: metadata.realm_id.clone(),
+        };
+        // The child as the owner's fork commits it: bound to the member,
+        // launched under the source's effective tool access policy, with
+        // the fork child projection of the source's build state, and
+        // without a fork seed (its own or one the source never delivered).
+        metadata.comms_name = Some(member_comms_name);
+        metadata.peer_meta = None;
+        metadata.keep_alive = false;
+        metadata.mob_member_binding = Some(request.member_binding.clone());
+        metadata.tooling.spawn_tool_access_policy =
+            Some(meerkat_core::ops::SpawnToolAccessPolicy::from_launch(
+                metadata.tooling.tool_access_policy.clone(),
+            ));
+        child
+            .set_session_metadata(metadata)
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        child
+            .set_build_state(build_state.fork_child_projection())
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        child.remove_metadata(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY);
+        Ok((evidence, child))
+    }
+}
+
 #[async_trait]
 impl MobSessionService for MockSessionService {
     /// Records the snapshot in the session's committed document (and in its
@@ -6564,6 +6731,150 @@ impl MobSessionService for MockSessionService {
             },
             session_ref: None,
             reactivated_instruction_count: 0,
+        })
+    }
+
+    async fn preflight_member_rewind_fork(
+        &self,
+        fork: &crate::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        let (evidence, _child) = self
+            .planned_member_rewind_child(fork.request(), true)
+            .await?;
+        Ok(evidence)
+    }
+
+    async fn fork_member_rewind_child(
+        &self,
+        fork: &crate::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let request = fork.request();
+        // As the owner: the member check and the busy answer come before
+        // the look for a planned child that already exists.
+        self.member_rewind_session(&request.source_session_id, &request.member_binding)
+            .await?;
+        if self
+            .active_sessions
+            .read()
+            .await
+            .contains(&request.source_session_id)
+        {
+            return Err(SessionError::Busy {
+                id: request.source_session_id.clone(),
+            });
+        }
+        // As the owner: whose the session under the planned child id is,
+        // is decided before that session is read, so a session that is not
+        // the member's answers not found in whatever state it is.
+        self.member_rewind_session(&request.planned_child_session_id, &request.member_binding)
+            .await?;
+        if let Some(observed) = self
+            .observe_member_rewind_child(&request.planned_child_session_id)
+            .await?
+        {
+            // As the owner: only the member's own child is returned.
+            if observed.member_binding.as_ref() != Some(&request.member_binding) {
+                return Err(SessionError::NotFound {
+                    id: request.planned_child_session_id.clone(),
+                });
+            }
+            return Ok(observed);
+        }
+        let (_evidence, child) = self.planned_member_rewind_child(request, false).await?;
+        let child_session_id = child.id().clone();
+        self.persisted_sessions
+            .write()
+            .await
+            .insert(child_session_id.clone(), child);
+        self.issue_persisted_session_revision(&child_session_id)
+            .await;
+        self.observe_member_rewind_child(&child_session_id)
+            .await?
+            .ok_or(SessionError::NotFound {
+                id: child_session_id,
+            })
+    }
+
+    async fn observe_member_rewind_child(
+        &self,
+        planned_child_session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let Some(child) = self.persisted_session_clone(planned_child_session_id).await else {
+            return Ok(None);
+        };
+        // The owner's error for a session that does not end as a fork
+        // child ends (a session between an instruction delivery and its
+        // next turn, for one).
+        let reactivated = child.fork_reactivation_suffix_len().map_err(|error| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "member rewind child {planned_child_session_id} does not end with its fork re-activation: {error}"
+            )))
+        })?;
+        let prefix_message_count = child.messages().len().saturating_sub(reactivated);
+        let prefix_digest = child
+            .transcript_prefix_digest(prefix_message_count)
+            .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        let metadata = child.session_metadata();
+        Ok(Some(meerkat_core::service::MemberRewindChildObservation {
+            session_id: planned_child_session_id.clone(),
+            evidence: meerkat_core::service::MemberRewindForkEvidence {
+                prefix_message_count,
+                prefix_digest,
+                tool_access_policy: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.tooling.tool_access_policy.clone()),
+                auth_binding: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.auth_binding.clone()),
+                realm_id: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.realm_id.clone()),
+            },
+            member_binding: metadata.and_then(|metadata| metadata.mob_member_binding),
+            archived: self
+                .archived_session_ids
+                .read()
+                .await
+                .contains(planned_child_session_id),
+        }))
+    }
+
+    async fn read_member_rewind_lineage_session(
+        &self,
+        witness: crate::MemberRewindLineageWitness,
+        prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Err(super::session_service::durable_fork_unsupported());
+        }
+        let session_id = witness.session_id();
+        let not_found = || SessionError::NotFound {
+            id: session_id.clone(),
+        };
+        // Read whether or not the session is archived or running.
+        let session = self
+            .member_rewind_session(session_id, witness.member_binding())
+            .await?
+            .ok_or_else(not_found)?;
+        let message_count = session.messages().len();
+        let prefix_digest = if prefix_message_count <= message_count {
+            Some(
+                session
+                    .transcript_prefix_digest(prefix_message_count)
+                    .map_err(|error| SessionError::Unsupported(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        Ok(meerkat_core::service::MemberRewindLineageRead {
+            message_count,
+            prefix_digest,
         })
     }
 
@@ -52034,7 +52345,7 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         .await;
 
     // Join the saga to its terminal reply: a plain `retire` answers typed
-    // `MemberRetirementInProgress` once its 2 s test budget elapses while the
+    // `MemberRetirementInProgress` once its test-build budget elapses while the
     // saga keeps running, which a loaded threaded run reaches.
     let started = Instant::now();
     retire_to_terminal(&handle, &retiring)
@@ -57331,17 +57642,19 @@ async fn test_retire_member_bounds_finalization_boundary_and_retry_keeps_authori
     let gate = service.install_non_reentrant_turn_finalization_gate();
     let held_gate = Arc::clone(&gate).lock_owned().await;
     let started = Instant::now();
+    // The row tests the deadline path of `retire_member_until`, so it passes
+    // its own two-second deadline instead of the retire window of the build.
     let error = provisioner
         .retire_member_until(
             &member_ref,
             &AgentIdentity::from("retiring"),
-            Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
+            Instant::now() + Duration::from_secs(2),
         )
         .await
         .expect_err("wedged B acquisition must return a typed retry outcome");
     assert!(
         started.elapsed() < Duration::from_secs(3),
-        "retire must return within its one test budget"
+        "retire must return at its caller's deadline"
     );
     assert!(matches!(
         &error,
@@ -57670,11 +57983,13 @@ async fn test_retire_member_bounds_wedged_exact_control_and_retry_converges() {
         .and_then(|snapshot| snapshot.control.current_run_id)
         .expect("fixture must expose exact active run");
 
+    // The row tests the deadline path of `retire_member_until`, so it passes
+    // its own two-second deadline instead of the retire window of the build.
     let error = provisioner
         .retire_member_until(
             &member_ref,
             &AgentIdentity::from("retiring"),
-            Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
+            Instant::now() + Duration::from_secs(2),
         )
         .await
         .expect_err("wedged exact control must return retirement-in-progress");
@@ -58766,11 +59081,14 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
         "Retiring must fence new member work while control callback is wedged"
     );
 
-    let first_error = tokio::time::timeout(Duration::from_secs(3), first_retire)
-        .await
-        .expect("first retire must honor the test owner deadline")
-        .expect("retire task should not panic")
-        .expect_err("wedged control must return retirement-in-progress");
+    let first_error = tokio::time::timeout(
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        first_retire,
+    )
+    .await
+    .expect("first retire must honor the test owner deadline")
+    .expect("retire task should not panic")
+    .expect_err("wedged control must return retirement-in-progress");
     assert!(
         is_retirement_in_progress(&first_error),
         "wedged exact control must retain typed retirement authority: {first_error:?}"
@@ -58784,7 +59102,7 @@ async fn test_retire_publishes_retiring_before_wedged_control_and_retry_is_bound
     assert_eq!(service.archive_call_count(&session_id).await, 0);
 
     let retry_error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
         handle.retire(AgentIdentity::from(member_id.as_str())),
     )
     .await
@@ -58894,11 +59212,14 @@ async fn test_retire_deadline_after_archive_commit_retains_anchor_and_retry_conv
         "durable archive must already hold before the injected callback wedge"
     );
 
-    let first_error = tokio::time::timeout(Duration::from_secs(3), first)
-        .await
-        .expect("retire must return within its owner deadline")
-        .expect("retire task should not panic")
-        .expect_err("post-commit callback wedge must return retirement-in-progress");
+    let first_error = tokio::time::timeout(
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        first,
+    )
+    .await
+    .expect("retire must return within its owner deadline")
+    .expect("retire task should not panic")
+    .expect_err("post-commit callback wedge must return retirement-in-progress");
     assert!(
         is_retirement_in_progress(&first_error),
         "post-commit archive wedge must retain typed retirement authority: {first_error:?}"
@@ -58915,7 +59236,7 @@ async fn test_retire_deadline_after_archive_commit_retains_anchor_and_retry_conv
     );
 
     let retry_error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
         handle.retire(AgentIdentity::from(member_id.as_str())),
     )
     .await
@@ -63431,6 +63752,723 @@ async fn test_stop_still_rejects_an_active_flow_after_another_member_retires() {
         .stop()
         .await
         .expect("the stop is admitted once the run ended");
+}
+
+/// Another member's force cancel does not end the mob's runs: with a flow run
+/// active on the worker, the idle lead (a member of no run) is force
+/// cancelled, the worker's run stays counted by MobMachine, and a stop is
+/// still refused until that run ends. The sibling of the retirement row
+/// above. Before, the force cancel reset the mob-wide run count while it
+/// cancelled only the named member's own work, and the stop was admitted
+/// with the worker's run still running inside the stopped mob.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_another_member_is_force_cancelled() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Control: the worker's run is counted and the stop is refused.
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+    let control = handle
+        .stop()
+        .await
+        .expect_err("control: the stop rejects the active flow");
+    assert!(matches!(
+        control,
+        MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }
+    ));
+
+    // Another caller force cancels the lead, which is in no run.
+    handle
+        .force_cancel_member(AgentIdentity::from("l-1"))
+        .await
+        .expect("force cancel the idle lead");
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        "a force cancel of the idle lead",
+    )
+    .await;
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    handle
+        .stop()
+        .await
+        .expect("the stop is admitted once the run ended");
+}
+
+/// The mob for the rows on a cancel of one member's work beside another
+/// member's flow run: a worker and a lead, and a flow run on the worker whose
+/// turn never ends. Returns the run, the run count MobMachine holds for it
+/// and the lead's member reference, after the control: the run is counted
+/// and a stop is refused.
+async fn mob_with_an_active_worker_flow_and_a_lead(
+    lead_mode: Option<crate::MobRuntimeMode>,
+) -> (MobHandle, Arc<MockSessionService>, RunId, u64, MemberRef) {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let lead_ref = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            AgentIdentity::from("l-1"),
+            None,
+            lead_mode,
+            None,
+        )
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+    let control = handle
+        .stop()
+        .await
+        .expect_err("control: the stop rejects the active flow");
+    assert!(matches!(
+        control,
+        MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }
+    ));
+    (handle, service, run_id, counted_before, lead_ref)
+}
+
+/// Holds one turn of the turn-driven lead open, so that a cancel of the
+/// lead's work has a run to cancel. Returns the lead's session.
+async fn hold_a_turn_open_on_the_lead(
+    handle: &MobHandle,
+    service: &MockSessionService,
+    lead_ref: &MemberRef,
+) -> SessionId {
+    let session_id = lead_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed lead");
+    service.set_start_turn_delay_ms(600_000);
+    let baseline_start_turn = service.start_turn_call_count();
+    handle
+        .member(&AgentIdentity::from("l-1"))
+        .await
+        .expect("lead handle")
+        .send("hold the lead's turn", HandlingMode::Queue)
+        .await
+        .expect("the lead admits the turn");
+    wait_for_start_turn_call_count(
+        service,
+        baseline_start_turn + 1,
+        "the lead's turn should reach the live session boundary",
+    )
+    .await;
+    session_id
+}
+
+/// After a cancel of one member's work, the other member's flow run is still
+/// counted by MobMachine, the stop is still refused, the mob is Running and
+/// the run is running. One assertion, so that a failure prints every
+/// observation.
+async fn assert_stop_still_rejects_the_active_flow(
+    handle: &MobHandle,
+    run_id: &RunId,
+    counted_before: u64,
+    cancel: &str,
+) {
+    let counted_after = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the cancel")
+        .active_run_count;
+    let run_after_cancel = handle
+        .flow_status(run_id.clone())
+        .await
+        .map(|run| run.map(|run| run.status));
+    let stop = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_after_stop = handle.status().await;
+    let stop_refused = matches!(
+        stop,
+        Ok(Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }))
+    );
+    // What the run's caller reads after the stop attempt: followed for a
+    // while when the stop was admitted, to show where it leaves the run.
+    let observe_deadline = Instant::now()
+        + if stop_refused {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(5)
+        };
+    let run_after_stop = loop {
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .map(|run| run.map(|run| run.status));
+        let live = matches!(run, Ok(Some(MobRunStatus::Running | MobRunStatus::Pending)));
+        if !live || Instant::now() >= observe_deadline {
+            break run;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let counted_after_stop = handle
+        .query_machine_state()
+        .await
+        .map(|state| state.active_run_count);
+
+    let count_kept = counted_after == counted_before;
+    let mob_running = matches!(phase_after_stop, Ok(MobState::Running));
+    let run_live = matches!(run_after_stop, Ok(Some(MobRunStatus::Running)));
+    assert!(
+        count_kept && stop_refused && mob_running && run_live,
+        "{cancel} must leave the worker's flow run counted, the stop refused and the run running; observed: active_run_count before the cancel = {counted_before}, after the cancel = {counted_after}, run after the cancel = {run_after_cancel:?}, stop = {stop:?}, mob phase after the stop = {phase_after_stop:?}, run after the stop = {run_after_stop:?}, active_run_count after the stop = {counted_after_stop:?}"
+    );
+}
+
+/// A cancel of all work of the lead's runtime does not end the mob's runs:
+/// with a flow run active on the worker, the worker's run stays counted and
+/// a stop is still refused until that run ends.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_another_members_work_is_all_cancelled() {
+    let (handle, _service, run_id, counted_before, _lead_ref) =
+        mob_with_an_active_worker_flow_and_a_lead(None).await;
+    let lead = handle
+        .get_member(&AgentIdentity::from("l-1"))
+        .await
+        .unwrap()
+        .expect("the lead is a member");
+
+    handle
+        .cancel_all_work(lead.agent_runtime_id.clone(), lead.fence_token)
+        .await
+        .expect("cancel all work of the idle lead");
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        "a cancel of all work of the idle lead",
+    )
+    .await;
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+    handle
+        .stop()
+        .await
+        .expect("the stop is admitted once the run ended");
+}
+
+/// A force cancel of a member with a turn in flight cancels that member's
+/// work only: with a flow run active on the worker, the worker's run stays
+/// counted and a stop is still refused until that run ends.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_a_busy_member_is_force_cancelled() {
+    let (handle, service, run_id, counted_before, lead_ref) =
+        mob_with_an_active_worker_flow_and_a_lead(Some(crate::MobRuntimeMode::TurnDriven)).await;
+    let lead_session = hold_a_turn_open_on_the_lead(&handle, service.as_ref(), &lead_ref).await;
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+
+    handle
+        .force_cancel_member(AgentIdentity::from("l-1"))
+        .await
+        .expect("force cancel the lead's turn");
+    assert!(
+        service.cancel_after_boundary_call_count() > baseline_boundary,
+        "the force cancel reaches the lead's run"
+    );
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        "a force cancel of the lead's turn",
+    )
+    .await;
+
+    // Release the lead's held turn, then end the worker's run.
+    let _ = SessionService::interrupt(service.as_ref(), &lead_session).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+/// A hard cancel of a member with a turn in flight commits the same machine
+/// input as the force cancel: with a flow run active on the worker, the
+/// worker's run stays counted and a stop is still refused until that run
+/// ends. The machine records the cancel before the interrupt is dispatched,
+/// so the row holds whatever the interrupt answers; its answer is printed.
+#[tokio::test]
+async fn test_stop_still_rejects_an_active_flow_after_another_member_is_hard_cancelled() {
+    let (handle, service, run_id, counted_before, lead_ref) =
+        mob_with_an_active_worker_flow_and_a_lead(Some(crate::MobRuntimeMode::TurnDriven)).await;
+    let lead_session = hold_a_turn_open_on_the_lead(&handle, service.as_ref(), &lead_ref).await;
+
+    let hard_cancel = handle
+        .hard_cancel_member(
+            crate::control_policy::MobControlPrincipal::Owner,
+            AgentIdentity::from("l-1"),
+            "hard cancel the lead's turn",
+        )
+        .await;
+
+    assert_stop_still_rejects_the_active_flow(
+        &handle,
+        &run_id,
+        counted_before,
+        &format!("a hard cancel of the lead's turn (answered {hard_cancel:?})"),
+    )
+    .await;
+
+    // Release the lead's turn if the hard cancel left it held, then end the
+    // worker's run.
+    let _ = SessionService::interrupt(service.as_ref(), &lead_session).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow after the rejected stop");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+/// No run is left counted for ever: a flow run whose own member is force
+/// cancelled in the middle of its step stays counted while it is on, its own
+/// end lowers the count to zero, and a stop is admitted after it. The run's
+/// count is read before its status in every sample, so a sample that reads
+/// the count at zero and the run still on is a run the mob no longer counts.
+#[tokio::test]
+async fn test_a_flow_run_whose_member_is_force_cancelled_stays_counted_until_it_ends() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    // The worker's flow turn fails after 1.5 s unless the cancel ends it
+    // first: either way the run reaches a terminal of its own.
+    service.set_flow_turn_fail(true);
+    service.set_flow_turn_delay_ms(1_500);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+
+    let cancelled_at = Instant::now();
+    handle
+        .force_cancel_member(AgentIdentity::from("w-1"))
+        .await
+        .expect("force cancel the run's own member");
+
+    let mut first_sample = None;
+    let mut uncounted_while_on = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (terminal, terminal_after) = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state while the run ends")
+            .active_run_count;
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .expect("flow_status should succeed")
+            .expect("run should exist");
+        let is_terminal = crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)
+            .expect("MobMachine terminality classifier should accept run status");
+        if first_sample.is_none() {
+            first_sample = Some((counted, run.status.clone()));
+        }
+        if counted == 0 && !is_terminal && uncounted_while_on.is_none() {
+            uncounted_while_on = Some(run.status.clone());
+        }
+        if is_terminal {
+            break (run.status, cancelled_at.elapsed());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for run {run_id} to end after the force cancel; last status: {:?}",
+            run.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    // The run's cleanup follows its persisted terminal.
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_after_end = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after the run ended")
+            .active_run_count;
+        if counted == 0 || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_after_stop = handle.status().await;
+
+    let observed = format!(
+        "active_run_count before the cancel = {counted_before}; first sample after the cancel (count, run) = {first_sample:?}; run read on with the count at zero = {uncounted_while_on:?}; run terminal = {terminal:?} {} ms after the cancel; active_run_count after the run ended = {counted_after_end}; stop = {stop:?}; mob phase after the stop = {phase_after_stop:?}",
+        terminal_after.as_millis()
+    );
+    println!("force cancel of the run's own member mid-step: {observed}");
+    assert!(
+        uncounted_while_on.is_none()
+            && counted_after_end == 0
+            && matches!(stop, Ok(Ok(())))
+            && matches!(phase_after_stop, Ok(MobState::Stopped)),
+        "a flow run whose member is force cancelled must stay counted while it is on, and its end must lower the count to zero and let the stop through; observed: {observed}"
+    );
+}
+
+/// The count is kept per run: with two flow runs active, a force cancel of
+/// the idle lead leaves both counted, the end of one run lowers the count by
+/// that run's share only and the stop stays refused under the other, and the
+/// end of the other lets the stop through.
+#[tokio::test]
+async fn test_two_flow_runs_stay_counted_each_until_its_own_end_across_a_force_cancel() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_a = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow a");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_a = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with run a")
+        .active_run_count;
+    let run_b = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow b");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_both = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with both runs")
+        .active_run_count;
+    assert!(
+        counted_a > 0 && counted_both == 2 * counted_a,
+        "each run is counted: {counted_a} with one run, {counted_both} with two"
+    );
+
+    handle
+        .force_cancel_member(AgentIdentity::from("l-1"))
+        .await
+        .expect("force cancel the idle lead");
+    let counted_after_cancel = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the cancel")
+        .active_run_count;
+
+    handle
+        .cancel_flow(run_a.clone())
+        .await
+        .expect("cancel run a");
+    let terminal_a = wait_for_run_terminal(&handle, &run_a, Duration::from_secs(8)).await;
+    // A run's cleanup follows its persisted terminal.
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_after_a = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after run a ended")
+            .active_run_count;
+        if counted <= counted_a || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop_under_b = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_under_b = handle.status().await;
+    let run_b_under_stop = handle
+        .flow_status(run_b.clone())
+        .await
+        .map(|run| run.map(|run| run.status));
+
+    handle
+        .cancel_flow(run_b.clone())
+        .await
+        .expect("cancel run b");
+    let terminal_b = wait_for_run_terminal(&handle, &run_b, Duration::from_secs(8)).await;
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_at_the_end = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after both runs ended")
+            .active_run_count;
+        if counted == 0 || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop_at_the_end = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_at_the_end = handle.status().await;
+
+    let observed = format!(
+        "active_run_count with run a = {counted_a}, with both runs = {counted_both}, after the force cancel = {counted_after_cancel}; run a terminal = {:?}; active_run_count after run a ended = {counted_after_a}; stop under run b = {stop_under_b:?}, mob phase = {phase_under_b:?}, run b = {run_b_under_stop:?}; run b terminal = {:?}; active_run_count at the end = {counted_at_the_end}; stop at the end = {stop_at_the_end:?}, mob phase = {phase_at_the_end:?}",
+        terminal_a.status, terminal_b.status
+    );
+    println!("two runs and a force cancel between them: {observed}");
+    assert!(
+        counted_after_cancel == counted_both
+            && terminal_a.status == MobRunStatus::Canceled
+            && counted_after_a == counted_a
+            && matches!(
+                stop_under_b,
+                Ok(Err(MobError::InvalidTransition {
+                    from: MobState::Running,
+                    to: MobState::Stopped,
+                }))
+            )
+            && matches!(phase_under_b, Ok(MobState::Running))
+            && matches!(run_b_under_stop, Ok(Some(MobRunStatus::Running)))
+            && terminal_b.status == MobRunStatus::Canceled
+            && counted_at_the_end == 0
+            && matches!(stop_at_the_end, Ok(Ok(())))
+            && matches!(phase_at_the_end, Ok(MobState::Stopped)),
+        "each of two flow runs must stay counted until its own end, and the stop must wait for the last of them; observed: {observed}"
+    );
+}
+
+/// A flow run whose own member leaves in the middle of its step, by a
+/// retirement or by a respawn, stays counted while it is on: the stop is
+/// refused under it, its own end (the step's timeout here, since the
+/// fixture's turn never ends) lowers the count to zero, and the stop is
+/// admitted after it.
+async fn a_flow_run_whose_member_leaves_stays_counted_until_it_ends(respawn: bool) {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(10_000, 8)).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let counted_before = handle
+        .query_machine_state()
+        .await
+        .expect("machine state with the run active")
+        .active_run_count;
+    assert!(counted_before > 0, "the active flow run is counted");
+
+    let left_at = Instant::now();
+    if respawn {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            handle.respawn(AgentIdentity::from("w-1"), None),
+        )
+        .await
+        .expect("the respawn of the run's own member answers")
+        .expect("respawn the run's own member");
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            handle.retire(AgentIdentity::from("w-1")),
+        )
+        .await
+        .expect("the retirement of the run's own member answers")
+        .expect("retire the run's own member");
+    }
+    let counted_after_leave = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the member left")
+        .active_run_count;
+    let run_after_leave = handle
+        .flow_status(run_id.clone())
+        .await
+        .map(|run| run.map(|run| run.status));
+    let stop_under_the_run = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_under_the_run = handle.status().await;
+
+    let mut uncounted_while_on = None;
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let (terminal, terminal_after) = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state while the run ends")
+            .active_run_count;
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .expect("flow_status should succeed")
+            .expect("run should exist");
+        let is_terminal = crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)
+            .expect("MobMachine terminality classifier should accept run status");
+        if counted == 0 && !is_terminal && uncounted_while_on.is_none() {
+            uncounted_while_on = Some(run.status.clone());
+        }
+        if is_terminal {
+            break (run.status, left_at.elapsed());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for run {run_id} to end after its member left; last status: {:?}",
+            run.status
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let counted_after_end = loop {
+        let counted = handle
+            .query_machine_state()
+            .await
+            .expect("machine state after the run ended")
+            .active_run_count;
+        if counted == 0 || Instant::now() >= drain_deadline {
+            break counted;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let stop_after_the_run = tokio::time::timeout(Duration::from_mins(1), handle.stop())
+        .await
+        .map(|result| result.map(|_| ()));
+    let phase_at_the_end = handle.status().await;
+
+    let observed = format!(
+        "respawn = {respawn}; active_run_count before the member left = {counted_before}, after it = {counted_after_leave}, run = {run_after_leave:?}; stop under the run = {stop_under_the_run:?}, mob phase = {phase_under_the_run:?}; run read on with the count at zero = {uncounted_while_on:?}; run terminal = {terminal:?} {} ms after the member left; active_run_count after the run ended = {counted_after_end}; stop after the run = {stop_after_the_run:?}, mob phase = {phase_at_the_end:?}",
+        terminal_after.as_millis()
+    );
+    println!("the run's own member leaves mid-step: {observed}");
+    assert!(
+        counted_after_leave == counted_before
+            && matches!(
+                stop_under_the_run,
+                Ok(Err(MobError::InvalidTransition {
+                    from: MobState::Running,
+                    to: MobState::Stopped,
+                }))
+            )
+            && matches!(phase_under_the_run, Ok(MobState::Running))
+            && uncounted_while_on.is_none()
+            && counted_after_end == 0
+            && matches!(stop_after_the_run, Ok(Ok(())))
+            && matches!(phase_at_the_end, Ok(MobState::Stopped)),
+        "a flow run whose own member leaves must stay counted while it is on, and its end must lower the count to zero and let the stop through; observed: {observed}"
+    );
+}
+
+#[tokio::test]
+async fn test_a_flow_run_whose_member_is_retired_stays_counted_until_it_ends() {
+    a_flow_run_whose_member_leaves_stays_counted_until_it_ends(false).await;
+}
+
+#[tokio::test]
+async fn test_a_flow_run_whose_member_is_respawned_stays_counted_until_it_ends() {
+    a_flow_run_whose_member_leaves_stays_counted_until_it_ends(true).await;
 }
 
 #[tokio::test]
@@ -70863,7 +71901,13 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         assert_eq!(data["authority_retained"], true);
     };
 
-    let first = tokio::time::timeout(Duration::from_secs(3), resumed.resume())
+    // A wedged takeover answers when a resume window of the build ends: the
+    // caller deadline or the observer's inactivity window, whichever is first.
+    let resume_answer_bound = past_window(
+        super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT
+            .max(super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT),
+    );
+    let first = tokio::time::timeout(resume_answer_bound, resumed.resume())
         .await
         .expect("first explicit resume must remain caller-bounded")
         .expect_err("wedged exact takeover must report retained authority");
@@ -70874,7 +71918,7 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
         "one process-owned exact takeover must remain blocked behind B"
     );
 
-    let second = tokio::time::timeout(Duration::from_secs(3), resumed.resume())
+    let second = tokio::time::timeout(resume_answer_bound, resumed.resume())
         .await
         .expect("level-trigger retry must remain caller-bounded")
         .expect_err("retry must join the retained takeover");
@@ -70882,11 +71926,11 @@ async fn test_explicit_resume_retains_wedged_attachment_retirement_for_level_tri
     assert_eq!(
         service.turn_finalization_acquire_counts(),
         (boundary_baseline.0 + 1, boundary_baseline.1),
-        "retry must observe the retained result instead of starting a duplicate takeover"
+        "retry must join the retained takeover instead of starting a duplicate one"
     );
 
     drop(held_gate);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(resume_answer_bound, async {
         loop {
             match resumed.resume().await {
                 Ok(()) => break,
@@ -71040,6 +72084,129 @@ async fn test_explicit_resume_terminal_survives_observer_drop_and_is_shared() {
     responder.await.expect("Resume responder task");
 }
 
+/// What a kept answer says, by its own structured data, about asking again.
+fn kept_answer_says_retryable(error: &MobError) -> Option<bool> {
+    error
+        .structured_data()
+        .and_then(|data| data.get("retryable").and_then(serde_json::Value::as_bool))
+}
+
+/// Ask for a lift on a handle that keeps `kept`: the answer of an earlier
+/// explicit resume that no caller has read. Returns what the lift answered
+/// and how many Resume commands it sent to the actor; each one is admitted
+/// and answered Ok.
+async fn lift_over_a_kept_resume_answer(
+    kept: Result<(), MobError>,
+) -> (Result<(), MobError>, usize) {
+    // A row asks this more than once: each mob needs an id of its own.
+    let (handle, _service) =
+        create_test_mob(with_unique_mob_id(sample_definition(), "kept-answer")).await;
+    let (command_tx, mut command_rx) =
+        tokio::sync::mpsc::channel::<super::scope_gate::RoutedMobCommand>(4);
+    let shared_handle = MobHandle {
+        command_tx,
+        explicit_resume_operations: Arc::new(super::handle::ResumeOperationRegistry::default()),
+        ..handle
+    };
+    shared_handle.install_terminal_resume_result_for_test(kept);
+    let commands = Arc::new(AtomicUsize::new(0));
+    let responder_commands = Arc::clone(&commands);
+    let responder = tokio::spawn(async move {
+        while let Some(routed) = command_rx.recv().await {
+            let super::state::MobCommand::ResumeLifecycle {
+                admission,
+                reply_tx,
+                ..
+            } = routed.cmd
+            else {
+                panic!("expected ResumeLifecycle command");
+            };
+            responder_commands.fetch_add(1, Ordering::SeqCst);
+            admission.admit();
+            let _ = reply_tx.send(Ok(()));
+        }
+    });
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        shared_handle.resume_until_for_test(Instant::now() + Duration::from_secs(5)),
+    )
+    .await
+    .expect("the lift answers");
+    let sent = commands.load(Ordering::SeqCst);
+    responder.abort();
+    (answer, sent)
+}
+
+/// A kept answer that is itself a retryable refusal is not a later lift's
+/// answer: the lift that finds it runs an attempt of its own.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_retryable_refusal_runs_its_own_attempt() {
+    for kept in [
+        MobError::LifecycleOperationPending {
+            intent: "explicit_resume_attachment_retirement:kept".to_string(),
+        },
+        MobError::LifecycleOperationAdmissionPending {
+            intent: "explicit_resume".to_string(),
+            stage: "actor_command_admission",
+        },
+    ] {
+        assert_eq!(
+            kept_answer_says_retryable(&kept),
+            Some(true),
+            "precondition: the kept refusal says a retry can succeed: {kept}"
+        );
+        let refusal = kept.to_string();
+        let (answer, sent) = lift_over_a_kept_resume_answer(Err(kept)).await;
+        if let Err(error) = answer {
+            panic!("the lift was answered with a refusal (kept: `{refusal}`): {error}");
+        }
+        assert_eq!(
+            sent, 1,
+            "the lift over the kept refusal `{refusal}` ran one attempt of its own"
+        );
+    }
+}
+
+/// A kept Ok is still the answer of the lift that finds it: the mob was
+/// lifted, and no second Resume reaches the actor.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_ok_is_answered_that_ok() {
+    let (answer, sent) = lift_over_a_kept_resume_answer(Ok(())).await;
+    answer.expect("the lift is answered the kept Ok");
+    assert_eq!(sent, 0, "a kept Ok is not replayed to the actor");
+}
+
+/// A kept error that does not say a retry can succeed (it says nothing about
+/// a retry, or says a retry cannot succeed) is still the answer of the lift
+/// that finds it.
+#[tokio::test]
+async fn test_a_lift_over_a_kept_hard_error_is_answered_that_error() {
+    for kept in [
+        MobError::Internal("kept hard failure".to_string()),
+        MobError::MemberReloadRequired {
+            member_id: AgentIdentity::from("kept-reload-member"),
+            reason: "kept durability reload".to_string(),
+        },
+    ] {
+        assert_ne!(
+            kept_answer_says_retryable(&kept),
+            Some(true),
+            "precondition: the kept error does not say a retry can succeed: {kept}"
+        );
+        let failure = kept.to_string();
+        let (answer, sent) = lift_over_a_kept_resume_answer(Err(kept)).await;
+        let error = answer.expect_err("the lift is answered the kept error");
+        assert!(
+            matches!(&error, MobError::SharedLifecycleFailure(inner) if inner.to_string() == failure),
+            "the lift is answered the kept error `{failure}`: {error:?}"
+        );
+        assert_eq!(
+            sent, 0,
+            "the kept error `{failure}` is not replayed to the actor"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_explicit_resume_host_materialization_uses_typed_host_terminality() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
@@ -71062,8 +72229,12 @@ async fn test_explicit_resume_host_materialization_uses_typed_host_terminality()
             panic!("expected ResumeLifecycle command");
         };
         admission.admit();
+        // The host-owned stage outlasts the observer's inactivity window.
         for (member_id, delay) in [
-            (AgentIdentity::from("slow-a"), Duration::from_millis(2_200)),
+            (
+                AgentIdentity::from("slow-a"),
+                super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT + Duration::from_millis(200),
+            ),
             (AgentIdentity::from("slow-b"), Duration::from_millis(100)),
         ] {
             progress.awaiting_member(
@@ -71080,7 +72251,7 @@ async fn test_explicit_resume_host_materialization_uses_typed_host_terminality()
     });
 
     tokio::time::timeout(
-        Duration::from_secs(4),
+        past_window(super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT),
         shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
     )
     .await
@@ -71144,7 +72315,11 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
 
     let boundary_baseline = service.turn_finalization_acquire_counts();
     let materialization_baseline = service.recorded_create_requests().await.len();
-    let per_member_delay = Duration::from_millis(550);
+    // Each member's preparation stays inside one resume window; the five
+    // together outlast it.
+    let per_member_delay = super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT
+        / u32::try_from(MEMBER_COUNT).expect("member count fits")
+        + Duration::from_millis(150);
     for session_id in session_ids {
         service
             .delay_next_turn_finalization_acquire(session_id, per_member_delay)
@@ -71152,10 +72327,13 @@ async fn test_explicit_resume_member_preparation_progress_rearms_inactivity_watc
     }
 
     let started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(5), resumed.resume())
-        .await
-        .expect("cumulative explicit Resume stays within the test harness bound")
-        .expect("each member owns a fresh retirement budget after Resume admission");
+    tokio::time::timeout(
+        past_window(super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT),
+        resumed.resume(),
+    )
+    .await
+    .expect("cumulative explicit Resume stays within the test harness bound")
+    .expect("each member owns a fresh retirement budget after Resume admission");
     let elapsed = started.elapsed();
     let pending_delays = service.turn_finalization_delays_once.read().await.len();
     assert_eq!(
@@ -71217,7 +72395,7 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
     });
 
     let error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT),
         shared_handle.resume_until_for_test(Instant::now() + Duration::from_millis(100)),
     )
     .await
@@ -71338,15 +72516,23 @@ async fn explicit_resume_successor_scan_reports_progress_and_scans_realm_once() 
         .map(|session_id| service.persisted_session_metadata_reads_for(session_id))
         .collect();
 
-    // 21+ realm sessions at 120 ms each: the single scan alone outlasts the
-    // 2 s test inactivity watchdog, so only per-session progress keeps it
-    // alive. A per-member rescan would additionally triple the reads.
-    service.set_persisted_session_metadata_delay_ms(120);
+    // 21+ realm sessions, each read a little over a 21st of the inactivity
+    // watchdog's window: the single scan alone outlasts the window, so only
+    // per-session progress keeps it alive. A per-member rescan would
+    // additionally triple the reads.
+    let per_read =
+        super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT / 21 + Duration::from_millis(25);
+    service.set_persisted_session_metadata_delay_ms(
+        u64::try_from(per_read.as_millis()).expect("the read delay fits"),
+    );
     let started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(30), handle.resume())
-        .await
-        .expect("slow successor scan completes within the harness bound")
-        .expect("a scan that keeps reporting progress must not stall the resume");
+    tokio::time::timeout(
+        super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT * 2 + Duration::from_secs(30),
+        handle.resume(),
+    )
+    .await
+    .expect("slow successor scan completes within the harness bound")
+    .expect("a scan that keeps reporting progress must not stall the resume");
     let elapsed = started.elapsed();
     service.set_persisted_session_metadata_delay_ms(0);
     assert!(
@@ -78575,7 +79761,7 @@ async fn test_retire_saturated_actor_queue_reports_not_admitted_without_authorit
     };
 
     let error = tokio::time::timeout(
-        Duration::from_secs(3),
+        past_window(super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
         blocked_handle.retire(identity.clone()),
     )
     .await
@@ -105012,6 +106198,10 @@ mod host_outage_recovery;
 /// commits hold the mob database's write lock across a slow fsync.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod identity_fence_contention;
+/// Identity reconciliation holds an identity to the wiring it owns, not to
+/// the edges another identity's declaration owns.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod identity_owned_wiring_reconcile;
 /// A mob's lifecycle as its handles observe it without asking its actor.
 #[cfg(not(target_arch = "wasm32"))]
 mod lifecycle_observation;
@@ -105048,6 +106238,11 @@ mod retire_absent;
 /// names, admitted in every step's own actor command, or nothing.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retire_at_scope;
+/// An exact retire converges with what became of the incarnation it names:
+/// `Ok(())` once its retirement completed, a join of one durably started,
+/// and the stale refusal only for a request that is stale.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod retire_converges;
 mod retirement_isolation;
 /// #1814 owned rollbacks release the turn-finalization boundary before they
 /// take the lease a concurrent raw unregister holds into its cleanup.

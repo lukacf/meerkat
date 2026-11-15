@@ -3,7 +3,8 @@
 //! One row per council. The row carries four separable things:
 //!
 //! * the **immutable request binding** — the council id, the canonical request
-//!   fingerprint, and the deterministic temporary [`MobId`];
+//!   fingerprint, the deterministic temporary [`MobId`], and the convener of a
+//!   council the agent-facing `council` tool convened;
 //! * the **canonical lifecycle state** — the generated
 //!   `TemporaryCouncilLifecycleMachine` state, which is the only phase truth —
 //!   plus the per-participant custody and the ordered exchange receipts
@@ -28,9 +29,10 @@ use crate::machines::temporary_council_lifecycle::{
     TemporaryCouncilLifecycleMachineTransitionTrigger,
 };
 use crate::temporary_council::{
-    TemporaryCouncilCleanupReceipt, TemporaryCouncilDurability, TemporaryCouncilExchangeReceipt,
-    TemporaryCouncilId, TemporaryCouncilJobBinding, TemporaryCouncilParticipantCustody,
-    TemporaryCouncilResult, TemporaryCouncilStoreDurability,
+    TemporaryCouncilCleanupReceipt, TemporaryCouncilConvener, TemporaryCouncilDurability,
+    TemporaryCouncilExchangeReceipt, TemporaryCouncilId, TemporaryCouncilJobBinding,
+    TemporaryCouncilMobCustody, TemporaryCouncilParticipantCustody, TemporaryCouncilResult,
+    TemporaryCouncilStoreDurability,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -48,6 +50,14 @@ pub struct TemporaryCouncilRecord {
     pub request_fingerprint: String,
     /// Deterministic temporary mob this council owns.
     pub temporary_mob_id: MobId,
+    /// What the council recorded about the mob it creates under
+    /// `temporary_mob_id`: whether its create was issued, and the
+    /// incarnation that create made. Seating and cleanup act on that
+    /// incarnation only. `None` in a record written before this was
+    /// recorded: such a record cannot name its mob, and its cleanup falls
+    /// back to the id under the guards its coordinator documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_mob_custody: Option<TemporaryCouncilMobCustody>,
     /// Absolute deadline computed once, with checked arithmetic, before work.
     pub deadline: DateTime<Utc>,
     /// Durability the caller declared for this council.
@@ -75,6 +85,14 @@ pub struct TemporaryCouncilRecord {
     /// council was run detached. Lets a restarted host deliver the outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detached_job: Option<TemporaryCouncilJobBinding>,
+    /// Who convened the council through the agent-facing `council` tool:
+    /// the session that tool's surface is bound to. `None` for a council a
+    /// host runs directly, and in records written before this field
+    /// existed. Written with the first insert and never changed: it belongs
+    /// to the immutable request binding, outside the request fingerprint
+    /// and the lifecycle machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convener: Option<TemporaryCouncilConvener>,
     /// Optimistic concurrency token.
     pub revision: u64,
     /// Creation instant.
@@ -241,6 +259,7 @@ pub(crate) mod contract_tests {
         TemporaryCouncilRecord {
             request_fingerprint: format!("tcf1:sha256:{council}"),
             temporary_mob_id: council_id.temporary_mob_id(),
+            temporary_mob_custody: Some(TemporaryCouncilMobCustody::NotCreated),
             deadline: now + chrono::Duration::seconds(600),
             durability: TemporaryCouncilDurability::ProcessBound,
             claim_lease_expires_at: now + chrono::Duration::seconds(60),
@@ -269,6 +288,7 @@ pub(crate) mod contract_tests {
             result: None,
             cleanup: None,
             detached_job: None,
+            convener: None,
             revision: 0,
             created_at: now,
             updated_at: now,
@@ -505,5 +525,191 @@ pub(crate) mod contract_tests {
             "retained cleanup debt keeps the record in the recovery sweep"
         );
         assert_eq!(store.list_all().await.expect("list all").len(), 2);
+    }
+
+    /// A store keeps the convener a record was inserted with through its
+    /// insert, a load and a later commit.
+    pub(crate) async fn convener_survives_insert_load_and_commit<S: TemporaryCouncilStore>(
+        store: &S,
+    ) {
+        let convener = TemporaryCouncilConvener::new(SessionId::new());
+        let mut convened = record("convened");
+        convened.convener = Some(convener.clone());
+        let stored = store.insert_new(&convened).await.expect("insert");
+        assert_eq!(stored.convener.as_ref(), Some(&convener));
+        let loaded = store
+            .load(&convened.council_id)
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.convener.as_ref(), Some(&convener));
+
+        let mut claimed = loaded;
+        claimed.machine_state = machine_state(&[
+            TemporaryCouncilLifecycleInput::Open {
+                request_fingerprint: "tcf1:sha256:convened".to_string(),
+            },
+            TemporaryCouncilLifecycleInput::Claim {
+                claim_id: "contract-claim".to_string(),
+                lease_expired: false,
+            },
+        ]);
+        let committed = store.commit(&claimed).await.expect("commit");
+        assert_eq!(committed.convener.as_ref(), Some(&convener));
+        let reloaded = store
+            .load(&convened.council_id)
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(reloaded.convener, Some(convener));
+
+        let hosted = store.insert_new(&record("hosted")).await.expect("insert");
+        assert_eq!(
+            hosted.convener, None,
+            "a record inserted without a convener has none"
+        );
+    }
+}
+
+/// The stored form of the convener, and what a reader from before the field
+/// existed does with it.
+#[cfg(test)]
+mod convener_stored_form_tests {
+    use super::contract_tests::record;
+    use super::*;
+    use meerkat_core::SessionId;
+    use serde_json::{Value, json};
+
+    /// The record as 0.9.14 reads and writes it: the same fields in the same
+    /// order, without `temporary_mob_custody` and without `convener`, and
+    /// like the record itself tolerant of keys it does not know.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct RecordOfAnEarlierRelease {
+        council_id: TemporaryCouncilId,
+        request_fingerprint: String,
+        temporary_mob_id: MobId,
+        deadline: DateTime<Utc>,
+        durability: TemporaryCouncilDurability,
+        claim_lease_expires_at: DateTime<Utc>,
+        machine_state: TemporaryCouncilLifecycleMachineState,
+        participants: Vec<TemporaryCouncilParticipantCustody>,
+        exchanges: Vec<TemporaryCouncilExchangeReceipt>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<TemporaryCouncilResult>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cleanup: Option<TemporaryCouncilCleanupReceipt>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detached_job: Option<TemporaryCouncilJobBinding>,
+        revision: u64,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    }
+
+    fn convened_record(label: &str) -> (TemporaryCouncilRecord, SessionId) {
+        let session = SessionId::new();
+        let mut record = record(label);
+        record.convener = Some(TemporaryCouncilConvener::new(session.clone()));
+        record.detached_job = Some(TemporaryCouncilJobBinding::new(
+            "job-of-the-convener",
+            session.clone(),
+        ));
+        (record, session)
+    }
+
+    /// The convener is one optional key, `convener`, holding the session id.
+    /// A record without a convener writes no such key.
+    #[test]
+    fn the_convener_is_one_optional_key_of_the_stored_record() {
+        let (convened, session) = convened_record("stored-form");
+        let stored = serde_json::to_value(&convened).expect("encode");
+        assert_eq!(stored["convener"], json!({ "session_id": session }));
+        let decoded: TemporaryCouncilRecord = serde_json::from_value(stored).expect("decode");
+        assert_eq!(decoded, convened);
+
+        let hosted = record("stored-form-hosted");
+        let stored = serde_json::to_value(&hosted).expect("encode");
+        assert!(
+            stored.get("convener").is_none(),
+            "a record with no convener writes no key: {stored}"
+        );
+    }
+
+    /// A row an earlier release wrote has neither new key and decodes as a
+    /// council with no convener that names no mob of its own.
+    #[test]
+    fn a_record_stored_without_the_new_keys_decodes_with_no_convener_and_no_custody() {
+        let (convened, _) = convened_record("older-row");
+        let older = RecordOfAnEarlierRelease {
+            council_id: convened.council_id.clone(),
+            request_fingerprint: convened.request_fingerprint.clone(),
+            temporary_mob_id: convened.temporary_mob_id.clone(),
+            deadline: convened.deadline,
+            durability: convened.durability,
+            claim_lease_expires_at: convened.claim_lease_expires_at,
+            machine_state: convened.machine_state.clone(),
+            participants: convened.participants.clone(),
+            exchanges: convened.exchanges.clone(),
+            result: convened.result.clone(),
+            cleanup: convened.cleanup.clone(),
+            detached_job: convened.detached_job.clone(),
+            revision: convened.revision,
+            created_at: convened.created_at,
+            updated_at: convened.updated_at,
+        };
+        let row = serde_json::to_vec(&older).expect("encode the older row");
+        let stored = serde_json::from_slice::<Value>(&row).expect("json");
+        assert!(stored.get("convener").is_none());
+        assert!(stored.get("temporary_mob_custody").is_none());
+        let decoded: TemporaryCouncilRecord = serde_json::from_slice(&row).expect("decode");
+        let mut expected = convened;
+        expected.convener = None;
+        expected.temporary_mob_custody = None;
+        assert_eq!(decoded, expected);
+    }
+
+    /// The record refuses no key it does not know: a row that carries one
+    /// still decodes, with everything it does know intact.
+    #[test]
+    fn a_record_stored_with_an_unknown_key_decodes() {
+        let (convened, _) = convened_record("unknown-key");
+        let mut stored = serde_json::to_value(&convened).expect("encode");
+        stored["a_key_of_a_later_release"] = json!({ "anything": [1, 2, 3] });
+        let decoded: TemporaryCouncilRecord = serde_json::from_value(stored).expect("decode");
+        assert_eq!(decoded, convened);
+    }
+
+    /// A reader of an earlier release reads a row that carries both new
+    /// keys, and when it writes the record back it drops `convener` and
+    /// `temporary_mob_custody` and nothing else. A current reader then finds
+    /// a council with no convener that names no mob of its own.
+    #[test]
+    fn an_older_reader_drops_the_convener_and_custody_keys_and_nothing_else() {
+        let (convened, _) = convened_record("older-reader");
+        let stored = serde_json::to_value(&convened).expect("encode");
+        assert!(stored.get("convener").is_some());
+        assert_eq!(
+            stored["temporary_mob_custody"],
+            json!({ "state": "not_created" })
+        );
+
+        let older: RecordOfAnEarlierRelease =
+            serde_json::from_value(stored.clone()).expect("an older reader decodes the row");
+        let rewritten = serde_json::to_value(&older).expect("an older reader writes it back");
+
+        let mut expected = stored;
+        for key in ["convener", "temporary_mob_custody"] {
+            expected
+                .as_object_mut()
+                .expect("the record is an object")
+                .remove(key)
+                .expect("the key was there");
+        }
+        assert_eq!(rewritten, expected);
+
+        let reread: TemporaryCouncilRecord = serde_json::from_value(rewritten).expect("decode");
+        let mut without = convened;
+        without.convener = None;
+        without.temporary_mob_custody = None;
+        assert_eq!(reread, without);
     }
 }

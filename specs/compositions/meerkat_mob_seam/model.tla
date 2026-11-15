@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated composition model for meerkat_mob_seam.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CommsRuntimeIdValues, CompactionRequestVerdictValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ContentShapeValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostAdoptionEntryVerdictValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAdoptionSourceValues, IdentityAdoptionVerdictValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityImportVerdictValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityNotAdoptableReasonValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentityRowsPurgeVerdictValues, IdentitySessionConditionValues, ImportedRecordKindValues, ImportedRowStateValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InstructionEffectValues, InstructionTargetKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LiveWsEndpointUrlValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberDispatchAdmissionHostAnswerValues, MemberDispatchAdmissionLineageValues, MemberDispatchAdmissionVerdictValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberUnwireAdmissionValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobIncarnationIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, NodeRunStatusValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OperatorInstructionRefusalValues, OutboundPeerRequestStateValues, OwnedEdgeDeclareVerdictValues, OwnedEdgeEndCauseValues, OwnedEdgeEndVerdictValues, OwnedEdgeRealizationValues, OwnedEdgeRestoreVerdictValues, PeerAddressValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerSigningKeyValues, PeerTerminalDispositionValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, ProviderValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredPresenceValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetainedRunSettleVerdictValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfRunStartHoldReasonValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StagedSessionPhaseValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StopInputDispositionValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnregisterQueuedInputsDispositionValues, UnseatedEntryCauseValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CommsRuntimeIdValues, CompactionRequestVerdictValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ContentShapeValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostAdoptionEntryVerdictValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAdoptionSourceValues, IdentityAdoptionVerdictValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityImportVerdictValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityNotAdoptableReasonValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentityRowsPurgeVerdictValues, IdentitySessionConditionValues, ImportedRecordKindValues, ImportedRowStateValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InstructionEffectValues, InstructionTargetKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LiveWsEndpointUrlValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberDispatchAdmissionHostAnswerValues, MemberDispatchAdmissionLineageValues, MemberDispatchAdmissionVerdictValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberUnwireAdmissionValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobIncarnationIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, NodeRunStatusValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OperatorInstructionRefusalValues, OutboundPeerRequestStateValues, OwnedEdgeDeclareVerdictValues, OwnedEdgeEndCauseValues, OwnedEdgeEndVerdictValues, OwnedEdgeRealizationValues, OwnedEdgeRestoreVerdictValues, PeerAddressValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerSigningKeyValues, PeerTerminalDispositionValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, ProviderValues, QueuedInputAbandonDispositionValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredPresenceValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetainedRunSettleVerdictValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfRunStartHoldReasonValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StagedSessionPhaseValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StopInputDispositionValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnregisterQueuedInputsDispositionValues, UnseatedEntryCauseValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -569,6 +569,7 @@ OptionIdentityEntryVerdictValues == {None} \cup {Some(x) : x \in IdentityEntryVe
 OptionIdentityNotAdoptableReasonValues == {None} \cup {Some(x) : x \in IdentityNotAdoptableReasonValues}
 OptionInputAbandonReasonValues == {None} \cup {Some(x) : x \in InputAbandonReasonValues}
 OptionInputLaneValues == {None} \cup {Some(x) : x \in InputLaneValues}
+OptionInputPhaseValues == {None} \cup {Some(x) : x \in InputPhaseValues}
 OptionInputPublicTerminalOutcomeValues == {None} \cup {Some(x) : x \in InputPublicTerminalOutcomeValues}
 OptionInputTerminalKindValues == {None} \cup {Some(x) : x \in InputTerminalKindValues}
 OptionInteractionStreamAbandonReasonValues == {None} \cup {Some(x) : x \in InteractionStreamAbandonReasonValues}
@@ -18332,7 +18333,7 @@ meerkat_ResolveRuntimeCompletionCleanupArchivedInitializing(arg_session_id, arg_
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedInitializing"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupArchivedSession", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedInitializing"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupArchivedInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -18362,7 +18363,7 @@ meerkat_ResolveRuntimeCompletionCleanupArchivedIdle(arg_session_id, arg_observat
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedIdle"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupArchivedSession", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupArchivedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -18392,7 +18393,7 @@ meerkat_ResolveRuntimeCompletionCleanupArchivedAttached(arg_session_id, arg_obse
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedAttached"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupArchivedSession", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupArchivedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -18422,7 +18423,7 @@ meerkat_ResolveRuntimeCompletionCleanupArchivedRunning(arg_session_id, arg_obser
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedRunning"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupArchivedSession", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupArchivedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -18452,7 +18453,7 @@ meerkat_ResolveRuntimeCompletionCleanupArchivedRetired(arg_session_id, arg_obser
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedRetired"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupArchivedSession", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedRetired"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupArchivedRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -18482,7 +18483,7 @@ meerkat_ResolveRuntimeCompletionCleanupArchivedStopped(arg_session_id, arg_obser
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupArchivedSession", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupArchivedStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupArchivedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -18519,99 +18520,6 @@ meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing(arg_session
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "meerkat"
-       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
-       /\ packet.payload.session_id = arg_session_id
-       /\ packet.payload.observation_session_id = arg_observation_session_id
-       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
-       /\ packet.payload.observation_fence_token = arg_observation_fence_token
-       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
-       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
-       /\ packet.payload.outcome = arg_outcome
-       /\ packet.payload.archived_by_authority = arg_archived_by_authority
-       /\ packet.payload.live_session = arg_live_session
-       /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Idle"
-       /\ (packet.payload.observation_session_id = packet.payload.session_id)
-       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
-       /\ (packet.payload.archived_by_authority = FALSE)
-       /\ (packet.payload.outcome = "RuntimeTerminated")
-       /\ meerkat_phase' = "Idle"
-       /\ UnchangedFrame_728f09b58e7c3af6
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
-       /\ UnchangedFrame_d2e65ac0b2ee17fd
-       /\ model_step_count' = model_step_count + 1
-
-
-meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "meerkat"
-       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
-       /\ packet.payload.session_id = arg_session_id
-       /\ packet.payload.observation_session_id = arg_observation_session_id
-       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
-       /\ packet.payload.observation_fence_token = arg_observation_fence_token
-       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
-       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
-       /\ packet.payload.outcome = arg_outcome
-       /\ packet.payload.archived_by_authority = arg_archived_by_authority
-       /\ packet.payload.live_session = arg_live_session
-       /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Attached"
-       /\ (packet.payload.observation_session_id = packet.payload.session_id)
-       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
-       /\ (packet.payload.archived_by_authority = FALSE)
-       /\ (packet.payload.outcome = "RuntimeTerminated")
-       /\ meerkat_phase' = "Attached"
-       /\ UnchangedFrame_728f09b58e7c3af6
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
-       /\ UnchangedFrame_d2e65ac0b2ee17fd
-       /\ model_step_count' = model_step_count + 1
-
-
-meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "meerkat"
-       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
-       /\ packet.payload.session_id = arg_session_id
-       /\ packet.payload.observation_session_id = arg_observation_session_id
-       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
-       /\ packet.payload.observation_fence_token = arg_observation_fence_token
-       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
-       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
-       /\ packet.payload.outcome = arg_outcome
-       /\ packet.payload.archived_by_authority = arg_archived_by_authority
-       /\ packet.payload.live_session = arg_live_session
-       /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Running"
-       /\ (packet.payload.observation_session_id = packet.payload.session_id)
-       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
-       /\ (packet.payload.archived_by_authority = FALSE)
-       /\ (packet.payload.outcome = "RuntimeTerminated")
-       /\ meerkat_phase' = "Running"
-       /\ UnchangedFrame_728f09b58e7c3af6
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
-       /\ UnchangedFrame_d2e65ac0b2ee17fd
-       /\ model_step_count' = model_step_count + 1
-
-
 meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
@@ -18631,6 +18539,7 @@ meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired(arg_session_id, 
        /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
        /\ (packet.payload.archived_by_authority = FALSE)
        /\ (packet.payload.outcome = "RuntimeTerminated")
+       /\ ((meerkat_current_run_id = None) /\ ~((\E input_id \in DOMAIN meerkat_input_phases : ((IF (input_id \in DOMAIN meerkat_input_phases) THEN Some((IF input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued")))))
        /\ meerkat_phase' = "Retired"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -18670,6 +18579,131 @@ meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped(arg_session_id, 
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "CleanupRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
+       /\ packet.payload.session_id = arg_session_id
+       /\ packet.payload.observation_session_id = arg_observation_session_id
+       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
+       /\ packet.payload.observation_fence_token = arg_observation_fence_token
+       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
+       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.archived_by_authority = arg_archived_by_authority
+       /\ packet.payload.live_session = arg_live_session
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (packet.payload.observation_session_id = packet.payload.session_id)
+       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
+       /\ (packet.payload.archived_by_authority = FALSE)
+       /\ (packet.payload.outcome = "RuntimeTerminated")
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "RetainRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
+       /\ packet.payload.session_id = arg_session_id
+       /\ packet.payload.observation_session_id = arg_observation_session_id
+       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
+       /\ packet.payload.observation_fence_token = arg_observation_fence_token
+       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
+       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.archived_by_authority = arg_archived_by_authority
+       /\ packet.payload.live_session = arg_live_session
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (packet.payload.observation_session_id = packet.payload.session_id)
+       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
+       /\ (packet.payload.archived_by_authority = FALSE)
+       /\ (packet.payload.outcome = "RuntimeTerminated")
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "RetainRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
+       /\ packet.payload.session_id = arg_session_id
+       /\ packet.payload.observation_session_id = arg_observation_session_id
+       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
+       /\ packet.payload.observation_fence_token = arg_observation_fence_token
+       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
+       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.archived_by_authority = arg_archived_by_authority
+       /\ packet.payload.live_session = arg_live_session
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (packet.payload.observation_session_id = packet.payload.session_id)
+       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
+       /\ (packet.payload.archived_by_authority = FALSE)
+       /\ (packet.payload.outcome = "RuntimeTerminated")
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "RetainRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, arg_archived_by_authority, arg_live_session) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ResolveRuntimeCompletionCleanup"
+       /\ packet.payload.session_id = arg_session_id
+       /\ packet.payload.observation_session_id = arg_observation_session_id
+       /\ packet.payload.observation_agent_runtime_id = arg_observation_agent_runtime_id
+       /\ packet.payload.observation_fence_token = arg_observation_fence_token
+       /\ packet.payload.observation_runtime_generation = arg_observation_runtime_generation
+       /\ packet.payload.observation_runtime_epoch_id = arg_observation_runtime_epoch_id
+       /\ packet.payload.outcome = arg_outcome
+       /\ packet.payload.archived_by_authority = arg_archived_by_authority
+       /\ packet.payload.live_session = arg_live_session
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (packet.payload.observation_session_id = packet.payload.session_id)
+       /\ ((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))
+       /\ (packet.payload.archived_by_authority = FALSE)
+       /\ (packet.payload.outcome = "RuntimeTerminated")
+       /\ (IF (meerkat_current_run_id # None) THEN TRUE ELSE (\E input_id \in DOMAIN meerkat_input_phases : ((IF (input_id \in DOMAIN meerkat_input_phases) THEN Some((IF input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))))
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeCompletionCleanupResolved", payload |-> [action |-> "RetainRuntime", pre_admission_action |-> "ReleasePreAdmission", session_id |-> packet.payload.session_id], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
 
@@ -83686,6 +83720,612 @@ meerkat_ConsumeCompactionRequestInertDestroyed(arg_run_id) ==
        /\ model_step_count' = model_step_count + 1
 
 
+meerkat_AbandonQueuedInputIdle(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued"))
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_input_phases' = MapSet(meerkat_input_phases, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_terminal_kind' = MapSet(meerkat_input_terminal_kind, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_superseded_by' = MapRemove(meerkat_input_superseded_by, packet.payload.input_id)
+       /\ meerkat_input_aggregate_id' = MapRemove(meerkat_input_aggregate_id, packet.payload.input_id)
+       /\ meerkat_input_abandon_reason' = MapSet(meerkat_input_abandon_reason, packet.payload.input_id, packet.payload.reason)
+       /\ meerkat_input_abandon_attempt_count' = IF (packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts) THEN MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, (IF packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts THEN meerkat_input_attempt_counts[packet.payload.input_id] ELSE 0)) ELSE MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, 0)
+       /\ meerkat_input_lane' = MapRemove(meerkat_input_lane, packet.payload.input_id)
+       /\ meerkat_input_recovery_lanes' = MapRemove(meerkat_input_recovery_lanes, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_run' = MapRemove(meerkat_input_live_boundary_join_run, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_phase' = MapRemove(meerkat_input_live_boundary_join_phase, packet.payload.input_id)
+       /\ meerkat_input_controller_holds' = (meerkat_input_controller_holds \ {packet.payload.input_id})
+       /\ UnchangedFrame_3447c1558981f549
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecordTerminalOutcome", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputIdle"], [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Abandoned", input_id |-> packet.payload.input_id, phase |-> Some("Abandoned")], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAttached(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued"))
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_input_phases' = MapSet(meerkat_input_phases, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_terminal_kind' = MapSet(meerkat_input_terminal_kind, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_superseded_by' = MapRemove(meerkat_input_superseded_by, packet.payload.input_id)
+       /\ meerkat_input_aggregate_id' = MapRemove(meerkat_input_aggregate_id, packet.payload.input_id)
+       /\ meerkat_input_abandon_reason' = MapSet(meerkat_input_abandon_reason, packet.payload.input_id, packet.payload.reason)
+       /\ meerkat_input_abandon_attempt_count' = IF (packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts) THEN MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, (IF packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts THEN meerkat_input_attempt_counts[packet.payload.input_id] ELSE 0)) ELSE MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, 0)
+       /\ meerkat_input_lane' = MapRemove(meerkat_input_lane, packet.payload.input_id)
+       /\ meerkat_input_recovery_lanes' = MapRemove(meerkat_input_recovery_lanes, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_run' = MapRemove(meerkat_input_live_boundary_join_run, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_phase' = MapRemove(meerkat_input_live_boundary_join_phase, packet.payload.input_id)
+       /\ meerkat_input_controller_holds' = (meerkat_input_controller_holds \ {packet.payload.input_id})
+       /\ UnchangedFrame_3447c1558981f549
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecordTerminalOutcome", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAttached"], [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Abandoned", input_id |-> packet.payload.input_id, phase |-> Some("Abandoned")], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputRunning(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued"))
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_input_phases' = MapSet(meerkat_input_phases, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_terminal_kind' = MapSet(meerkat_input_terminal_kind, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_superseded_by' = MapRemove(meerkat_input_superseded_by, packet.payload.input_id)
+       /\ meerkat_input_aggregate_id' = MapRemove(meerkat_input_aggregate_id, packet.payload.input_id)
+       /\ meerkat_input_abandon_reason' = MapSet(meerkat_input_abandon_reason, packet.payload.input_id, packet.payload.reason)
+       /\ meerkat_input_abandon_attempt_count' = IF (packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts) THEN MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, (IF packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts THEN meerkat_input_attempt_counts[packet.payload.input_id] ELSE 0)) ELSE MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, 0)
+       /\ meerkat_input_lane' = MapRemove(meerkat_input_lane, packet.payload.input_id)
+       /\ meerkat_input_recovery_lanes' = MapRemove(meerkat_input_recovery_lanes, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_run' = MapRemove(meerkat_input_live_boundary_join_run, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_phase' = MapRemove(meerkat_input_live_boundary_join_phase, packet.payload.input_id)
+       /\ meerkat_input_controller_holds' = (meerkat_input_controller_holds \ {packet.payload.input_id})
+       /\ UnchangedFrame_3447c1558981f549
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecordTerminalOutcome", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputRunning"], [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Abandoned", input_id |-> packet.payload.input_id, phase |-> Some("Abandoned")], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputRetired(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued"))
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_input_phases' = MapSet(meerkat_input_phases, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_terminal_kind' = MapSet(meerkat_input_terminal_kind, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_superseded_by' = MapRemove(meerkat_input_superseded_by, packet.payload.input_id)
+       /\ meerkat_input_aggregate_id' = MapRemove(meerkat_input_aggregate_id, packet.payload.input_id)
+       /\ meerkat_input_abandon_reason' = MapSet(meerkat_input_abandon_reason, packet.payload.input_id, packet.payload.reason)
+       /\ meerkat_input_abandon_attempt_count' = IF (packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts) THEN MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, (IF packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts THEN meerkat_input_attempt_counts[packet.payload.input_id] ELSE 0)) ELSE MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, 0)
+       /\ meerkat_input_lane' = MapRemove(meerkat_input_lane, packet.payload.input_id)
+       /\ meerkat_input_recovery_lanes' = MapRemove(meerkat_input_recovery_lanes, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_run' = MapRemove(meerkat_input_live_boundary_join_run, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_phase' = MapRemove(meerkat_input_live_boundary_join_phase, packet.payload.input_id)
+       /\ meerkat_input_controller_holds' = (meerkat_input_controller_holds \ {packet.payload.input_id})
+       /\ UnchangedFrame_3447c1558981f549
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecordTerminalOutcome", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputRetired"], [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Abandoned", input_id |-> packet.payload.input_id, phase |-> Some("Abandoned")], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputStopped(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued"))
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_input_phases' = MapSet(meerkat_input_phases, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_terminal_kind' = MapSet(meerkat_input_terminal_kind, packet.payload.input_id, "Abandoned")
+       /\ meerkat_input_superseded_by' = MapRemove(meerkat_input_superseded_by, packet.payload.input_id)
+       /\ meerkat_input_aggregate_id' = MapRemove(meerkat_input_aggregate_id, packet.payload.input_id)
+       /\ meerkat_input_abandon_reason' = MapSet(meerkat_input_abandon_reason, packet.payload.input_id, packet.payload.reason)
+       /\ meerkat_input_abandon_attempt_count' = IF (packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts) THEN MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, (IF packet.payload.input_id \in DOMAIN meerkat_input_attempt_counts THEN meerkat_input_attempt_counts[packet.payload.input_id] ELSE 0)) ELSE MapSet(meerkat_input_abandon_attempt_count, packet.payload.input_id, 0)
+       /\ meerkat_input_lane' = MapRemove(meerkat_input_lane, packet.payload.input_id)
+       /\ meerkat_input_recovery_lanes' = MapRemove(meerkat_input_recovery_lanes, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_run' = MapRemove(meerkat_input_live_boundary_join_run, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_join_phase' = MapRemove(meerkat_input_live_boundary_join_phase, packet.payload.input_id)
+       /\ meerkat_input_controller_holds' = (meerkat_input_controller_holds \ {packet.payload.input_id})
+       /\ UnchangedFrame_3447c1558981f549
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecordTerminalOutcome", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputStopped"], [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Abandoned", input_id |-> packet.payload.input_id, phase |-> Some("Abandoned")], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedInitializing(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedIdle(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedAttached(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedRunning(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedRetired(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedStopped(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputNotQueuedDestroyed(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Destroyed"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption"))))
+       /\ meerkat_phase' = "Destroyed"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "NotQueued", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputNotQueuedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputNotQueuedDestroyed", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalInitializing(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalIdle(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalAttached(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalRunning(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalRetired(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalStopped(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputAlreadyTerminalDestroyed(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Destroyed"
+       /\ (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned")))))
+       /\ meerkat_phase' = "Destroyed"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "AlreadyTerminal", input_id |-> packet.payload.input_id, phase |-> (IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputAlreadyTerminalDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputAlreadyTerminalDestroyed", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedInitializing(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedIdle(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedAttached(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedRunning(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedRetired(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedStopped(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbandonQueuedInputUntrackedDestroyed(arg_input_id, arg_reason) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbandonQueuedInput"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.reason = arg_reason
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Destroyed"
+       /\ ~((packet.payload.input_id \in DOMAIN meerkat_input_phases))
+       /\ meerkat_phase' = "Destroyed"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "QueuedInputAbandonResolved", payload |-> [disposition |-> "Untracked", input_id |-> packet.payload.input_id, phase |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "AbandonQueuedInputUntrackedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbandonQueuedInputUntrackedDestroyed", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
 meerkat_live_delegation_steer_records_are_authorized_and_single == ((DOMAIN meerkat_live_delegation_steer_digest_by_continuation = DOMAIN meerkat_live_delegation_steer_operation_by_continuation) /\ (DOMAIN meerkat_live_delegation_steer_reconciliation_by_continuation = DOMAIN meerkat_live_delegation_steer_operation_by_continuation) /\ (\A continuation_id \in DOMAIN meerkat_live_delegation_steer_delivered_by_continuation : (continuation_id \in DOMAIN meerkat_live_delegation_steer_operation_by_continuation)))
 meerkat_live_media_health_budget_and_verdicts_are_consistent == ((\A budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session : ((IF "value" \in DOMAIN (IF (budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session) THEN Some((IF budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session THEN meerkat_live_media_fault_reopens_by_session[budget_session] ELSE 0)) ELSE None) THEN (IF (budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session) THEN Some((IF budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session THEN meerkat_live_media_fault_reopens_by_session[budget_session] ELSE 0)) ELSE None)["value"] ELSE None) <= 1)) /\ (\A verdict_channel \in DOMAIN meerkat_live_media_fault_reopen_recommended_by_channel : (IF (verdict_channel \in meerkat_live_media_health_judged_channels) THEN TRUE ELSE (verdict_channel \in DOMAIN meerkat_live_close_status_by_channel))) /\ (\A judged_channel \in meerkat_live_media_health_judged_channels : (judged_channel \in DOMAIN meerkat_live_media_health_requested_output_by_channel)) /\ (IF (meerkat_session_id # None) THEN TRUE ELSE ((meerkat_live_media_health_requested_output_by_channel = [x \in {} |-> None]) /\ (meerkat_live_media_health_judged_channels = {}) /\ (meerkat_live_media_fault_reopen_recommended_by_channel = [x \in {} |-> None]) /\ (meerkat_live_media_fault_reopens_by_session = [x \in {} |-> None]))))
 meerkat_fence_requires_bound_runtime == (IF (meerkat_active_fence_token = None) THEN TRUE ELSE (meerkat_active_runtime_id # None))
@@ -114891,8 +115531,7 @@ mob_ForceCancelRunning(arg_agent_identity) ==
        /\ ((packet.payload.agent_identity \in DOMAIN mob_identity_to_runtime) /\ ((IF ((mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN mob_member_state_markers) THEN Some((IF (mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN mob_member_state_markers THEN mob_member_state_markers[(mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
        /\ (IF ((packet.payload.agent_identity \in DOMAIN mob_member_placement) = FALSE) THEN TRUE ELSE mob__mob_machine_placed_carrier_binding_active(mob_member_placement, mob_current_placed_spawn_host_binding_generations, mob_host_bind_phase, mob_host_binding_generations, packet.payload.agent_identity))
        /\ mob_phase' = "Running"
-       /\ mob_active_run_count' = 0
-       /\ UnchangedFrame_5efd8bb47a658566
+       /\ UnchangedFrame_9ffca9352268874f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -120913,8 +121552,7 @@ mob_CancelAllWorkRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_tok
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ ((IF (packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens THEN mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))
        /\ mob_phase' = "Running"
-       /\ mob_active_run_count' = 0
-       /\ UnchangedFrame_5efd8bb47a658566
+       /\ UnchangedFrame_9ffca9352268874f
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -142111,11 +142749,12 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Retired") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = TRUE))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = TRUE))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Initializing") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
+    \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Retired") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated")) /\ (((meerkat_current_run_id = None) /\ ~((\E input_id \in DOMAIN meerkat_input_phases : ((IF (input_id \in DOMAIN meerkat_input_phases) THEN Some((IF input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))))))
+    \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Idle") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Attached") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Running") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
-    \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Retired") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
-    \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated"))
+    \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Retired") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "RuntimeTerminated")) /\ ((IF (meerkat_current_run_id # None) THEN TRUE ELSE (\E input_id \in DOMAIN meerkat_input_phases : ((IF (input_id \in DOMAIN meerkat_input_phases) THEN Some((IF input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued")))))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Initializing") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "FinalizationFailed"))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Idle") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "FinalizationFailed"))
     \/ /\ (packet.variant = "ResolveRuntimeCompletionCleanup") /\ (meerkat_phase = "Attached") /\ ((packet.payload.observation_session_id = packet.payload.session_id)) /\ (((meerkat_active_runtime_id = packet.payload.observation_agent_runtime_id) /\ (meerkat_active_fence_token = packet.payload.observation_fence_token) /\ (meerkat_active_runtime_generation = packet.payload.observation_runtime_generation) /\ (meerkat_active_runtime_epoch_id = packet.payload.observation_runtime_epoch_id))) /\ ((packet.payload.archived_by_authority = FALSE)) /\ ((packet.payload.outcome = "FinalizationFailed"))
@@ -144372,6 +145011,32 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "ConsumeCompactionRequest") /\ (meerkat_phase = "Attached")
     \/ /\ (packet.variant = "ConsumeCompactionRequest") /\ (meerkat_phase = "Stopped")
     \/ /\ (packet.variant = "ConsumeCompactionRequest") /\ (meerkat_phase = "Destroyed")
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Idle") /\ (((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued")))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Attached") /\ (((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued")))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Running") /\ (((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued")))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Retired") /\ (((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued")))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Stopped") /\ (((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Queued")))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Initializing") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Idle") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Attached") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Running") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Retired") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Stopped") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Destroyed") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Staged")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Applied")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("AppliedPendingConsumption")))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Initializing") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Idle") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Attached") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Running") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Retired") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Stopped") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Destroyed") /\ ((IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Consumed")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Superseded")) THEN TRUE ELSE (IF ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Coalesced")) THEN TRUE ELSE ((IF (packet.payload.input_id \in DOMAIN meerkat_input_phases) THEN Some((IF packet.payload.input_id \in DOMAIN meerkat_input_phases THEN meerkat_input_phases[packet.payload.input_id] ELSE "None")) ELSE None) = Some("Abandoned"))))))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Initializing") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Idle") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Attached") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Running") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Retired") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Stopped") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
+    \/ /\ (packet.variant = "AbandonQueuedInput") /\ (meerkat_phase = "Destroyed") /\ (~((packet.payload.input_id \in DOMAIN meerkat_input_phases)))
 
 mob__entry_packet__operator_instruction_write_well_formed(revision, digest, kind, profile, member) == ((revision >= 1) /\ (digest # "") /\ (IF ((kind = "Mob") /\ (profile = "") /\ (member = None)) THEN TRUE ELSE (IF ((kind = "Profile") /\ (profile # "") /\ (member = None)) THEN TRUE ELSE ((IF (kind = "Member") THEN TRUE ELSE (kind = "MemberAndForks")) /\ (profile = "") /\ (member # None)))))
 
@@ -148325,11 +148990,12 @@ CoreNext ==
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupArchivedRetired(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, TRUE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupArchivedStopped(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, TRUE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
-    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
-    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
-    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
+    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
+    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
+    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
+    \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupFinalizationFailedInitializing(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupFinalizationFailedIdle(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
     \/ \E arg_session_id \in SessionIdValues : \E arg_observation_session_id \in SessionIdValues : \E arg_observation_agent_runtime_id \in OptionAgentRuntimeIdValues : \E arg_observation_fence_token \in OptionFenceTokenValues : \E arg_observation_runtime_generation \in OptionGenerationValues : \E arg_observation_runtime_epoch_id \in OptionRuntimeEpochIdValues : \E arg_outcome \in RuntimeCompletionObservedOutcomeValues : \E arg_live_session \in RuntimeCompletionLiveSessionObservationValues : meerkat_ResolveRuntimeCompletionCleanupFinalizationFailedAttached(arg_session_id, arg_observation_session_id, arg_observation_agent_runtime_id, arg_observation_fence_token, arg_observation_runtime_generation, arg_observation_runtime_epoch_id, arg_outcome, FALSE, arg_live_session)
@@ -150586,6 +151252,32 @@ CoreNext ==
     \/ \E arg_run_id \in RunIdValues : meerkat_ConsumeCompactionRequestInertAttached(arg_run_id)
     \/ \E arg_run_id \in RunIdValues : meerkat_ConsumeCompactionRequestInertStopped(arg_run_id)
     \/ \E arg_run_id \in RunIdValues : meerkat_ConsumeCompactionRequestInertDestroyed(arg_run_id)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputIdle(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAttached(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputRunning(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputRetired(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputStopped(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedInitializing(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedIdle(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedAttached(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedRunning(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedRetired(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedStopped(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputNotQueuedDestroyed(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalInitializing(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalIdle(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalAttached(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalRunning(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalRetired(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalStopped(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputAlreadyTerminalDestroyed(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedInitializing(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedIdle(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedAttached(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedRunning(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedRetired(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedStopped(arg_input_id, arg_reason)
+    \/ \E arg_input_id \in StringValues : \E arg_reason \in InputAbandonReasonValues : meerkat_AbandonQueuedInputUntrackedDestroyed(arg_input_id, arg_reason)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : mob_ClassifyFlowRunTerminalityTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : mob_ClassifyFlowRunTerminalityNonTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_step_id \in StepIdValues : \E arg_status \in StepRunStatusValues : mob_ClassifyFlowStepTerminalityTerminalRunning(arg_run_id, arg_step_id, arg_status)

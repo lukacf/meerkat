@@ -67,7 +67,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 
@@ -508,7 +508,7 @@ structured-output extraction fails. Inspect both `structured_output` and
 never requested. These optional REST fields are omitted when absent, not
 filled with `null`.
 
-### GET /sessions/{id}/history
+### GET /sessions/\{id\}/history
 
 Read committed transcript history for a session without changing the lightweight metadata shape of `GET /sessions/{id}`.
 
@@ -697,13 +697,27 @@ Continue an existing session.
   The session's provider-neutral reasoning effort level from this message
   on: a level (`"high"`, or `{"action":"set","value":"high"}`) sets it,
   `{"action":"clear"}` removes it, and omission/`null` keeps the level the
-  session recorded. A level the model or its route does not accept is
-  refused exactly as on `POST /sessions`: HTTP 400, code `INVALID_PARAMS`
+  session recorded. On a session this server does not hold live, a level
+  the model or its route does not accept is refused exactly as on
+  `POST /sessions`: HTTP 400, code `INVALID_PARAMS`
   and the `reasoning_effort_refused` details. The stored session is
   unchanged. A message that names this field rebuilds the session, like
   one that names `model` or `max_tokens`: while this server holds the
   session live, such a message is answered HTTP 500 `session is busy` and
-  changes nothing.
+  changes nothing. So on REST a provider-neutral level can be set only when
+  the session is created (`POST /sessions`) or on a session this server
+  does not hold live. On a live session a message that names the level, or
+  a `model`, is not served: it is refused at once, whether or not a turn is
+  running, and nothing is stored or queued for it; a turn that is running
+  and the messages queued behind it go on. In 0.9.15 the answer is HTTP 500
+  with code `INTERNAL_ERROR` and a text that says the session is busy; read
+  it as "not served on a live session", and do not rely on that status or
+  code staying. It is not an answer to retry when the session is idle:
+  sending the message again while the server holds the session is refused
+  the same way. The typed busy answer of JSON-RPC
+  (`reasoning_effort_change_needs_idle_session`) does not apply to REST.
+  `provider_params` is not a member of this request and is not read here:
+  the field is the only form of the level on a message.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">

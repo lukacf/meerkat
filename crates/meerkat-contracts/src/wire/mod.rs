@@ -21,6 +21,7 @@ mod models;
 mod operator_instruction;
 mod params;
 mod portable_spec;
+pub mod queued_input_recall;
 mod realtime;
 mod rest;
 mod result;
@@ -95,8 +96,9 @@ pub use decision::{
     DECISION_NOTICE_NOTIFICATION, DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams,
     DecisionListParams, DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
     DecisionRenderingParams, DecisionRenderingResult, DecisionResult, DecisionWithdrawParams,
-    WireCanonicalPart, WireDecision, WireDecisionAssurance, WireDecisionEffect,
-    WireDecisionErrorData, WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
+    WireAskUserAnswer, WireAskUserQuestionAnswer, WireCanonicalPart, WireDecision,
+    WireDecisionAnswer, WireDecisionAssurance, WireDecisionEffect, WireDecisionErrorData,
+    WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
     WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
     WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
     WireDecisionTier, WirePresentationAudience, WirePresentationLink, WirePresentationRecord,
@@ -114,6 +116,7 @@ pub use operator_instruction::{
     WireMemberInstructionSlot, WireMemberInstructionStatus, WireMobInstructionDisposition,
     WireSessionInstructionDisposition, WireSessionInstructionSlot,
 };
+pub use queued_input_recall::{RecallInputParams, RecallInputResult, WireQueuedInputRecall};
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,
     ExportAtifParams, InjectSystemContextParams, InjectSystemContextResult, InterruptParams,

@@ -70,10 +70,13 @@ pub fn pack_directory_with_excludes(
     signing: Option<SigningRequest<'_>>,
     excluded_paths: &[&Path],
 ) -> Result<PackResult, PackValidationError> {
+    let signing = signing
+        .map(|request| OpenedSigningKey::open(request.key_path).map(|key| (request.signer_id, key)))
+        .transpose()?;
     let mut scanned = scan_directory(directory)?;
     exclude_paths_from_pack(directory, excluded_paths, &mut scanned)?;
-    if let Some(request) = signing {
-        exclude_paths_from_pack(directory, &[request.key_path], &mut scanned)?;
+    if let Some((_, key)) = &signing {
+        key.leave_out_of(directory, &mut scanned)?;
     }
     let mut files: BTreeMap<String, Vec<u8>> = scanned
         .into_iter()
@@ -82,12 +85,12 @@ pub fn pack_directory_with_excludes(
     prepare_adaptive_build_outputs(&mut files)?;
     validate_extracted_pack_files(&files)?;
 
-    if let Some(request) = signing {
+    if let Some((signer_id, key)) = &signing {
         let unsigned_archive = create_targz(&files)?;
         let digest = compute_archive_digest(&unsigned_archive)?;
-        let signing_key = load_signing_key(request.key_path)?;
+        let signing_key = key.signing_key()?;
         let signature = sign_digest(&signing_key, digest);
-        let signer_id = SignerId::from_str(request.signer_id).map_err(|err| {
+        let signer_id = SignerId::from_str(signer_id).map_err(|err| {
             PackValidationError::InvalidSignature(format!("invalid signer id: {err}"))
         })?;
         let timestamp =
@@ -663,6 +666,8 @@ fn scan_directory_inner(
     current: &Path,
     out: &mut BTreeMap<String, ScannedFile>,
 ) -> Result<(), PackValidationError> {
+    use std::io::Read;
+
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
@@ -678,10 +683,19 @@ fn scan_directory_inner(
             .strip_prefix(root)
             .map_err(|err| PackValidationError::Archive(err.to_string()))?;
         let rel_path = normalize_rel_path(&rel.to_string_lossy());
+        // One open gives the file's bytes and which file they are the bytes
+        // of.
+        let mut opened = std::fs::File::open(&path)?;
+        let metadata = opened.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes)?;
         let file = ScannedFile {
             #[cfg(unix)]
-            identity: FileIdentity::of(&entry.metadata()?),
-            bytes: std::fs::read(&path)?,
+            identity: FileIdentity::of(&metadata),
+            bytes,
         };
         out.insert(rel_path, file);
     }
@@ -698,9 +712,11 @@ fn scan_directory_inner(
 /// inode) is left out too, under whatever name or case the scan found it: a
 /// hard link, or another spelling on a file system that ignores case.
 ///
-/// A path that names no file leaves nothing out. A path, or the directory,
-/// that cannot be resolved for any other reason is an error: it is never
-/// compared as written, which could pack the file it names.
+/// A path that names no file leaves nothing out: an output file that is not
+/// written yet. (The signing key is not left out here but by
+/// `OpenedSigningKey::leave_out_of`: its path must name a file.) A path, or
+/// the directory, that cannot be resolved for any other reason is an error:
+/// it is never compared as written, which could pack the file it names.
 fn exclude_paths_from_pack(
     root: &Path,
     paths: &[&Path],
@@ -709,27 +725,14 @@ fn exclude_paths_from_pack(
     if paths.is_empty() {
         return Ok(());
     }
-    let real_root = std::fs::canonicalize(root).map_err(|err| {
-        PackValidationError::Io(format!(
-            "cannot resolve the mob directory '{}': {err}",
-            root.display()
-        ))
-    })?;
+    let real_root = resolve_mob_directory(root)?;
     for path in paths {
-        let unresolved = |err: std::io::Error| {
-            PackValidationError::Io(format!(
-                "cannot resolve '{}', a file the pack must leave out: {err}",
-                path.display()
-            ))
-        };
         let real = match std::fs::canonicalize(path) {
             Ok(real) => real,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(unresolved(err)),
+            Err(err) => return Err(unresolved_exclusion(path, &err)),
         };
-        if let Ok(relative) = real.strip_prefix(&real_root) {
-            files.remove(&normalize_rel_path(&relative.to_string_lossy()));
-        }
+        remove_resolved_name(&real_root, &real, files);
         #[cfg(unix)]
         match std::fs::metadata(&real) {
             Ok(metadata) => {
@@ -738,19 +741,143 @@ fn exclude_paths_from_pack(
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(unresolved(err)),
+            Err(err) => return Err(unresolved_exclusion(path, &err)),
         }
     }
     Ok(())
+}
+
+fn resolve_mob_directory(root: &Path) -> Result<std::path::PathBuf, PackValidationError> {
+    std::fs::canonicalize(root).map_err(|err| {
+        PackValidationError::Io(format!(
+            "cannot resolve the mob directory '{}': {err}",
+            root.display()
+        ))
+    })
+}
+
+fn unresolved_exclusion(path: &Path, err: &std::io::Error) -> PackValidationError {
+    PackValidationError::Io(format!(
+        "cannot resolve '{}', a file the pack must leave out: {err}",
+        path.display()
+    ))
+}
+
+/// Removes the scanned file whose name under the resolved mob directory is
+/// the resolved path `real`, if `real` is inside that directory.
+fn remove_resolved_name(real_root: &Path, real: &Path, files: &mut BTreeMap<String, ScannedFile>) {
+    if let Ok(relative) = real.strip_prefix(real_root) {
+        files.remove(&normalize_rel_path(&relative.to_string_lossy()));
+    }
 }
 
 fn normalize_rel_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
-fn load_signing_key(path: &Path) -> Result<SigningKey, PackValidationError> {
-    let raw = std::fs::read_to_string(path)?;
-    let trimmed = raw.trim();
+/// The signing key file of a signed pack, opened once.
+///
+/// Everything the pack takes from the key path it takes at that one open,
+/// before the mob directory is read: which file it is, the name the path
+/// resolves to and the text of the file. The file the pack leaves out and the
+/// key it is signed with are therefore one file.
+struct OpenedSigningKey<'a> {
+    /// The path as it was given, for messages.
+    path: &'a Path,
+    /// Kept open until the pack is made: while a file is open, no other file
+    /// has its identity.
+    _file: std::fs::File,
+    /// Which file was opened. `None` where the file system gives none.
+    #[cfg(unix)]
+    identity: Option<FileIdentity>,
+    /// The name the path resolved to when the file was opened, or why it has
+    /// none; the reason refuses the pack where the file is left out, unless
+    /// the path names nothing any more and the file has an identity. `None`
+    /// for a key that is no regular file (a pipe, a device): the scan takes
+    /// regular files only, so such a key is no file of the mob directory and
+    /// has no name to leave out.
+    real_path: Option<std::io::Result<std::path::PathBuf>>,
+    /// The text of the file, read from the open file.
+    text: String,
+}
+
+impl<'a> OpenedSigningKey<'a> {
+    /// Opens and reads the key file. A path that names no file, or a file
+    /// that cannot be read, is an error: a signed pack has a key. A path that
+    /// cannot be opened because it cannot be resolved (for another reason
+    /// than that it names no file) is refused by its name, as a path to
+    /// leave out is.
+    fn open(path: &'a Path) -> Result<Self, PackValidationError> {
+        use std::io::Read;
+
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(not_opened) => {
+                return Err(match std::fs::canonicalize(path) {
+                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                        unresolved_exclusion(path, &err)
+                    }
+                    _ => not_opened.into(),
+                });
+            }
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|err| unresolved_exclusion(path, &err))?;
+        #[cfg(unix)]
+        let identity = FileIdentity::of(&metadata);
+        let real_path = metadata.is_file().then(|| std::fs::canonicalize(path));
+        let mut text = String::new();
+        file.read_to_string(&mut text)?;
+        Ok(Self {
+            path,
+            _file: file,
+            #[cfg(unix)]
+            identity,
+            real_path,
+            text,
+        })
+    }
+
+    /// Removes the file the key was read from from the scanned set: the file
+    /// with the name the key path resolved to and, on Unix, every scanned
+    /// file that is the opened file (the same device and inode), under
+    /// whatever name the scan found it. A key that is no regular file leaves
+    /// nothing out.
+    ///
+    /// A regular key file, or a directory, whose name could not be resolved
+    /// is an error: neither is ever compared as written. The one exception,
+    /// on Unix: an opened key file whose path names nothing any more has no
+    /// name to leave out, and is left out by its identity alone.
+    fn leave_out_of(
+        &self,
+        root: &Path,
+        files: &mut BTreeMap<String, ScannedFile>,
+    ) -> Result<(), PackValidationError> {
+        let real_root = resolve_mob_directory(root)?;
+        match &self.real_path {
+            None => return Ok(()),
+            Some(Ok(real)) => remove_resolved_name(&real_root, real, files),
+            #[cfg(unix)]
+            Some(Err(err))
+                if err.kind() == std::io::ErrorKind::NotFound && self.identity.is_some() => {}
+            Some(Err(err)) => return Err(unresolved_exclusion(self.path, err)),
+        }
+        #[cfg(unix)]
+        if let Some(identity) = self.identity {
+            files.retain(|_, file| file.identity != Some(identity));
+        }
+        Ok(())
+    }
+
+    /// The key the pack is signed with: the one in the text that was read.
+    fn signing_key(&self) -> Result<SigningKey, PackValidationError> {
+        parse_signing_key(&self.text)
+    }
+}
+
+fn parse_signing_key(text: &str) -> Result<SigningKey, PackValidationError> {
+    let trimmed = text.trim();
     let bytes = hex::decode(trimmed)
         .map_err(|err| PackValidationError::InvalidSigningKey(err.to_string()))?;
     let secret: [u8; 32] = bytes.try_into().map_err(|_| {
@@ -1434,6 +1561,208 @@ mod tests {
             );
             assert_eq!(files, baseline, "{spelling}");
         }
+    }
+
+    // One read of the key file gives a signed pack both the file it leaves
+    // out and the key it is signed with.
+
+    /// A throwaway signing key derived in the test from `label`, written to
+    /// `path` as a key file.
+    fn write_labelled_throwaway_key(path: &Path, label: &str) -> SigningKey {
+        let secret: [u8; 32] = Sha256::digest(label.as_bytes()).into();
+        std::fs::write(path, hex::encode(secret)).unwrap();
+        SigningKey::from_bytes(&secret)
+    }
+
+    /// The file that is left out is the file the key was read from, and the
+    /// key the pack is signed with is the one read there.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_leaves_out_the_file_its_signing_key_was_read_from() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        let key_path = mob.join("key.hex");
+        let read_key = write_labelled_throwaway_key(&key_path, "the key that is read");
+        let read_from = FileIdentity::of(&std::fs::metadata(&key_path).unwrap())
+            .expect("the key file has an identity");
+
+        let opened = OpenedSigningKey::open(&key_path).unwrap();
+
+        // The key path and the file's name change here.
+        std::fs::rename(&key_path, mob.join("renamed.hex")).unwrap();
+        let other_key = write_labelled_throwaway_key(&key_path, "another key");
+        assert_ne!(read_key.verifying_key(), other_key.verifying_key());
+
+        let mut scanned = scan_directory(&mob).unwrap();
+        opened.leave_out_of(&mob, &mut scanned).unwrap();
+        let public_key_hex = |key: &SigningKey| hex::encode(key.verifying_key().to_bytes());
+        let signs_with = opened.signing_key().map(|key| public_key_hex(&key));
+
+        let mut not_so = Vec::new();
+        for (name, file) in &scanned {
+            if file.identity == Some(read_from) {
+                not_so.push(format!(
+                    "`{name}` is the file the key was read from and is still to be packed"
+                ));
+            }
+        }
+        if signs_with != Ok(public_key_hex(&read_key)) {
+            not_so.push(format!(
+                "the pack is to be signed with another key than the one that was read (public \
+                 key {}): {signs_with:?}",
+                public_key_hex(&read_key)
+            ));
+        }
+        assert!(
+            not_so.is_empty(),
+            "the file left out and the signing key come from one read of the key file; not so:\n{}",
+            not_so.join("\n")
+        );
+        // The name the key path resolved to is left out as well.
+        assert_eq!(
+            scanned.into_keys().collect::<Vec<_>>(),
+            sorted_names(&EXCLUSION_SOURCES)
+        );
+    }
+
+    /// A key path that names no file refuses the pack before the mob
+    /// directory is read, with the error for a key file that cannot be read.
+    #[test]
+    fn test_pack_key_path_that_names_no_file_is_refused_before_the_directory_is_read() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        let missing_key = temp.path().join("no-such.key");
+        let unreadable_key =
+            PackValidationError::from(std::fs::File::open(&missing_key).unwrap_err());
+
+        let no_manifest = temp.path().join("no-manifest");
+        std::fs::create_dir_all(&no_manifest).unwrap();
+        std::fs::write(no_manifest.join("definition.json"), br#"{"id":"mob"}"#).unwrap();
+        let not_a_directory = temp.path().join("a-file");
+        std::fs::write(&not_a_directory, "not a mob directory\n").unwrap();
+
+        let mut not_so = Vec::new();
+        for (case, directory) in [
+            ("a mob directory that packs", &mob),
+            ("a mob directory without a manifest", &no_manifest),
+            ("a directory argument that cannot be read", &not_a_directory),
+        ] {
+            let outcome = pack_directory_with_excludes(
+                directory,
+                Some(SigningRequest {
+                    signer_id: "test-signer",
+                    key_path: &missing_key,
+                }),
+                &[],
+            )
+            .map(|_| "a pack was made");
+            if outcome != Err(unreadable_key.clone()) {
+                not_so.push(format!("{case}: {outcome:?}"));
+            }
+        }
+        assert!(
+            not_so.is_empty(),
+            "expected Err({unreadable_key:?}) whatever the directory holds; not so for:\n{}",
+            not_so.join("\n")
+        );
+    }
+
+    /// A key path that cannot be opened because it cannot be resolved (it
+    /// goes through a regular file, or it is a symbolic link that names
+    /// itself) is refused with the message that names the path.
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_key_path_that_cannot_be_resolved_to_a_file_is_refused_by_its_name() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        let through_a_file = mob.join("manifest.toml").join("key.hex");
+        let names_itself = temp.path().join("loop.hex");
+        std::os::unix::fs::symlink(&names_itself, &names_itself).unwrap();
+
+        for (key, reason) in [
+            (&through_a_file, "Not a directory"),
+            (&names_itself, "Too many levels of symbolic links"),
+        ] {
+            let refusal = match pack_directory(
+                &mob,
+                Some(SigningRequest {
+                    signer_id: "test-signer",
+                    key_path: key,
+                }),
+            ) {
+                Err(refusal) => refusal.to_string(),
+                Ok(_) => panic!("a pack was made with the key path `{}`", key.display()),
+            };
+            let expected = format!(
+                "I/O error: cannot resolve '{}', a file the pack must leave out: {reason}",
+                key.display()
+            );
+            assert!(
+                refusal.starts_with(&expected),
+                "expected `{expected}`: {refusal}"
+            );
+        }
+    }
+
+    /// Only the key path must name a file. An output path that names no file
+    /// yet leaves nothing out of a signed pack, as of an unsigned one.
+    #[test]
+    fn test_pack_signed_with_output_not_yet_written_leaves_nothing_else_out() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        let key = temp.path().join("key.hex");
+        write_throwaway_key(&key);
+        let mut expected = EXCLUSION_SOURCES.to_vec();
+        expected.push("signature.toml");
+
+        for output in [
+            mob.join("new.mobpack"),
+            mob.join("dist").join("new.mobpack"),
+        ] {
+            assert!(!output.exists());
+            let files = signed_pack_files(&mob, &key, &output);
+            assert_eq!(
+                files,
+                sorted_names(&expected),
+                "output `{}`",
+                output.display()
+            );
+        }
+    }
+
+    /// What a signed pack carries is what the key file and the sources give:
+    /// the public key of the key in the file, over the digest of the sources.
+    #[test]
+    fn test_pack_signature_carries_the_key_files_public_key_over_the_sources_digest() {
+        let temp = exclusion_fixture();
+        let mob = temp.path().join("mob");
+        let key_path = temp.path().join("key.hex");
+        let key = write_labelled_throwaway_key(&key_path, "the key in the file");
+        let unsigned = pack_directory(&mob, None).unwrap();
+
+        let packed = pack_directory(
+            &mob,
+            Some(SigningRequest {
+                signer_id: "test-signer",
+                key_path: &key_path,
+            }),
+        )
+        .unwrap();
+        let mut files = extract_targz_safe(&packed.archive_bytes).unwrap();
+        let signature_toml = files.remove("signature.toml").expect("signature.toml");
+        let signature: PackSignature =
+            toml::from_str(std::str::from_utf8(&signature_toml).unwrap()).unwrap();
+
+        assert_eq!(files, extract_targz_safe(&unsigned.archive_bytes).unwrap());
+        assert_eq!(packed.digest, unsigned.digest);
+        assert_eq!(signature.digest, unsigned.digest);
+        assert_eq!(*signature.public_key.verifying_key(), key.verifying_key());
+        verify_digest(
+            &key.verifying_key(),
+            unsigned.digest,
+            signature.signature.signature(),
+        )
+        .unwrap();
     }
 
     #[test]

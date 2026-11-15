@@ -73,7 +73,7 @@ async def main() -> None:
         skill = SkillKey(source_uuid=source_uuid, skill_name=skill_name)
         session = await client.create_session(
             prompt="Hello",
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5-5",
         )
         result = await session.invoke_skill(
             skill,

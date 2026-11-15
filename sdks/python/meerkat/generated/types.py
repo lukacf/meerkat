@@ -923,6 +923,25 @@ WireInputTerminalOutcome = Literal['completed', 'abandoned', 'superseded', 'coal
 # check compacts once.
 WireCompactionRequestOutcome = Literal['requested', 'already_requested']
 
+# Typed answer of a queued-input recall.
+class WireQueuedInputRecallAbandoned(TypedDict, total=False):
+    attempt_count: NotRequired[int]
+    input_id: Required[str]
+    outcome: Required[Literal['abandoned']]
+
+class WireQueuedInputRecallNotQueued(TypedDict, total=False):
+    input_id: Required[str]
+    outcome: Required[Literal['not_queued']]
+    phase: Required[Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']]
+    run_id: NotRequired[Optional[str]]
+
+class WireQueuedInputRecallAlreadyTerminal(TypedDict, total=False):
+    input_id: Required[str]
+    outcome: Required[Literal['already_terminal']]
+    terminal: Required[WireInputTerminalOutcome]
+
+WireQueuedInputRecall = WireQueuedInputRecallAbandoned | WireQueuedInputRecallNotQueued | WireQueuedInputRecallAlreadyTerminal
+
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
     state: Required[Literal['pending']]
@@ -1427,9 +1446,38 @@ class WirePresentationAudienceUnknown(TypedDict, total=False):
 
 WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown
 
+# The answer to one question an agent asked a person.
+class WireAskUserAnswerChoice(TypedDict, total=False):
+    choice_id: Required[str]
+    kind: Required[Literal['choice']]
+
+class WireAskUserAnswerFreeText(TypedDict, total=False):
+    kind: Required[Literal['free_text']]
+    text: Required[str]
+
+class WireAskUserAnswerUnanswered(TypedDict, total=False):
+    kind: Required[Literal['unanswered']]
+
+class WireAskUserAnswerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown
+
+# The typed answer a person gave with an approving decision, for a kind
+# that asks one. It is data of the decision's evidence, never text.
+class WireDecisionAnswerAskUser(TypedDict, total=False):
+    answers: Required[list[dict[str, Any]]]
+    kind: Required[Literal['ask_user']]
+
+class WireDecisionAnswerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireDecisionAnswer = WireDecisionAnswerAskUser | WireDecisionAnswerUnknown
+
 # The durable evidence a decision was decided with. An authentication
 # scope is never projected.
 class WireDecisionEvidenceHuman(TypedDict, total=False):
+    answer: NotRequired[Optional[WireDecisionAnswer]]
     approve: Required[bool]
     approver_id: Required[str]
     assurance: Required[WireDecisionAssurance]
@@ -2100,6 +2148,24 @@ class SessionInputStateResult:
 
 
 @dataclass
+class RecallInputParams:
+    """Parameters for `session/recall_input`.
+
+`selector` names the input exactly as `session/input_status` does: by the
+runtime input id the submit answered, or by the idempotency key the caller
+submitted it under."""
+    selector: SessionInputStateSelector
+    session_id: str
+
+
+@dataclass
+class RecallInputResult:
+    """Result for `session/recall_input`."""
+    recall: WireQueuedInputRecall
+    session_id: str
+
+
+@dataclass
 class RealmIdParams:
     """Request payload for `auth/profile/list` and `realm/get`."""
     realm_id: str
@@ -2690,6 +2756,13 @@ class WirePresentationRecord:
     subject_digest: str
     link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class WireAskUserQuestionAnswer:
+    """One question's answer in a [`WireDecisionAnswer::AskUser`]."""
+    answer: WireAskUserAnswer
+    question_id: str
 
 
 @dataclass

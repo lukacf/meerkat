@@ -182,7 +182,24 @@ export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" |
 
 export type WireHandlingMode = "queue" | "steer";
 
+export type WireInputLifecycleState = "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+
 export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
+
+export type WireQueuedInputRecall = {
+  attempt_count?: number;
+  input_id: string;
+  outcome: "abandoned";
+} | {
+  input_id: string;
+  outcome: "not_queued";
+  phase: WireInputLifecycleState;
+  run_id?: string | null;
+} | {
+  input_id: string;
+  outcome: "already_terminal";
+  terminal: WireInputTerminalOutcome;
+};
 
 export type WireResolvedModelCapabilities = {
   image_generation?: boolean;

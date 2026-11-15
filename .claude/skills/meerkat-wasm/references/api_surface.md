@@ -39,6 +39,7 @@ completed.
 | `get_session_state` | handle | `Promise<string>` | Canonical `WireSessionInfo` JSON, including `session_id`; no browser handle, mob identity, or usage fields |
 | `interrupt_session` | handle | `Promise<void>` | Interrupt through the shared machine authority |
 | `stop_session_run` | handle, run_id, reason | `Promise<string>` | Run-fenced Stop of one exact run; canonical `WireRunStopReceipt` JSON (`outcome` is `stopped`, `not_current`, or `not_stoppable`); a stale run id is `not_current`, not an error |
+| `recall_session_input` | handle, input_id | `Promise<string>` | Withdraw one input only while it is still queued; canonical `WireQueuedInputRecall` JSON (`outcome` is `abandoned`, `not_queued`, or `already_terminal`); a run that holds the input is never interrupted; an input the session does not hold rejects with `invalid_params` |
 | `session_wire_peer` | handle, peer handle | `Promise<void>` | Install directional in-process peer trust |
 | `destroy_session` | handle | `Promise<void>` | Retire the exact runtime registration; remove the handle only after cleanup succeeds |
 | `poll_events` | handle | AgentEvent[] JSON | Drain buffered canonical direct-session events; a lag gap arrives as `stream_truncated` |
@@ -409,7 +410,7 @@ import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 // Stock key/proxy bootstrap also loads the WASM binary.
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: 'proxy',
-  anthropicBaseUrl: 'http://localhost:3100/anthropic',
+  anthropicBaseUrl: 'http://127.0.0.1:3100/anthropic',
 });
 
 // Register runtime-scoped tools after init
@@ -458,5 +459,6 @@ await runtime.destroy();
 - `SessionState` is generated from `WireSessionInfo`; `AppendSystemContextResult` exposes canonical `status` only. `TurnResult` is the generated `WireRunResult`, with no `response` alias or browser-only terminal status.
 - Direct `keepAlive` is supported with `commsName`. Browser exclusions carry `CAPABILITY_UNAVAILABLE` and a typed clearing action from the shared capability profile.
 - `Session.stopRun(runId, reason)` and `Mob.stopMemberRun(agentIdentity, runId, reason)` validate and return the `WireRunStopReceipt` union (`stopped`, `not_current`, `not_stoppable`).
+- `Session.recallInput(inputId)` validates and returns the `WireQueuedInputRecall` union (`abandoned`, `not_queued`, `already_terminal`).
 - `Session.pollEvents()` and `Session.subscribe()` drain the same buffer; use one of them.
 - `MeerkatError.fromWasm` wraps rejections from `createSession`, `runtime.destroy`, `Session.turn`/`getState`/`destroy`/`wirePeer`/`stopRun`/`interrupt`, and `Mob.spawn`/`respawn`/`stopMemberRun`/`spawnHelper`/`forkHelper`; other wrappers pass the raw WASM rejection through (normally a `{code, message}` JSON string). `Session.destroy()` treats `not_initialized` and `invalid_session_handle` as already gone.

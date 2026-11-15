@@ -795,17 +795,44 @@ impl AgentToolDispatcher for ToolGateway {
 /// Dynamic duplicate names fail closed. Callers that need legitimate profile
 /// priority should express that priority before composing children; the shared
 /// dynamic compositor is not a first-child ownership authority.
+///
+/// A name the composite leaves out because more than one child lists it is
+/// logged as a warning (target [`SHARED_TOOL_NAME_LOG_TARGET`]), once per
+/// composite and name, when the composite first computes its list with the
+/// name shared: for children whose lists grow (an MCP adapter whose servers
+/// connect), that is when the second lister appears, not when the composite
+/// is made. The warning names the tool, the source of each child's tool of
+/// that name, and the composite's label ([`Self::with_label`]).
 pub struct DynamicToolComposite {
     dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
     execution_authority_id: u64,
+    /// What this composite's tools are for, for its shared-name warning.
+    label: Option<String>,
+    /// The shared names this composite has warned about.
+    warned_shared_names: std::sync::Mutex<std::collections::HashSet<ToolName>>,
 }
+
+/// The log target of the warning a [`DynamicToolComposite`] logs when it
+/// leaves out a tool name more than one of its children lists.
+pub const SHARED_TOOL_NAME_LOG_TARGET: &str = "meerkat::tools::shared_name";
 
 impl DynamicToolComposite {
     pub fn new(dispatchers: Vec<Arc<dyn AgentToolDispatcher>>) -> Self {
         Self {
             dispatchers,
             execution_authority_id: next_execution_authority_id(),
+            label: None,
+            warned_shared_names: std::sync::Mutex::default(),
         }
+    }
+
+    /// Say what this composite's tools are for (a session, say). The
+    /// warning it logs for a name more than one child lists carries the
+    /// label; nothing else reads it.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     fn execution_authority_key(&self) -> String {
@@ -900,8 +927,44 @@ impl DynamicToolComposite {
                 result.push(entry.clone());
             }
         }
+        if counts.values().any(|count| *count > 1) {
+            self.warn_of_shared_names(&result, &counts);
+        }
         result.retain(|entry| counts.get(&entry.tool.name).copied().unwrap_or(0) == 1);
         result
+    }
+
+    /// Log each name of `counts` that more than one child lists, once for
+    /// this composite. `listed` is every child's entries, the shared ones
+    /// included. Changes nothing about what the composite lists or routes.
+    fn warn_of_shared_names(&self, listed: &[ToolCatalogEntry], counts: &HashMap<ToolName, usize>) {
+        let mut warned = self
+            .warned_shared_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (name, count) in counts {
+            if *count < 2 || !warned.insert(name.clone()) {
+                continue;
+            }
+            let listed_by = listed
+                .iter()
+                .filter(|entry| entry.tool.name == *name)
+                .map(|entry| match &entry.tool.provenance {
+                    Some(provenance) => {
+                        format!("{:?}:{}", provenance.kind, provenance.source_id.as_str())
+                    }
+                    None => "a source that names itself nowhere".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                target: SHARED_TOOL_NAME_LOG_TARGET,
+                tool = %name,
+                listed_by = %listed_by,
+                tools_of = self.label.as_deref().unwrap_or("an unlabelled tool surface"),
+                "more than one part of a tool surface lists this tool name: it is offered by none of them"
+            );
+        }
     }
 }
 
@@ -1211,9 +1274,17 @@ impl AgentToolDispatcher for DynamicToolComposite {
     ) -> Result<crate::agent::BindOutcome, crate::agent::OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
-        let mut rebound = Vec::with_capacity(owned.dispatchers.len());
+        // The rebuilt composite is this composite for its shared-name
+        // warning: it keeps the label and the names already reported.
+        let Self {
+            dispatchers,
+            label,
+            warned_shared_names,
+            execution_authority_id: _,
+        } = owned;
+        let mut rebound = Vec::with_capacity(dispatchers.len());
         let mut any_bound = false;
-        for d in owned.dispatchers {
+        for d in dispatchers {
             if d.capabilities().ops_lifecycle {
                 // A child that needs the binding but is still shared cannot
                 // be rebound. Leaving it unbound would silently drop its
@@ -1231,7 +1302,11 @@ impl AgentToolDispatcher for DynamicToolComposite {
                 rebound.push(d);
             }
         }
-        let d: Arc<dyn AgentToolDispatcher> = Arc::new(DynamicToolComposite::new(rebound));
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(DynamicToolComposite {
+            label,
+            warned_shared_names,
+            ..DynamicToolComposite::new(rebound)
+        });
         Ok(if any_bound {
             crate::agent::BindOutcome::Bound(d)
         } else {
@@ -2675,6 +2750,260 @@ mod tests {
         assert!(
             catalog.iter().all(|entry| entry.tool.name != "shared"),
             "collided tool names must be omitted from the dynamic catalog"
+        );
+    }
+
+    /// One warning a composite logged for a name its children share.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    struct SharedNameWarning {
+        tool: String,
+        listed_by: String,
+        tools_of: String,
+    }
+
+    impl tracing::field::Visit for SharedNameWarning {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "tools_of" {
+                self.tools_of = value.to_string();
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "tool" => self.tool = format!("{value:?}"),
+                "listed_by" => self.listed_by = format!("{value:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Keeps every shared-name warning logged while it is the subscriber.
+    #[derive(Clone, Default)]
+    struct SharedNameWarnings(Arc<std::sync::Mutex<Vec<SharedNameWarning>>>);
+
+    impl SharedNameWarnings {
+        fn seen(&self) -> Vec<SharedNameWarning> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl tracing::Subscriber for SharedNameWarnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == SHARED_TOOL_NAME_LOG_TARGET
+                && *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut warning = SharedNameWarning::default();
+            event.record(&mut warning);
+            self.0.lock().unwrap().push(warning);
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// A name two children list is left out, and the composite says so: one
+    /// warning for the composite and the name, logged when it first lists
+    /// with the name shared (here, when the growing child gains the name
+    /// after the composite was made, as an MCP adapter does when its server
+    /// connects), naming the tool, each child's source of it and the
+    /// composite's label. Later lists and catalog reads log nothing more,
+    /// and the warning changes nothing about what is listed.
+    #[test]
+    fn dynamic_tool_composite_warns_once_of_a_name_two_children_list() {
+        let warnings = SharedNameWarnings::default();
+        let capture = tracing::Dispatch::new(warnings.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite another thread reached first under
+        // no subscriber still reaches this one.
+        let _anchor = tracing::Dispatch::new(SharedNameWarnings::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        let growing = Arc::new(MutableMockDispatcher::new("growing", &["other"]));
+        let fixed = Arc::new(MutableMockDispatcher {
+            tools: std::sync::Mutex::new(vec![Arc::new(
+                ToolDef::new("shared", "fixed tool: shared", empty_object_schema())
+                    .with_provenance(crate::types::ToolProvenance::new(
+                        crate::types::ToolSourceKind::Builtin,
+                        "fixed",
+                    )),
+            )]),
+            prefix: "fixed".to_string(),
+        });
+        let composite =
+            DynamicToolComposite::new(vec![growing.clone(), fixed]).with_label("session s-1");
+        let listed = || {
+            let mut names: Vec<String> = composite
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+
+        assert_eq!(listed(), vec!["other".to_string(), "shared".to_string()]);
+        assert_eq!(
+            warnings.seen(),
+            Vec::new(),
+            "no name is shared when the composite is made: nothing is logged"
+        );
+
+        growing.add_tool("shared");
+        assert_eq!(
+            listed(),
+            vec!["other".to_string()],
+            "the shared name is left out"
+        );
+        assert_eq!(listed(), vec!["other".to_string()]);
+        assert!(
+            composite
+                .tool_catalog()
+                .iter()
+                .all(|entry| entry.tool.name != "shared")
+        );
+        assert_eq!(
+            warnings.seen(),
+            vec![SharedNameWarning {
+                tool: "shared".to_string(),
+                listed_by: "a source that names itself nowhere, Builtin:fixed".to_string(),
+                tools_of: "session s-1".to_string(),
+            }],
+            "one warning for the composite and the name, however often it lists"
+        );
+    }
+
+    /// A child that takes the ops lifecycle binding. Its list is the shared
+    /// mock's, which the row keeps a handle on, so the list can grow after
+    /// the bind took this dispatcher alone.
+    struct OpsBoundChild(Arc<MutableMockDispatcher>);
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for OpsBoundChild {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.0.tools()
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            self.0.dispatch(call).await
+        }
+
+        fn capabilities(&self) -> crate::agent::DispatcherCapabilities {
+            crate::agent::DispatcherCapabilities {
+                ops_lifecycle: true,
+            }
+        }
+
+        fn bind_ops_lifecycle(
+            self: Arc<Self>,
+            _registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+            _owner_bridge_session_id: crate::types::SessionId,
+        ) -> Result<crate::agent::BindOutcome, crate::agent::OpsLifecycleBindError> {
+            Ok(crate::agent::BindOutcome::Bound(self))
+        }
+    }
+
+    /// The ops lifecycle binding rebuilds a composite around its rebound
+    /// children. For its warning the rebuilt composite is the composite it
+    /// was: it keeps the label, so a name shared after the bind is reported
+    /// with it, and it keeps the names it warned about, so a name reported
+    /// before the bind is not reported again.
+    #[test]
+    fn dynamic_tool_composite_keeps_its_label_and_warned_names_across_the_ops_lifecycle_bind() {
+        let warnings = SharedNameWarnings::default();
+        let capture = tracing::Dispatch::new(warnings.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite another thread reached first under
+        // no subscriber still reaches this one.
+        let _anchor = tracing::Dispatch::new(SharedNameWarnings::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        let provenance =
+            || crate::types::ToolProvenance::new(crate::types::ToolSourceKind::Builtin, "fixed");
+        let growing = Arc::new(MutableMockDispatcher::new("growing", &["other", "early"]));
+        let fixed = Arc::new(MutableMockDispatcher {
+            tools: std::sync::Mutex::new(
+                ["early", "late"]
+                    .into_iter()
+                    .map(|name| {
+                        Arc::new(
+                            ToolDef::new(
+                                name,
+                                format!("fixed tool: {name}"),
+                                empty_object_schema(),
+                            )
+                            .with_provenance(provenance()),
+                        )
+                    })
+                    .collect(),
+            ),
+            prefix: "fixed".to_string(),
+        });
+        let composite = Arc::new(
+            DynamicToolComposite::new(vec![Arc::new(OpsBoundChild(Arc::clone(&growing))), fixed])
+                .with_label("session s-1"),
+        );
+        let listed = |dispatcher: &dyn AgentToolDispatcher| {
+            let mut names: Vec<String> = dispatcher
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        let warning = |tool: &str| SharedNameWarning {
+            tool: tool.to_string(),
+            listed_by: "a source that names itself nowhere, Builtin:fixed".to_string(),
+            tools_of: "session s-1".to_string(),
+        };
+
+        assert_eq!(
+            listed(composite.as_ref()),
+            vec!["late".to_string(), "other".to_string()]
+        );
+        assert_eq!(warnings.seen(), vec![warning("early")]);
+
+        let outcome = composite
+            .bind_ops_lifecycle(
+                Arc::new(crate::tool_execution_policy::tests::UnsupportedOpsRegistry),
+                crate::types::SessionId::default(),
+            )
+            .unwrap();
+        assert!(outcome.was_bound(), "the ops-capable child was rebound");
+        let bound = outcome.into_dispatcher();
+
+        assert_eq!(
+            listed(bound.as_ref()),
+            vec!["late".to_string(), "other".to_string()]
+        );
+        assert_eq!(
+            warnings.seen(),
+            vec![warning("early")],
+            "a name reported before the bind is not reported again after it"
+        );
+
+        growing.add_tool("late");
+        assert_eq!(listed(bound.as_ref()), vec!["other".to_string()]);
+        assert_eq!(listed(bound.as_ref()), vec!["other".to_string()]);
+        assert_eq!(
+            warnings.seen(),
+            vec![warning("early"), warning("late")],
+            "a name shared after the bind is reported once, with the composite's label"
         );
     }
 

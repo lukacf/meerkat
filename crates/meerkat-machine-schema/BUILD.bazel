@@ -1895,6 +1895,61 @@ rust_test(
 )
 
 rust_test(
+    name = "queued_input_abandon_totality_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "queued_input_abandon_totality",
+    crate_root = "tests/queued_input_abandon_totality.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/queued_input_abandon_totality.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_BIN_NAME": "queued_input_abandon_totality",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "runtime_authority_reconciliation_totality_test",
     aliases = aliases(
         package_name = "crates/meerkat-machine-schema",
@@ -1920,6 +1975,61 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.9.14",
         "CARGO_BIN_NAME": "runtime_authority_reconciliation_totality",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "runtime_completion_cleanup_rule_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "runtime_completion_cleanup_rule",
+    crate_root = "tests/runtime_completion_cleanup_rule.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/runtime_completion_cleanup_rule.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_BIN_NAME": "runtime_completion_cleanup_rule",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     tags = [
@@ -2593,7 +2703,9 @@ test_suite(
         ":peer_endpoint_structural_equivalence_test",
         ":phase_target_contract_test",
         ":placed_lifecycle_origin_fence_test",
+        ":queued_input_abandon_totality_test",
         ":runtime_authority_reconciliation_totality_test",
+        ":runtime_completion_cleanup_rule_test",
         ":schema_construction_cache_test",
         ":schema_contracts_test",
         ":session_document_activation_retirement_region_test",

@@ -220,6 +220,37 @@ stopped, is stopped without waiting: `stopped` with no `contributors`, and
 its inputs end cancelled when the runtime settles it (once the store takes
 writes again, after a gap).
 
+### `recall_input`
+
+From 0.9.15.
+
+```python
+result = await session.recall_input(input_id=input_id)
+result = await session.recall_input(idempotency_key="inbox:msg-1")
+```
+
+Withdraws one input of the session, only while it is still queued
+(`session/recall_input`). Name it by the `input_id` its submit answered or by
+the `idempotency_key` it was submitted under (exactly one). Returns
+`RecallInputResult` whose `recall["outcome"]` is `abandoned` (the input was
+queued and is now withdrawn: its terminal is `cancelled` and no run will take
+it; `attempt_count` is `0` when no run attempt was counted for it),
+`not_queued` (a run holds
+it: nothing was touched and the run is not interrupted; `phase` says where
+it is and `run_id`, when the runtime has one, names the run that holds it) or `already_terminal` (it already ended; `terminal` is its
+terminal class, `cancelled` for a second recall). The list of outcomes can
+grow: keep an outcome you do not know as it is (the method returns it
+unchanged and raises nothing). An input the session does
+not hold raises `MeerkatError` with the invalid-params code. The recall is
+session-level (any queued input of the session, whoever submitted it) and
+withdraws everything the queue coalesced into the input; see
+[`session/recall_input`](/api/rpc#session%2Frecall_input). A server that
+does not serve the method (0.9.0 through 0.9.14; an older server is refused
+when the SDK connects) answers method not found, and
+the call raises `MeerkatError` with the code `"-32601"`; the method does not
+read the server's contract version or capabilities first, and the refused
+call changes nothing.
+
 ### `compact`
 
 ```python
@@ -392,6 +423,36 @@ not know is not parsed (`None`), and `error.details` keeps the data as sent.
 The route's names and `facts` are advisory: a value this SDK does not know is
 kept as a string. `route`, `supported` and `facts` are always present in the
 refusal data: `None` when they have no value, never left out.
+
+A turn that would change the model identity of a session that has unfinished
+work is not queued behind that work (the rule of the JSON-RPC turn requests:
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+It fails at once with a `MeerkatError`
+whose `code` is `"-32002"` (session busy) and whose `details` are
+`{"kind": "reasoning_effort_change_needs_idle_session"}`; nothing is stored
+for the turn. The one `kind` covers every cause. On a session that holds a
+provider-neutral level: a turn that sets, changes or clears the level, or
+that changes the model, the provider, the self-hosted server, the provider
+parameters or the auth binding (a level named inside `provider_params`
+replaces those parameters, so it is one of these even when the level is the
+same). On a session that holds no level: a turn that sets one. Plain turns,
+and turns that repeat the session's level with `reasoning_effort`, queue as
+before. This is not a level refusal, so `reasoning_effort_refusal(error)`
+returns `None` for it; a level the model does not accept is still answered
+with its refusal first. Wait for the running turn's answer, then send the
+turn again; do not poll. A later release is planned to queue such a turn.
+
+```python
+running_turn = asyncio.create_task(session.turn("Summarize the report"))  # a turn in flight
+try:
+    result = await session.turn("Think harder", reasoning_effort="high")
+except MeerkatError as error:
+    details = error.details if isinstance(error.details, dict) else {}
+    if details.get("kind") != "reasoning_effort_change_needs_idle_session":
+        raise
+    await running_turn  # the turn that was in flight
+    result = await session.turn("Think harder", reasoning_effort="high")
+```
 
 `parse_reasoning_effort_report(...)` reads the `reasoning_effort` block of a
 run result (`requested`, and one `sent` row per distinct resolution: `level`,

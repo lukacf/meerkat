@@ -11,6 +11,14 @@ use crate::runtime::{DormantSeatOutcome, MemberRestorePolicy, MobBootSetBasis};
 
 const LAZY_STEP: Duration = Duration::from_mins(1);
 
+/// The lift's inactivity budget in this build, in milliseconds: the window
+/// after which its observer answers a stall when nothing reported progress.
+/// The rows that outlast it, or stay inside it, take their delays from it.
+fn lift_inactivity_budget_ms() -> u64 {
+    u64::try_from(crate::runtime::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT.as_millis())
+        .expect("the budget fits")
+}
+
 fn worker(index: usize) -> AgentIdentity {
     AgentIdentity::from(format!("lazy-{index:02}"))
 }
@@ -369,7 +377,8 @@ async fn the_lift_joins_the_wakes_its_plan_opens_after_its_readiness() {
 }
 
 /// A lift whose planned member takes longer to build than the lift's
-/// inactivity budget (two seconds in this build) waits for the build and
+/// inactivity budget (`EXPLICIT_RESUME_PROGRESS_TIMEOUT` of this build)
+/// waits for the build and
 /// answers Ok with the member Live. The lift reports its wait for a joined
 /// wake as the member's host materialization, which no platform budget
 /// ends. Before, it reported nothing between the durable Resume and the
@@ -384,8 +393,10 @@ async fn a_lift_waits_for_a_slow_planned_build_without_a_stall() {
         .resume(mob.builder().with_host_required_members([required.clone()]))
         .await;
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
-    // Each session build now outlasts the lift's inactivity budget.
-    mob.service.set_create_session_delay_ms(3_000);
+    // Each session build now outlasts the lift's inactivity budget by a
+    // second.
+    mob.service
+        .set_create_session_delay_ms(lift_inactivity_budget_ms() + 1_000);
 
     let lifted = tokio::time::timeout(LAZY_STEP, handle.resume())
         .await
@@ -410,7 +421,8 @@ async fn a_lift_waits_for_a_slow_planned_build_without_a_stall() {
 /// the verified policy the lift of a stopped mob reads the store before it
 /// answers: its obligation scan, then the verified pass's read of each
 /// member it leaves Dormant (one read at a time here). Each read answers
-/// within the lift's inactivity budget (two seconds in this build), and
+/// within the lift's inactivity budget (`EXPLICIT_RESUME_PROGRESS_TIMEOUT`
+/// of this build), and
 /// all of them together outlast it. The lift reports each read as a unit of
 /// work, so the caller's budget starts again after each one, and the lift
 /// answers Ok with both members Dormant. Before, nothing reported progress
@@ -429,12 +441,15 @@ async fn a_lift_whose_plan_reads_a_slow_store_answers_without_a_stall() {
         .await;
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
     // The obligation scan, and each member's read in the verified pass,
-    // answer after 1.2 s: each within the budget, the three beyond it.
+    // answer after three fifths of the budget: each within the budget, any
+    // two of them beyond it.
+    let slow_read_ms = lift_inactivity_budget_ms() * 3 / 5;
     crate::runtime::boot_plan::delay_next_boot_obligation_scan_for_test(
         handle.mob_id(),
-        Duration::from_millis(1_200),
+        Duration::from_millis(slow_read_ms),
     );
-    mob.service.set_resume_authority_observe_delay_ms(1_200);
+    mob.service
+        .set_resume_authority_observe_delay_ms(slow_read_ms);
 
     let lifted = tokio::time::timeout(LAZY_STEP, handle.resume())
         .await
@@ -463,8 +478,9 @@ async fn a_lift_whose_plan_reads_a_slow_store_answers_without_a_stall() {
 /// lazy-00, so the plan wakes it in its first round and reaches lazy-01,
 /// which it verifies, only once that wake closed, while the lift reported
 /// lazy-00's host build, a stage with no inactivity budget. The pass's reads
-/// are units of work with the budget (two seconds in this build): lazy-01's
-/// read, held for three seconds, is answered as a stall at
+/// are units of work with the budget (`EXPLICIT_RESUME_PROGRESS_TIMEOUT` of
+/// this build): lazy-01's read, held for a second longer than the budget,
+/// is answered as a stall at
 /// `member_session_metadata_probe`, the lift goes on, and joining it again
 /// answers Ok once the read returned. Before, the pass's first read ran
 /// under the host build's stage, so a read that never returned held the lift
@@ -483,9 +499,10 @@ async fn a_later_verified_pass_whose_first_read_hangs_is_answered_as_a_stall() {
         )
         .await;
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
-    // Each read of a member's resume authority now takes three seconds:
-    // longer than the budget.
-    mob.service.set_resume_authority_observe_delay_ms(3_000);
+    // Each read of a member's resume authority now takes a second longer
+    // than the budget.
+    mob.service
+        .set_resume_authority_observe_delay_ms(lift_inactivity_budget_ms() + 1_000);
 
     let first = tokio::time::timeout(LAZY_STEP, handle.resume())
         .await

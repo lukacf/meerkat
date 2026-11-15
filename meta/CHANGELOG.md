@@ -2772,6 +2772,15 @@ Security, Upgrade and Changed.
   the deleting step, not end to end; 0.9.11 through 0.9.14 read from the
   source.)
 
+- The `memory` tool's reply after a `forget`, and the gateway's WARN line
+  when a session is marked as tainted, named a respawn as a fresh-context
+  boundary. For an agent it is not one: its respawn keeps the session and
+  its transcript, so it neither takes forgotten text out of the agent's
+  context nor clears the session's taint; a reset does both. Both texts now
+  name a reset. Behaviour is unchanged; the texts were wrong in every Meta
+  release (read from the source; the behaviour by runs on the published
+  0.9.14).
+
 ### Known limitations
 
 - `meta/compact_member` still answers an error on a conversation its

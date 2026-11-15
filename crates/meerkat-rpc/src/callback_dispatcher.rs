@@ -1335,10 +1335,20 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        // A client can register tools at any time, so every session with
+        // this dispatcher has the control tools mounted: tools registered
+        // after it started can then wait behind the catalog.
         ToolCatalogCapabilities {
             exact_catalog: true,
             may_require_catalog_control_plane: true,
         }
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        // Registered tools need no control tool while they are all in the
+        // request: the control tools are shown only while one of them waits
+        // behind the catalog.
+        meerkat_core::ToolCatalogControlPlane::OnDemand
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
@@ -2687,6 +2697,31 @@ mod tests {
         .await;
 
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    /// A client can register tools at any time, so the dispatcher has the
+    /// control tools mounted in every session it is part of, a session that
+    /// started with no registered tool included. It asks for them on demand:
+    /// they are in a request only while a registered tool waits behind the
+    /// catalog.
+    #[test]
+    fn registered_tools_ask_for_the_control_tools_on_demand() {
+        let (callback_tx, _callback_rx) = mpsc::channel(10);
+        for tools in [vec![], vec![make_tool_def("lookup")]] {
+            let dispatcher = CallbackToolDispatcher::new(
+                Arc::new(StdRwLock::new(tools)),
+                callback_tx.clone(),
+                Arc::new(AtomicU64::new(0)),
+                vec![],
+            );
+            let capabilities = dispatcher.tool_catalog_capabilities();
+            assert!(capabilities.exact_catalog);
+            assert!(capabilities.may_require_catalog_control_plane);
+            assert_eq!(
+                dispatcher.tool_catalog_control_plane(),
+                meerkat_core::ToolCatalogControlPlane::OnDemand
+            );
+        }
     }
 
     #[test]

@@ -499,10 +499,11 @@ impl meerkat_core::AgentToolDispatcher for ScopePinnedWorkGraphTools {
     /// EMPTY catalog, which is not a conservative choice - it is a different
     /// surface than the one being wrapped.
     ///
-    /// Both flags are load-bearing, not decorative. `AgentBuilder` only fills
-    /// `deferred_tool_names` when `exact_catalog` holds AND
-    /// (`may_require_catalog_control_plane` or a Control-plane entry exists)
-    /// AND the catalog mode is `Deferred`. The inner surface declares both and
+    /// The catalog declarations are load-bearing, not decorative.
+    /// `AgentBuilder` only fills `deferred_tool_names` when `exact_catalog`
+    /// holds AND (`may_require_catalog_control_plane` or a Control-plane
+    /// entry exists) AND the catalog mode is `Deferred`. The inner surface
+    /// declares an exact catalog (it does not ask for the control plane) and
     /// mints `session_deferred` entries with WorkGraph provenance for
     /// `workgraph_attention_reassign` and `workgraph_policy_escalate`. Dropping
     /// them left the deferred set empty while an attention overlay still

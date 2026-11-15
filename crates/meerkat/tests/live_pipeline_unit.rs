@@ -135,6 +135,14 @@ mod live_pipeline {
     static OPEN_RESERVATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn build_fixture() -> Fixture {
+        build_fixture_with_tools(None).await
+    }
+
+    /// The fixture, with `tools` as every session's tool dispatcher when
+    /// given. The factory composes its catalog control plane over them.
+    async fn build_fixture_with_tools(
+        tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    ) -> Fixture {
         let open_reservation = OPEN_RESERVATION.lock().await;
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let persistence = PersistenceBundle::new(
@@ -155,6 +163,7 @@ mod live_pipeline {
         );
         let mut builder = FactoryAgentBuilder::new(factory, config);
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        builder.default_tool_dispatcher = tools;
         let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
             .expect("compose the runtime-backed service");
         let service = Arc::new(service);
@@ -1309,6 +1318,777 @@ mod live_pipeline {
         assert!(
             result.is_err(),
             "dispatch against an unknown session must fail typed"
+        );
+    }
+
+    // -- Deferred tools loaded inside a live conversation --
+
+    const DEFERRED_LOOKUP: &str = "deferred_lookup";
+    const DEFERRED_OTHER: &str = "deferred_other";
+    const DEFERRED_UNSENDABLE: &str = "deferred_unsendable";
+
+    /// Deferred-eligible tools behind an exact catalog whose definitions are
+    /// over the deferred catalog's byte budget: enough for a session to run
+    /// in the deferred mode, where the model sees the catalog control tools
+    /// and loads the rest on demand. (Under the budget the tools would stay
+    /// in every request and there would be nothing to load.)
+    struct DeferredCatalogTools {
+        tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+    }
+
+    impl DeferredCatalogTools {
+        fn new() -> Self {
+            let object = serde_json::json!({ "type": "object" });
+            Self::with_tools(&[(DEFERRED_LOOKUP, object.clone()), (DEFERRED_OTHER, object)])
+        }
+
+        /// The two ordinary tools and one whose parameter schema root is not
+        /// an object: a realtime provider refuses such a definition.
+        fn with_an_unsendable_tool() -> Self {
+            let object = serde_json::json!({ "type": "object" });
+            Self::with_tools(&[
+                (DEFERRED_LOOKUP, object.clone()),
+                (DEFERRED_OTHER, object),
+                (DEFERRED_UNSENDABLE, serde_json::json!({ "type": "string" })),
+            ])
+        }
+
+        /// A description of half the deferred catalog's byte budget, so any
+        /// two of these tools are over it together.
+        fn description(name: &str) -> String {
+            let mut text = format!("Deferred test tool {name}.");
+            while text.len()
+                < meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD / 2
+            {
+                text.push_str(" It returns the text it ran with and reads nothing else.");
+            }
+            text
+        }
+
+        fn with_tools(specs: &[(&str, serde_json::Value)]) -> Self {
+            let provenance = meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Callback,
+                source_id: "deferred-catalog".into(),
+                artifact: None,
+            };
+            let tools = specs
+                .iter()
+                .map(|(name, input_schema)| {
+                    Arc::new(meerkat_core::ToolDef {
+                        audience: Default::default(),
+                        name: (*name).into(),
+                        description: Self::description(name),
+                        input_schema: input_schema.clone(),
+                        provenance: Some(provenance.clone()),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Self {
+                catalog: tools
+                    .iter()
+                    .map(|tool| {
+                        meerkat_core::ToolCatalogEntry::session_deferred(
+                            Arc::clone(tool),
+                            true,
+                            provenance.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                tools: tools.into(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for DeferredCatalogTools {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::ToolError> {
+            Ok(meerkat_core::types::ToolResult::new(
+                call.id.to_string(),
+                format!("ran {}", call.name),
+                false,
+            )
+            .into())
+        }
+    }
+
+    async fn deferred_catalog_fixture() -> (Fixture, SessionId) {
+        deferred_catalog_fixture_with(DeferredCatalogTools::new()).await
+    }
+
+    async fn deferred_catalog_fixture_with(tools: DeferredCatalogTools) -> (Fixture, SessionId) {
+        let fx = build_fixture_with_tools(Some(Arc::new(tools))).await;
+        let session_id = create_realtime_session(&fx).await;
+        // The live tool seam every composition installs on its host.
+        fx.host
+            .set_live_tool_dispatcher(Arc::new(ServiceLiveToolDispatcher::new(Arc::clone(
+                &fx.service,
+            ))));
+        (fx, session_id)
+    }
+
+    fn tool_names(tools: &[meerkat_core::ToolDef]) -> std::collections::BTreeSet<String> {
+        tools.iter().map(|tool| tool.name.to_string()).collect()
+    }
+
+    /// One tool call from the realtime provider, as the channel's pump feeds
+    /// it to the host.
+    async fn provider_tool_call(
+        fx: &Fixture,
+        channel: &LiveChannelId,
+        call_id: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) {
+        fx.host
+            .apply_observation(
+                channel,
+                &meerkat_core::live_adapter::LiveAdapterObservation::ToolCallRequested {
+                    provider_call_id: meerkat_core::image_generation::ToolCallId::new(call_id),
+                    tool_name: tool.into(),
+                    arguments,
+                },
+            )
+            .await
+            .expect("the host handles the provider's tool call");
+    }
+
+    /// Where in the adapter's command stream the result of `call_id` was
+    /// submitted, with its text and error flag.
+    fn submitted_tool_result(
+        commands: &[LiveAdapterCommand],
+        call_id: &str,
+    ) -> (usize, String, bool) {
+        commands
+            .iter()
+            .enumerate()
+            .find_map(|(index, command)| match command {
+                LiveAdapterCommand::SubmitToolResult { result } if result.call_id.0 == call_id => {
+                    Some((
+                        index,
+                        meerkat_core::types::text_content(&result.content),
+                        result.is_error,
+                    ))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no result was submitted for {call_id}: {commands:?}"))
+    }
+
+    /// Every position in the adapter's command stream of a `Refresh` whose
+    /// tool list holds `tool`.
+    fn refreshes_listing(commands: &[LiveAdapterCommand], tool: &str) -> Vec<usize> {
+        commands
+            .iter()
+            .enumerate()
+            .filter_map(|(index, command)| match command {
+                LiveAdapterCommand::Refresh { snapshot }
+                    if tool_names(&snapshot.visible_tools).contains(tool) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn stored_row_count(fx: &Fixture, session_id: &SessionId) -> usize {
+        fx.service
+            .export_realtime_refresh_session_snapshot(session_id)
+            .await
+            .expect("the session's stored rows")
+            .messages()
+            .len()
+    }
+
+    /// A deferred tool the realtime model loads inside a live conversation
+    /// is callable in that conversation: the provider gets the new tool list
+    /// before it gets the load's result, the result says the tool is
+    /// available now, a call of the tool runs, and the session's stored rows
+    /// are unchanged by the load. A second load of the same tool says the
+    /// same. The channel is composed the way a member host composes it.
+    #[tokio::test]
+    async fn a_deferred_tool_loaded_in_a_live_conversation_is_callable_in_it() {
+        let (fx, session_id) = deferred_catalog_fixture().await;
+        #[cfg(feature = "comms")]
+        {
+            let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(
+                meerkat_comms::CommsRuntime::inproc_only("live-pipeline-unit-deferred")
+                    .expect("inproc comms runtime"),
+            );
+            fx.adapter
+                .maybe_spawn_mob_comms_drain(
+                    &session_id,
+                    comms,
+                    meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                        "mob-live-pipeline-deferred",
+                    ),
+                )
+                .await
+                .expect("record mob-owned ingress for the member session");
+        }
+        let factory: Arc<ScriptedRealtimeSessionFactory> =
+            Arc::new(ScriptedRealtimeSessionFactory::new());
+        let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
+            service: Arc::clone(&fx.service),
+            runtime_adapter: Arc::clone(&fx.adapter),
+            host: Arc::clone(&fx.host),
+            ws_state: Some(Arc::clone(&fx.ws_state)),
+            base_url: Some(ADVERTISED_BASE.to_string()),
+            session_factory: Arc::clone(&factory)
+                as Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+        });
+        let opened = member_host
+            .open(&session_id, None, None)
+            .await
+            .expect("member open succeeds");
+        let channel = LiveChannelId::new(&opened.channel_id);
+        let adapter = factory.adapters().pop().expect("scripted adapter minted");
+
+        let control_tools: std::collections::BTreeSet<String> =
+            ["tool_catalog_load", "tool_catalog_search"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        // The read a live open and refresh take their tool list from.
+        let opened_with = tool_names(
+            &fx.service
+                .live_visible_tool_defs(&session_id)
+                .await
+                .expect("the session's live tool list"),
+        );
+        assert_eq!(
+            opened_with, control_tools,
+            "the conversation opens on the short list: the deferred tools stay behind the catalog"
+        );
+        let rows_before = stored_row_count(&fx, &session_id).await;
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (result_at, result_text, is_error) = submitted_tool_result(&commands, "call-load");
+        assert!(!is_error, "the load succeeds: {result_text}");
+        let refreshed_at = refreshes_listing(&commands, DEFERRED_LOOKUP);
+        assert_eq!(
+            refreshed_at.len(),
+            1,
+            "the provider's tool list is updated once with the loaded tool: {commands:?}"
+        );
+        assert!(
+            refreshed_at[0] < result_at,
+            "the tool list update precedes the load's result, so the model's \
+             continuation already has the tool: {commands:?}"
+        );
+        assert!(
+            refreshes_listing(&commands, DEFERRED_OTHER).is_empty(),
+            "the tool nobody loaded stays behind the catalog"
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&result_text).expect("the load's JSON result");
+        assert_eq!(
+            result["availability"], "available_now",
+            "the load's result says the tool can be called now: {result}"
+        );
+        assert_eq!(result["resolutions"][0]["accepted"], true, "{result}");
+        assert_eq!(
+            stored_row_count(&fx, &session_id).await,
+            rows_before,
+            "a load made in a live conversation adds no stored row"
+        );
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-tool",
+            DEFERRED_LOOKUP,
+            serde_json::json!({}),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (_, call_text, call_is_error) = submitted_tool_result(&commands, "call-tool");
+        assert!(
+            !call_is_error && call_text == format!("ran {DEFERRED_LOOKUP}"),
+            "the loaded tool runs in the same conversation: {call_text}"
+        );
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load-again",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (again_at, again_text, again_is_error) =
+            submitted_tool_result(&commands, "call-load-again");
+        assert!(!again_is_error, "a second load succeeds: {again_text}");
+        let again: serde_json::Value =
+            serde_json::from_str(&again_text).expect("the second load's JSON result");
+        assert_eq!(
+            again["availability"], "available_now",
+            "a second load of an available tool says it is available: {again}"
+        );
+        let refreshed_at = refreshes_listing(&commands, DEFERRED_LOOKUP);
+        assert!(
+            refreshed_at.len() == 2 && refreshed_at[1] < again_at,
+            "the second load updates the tool list again before its result: {commands:?}"
+        );
+    }
+
+    /// A load that leaves nothing behind the catalog takes the control tools
+    /// off the conversation's tool list with the same update: the update is
+    /// the session's tool list as it is after the load, and a session shows
+    /// the control tools only while a tool waits behind the catalog. A later
+    /// call of the load tool is refused like a call of any tool the session
+    /// does not show, and updates nothing.
+    #[tokio::test]
+    async fn a_live_load_that_leaves_nothing_behind_the_catalog_removes_the_control_tools() {
+        let (fx, session_id) = deferred_catalog_fixture().await;
+        #[cfg(feature = "comms")]
+        {
+            let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(
+                meerkat_comms::CommsRuntime::inproc_only("live-pipeline-unit-load-all")
+                    .expect("inproc comms runtime"),
+            );
+            fx.adapter
+                .maybe_spawn_mob_comms_drain(
+                    &session_id,
+                    comms,
+                    meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                        "mob-live-pipeline-load-all",
+                    ),
+                )
+                .await
+                .expect("record mob-owned ingress for the member session");
+        }
+        let factory: Arc<ScriptedRealtimeSessionFactory> =
+            Arc::new(ScriptedRealtimeSessionFactory::new());
+        let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
+            service: Arc::clone(&fx.service),
+            runtime_adapter: Arc::clone(&fx.adapter),
+            host: Arc::clone(&fx.host),
+            ws_state: Some(Arc::clone(&fx.ws_state)),
+            base_url: Some(ADVERTISED_BASE.to_string()),
+            session_factory: Arc::clone(&factory)
+                as Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+        });
+        let opened = member_host
+            .open(&session_id, None, None)
+            .await
+            .expect("member open succeeds");
+        let channel = LiveChannelId::new(&opened.channel_id);
+        let adapter = factory.adapters().pop().expect("scripted adapter minted");
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load-all",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP, DEFERRED_OTHER] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (result_at, result_text, is_error) = submitted_tool_result(&commands, "call-load-all");
+        assert!(!is_error, "the load succeeds: {result_text}");
+        let result: serde_json::Value =
+            serde_json::from_str(&result_text).expect("the load's JSON result");
+        assert_eq!(result["availability"], "available_now", "{result}");
+        let updates: Vec<(usize, std::collections::BTreeSet<String>)> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(index, command)| match command {
+                LiveAdapterCommand::Refresh { snapshot } => {
+                    Some((index, tool_names(&snapshot.visible_tools)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1, "one tool list update: {commands:?}");
+        let (updated_at, updated_tools) = &updates[0];
+        assert!(*updated_at < result_at, "the update precedes the result");
+        assert_eq!(
+            *updated_tools,
+            [DEFERRED_LOOKUP, DEFERRED_OTHER]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<String>>(),
+            "both tools are on the conversation's tool list and the control tools are not: \
+             nothing waits behind the catalog any more"
+        );
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load-stale",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (_, stale_text, stale_is_error) = submitted_tool_result(&commands, "call-load-stale");
+        assert!(
+            stale_is_error && stale_text.contains("access_denied"),
+            "a call of the load tool the session no longer shows is refused: {stale_text}"
+        );
+        assert_eq!(
+            refreshes_listing(&commands, DEFERRED_LOOKUP).len(),
+            1,
+            "a refused call updates nothing: {commands:?}"
+        );
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-other",
+            DEFERRED_OTHER,
+            serde_json::json!({}),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (_, call_text, call_is_error) = submitted_tool_result(&commands, "call-other");
+        assert!(
+            !call_is_error && call_text == format!("ran {DEFERRED_OTHER}"),
+            "a loaded tool runs in the same conversation: {call_text}"
+        );
+    }
+
+    /// A tool loaded inside a live conversation is loaded for the session,
+    /// not for that conversation only: the session's stored visibility state
+    /// records it, a channel opened after the first one closed lists it, and
+    /// the session's durable record still holds it once the live actor is
+    /// gone, which is what a session built again from the store reads.
+    #[tokio::test]
+    async fn a_tool_loaded_in_a_live_conversation_stays_loaded_for_the_session() {
+        let (fx, session_id) = deferred_catalog_fixture().await;
+        #[cfg(feature = "comms")]
+        {
+            let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(
+                meerkat_comms::CommsRuntime::inproc_only("live-pipeline-unit-stays-loaded")
+                    .expect("inproc comms runtime"),
+            );
+            fx.adapter
+                .maybe_spawn_mob_comms_drain(
+                    &session_id,
+                    comms,
+                    meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                        "mob-live-pipeline-stays-loaded",
+                    ),
+                )
+                .await
+                .expect("record mob-owned ingress for the member session");
+        }
+        let factory: Arc<ScriptedRealtimeSessionFactory> =
+            Arc::new(ScriptedRealtimeSessionFactory::new());
+        let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
+            service: Arc::clone(&fx.service),
+            runtime_adapter: Arc::clone(&fx.adapter),
+            host: Arc::clone(&fx.host),
+            ws_state: Some(Arc::clone(&fx.ws_state)),
+            base_url: Some(ADVERTISED_BASE.to_string()),
+            session_factory: Arc::clone(&factory)
+                as Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+        });
+        let opened = member_host
+            .open(&session_id, None, None)
+            .await
+            .expect("member open succeeds");
+        let channel = LiveChannelId::new(&opened.channel_id);
+        let adapter = factory.adapters().pop().expect("scripted adapter minted");
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (_, result_text, is_error) = submitted_tool_result(&commands, "call-load");
+        assert!(!is_error, "the load succeeds: {result_text}");
+
+        // What is stored with the session: the loaded tool is an active
+        // request of its visibility state, so a build from the store has it.
+        let stored = fx
+            .service
+            .export_realtime_refresh_session_snapshot(&session_id)
+            .await
+            .expect("the session as stored")
+            .tool_visibility_state()
+            .expect("a readable visibility state")
+            .expect("the session stores its visibility state");
+        assert!(
+            stored
+                .active_requested_deferred_names
+                .iter()
+                .any(|name| name.as_str() == DEFERRED_LOOKUP),
+            "the load is stored with the session: {stored:?}"
+        );
+
+        let expected: std::collections::BTreeSet<String> =
+            [DEFERRED_LOOKUP, "tool_catalog_load", "tool_catalog_search"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+
+        // A second conversation: the first channel is closed, the next one
+        // opens on the session's tool list, which has the loaded tool.
+        let status = member_host
+            .close(&session_id, &opened.channel_id)
+            .await
+            .expect("close succeeds");
+        assert_eq!(status, LiveCloseStatus::Closed);
+        let reopened = member_host
+            .open(&session_id, None, None)
+            .await
+            .expect("a second open succeeds");
+        assert_eq!(
+            tool_names(
+                &fx.service
+                    .live_visible_tool_defs(&session_id)
+                    .await
+                    .expect("the session's live tool list"),
+            ),
+            expected,
+            "a channel opened after the load lists the loaded tool; the other tool still \
+             waits behind the catalog"
+        );
+        let status = member_host
+            .close(&session_id, &reopened.channel_id)
+            .await
+            .expect("the second close succeeds");
+        assert_eq!(status, LiveCloseStatus::Closed);
+
+        // What a restore reads: the session's durable record holds the load,
+        // also once the live actor is gone.
+        fx.service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        let durable = fx
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("the durable record loads")
+            .expect("the durable record survives the live actor")
+            .tool_visibility_state()
+            .expect("a readable durable visibility state")
+            .expect("the durable record stores the visibility state");
+        assert!(
+            durable
+                .active_requested_deferred_names
+                .iter()
+                .any(|name| name.as_str() == DEFERRED_LOOKUP),
+            "a session built again from its durable record has the loaded tool: {durable:?}"
+        );
+    }
+
+    /// A loaded tool whose definition the conversation's provider would
+    /// refuse does not end the conversation. The adapter's own check names
+    /// it before anything is sent: the tool list update leaves it out, the
+    /// load's result names it as loaded for the session and not in this
+    /// conversation, with the provider's reason, and the other tool of the
+    /// same load is available now and runs.
+    #[tokio::test]
+    async fn a_loaded_tool_the_provider_would_refuse_is_withheld_and_named() {
+        let (fx, session_id) =
+            deferred_catalog_fixture_with(DeferredCatalogTools::with_an_unsendable_tool()).await;
+        #[cfg(feature = "comms")]
+        {
+            let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(
+                meerkat_comms::CommsRuntime::inproc_only("live-pipeline-unit-unsendable")
+                    .expect("inproc comms runtime"),
+            );
+            fx.adapter
+                .maybe_spawn_mob_comms_drain(
+                    &session_id,
+                    comms,
+                    meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                        "mob-live-pipeline-unsendable",
+                    ),
+                )
+                .await
+                .expect("record mob-owned ingress for the member session");
+        }
+        let factory: Arc<ScriptedRealtimeSessionFactory> =
+            Arc::new(ScriptedRealtimeSessionFactory::new());
+        let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
+            service: Arc::clone(&fx.service),
+            runtime_adapter: Arc::clone(&fx.adapter),
+            host: Arc::clone(&fx.host),
+            ws_state: Some(Arc::clone(&fx.ws_state)),
+            base_url: Some(ADVERTISED_BASE.to_string()),
+            session_factory: Arc::clone(&factory)
+                as Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+        });
+        let opened = member_host
+            .open(&session_id, None, None)
+            .await
+            .expect("member open succeeds");
+        let channel = LiveChannelId::new(&opened.channel_id);
+        let adapter = factory.adapters().pop().expect("scripted adapter minted");
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP, DEFERRED_UNSENDABLE] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (result_at, result_text, is_error) = submitted_tool_result(&commands, "call-load");
+        assert!(
+            !is_error,
+            "the load is a result, not an error: {result_text}"
+        );
+        let refreshed_at = refreshes_listing(&commands, DEFERRED_LOOKUP);
+        assert!(
+            refreshed_at.len() == 1 && refreshed_at[0] < result_at,
+            "the tool the provider takes is sent before the result: {commands:?}"
+        );
+        assert!(
+            refreshes_listing(&commands, DEFERRED_UNSENDABLE).is_empty(),
+            "the tool the provider would refuse is never sent: {commands:?}"
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&result_text).expect("the load's JSON result");
+        assert_eq!(result["availability"], "mixed", "{result}");
+        let entry = |name: &str| -> serde_json::Value {
+            result["tool_availability"]
+                .as_array()
+                .and_then(|entries| entries.iter().find(|entry| entry["name"] == name))
+                .cloned()
+                .unwrap_or_else(|| panic!("an entry for {name}: {result}"))
+        };
+        assert_eq!(
+            entry(DEFERRED_LOOKUP),
+            serde_json::json!({ "name": DEFERRED_LOOKUP, "availability": "available_now" })
+        );
+        let withheld = entry(DEFERRED_UNSENDABLE);
+        assert_eq!(
+            withheld["availability"], "loaded_not_in_this_conversation",
+            "{result}"
+        );
+        assert!(
+            withheld["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("root is not an object")),
+            "the provider's reason is given: {result}"
+        );
+        // Loaded for the session all the same.
+        assert!(
+            tool_names(
+                &fx.service
+                    .live_visible_tool_defs(&session_id)
+                    .await
+                    .expect("the session's live tool list"),
+            )
+            .contains(DEFERRED_UNSENDABLE)
+        );
+
+        // The conversation goes on: the tool that was sent runs.
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-tool",
+            DEFERRED_LOOKUP,
+            serde_json::json!({}),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (_, call_text, call_is_error) = submitted_tool_result(&commands, "call-tool");
+        assert!(
+            !call_is_error && call_text == format!("ran {DEFERRED_LOOKUP}"),
+            "the loaded tool runs in the same conversation: {call_text}"
+        );
+    }
+
+    /// A composition that installs no way to update the provider's tool list
+    /// still loads the tool for the session, and says so: the load's result
+    /// is not a bare acceptance, it states that the tool cannot be called in
+    /// this conversation yet. A call of it is still served for the session.
+    #[tokio::test]
+    async fn a_live_load_without_a_tool_list_update_says_the_tool_is_not_available_here() {
+        let (fx, session_id) = deferred_catalog_fixture().await;
+        let factory = ScriptedRealtimeSessionFactory::new();
+        let ingress = RecordingIngress::default();
+        // Opened through the bare pipeline: no member host is composed.
+        let opened = open_with_realtime_model(&fx, &ingress, &factory, &session_id).await;
+        let channel = LiveChannelId::new(&opened.channel_id);
+        let adapter = factory.adapters().pop().expect("scripted adapter minted");
+
+        provider_tool_call(
+            &fx,
+            &channel,
+            "call-load",
+            "tool_catalog_load",
+            serde_json::json!({ "names": [DEFERRED_LOOKUP] }),
+        )
+        .await;
+        let commands = adapter.commands();
+        let (_, result_text, is_error) = submitted_tool_result(&commands, "call-load");
+        assert!(
+            !is_error,
+            "the tool is loaded for the session: {result_text}"
+        );
+        assert!(
+            refresh_snapshots(&adapter).is_empty(),
+            "nothing can update this conversation's tool list: {commands:?}"
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&result_text).expect("the load's JSON result");
+        assert_eq!(
+            result["availability"], "loaded_not_in_this_conversation",
+            "the result says the tool is loaded but not callable here yet: {result}"
+        );
+
+        let visible = fx
+            .service
+            .live_visible_tool_defs(&session_id)
+            .await
+            .expect("the session's visible tools");
+        assert!(
+            tool_names(&visible).contains(DEFERRED_LOOKUP),
+            "the tool is loaded for the session, so the next open lists it: {visible:?}"
         );
     }
 }

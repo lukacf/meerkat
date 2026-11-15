@@ -315,3 +315,364 @@ async fn member_tools_and_attention_overlay_reach_live_turns() {
         "teardown must not be blocked by a member's runtime readiness: {teardown:?}"
     );
 }
+
+/// Profile whose member also mounts a host tool bundle with one deferrable
+/// tool over the deferred catalog's byte budget.
+const WORKGRAPH_OVER_BUDGET_TOML: &str = r#"
+[mob]
+id = "workgraph-over-budget-mob"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "autonomous_host"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+workgraph = true
+rust_bundles = ["large"]
+"#;
+
+const LARGE_HOST_TOOL: &str = "host_lookup";
+const CATALOG_CONTROL_TOOLS: [&str; 2] = [
+    meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+    meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+];
+const ATTENTION_TOOLS: [&str; 2] = ["workgraph_attention_reassign", "workgraph_policy_escalate"];
+
+/// A host bundle with an exact catalog and one deferrable tool whose
+/// definition alone is over the deferred catalog's byte budget. It asks for
+/// the catalog's control tools on demand, so a request carries them only
+/// while a tool waits behind the catalog.
+struct LargeHostTools;
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for LargeHostTools {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        vec![Arc::new(meerkat_core::types::ToolDef::new(
+            LARGE_HOST_TOOL,
+            "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD),
+            json!({"type": "object", "properties": {}}),
+        ))]
+        .into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: true,
+        }
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.tools()
+            .iter()
+            .map(|tool| {
+                meerkat_core::ToolCatalogEntry::session_deferred(
+                    Arc::clone(tool),
+                    true,
+                    meerkat_core::types::ToolProvenance {
+                        kind: meerkat_core::types::ToolSourceKind::RustBundle,
+                        source_id: "large".into(),
+                        artifact: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
+        ))
+    }
+}
+
+/// One model request as [`CallingClient`] saw it.
+#[derive(Clone, Debug)]
+struct Seen {
+    /// The names of the tools the request offers.
+    tools: Vec<String>,
+    /// Every tool result the request carries: text, and whether the result
+    /// is an error.
+    answers: Vec<(String, bool)>,
+    /// The tool this request's answer calls, if it calls one.
+    calls: Option<String>,
+}
+
+/// A model that makes the one call the row scripts, in the first request
+/// that offers the tool, and records every request. It reads no message
+/// text: what a member's turn carries as user content is the runtime's.
+#[derive(Clone, Default)]
+struct CallingClient {
+    seen: Arc<std::sync::Mutex<Vec<Seen>>>,
+    next_call: Arc<std::sync::Mutex<Option<(String, Value)>>>,
+}
+
+impl CallingClient {
+    /// Have the model call `tool` with `arguments` once, in the first
+    /// request from now on that offers `tool`.
+    fn call_when_offered(&self, tool: &str, arguments: Value) {
+        *self.next_call.lock().unwrap() = Some((tool.to_owned(), arguments));
+    }
+
+    /// Wait until `found` answers for the requests seen so far; a wait that
+    /// runs out prints them.
+    async fn wait_for<T>(&self, what: &str, found: impl Fn(&[Seen]) -> Option<T>) -> T {
+        let waited = tokio::time::timeout(Duration::from_mins(1), async {
+            loop {
+                let seen = self.seen.lock().unwrap().clone();
+                if let Some(value) = found(&seen) {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        match waited {
+            Ok(value) => value,
+            Err(_) => {
+                let seen = self.seen.lock().unwrap().clone();
+                panic!(
+                    "no model request shows {what}; {} request(s) so far: {seen:#?}",
+                    seen.len()
+                )
+            }
+        }
+    }
+}
+
+impl LlmClient for CallingClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let mut answers = Vec::new();
+        for message in &request.messages {
+            if let meerkat_core::Message::ToolResults { results, .. } = message {
+                answers.extend(
+                    results
+                        .iter()
+                        .map(|result| (result.text_content(), result.is_error)),
+                );
+            }
+        }
+        let tools: Vec<String> = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let call = {
+            let mut next_call = self.next_call.lock().unwrap();
+            let offered = next_call
+                .as_ref()
+                .is_some_and(|(tool, _)| has_tool(&tools, tool));
+            if offered { next_call.take() } else { None }
+        };
+        self.seen.lock().unwrap().push(Seen {
+            tools,
+            answers,
+            calls: call.as_ref().map(|(name, _)| name.clone()),
+        });
+        let (lead, stop) = match call {
+            Some((name, args)) => (
+                LlmEvent::ToolCallComplete {
+                    id: "fc_0".to_string(),
+                    name,
+                    args,
+                    meta: None,
+                },
+                StopReason::ToolUse,
+            ),
+            None => (
+                LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                },
+                StopReason::EndTurn,
+            ),
+        };
+        let [usage, done] = llm_usage::usage_then_done(request, meerkat::Provider::OpenAI, stop);
+        Box::pin(async_stream::stream! {
+            yield Ok(lead);
+            yield Ok(usage);
+            yield Ok(done);
+        })
+    }
+
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// A member whose other tools take it over the deferred catalog's byte
+/// budget: WorkGraph's two attention tools, the one first-party family whose
+/// tools may wait, wait behind the catalog with the host's tool on an
+/// ordinary turn. In an attention turn the turn's overlay makes the tool its
+/// binding's authority allows callable for that turn: the request offers
+/// `workgraph_policy_escalate` with no load, and a call of it runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attention_turn_of_a_member_over_the_catalog_budget_offers_and_runs_its_attention_tool()
+{
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let client = CallingClient::default();
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .definition(
+                MobDefinition::from_toml(WORKGRAPH_OVER_BUDGET_TOML)
+                    .expect("parse over-budget definition"),
+            )
+            .persistent_state(state_dir.path())
+            .default_llm_client(Arc::new(client.clone()))
+            .register_tool_bundle("large", Arc::new(LargeHostTools))
+            .build(),
+    )
+    .await
+    .expect("persistent workgraph runtime builds");
+    runtime
+        .spawn_many(vec![SpawnMemberSpec::from_wire(
+            "worker".to_string(),
+            "helper".to_string(),
+            None,
+            None,
+            None,
+        )])
+        .await
+        .expect("spawn the over-budget member");
+
+    // The member's first request, before any binding exists (it is the
+    // request of the member's spawn turn or of the sent text's turn: either
+    // is an ordinary turn): the member is over the budget, so what may wait
+    // waits: the host's tool and WorkGraph's two attention tools. The two
+    // control tools are in the request because a tool waits (the host bundle
+    // asks for them on demand, not always); the other WorkGraph tools are
+    // inline.
+    meerkat_meta::send_message_on_mob(&runtime.mob_handle(), "helper", "hello".to_string())
+        .await
+        .expect("first send");
+    let unbound = client
+        .wait_for("an ordinary turn", |seen| {
+            seen.first().map(|request| request.tools.clone())
+        })
+        .await;
+    for control_tool in CATALOG_CONTROL_TOOLS {
+        assert!(
+            has_tool(&unbound, control_tool),
+            "an over-budget member's request carries {control_tool}: {unbound:?}"
+        );
+    }
+    for waiting in ATTENTION_TOOLS.into_iter().chain([LARGE_HOST_TOOL]) {
+        assert!(
+            !has_tool(&unbound, waiting),
+            "{waiting} waits behind the catalog on an ordinary turn: {unbound:?}"
+        );
+    }
+    assert!(
+        has_tool(&unbound, "workgraph_get"),
+        "the other WorkGraph tools never wait: {unbound:?}"
+    );
+
+    // Bind a goal to the member (default mode: pursue, whose authority
+    // allows `workgraph_policy_escalate` and not `workgraph_attention_reassign`).
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "watch the queue",
+            "target": { "kind": "identity", "identity": "helper" },
+        }),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response:#?}");
+    let item_id = response["result"]["item"]["id"]
+        .as_str()
+        .expect("item id")
+        .to_string();
+    let item_revision = response["result"]["item"]["revision"]
+        .as_u64()
+        .expect("item revision");
+
+    // The attention turn: the model calls the attention tool in the first
+    // request that offers it. No load came before: only the turn's overlay
+    // can have put the tool into that request.
+    client.call_when_offered(
+        "workgraph_policy_escalate",
+        json!({
+            "id": item_id,
+            "expected_revision": item_revision,
+            "completion_policy": { "kind": "host_confirmed" },
+        }),
+    );
+    meerkat_meta::send_message_on_mob(&runtime.mob_handle(), "helper", "tighten it".to_string())
+        .await
+        .expect("second send");
+    let (calling, bound) = client
+        .wait_for(
+            "the attention tool offered with no load (the scripted call is made there)",
+            |seen| {
+                seen.iter()
+                    .position(|request| request.calls.is_some())
+                    .map(|index| (index, seen[index].tools.clone()))
+            },
+        )
+        .await;
+    assert!(
+        !has_tool(&bound, "workgraph_attention_reassign"),
+        "the pursue binding's authority does not allow a reassign: {bound:?}"
+    );
+    // The attention turn does not offer the host's tool. This cannot tell
+    // which of two reasons holds (it still waits behind the catalog; the
+    // turn's overlay allows the binding's tools only): the ordinary turn
+    // above is what shows it waiting.
+    assert!(
+        !has_tool(&bound, LARGE_HOST_TOOL),
+        "the attention turn does not offer the host's tool: {bound:?}"
+    );
+
+    // The call's result reaches the model in the turn's next request.
+    let answers = client
+        .wait_for("the result of the attention tool's call", |seen| {
+            seen.iter()
+                .skip(calling + 1)
+                .find(|request| !request.answers.is_empty())
+                .map(|request| request.answers.clone())
+        })
+        .await;
+    assert_eq!(answers.len(), 1, "one call, one result: {answers:?}");
+    let (answer, is_error) = &answers[0];
+    assert!(
+        !is_error,
+        "the call runs: it is not refused as a tool that waits behind the catalog: {answer}"
+    );
+
+    let teardown = runtime.stop_mob_for_teardown().await;
+    assert!(
+        teardown.teardown_may_proceed(),
+        "teardown must not be blocked by a member's runtime readiness: {teardown:?}"
+    );
+}

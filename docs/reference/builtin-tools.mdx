@@ -46,7 +46,7 @@ may apply explicit presets of their own.
 | `skill_read_resource` | Skills | No | `skills` + explicit tool policy | Read a specific skill-owned resource |
 | `skill_invoke_function` | Skills | No | `skills` + explicit tool policy | Invoke a skill-defined function |
 | `tool_catalog_search` | Control plane | Adaptive | exact deferred catalog | Search deferred tool-catalog entries |
-| `tool_catalog_load` | Control plane | Adaptive | exact deferred catalog | Stage deferred tool-catalog entries for visibility |
+| `tool_catalog_load` | Control plane | Adaptive | exact deferred catalog | Load deferred tool-catalog entries so the model can call them |
 | `brain_swap` | Model routing | Conditional | realization host + multiple reachable models + tool policy | Stage a model switch for a later input |
 | `delegate` | Mob | Yes | `mob` + generated authority | Run one bounded helper task in an implicit mob |
 | `fork_off` | Mob | Yes | `mob` + generated authority | Fork the calling member into a durable child that runs one task in the background and belongs to the caller |
@@ -230,6 +230,21 @@ engine or another trusted per-turn producer. It is ephemeral — cleared after
 the turn completes — and composes with the external filter using
 most-restrictive semantics.
 
+From 0.9.15, for that turn `tool_catalog_search` and `tool_catalog_load`
+follow the overlay too: a tool the turn's overlay does not allow is not
+found, and its load answers `unknown_key`. The next turn without the overlay
+finds it again.
+
+From 0.9.15, the deferred-catalog notice keeps its record of what the session
+was offered on the session's own filters, so an overlay that only hides tools
+writes no notice, in its turn or in the turn after it, and does not change
+what the session was offered. The notice never names a tool as available in a
+turn whose overlay hides it: a tool that first becomes available during such
+a turn is named once, at the first boundary whose overlay does not hide it. A
+change of the session's own filters, its launch policy, its model's
+capabilities or the catalog that takes a tool away is reported in the turn it
+applies, with or without an overlay.
+
 Public wire requests use the caller-safe `PublicTurnToolOverlay` shape:
 `allowed_tools` and `blocked_tools` contain string names. They do not accept
 the internal `dispatch_context` field.
@@ -240,10 +255,68 @@ the internal `dispatch_context` field.
 ## Deferred tool catalog control plane
 
 An exact dispatcher can keep eligible session tools out of the LLM's inline
-schema set and expose two always-inline control tools instead. The adaptive
-selector enters deferred mode when a source is still pending, at least two
-eligible tools exist, or their combined name, description, and schema volume
-reaches 160 bytes. These tools are not part of the general builtins gate.
+schema set and expose two control tools instead. From 0.9.15, the selector
+enters deferred mode when a source is still pending, or when the combined
+name, description and schema text of the eligible tools reaches 8,192 bytes
+(`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`); through 0.9.14 it entered the
+mode when a source was pending, at least two eligible tools existed, or
+their combined text reached 160 bytes. The budget counts every
+deferred-eligible tool whatever its source: MCP server tools, tools a client
+registered over RPC, and a host's own deferred-eligible tools. Below it the
+tools stay in every request: the mode costs about 1.2 KB per request and two
+extra model requests on a tool's first use, so a few small tools are cheaper
+to send than to defer. The number of tools alone never starts the mode. These
+tools are not part of the general builtins gate.
+
+From 0.9.15, the two control tools are mounted for a session with an exact
+catalog that has an eligible tool, a pending source, or a source that may
+need them (an MCP router does); through 0.9.14 they were in every request of
+a session in the deferred mode. They are in a model request only while an
+eligible tool
+waits behind the catalog, while a source is still pending, or when a source
+asks for them always (`ToolCatalogControlPlane::Always`, which a router asks
+unless its host says otherwise); otherwise they are left out and a call of
+one is refused with `access_denied`. The RPC server gives every session a
+router that asks for them on demand, and the tools a client registers ask
+the same way, so a session or mob member there with a few small tools sends
+neither, and gets both once a later registration or a server added with
+`mcp/add` takes it over the budget. A session with no such source
+and nothing to defer when it starts mounts no control tools and keeps tools
+that arrive later in every request for its lifetime.
+
+From 0.9.15, a session that grows past the budget, or whose source starts
+connecting, keeps the tools its model already had: they stay in the request
+and are
+called with no load. Only tools that arrive with or after that change wait
+behind the catalog. A tool kept this way stays in the request for the rest
+of the session, so what a session keeps is bounded by its catalog, not by
+the budget: a session whose tool sources leave and return can end up sending
+more than the budget in every request. A resumed session starts in the mode
+its tools select at that moment.
+
+A session's dispatcher is exact when every tool source it mounts reports an
+exact catalog. From 0.9.15, the built-in families do, and their own tools
+stay in every
+request: the builtin, comms, schedule and memory tools, the mob operator
+tools and the agent mob tools. A mob member, and a session with memory
+search (every session of the RPC server mounts it by default), therefore
+follows the same rule as any other session: its deferrable tools wait behind
+the catalog once they are over the byte budget. The tools that may wait are
+the ones their source marks deferred-eligible: MCP server tools, tools a
+client registers over RPC, a host's own deferred-eligible tools, and
+WorkGraph's `workgraph_attention_reassign` and `workgraph_policy_escalate`
+(which alone are under the budget and stay in the request). A host tool
+source that keeps the `AgentToolDispatcher` default reports no exact
+catalog, and a session that mounts it sends every tool definition in every
+request. So does a session with neither builtin nor external tools: its
+empty base source reports no exact catalog.
+
+When the deferred catalog changes at a boundary, the session receives a
+notice naming the deferred tools that became available, and the event stream
+a `tool_config_changed` event whose `deferred_catalog_delta` carries the same
+names and whose status carries their counts. From 0.9.15, like a search, the
+notice and the delta name and count only tools the session's tool filters
+allow: a tool they do not allow is named once they allow it.
 
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and
@@ -271,15 +344,36 @@ Search deferred-eligible session tools without loading them.
 The response contains `catalog_exact`, `total_matches`, `results`, optional
 `pending_sources`, and optional `empty_result_status`. Each result reports
 `name`, `description`, `currently_callable`, and `visibility_status`:
-`loaded`, `deferred`, `blocked_by_filter`, or `temporarily_unavailable`.
-`pending_source` is used only as the empty-result status while a catalog source
-is pending.
+`loaded`, `deferred`, or `temporarily_unavailable`.
+`empty_result_status` is set only on an answer without results:
+`pending_source` while a catalog source is pending, and, from 0.9.15,
+`temporarily_unavailable` when the session's tool scope cannot be read. In
+that case the answer names no tool: it has no result, and `total_matches` is
+0, whatever the catalog holds.
+
+From 0.9.15, a session's deferred catalog holds only the tools its tool
+filters allow, as the tool list of a session without a deferred catalog
+does. The filters are
+the ones the tool scope composes: the tools its model can use, an inherited
+ceiling, its launch tool policy, the host's staged filter, its scoped tool
+grant gate, and, for one turn, that turn's tool overlay (a flow step's or a
+caller's allowed and blocked tools). A tool they do not allow is not a result
+and is not counted in `total_matches`, whatever the query; it is a result
+again from the moment the filters allow it (a filter is lifted, a grant opens
+the name, the turn with the overlay ends), with no rebuild. A tool the model
+already holds keeps its `loaded` row until the boundary that removes it from
+the model's tool list. `blocked_by_filter`, which releases through 0.9.14
+returned for such a tool, is no longer returned.
+
+A tool whose source is still connecting may not be findable yet: while
+`pending_sources` names a source, repeat the search once that source is
+ready.
 
 **Source:** `crates/meerkat-tools/src/control_plane.rs`
 </Accordion>
 
 <Accordion title="tool_catalog_load">
-Stage one or more canonical deferred tool names for the next tool boundary.
+Load one or more canonical deferred tool names so the model can call them.
 The control plane consults the bound `ToolScope` and fails closed when it has no
 authoritative visibility state.
 
@@ -289,12 +383,78 @@ authoritative visibility state.
 
 The response contains `catalog_exact`, `accepted_names`, `noop_names`, and one
 resolution per requested name. Rejection reasons are `unknown_key`,
-`not_deferred_eligible`, `not_filterable`, or `temporarily_unavailable`.
-Already staged or visible names are successful no-ops. Accepted loads take
-effect at the next boundary, not during the current tool call.
+`not_deferred_eligible`, or `temporarily_unavailable`.
+Already requested or visible names are successful no-ops.
+
+When an accepted load takes effect depends on who made the call:
+
+- **An ordinary turn.** The load is staged and takes effect at the next
+  model-call boundary, not during the current tool call: the model's next
+  request lists the tool.
+- **A live (realtime) conversation.** From 0.9.15, the load is committed for
+  the session before the call returns, because no model-call boundary of an
+  ordinary turn follows a live tool call, and the live host refreshes the
+  channel so the provider gets the new tool list before it gets the load's
+  result. The
+  response then carries `tool_availability`, one entry per tool (`name`,
+  `availability`, and a `reason` when the tool was refused), and the summary
+  field `availability`, which is the one value when every tool has the same
+  and `mixed` otherwise:
+  - `available_now`: the tool is loaded and the update of the conversation's
+    tool list was accepted by the channel's queue ahead of the load's result,
+    so the model can call the tool from its next step. Accepted is not
+    applied: a channel that then cannot apply the update closes, exactly as
+    it does for `live/refresh` (the session's model or provider changed, or
+    its transcript or system prompt was rewritten, since the channel was
+    opened).
+  - `loaded_not_in_this_conversation`: the tool is loaded for the session but
+    the conversation's tool list does not have it. Either the list could not
+    be updated (no channel refresher, or the refresh was refused or not
+    queued in time), or the realtime adapter's own check refused the tool's
+    parameter schema: before the update is sent the adapter runs its schema
+    normalizer for the provider over each tool, leaves a tool whose schema
+    it refuses out of the update and gives the reason, so a load does not
+    end the conversation over such a schema. The tool is sent with the
+    session's whole tool list at the next `live/refresh` or `live/open`,
+    which then fails. The check reads the schema only: a definition the
+    provider refuses for another reason (a description longer than it
+    takes, for one) is sent with the update, and the channel closes when
+    the provider refuses it.
+  - `not_loaded`: the session's active tool filter still hides the tool (a
+    filter change staged for the next ordinary turn allows it; the filter in
+    force does not yet); the request stays recorded for the next ordinary
+    turn.
+
+  A load that cannot be committed, or all of whose tools the active filter
+  hides, is a tool error. Only requested names are committed this way; a
+  staged tool filter still waits for an ordinary turn. The update sends the
+  session's tool list as it is after the load: when the load leaves nothing
+  behind the catalog, the two control tools are no longer on it (unless a
+  tool source asks for them always), as in an ordinary turn's next request.
+- **A live bridge operation** (a live channel opened under an execution
+  identity, where the member's own model does the delegated work). From
+  0.9.15, the load joins that operation's own tool list, since the operation
+  commits nothing to the session: the tool is in the operation's next model
+  call,
+  and a later operation loads it again. A tool the bridge profile cannot run
+  (callback provenance, or no Fast execution mode) is refused as that call's
+  tool error; the operation goes on.
+
+From 0.9.15, a load of a tool the session's tool filters do not allow
+answers `unknown_key`, exactly as a load of a name no source provides: the
+answer
+does not tell the two apart. This holds for a deferrable tool and for a tool
+that is never deferred. `not_deferred_eligible` is answered only for a tool
+that is never deferred and that the filters allow (or that the model already
+holds). `not_filterable`, which releases through 0.9.14 answered for a
+filtered deferrable tool, is no longer answered;
+`ToolCatalogLoadRejectedReason::NotFilterable` remains in the Rust type and
+nothing produces it. A host that needs to tell a tool its filters hide from
+one no source provides reads `ToolCatalogView` (`Hidden`).
 
 **Source:** `crates/meerkat-tools/src/control_plane.rs`,
-`crates/meerkat-core/src/tool_catalog.rs`
+`crates/meerkat-core/src/tool_catalog.rs`,
+`crates/meerkat-core/src/agent/runner.rs`
 </Accordion>
 
 ## Model-switch tool

@@ -4561,10 +4561,14 @@ mod tests {
         .await
     }
 
+    /// A member that shows `tool_name`, a tool whose execution contract has
+    /// no Fast mode, is refused the live bridge before any provider request,
+    /// tool dispatch, save or checkpoint, and the refusal names the tool.
     #[cfg(feature = "openai-live")]
-    #[tokio::test]
-    async fn exact_non_fast_catalog_member_rejects_live_bridge_before_provider_or_dispatch()
-    -> Result<(), String> {
+    async fn assert_member_with_a_tool_without_a_fast_mode_rejects_live_bridge(
+        tool_name: &'static str,
+        contract: meerkat_core::ToolExecutionContract,
+    ) -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let client = Arc::new(MidRunCancellationClient {
             calls: AtomicUsize::new(0),
@@ -4572,22 +4576,10 @@ mod tests {
             seen_tools: Mutex::new(Vec::new()),
         });
         let tool = Arc::new(ToolDef::new(
-            "streaming_tool",
-            "streaming-only member tool",
+            tool_name,
+            "member tool with no Fast execution mode",
             serde_json::json!({ "type": "object" }),
         ));
-        let streaming = meerkat_core::StreamingToolExecutionPolicy::new(
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(5),
-        )
-        .map_err(|error| error.to_string())?;
-        let contract = meerkat_core::ToolExecutionContract::new(
-            std::collections::BTreeSet::from([meerkat_core::ToolExecutionMode::Streaming]),
-            meerkat_core::ToolExecutionMode::Streaming,
-            Some(streaming),
-            None,
-        )
-        .map_err(|error| error.to_string())?;
         let dispatcher = Arc::new(PolicyProbeDispatcher {
             tools: Arc::from([Arc::clone(&tool)]),
             catalog: Arc::from([meerkat_core::ToolCatalogEntry::session_inline(tool, true)
@@ -4614,13 +4606,15 @@ mod tests {
         assert!(
             SessionAgent::visible_tool_defs(&agent)
                 .iter()
-                .any(|tool| tool.name == "streaming_tool")
+                .any(|tool| tool.name == tool_name)
         );
-        let request = policy_probe_bridge_request(&agent, "streaming-live-bridge")?;
+        let request = policy_probe_bridge_request(&agent, "no-fast-mode-live-bridge")?;
         assert_live_bridge_policy_rejected_without_effects(
             agent,
             request,
-            "Fast-only",
+            &format!(
+                "cannot run a tool that has no Fast execution mode; this member has: {tool_name}"
+            ),
             client.as_ref(),
             dispatcher.as_ref(),
             store.as_ref(),
@@ -4628,6 +4622,56 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// A streaming-only tool has no Fast mode: its member is refused.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn member_with_a_tool_without_a_fast_mode_rejects_live_bridge_before_provider_or_dispatch()
+    -> Result<(), String> {
+        let streaming = meerkat_core::StreamingToolExecutionPolicy::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        )
+        .map_err(|error| error.to_string())?;
+        let contract = meerkat_core::ToolExecutionContract::new(
+            std::collections::BTreeSet::from([meerkat_core::ToolExecutionMode::Streaming]),
+            meerkat_core::ToolExecutionMode::Streaming,
+            Some(streaming),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_member_with_a_tool_without_a_fast_mode_rejects_live_bridge(
+            "streaming_tool",
+            contract,
+        )
+        .await
+    }
+
+    /// The shell monitor tool runs detached only where shell jobs are
+    /// durable: a member that has it is refused, and the refusal names
+    /// `monitor_start`.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn member_with_the_shell_monitor_tool_rejects_live_bridge_before_provider_or_dispatch()
+    -> Result<(), String> {
+        let detached = meerkat_core::DetachedToolExecutionPolicy::new(
+            meerkat_core::RunnerIdentity::new("meerkat.monitor_script", "v1")
+                .map_err(|error| error.to_string())?,
+            meerkat_core::RestartClass::NonResumable,
+            meerkat_core::IdempotencyScope::ToolCall,
+            std::time::Duration::from_secs(30),
+        )
+        .map_err(|error| error.to_string())?;
+        let contract = meerkat_core::ToolExecutionContract::new(
+            std::collections::BTreeSet::from([meerkat_core::ToolExecutionMode::Detached]),
+            meerkat_core::ToolExecutionMode::Detached,
+            None,
+            Some(detached),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_member_with_a_tool_without_a_fast_mode_rejects_live_bridge("monitor_start", contract)
+            .await
     }
 
     fn session_with_raw_metadata(

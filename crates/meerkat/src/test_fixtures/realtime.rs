@@ -266,4 +266,29 @@ impl LiveAdapter for ScriptedLiveAdapter {
             ..LiveChannelCapabilities::default()
         }
     }
+
+    /// Provider parity: a real realtime provider refuses a tool whose
+    /// parameter schema root is not an object, and its adapter says so
+    /// locally. This adapter refuses the same.
+    fn refused_tools(
+        &self,
+        tools: &[meerkat_core::ToolDef],
+    ) -> Vec<meerkat_core::live_adapter::LiveToolRefusal> {
+        tools
+            .iter()
+            .filter(|tool| {
+                tool.input_schema
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|root| root != "object")
+            })
+            .map(|tool| meerkat_core::live_adapter::LiveToolRefusal {
+                name: tool.name.clone(),
+                reason: format!(
+                    "tool '{}' has a parameter schema whose root is not an object",
+                    tool.name
+                ),
+            })
+            .collect()
+    }
 }

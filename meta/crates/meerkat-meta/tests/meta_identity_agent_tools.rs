@@ -76,6 +76,12 @@ const TURN_BOUND: Duration = Duration::from_secs(90);
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
 fn definition(mob_id: &str) -> MobDefinition {
+    definition_with_maker_tools(mob_id, "")
+}
+
+/// [`definition`], with `more` appended to the tools table of the profile
+/// with mob tools.
+fn definition_with_maker_tools(mob_id: &str, more: &str) -> MobDefinition {
     MobDefinition::from_toml(&format!(
         r#"
 [mob]
@@ -89,6 +95,7 @@ runtime_mode = "turn_driven"
 [profiles.{MAKER}.tools]
 comms = true
 mob = true
+{more}
 
 [profiles.{WORKER}]
 model = "gpt-5.5"
@@ -543,6 +550,98 @@ async fn boot(state: &Path, mob_id: &str) -> Rig {
 /// policy attaches its family.
 async fn boot_with_family(state: &Path, mob_id: &str) -> Rig {
     let rig = boot(state, mob_id).await;
+    rig.attach_family();
+    rig
+}
+
+/// The host bundle's one tool: deferrable, and alone over the deferred
+/// catalog's byte budget.
+const LARGE_HOST_TOOL: &str = "host_lookup";
+
+/// A host bundle with an exact catalog and one deferrable tool whose
+/// definition alone is over the deferred catalog's byte budget. It asks for
+/// the catalog's control tools on demand, so a request carries them only
+/// while its tool waits.
+struct LargeHostTools;
+
+#[async_trait]
+impl meerkat_core::AgentToolDispatcher for LargeHostTools {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        vec![Arc::new(meerkat_core::types::ToolDef::new(
+            LARGE_HOST_TOOL,
+            "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD),
+            json!({"type": "object", "properties": {}}),
+        ))]
+        .into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: true,
+        }
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.tools()
+            .iter()
+            .map(|tool| {
+                meerkat_core::ToolCatalogEntry::session_deferred(
+                    Arc::clone(tool),
+                    true,
+                    meerkat_core::types::ToolProvenance {
+                        kind: meerkat_core::types::ToolSourceKind::RustBundle,
+                        source_id: "large".into(),
+                        artifact: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
+        ))
+    }
+}
+
+/// [`boot_with_family`], for a mob whose profile with mob tools also mounts
+/// [`LargeHostTools`]: its member's deferrable tools are over the deferred
+/// catalog's byte budget.
+async fn boot_over_the_catalog_budget_with_family(state: &Path, mob_id: &str) -> Rig {
+    let model = ScriptedModel::default();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(definition_with_maker_tools(
+                mob_id,
+                r#"rust_bundles = ["large"]"#,
+            ))
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(DeclaredRoster))
+            .identity_runtime_instance_id("meta-identity-agent-tools")
+            .default_llm_client(Arc::new(model.clone()))
+            .register_tool_bundle("large", Arc::new(LargeHostTools))
+            .build(),
+    )
+    .await
+    .expect("build the gateway-shaped UnifiedRuntime with a host bundle");
+    let rig = Rig {
+        runtime,
+        model,
+        family: Arc::new(ScriptedFamily::default()),
+    };
     rig.attach_family();
     rig
 }
@@ -1787,11 +1886,12 @@ async fn identity_list_and_identity_directory_wake_nothing() {
     rig.shutdown().await;
 }
 
-/// The identity tools declare themselves as tools that may wait behind the
-/// deferred catalog, under one source, so a session with an exact catalog
-/// carries their definitions only once it loaded them.
+/// The identity tools declare themselves as inline session tools, under one
+/// source: they never wait behind the deferred catalog, so a session with an
+/// exact catalog carries their definitions in every request, as a session
+/// without one does.
 #[test]
-fn the_identity_tools_may_wait_behind_the_deferred_catalog() {
+fn the_identity_tools_never_wait_behind_the_deferred_catalog() {
     let catalog = identity_tool_catalog();
     assert_eq!(
         catalog
@@ -1803,20 +1903,83 @@ fn the_identity_tools_may_wait_behind_the_deferred_catalog() {
     for entry in &catalog {
         assert_eq!(entry.plane, meerkat_core::ToolPlaneClass::Session);
         assert!(entry.callability.is_callable());
-        let meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { provenance } =
-            &entry.deferred_eligibility
-        else {
-            panic!("{} may wait behind the deferred catalog", entry.tool.name);
-        };
+        assert_eq!(
+            entry.deferred_eligibility,
+            meerkat_core::ToolCatalogDeferredEligibility::InlineOnly,
+            "{} never waits behind the deferred catalog",
+            entry.tool.name
+        );
+        let provenance = entry
+            .tool
+            .provenance
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} names its source", entry.tool.name));
         assert_eq!(provenance.kind, meerkat_core::types::ToolSourceKind::Mob);
         assert_eq!(provenance.source_id.to_string(), "identity");
-        assert_eq!(entry.tool.provenance.as_ref(), Some(provenance));
     }
     assert_eq!(
         meerkat_core::select_catalog_mode_from_snapshot(true, &catalog, &[]),
-        meerkat_core::ToolCatalogMode::Deferred,
-        "in a session whose catalog is exact, the identity tools alone are deferred"
+        meerkat_core::ToolCatalogMode::Inline,
+        "in a session whose catalog is exact, the identity tools alone defer nothing"
     );
+}
+
+/// From the catalog's side: a member that may create agents has the eight
+/// identity tools in the first request of its first run. The mob tools and
+/// memory search report exact catalogs, so this member's catalog is meant to
+/// be exact; this row does not assert that (nothing of this member waits, so
+/// an inexact catalog would offer the same request). The next row drives
+/// a member of the same profile whose host tool does wait, which
+/// only an exact catalog does, and it is offered the identity tools too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_with_an_exact_catalog_is_offered_the_identity_tools_in_its_first_request() {
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot_with_family(state.path(), &mob_id).await;
+
+    let asked = rig.send(LEAD, "first-run", "first-run").await;
+    assert!(
+        has_identity_tools(&asked[0]),
+        "the first request offers the identity tools: {:?}",
+        asked[0].tools
+    );
+    rig.shutdown().await;
+}
+
+/// A member that may create agents and whose other deferrable tools are over
+/// the deferred catalog's byte budget: its host tool waits behind the
+/// catalog, so the first request of its first run carries the two control
+/// tools and not the host's tool. The eight identity tools are in that
+/// request all the same: they are inline entries and never wait, whatever
+/// else does. Were they deferrable, they would wait with the host's tool
+/// and this request would not offer them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_over_the_catalog_budget_is_offered_the_identity_tools_and_not_its_waiting_host_tool()
+ {
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot_over_the_catalog_budget_with_family(state.path(), &mob_id).await;
+
+    let asked = rig.send(LEAD, "first-run", "first-run").await;
+    let offered = &asked[0].tools;
+    assert!(
+        !offered.iter().any(|tool| tool == LARGE_HOST_TOOL),
+        "the host's deferrable tool is over the budget and waits behind the catalog: {offered:?}"
+    );
+    for control_tool in [
+        meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+        meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+    ] {
+        assert!(
+            offered.iter().any(|tool| tool == control_tool),
+            "a tool waits behind the catalog, so {control_tool} is offered: {offered:?}"
+        );
+    }
+    assert!(
+        has_identity_tools(&asked[0]),
+        "the identity tools never wait, whatever else does: {offered:?}"
+    );
+    rig.shutdown().await;
 }
 
 fn schema_of(tool: &str) -> Value {

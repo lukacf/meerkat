@@ -137,6 +137,17 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
+    /// The one memory tool is listed for the dispatcher's whole life, so the
+    /// default catalog (each listed tool as an inline session entry) is this
+    /// source's exact registry. Reporting it lets a session that mounts
+    /// memory search keep an exact composed catalog.
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
     fn live_bridge_effect_kind(&self, tool_name: &str) -> meerkat_core::LiveBridgeEffectKind {
         if tool_name == TOOL_NAME {
             meerkat_core::LiveBridgeEffectKind::ReadOnlyMemorySnapshot

@@ -100,8 +100,8 @@ pub fn is_identity_tool(name: &str) -> bool {
     IDENTITY_TOOLS.contains(&name)
 }
 
-/// Where the identity tools come from: what a deferred catalog lists them
-/// under.
+/// Where the identity tools come from: the provenance each definition
+/// carries.
 pub fn identity_tool_provenance() -> ToolProvenance {
     ToolProvenance {
         kind: ToolSourceKind::Mob,
@@ -128,15 +128,14 @@ pub fn identity_tool_defs() -> Arc<[Arc<ToolDef>]> {
     Arc::clone(&TOOL_DEFS)
 }
 
-/// The identity tools as a catalog lists them: session tools that may wait
-/// behind the deferred catalog, so a session with many tools carries their
-/// definitions only once it asked for them.
+/// The identity tools as a catalog lists them: inline session tools. They
+/// never wait behind the deferred catalog, so an agent that may create
+/// agents has them in the first request of its first run, whether or not its
+/// session's catalog is exact and whatever else waits behind it.
 pub fn identity_tool_catalog() -> Vec<ToolCatalogEntry> {
     identity_tool_defs()
         .iter()
-        .map(|tool| {
-            ToolCatalogEntry::session_deferred(Arc::clone(tool), true, identity_tool_provenance())
-        })
+        .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
         .collect()
 }
 

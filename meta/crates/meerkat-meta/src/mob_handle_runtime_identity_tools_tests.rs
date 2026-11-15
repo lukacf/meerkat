@@ -6,7 +6,7 @@
 //! one. The wrapper refuses a private member's call itself
 //! (`private_requester`, as it refuses its council), and answers a surface
 //! whose family takes no changes as it answers any tool it does not have. The identity tools
-//! are entries that may wait behind the deferred catalog.
+//! are inline entries: they never wait behind the deferred catalog.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -740,12 +740,14 @@ async fn identity_list_shows_an_agent_no_provenance() {
 }
 
 /// The identity tools are the wrapper's own exact catalog entries, after the
-/// inner ones, and may wait behind the deferred catalog: with an exact
-/// inner catalog the session's catalog stays exact, a member's surface
-/// says it may need the catalog's control plane, and they are what a
-/// deferred catalog leaves out of the request until they are loaded.
+/// inner ones, and they are inline: with an exact inner catalog the
+/// session's catalog stays exact, and a member that may create agents has
+/// the identity tools in every request, whatever else waits behind the
+/// deferred catalog. Alone they select no deferred mode, so the session
+/// sends no catalog control tool; a deferrable tool over the byte budget
+/// beside them selects it, and that tool alone is what waits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_identity_tools_are_deferred_entries_of_the_wrappers_catalog() {
+async fn the_identity_tools_are_inline_entries_of_the_wrappers_catalog() {
     let dir = tempfile::tempdir().expect("state dir");
     let family = Arc::new(CountingFamily::default());
     let (runtime, _identity) = runtime_with(dir.path(), Some(family)).await;
@@ -771,24 +773,62 @@ async fn the_identity_tools_are_deferred_entries_of_the_wrappers_catalog() {
             .collect::<Vec<_>>(),
         "the catalog lists the tools in names and order"
     );
-    assert_eq!(
-        catalog[0].deferred_eligibility,
-        meerkat_core::ToolCatalogDeferredEligibility::InlineOnly
-    );
-    for entry in &catalog[1..] {
-        assert!(
-            matches!(
-                entry.deferred_eligibility,
-                meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { .. }
-            ),
-            "{} may wait behind the deferred catalog",
+    for entry in catalog.iter() {
+        assert_eq!(
+            entry.deferred_eligibility,
+            meerkat_core::ToolCatalogDeferredEligibility::InlineOnly,
+            "{} never waits behind the deferred catalog",
             entry.tool.name
         );
     }
     assert_eq!(
+        meerkat_core::deferred_session_schema_volume(&catalog),
+        0,
+        "the identity tools do not count towards the byte budget"
+    );
+    assert_eq!(
         meerkat_core::select_catalog_mode_from_snapshot(capabilities.exact_catalog, &catalog, &[]),
+        meerkat_core::ToolCatalogMode::Inline,
+        "nothing waits, so the session sends no catalog control tool"
+    );
+
+    let mut with_a_large_tool = catalog.to_vec();
+    with_a_large_tool.push(meerkat_core::ToolCatalogEntry::session_deferred(
+        Arc::new(ToolDef::new(
+            "host_lookup",
+            "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD),
+            json!({"type": "object"}),
+        )),
+        true,
+        meerkat_core::types::ToolProvenance {
+            kind: meerkat_core::types::ToolSourceKind::Mcp,
+            source_id: "host".into(),
+            artifact: None,
+        },
+    ));
+    assert_eq!(
+        meerkat_core::select_catalog_mode_from_snapshot(
+            capabilities.exact_catalog,
+            &with_a_large_tool,
+            &[]
+        ),
         meerkat_core::ToolCatalogMode::Deferred,
-        "the session's catalog defers them"
+        "a deferrable tool over the budget beside them selects the deferred mode"
+    );
+    let may_wait: Vec<String> = with_a_large_tool
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.deferred_eligibility,
+                meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { .. }
+            )
+        })
+        .map(|entry| entry.tool.name.to_string())
+        .collect();
+    assert_eq!(
+        may_wait,
+        ["host_lookup"],
+        "and it alone waits: the identity tools stay in the request"
     );
     runtime.clear_identity_runtime_authority();
 }

@@ -350,18 +350,49 @@ example after a logout in another process) is released the same way. No
 
 Deferred tools: MCP tools and registered callback tools are deferred-eligible.
 A session switches to the deferred catalog while a server is still connecting,
-or when there are 2 or more eligible tools, or when their names, descriptions
-and schemas total 160 characters or more. In practice a server with two or
-more tools is deferred. The model then gets two control tools instead of the
+or when the names, descriptions and schemas of its eligible tools total 8,192
+bytes or more (0.9.15; before: 2 or more eligible tools, or 160 bytes). In
+practice a few small tools stay in every request and a server with many or
+large tools is deferred. The model then gets two control tools instead of the
 deferred schemas:
 
 - `tool_catalog_search {query?, limit?}` (limit 1-50, default 10). Results
   carry `name`, `description`, `currently_callable` and `visibility_status`
-  (`loaded`, `deferred`, `blocked_by_filter`, `temporarily_unavailable`;
-  `pending_source` while a source is connecting).
+  (`loaded`, `deferred`, `temporarily_unavailable`; `pending_source` while a
+  source is connecting).
 - `tool_catalog_load {names: [...]}`. Accepted names become callable at the
-  next boundary. Rejections: `unknown_key`, `not_deferred_eligible`,
-  `not_filterable`, `temporarily_unavailable`.
+  next model call. In a live (realtime) conversation the load is committed
+  before the call returns and the channel is refreshed first, and the result
+  says per tool (`tool_availability`, with the summary field `availability`,
+  `mixed` when the tools differ): `available_now` (the update of the
+  conversation's tool list is queued ahead of the result),
+  `loaded_not_in_this_conversation` (loaded for the session, not on the
+  conversation's tool list: the list could not be updated, or the adapter's
+  schema check refused the tool's parameter schema and the tool was left
+  out), or
+  `not_loaded` (the session's active tool filter still hides it: a filter
+  change staged for the next ordinary turn allows the tool, the filter in
+  force does not yet).
+  Rejections: `unknown_key`, `not_deferred_eligible`,
+  `temporarily_unavailable`.
+
+The catalog holds only the tools the session's tool filters allow (its
+model's capabilities, an inherited ceiling, its launch tool policy, the host's
+staged filter, its scoped tool grant gate and, for one turn, that turn's tool
+overlay), as the session's tool list does. A tool they do not allow is not a
+search result, is not counted in `total_matches`, is not offered by the
+deferred-catalog notice, and its load answers `unknown_key`, the same as a
+name no source provides (`not_deferred_eligible` is answered only for a tool
+that is never deferred and that the filters allow). It is findable and
+loadable again once the filters allow it. A turn's overlay that only hides
+tools writes no deferred-catalog notice: the notice follows the session's
+own filters, and offers a tool that first becomes available under an overlay
+that hides it once that overlay is gone. `blocked_by_filter` and
+`not_filterable`, which earlier releases returned for such a tool, are no
+longer returned. A search answers no result with `empty_result_status`
+`temporarily_unavailable` when the session's tool scope cannot be read. A
+tool whose source is still connecting may not be findable yet: repeat the
+search once `pending_sources` no longer names the source.
 
 A deferred tool called before it is loaded fails `access_denied` ("Tool
 '<name>' is not allowed by policy"). Both control tools are read-only.

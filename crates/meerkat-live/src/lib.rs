@@ -21,12 +21,12 @@ pub use host::{
     DEFAULT_LIVE_TOOL_TIMEOUT, DeltaIdentity, LiveAdapterHost, LiveAdapterHostError,
     LiveAssistantOutputAddress, LiveChannelCloseCommitAuthority, LiveChannelCloseCommitTarget,
     LiveChannelCloseObservation, LiveChannelCloseProjectionLease, LiveChannelId,
-    LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority, LiveChannelStatusObservation,
-    LiveCommandAcceptanceKind, LiveCommandQueueAcceptance, LiveProjectionBoundaryHold,
-    LiveProjectionError, LiveProjectionSink, LiveRefreshQueueAcceptance, LiveToolDispatchError,
-    LiveToolDispatchTimeout, LiveToolDispatcher, LiveTranscriptIdentity,
-    LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome, ObservationRouting,
-    ToolDispatchSkipReason,
+    LiveChannelOpenAuthority, LiveChannelRefreshError, LiveChannelRefresher,
+    LiveChannelStatusCommitAuthority, LiveChannelStatusObservation, LiveCommandAcceptanceKind,
+    LiveCommandQueueAcceptance, LiveProjectionBoundaryHold, LiveProjectionError,
+    LiveProjectionSink, LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatchTimeout,
+    LiveToolDispatcher, LiveTranscriptIdentity, LiveTranscriptIdentityError, NoOpProjectionSink,
+    ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
 };
 pub use provider_webrtc::{
     LiveProviderInputLatency, LiveQuietAppendTiming, LiveRuntimeBindingFence,

@@ -5399,6 +5399,55 @@ mod durable_tests {
         assert!(schema["properties"].get("background").is_none());
     }
 
+    /// The execution modes a live bridge reads from a member's shell tools.
+    /// With a durable binding `shell` runs Fast by default and can also run
+    /// detached, so its member can use the live bridge, and the monitor tool
+    /// runs detached only, so its member cannot. Without one both are Fast
+    /// only.
+    #[tokio::test]
+    async fn durable_shell_can_run_fast_and_the_monitor_tool_cannot() {
+        use crate::builtin::BuiltinTool;
+        use crate::builtin::shell::{MonitorStartTool, ShellTool};
+        use meerkat_core::ToolExecutionMode::{Detached, Fast};
+        use std::collections::BTreeSet;
+
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let bound = Arc::new(
+            JobManager::new(config.clone())
+                .bind_canonical_async_ops(
+                    session_id.clone(),
+                    Arc::new(RuntimeOpsLifecycleRegistry::new()),
+                )
+                .with_durable_job_runtime(runtime),
+        );
+        let shell =
+            ShellTool::with_job_manager(config.clone(), Arc::clone(&bound)).execution_contract();
+        assert_eq!(shell.default_mode(), Fast);
+        assert_eq!(shell.supported_modes(), &BTreeSet::from([Fast, Detached]));
+        let monitor = MonitorStartTool::new(config.clone(), bound).execution_contract();
+        assert_eq!(monitor.default_mode(), Detached);
+        assert_eq!(monitor.supported_modes(), &BTreeSet::from([Detached]));
+
+        let unbound = Arc::new(
+            JobManager::new(config.clone())
+                .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new())),
+        );
+        assert_eq!(
+            ShellTool::with_job_manager(config.clone(), Arc::clone(&unbound))
+                .execution_contract()
+                .supported_modes(),
+            &BTreeSet::from([Fast])
+        );
+        assert_eq!(
+            MonitorStartTool::new(config, unbound)
+                .execution_contract()
+                .supported_modes(),
+            &BTreeSet::from([Fast])
+        );
+    }
+
     #[tokio::test]
     async fn background_output_keeps_head_and_tail_within_the_configured_cap() {
         let temp = TempDir::new().expect("tempdir");

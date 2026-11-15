@@ -50,6 +50,34 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `meerkat-tools`,
+  `meerkat-core`: the deferred tool catalog no longer shows a session a tool
+  its tool filters do not allow, a turn's own tool overlay included for that
+  turn. `tool_catalog_search` no longer returns such a tool and no longer
+  counts it in `total_matches`: the `visibility_status` `blocked_by_filter`,
+  which it returned for one, is no longer returned in any case.
+  `tool_catalog_load` answers such a tool with `rejected_reason`
+  `unknown_key`, as it answers a name no source provides, where it answered
+  `not_filterable` (or `not_deferred_eligible` for a tool that is never
+  deferred). `not_filterable` is no longer answered in any case;
+  `not_deferred_eligible` is still answered for a tool that is never
+  deferred and that the filters allow or the model still holds, and
+  `temporarily_unavailable` is unchanged for a tool or a load. The
+  deferred-catalog notice, and the `deferred_catalog_delta` and counts of
+  its `tool_config_changed` event, no longer name or count a tool the
+  session's own filters do not allow, and no longer offer a tool in a turn
+  whose overlay hides it: such a tool is offered at the first boundary whose
+  overlay does not hide it, and an overlay that only hides tools writes no
+  notice.
+  `ToolScope::staged_session_filters_allow_name`, the public predicate
+  behind the search and the load, keeps its signature and now also answers
+  false for a name the current turn's overlay hides. A search whose session
+  tool scope cannot be read returns no result and `empty_result_status`
+  `temporarily_unavailable`, where it returned every deferrable tool as a
+  `temporarily_unavailable` result.
+  `ToolCatalogLoadRejectedReason::NotFilterable` stays in the Rust type and
+  nothing produces it. See Security and the Upgrade notes.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -288,6 +316,82 @@ them.
   matches either enum exhaustively handles the new variant. The
   LayerDecision schema that adaptive mob packs bundle does not carry the
   value, so the schema stays the released one.
+
+- `meerkat-core`: the constant `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` is
+  removed (`meerkat_core::tool_catalog::DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD`):
+  the number of deferred-eligible tools no longer starts the deferred tool
+  catalog. See Changed.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: the deferred
+  tool catalog starts at a byte budget instead of at two deferrable tools.
+  `select_catalog_mode_from_snapshot` keeps its signature and selects the
+  deferred mode only while a tool source is connecting or from 8,192 bytes
+  of deferrable names, descriptions and schemas
+  (`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`, which keeps its name and
+  type and changes from 160 to 8,192). A session with a few small MCP or
+  registered tools therefore sends them in every request and no longer
+  defers them. See Changed and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`,
+  `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`, `meerkat-workgraph`:
+  `tool_catalog_search` and `tool_catalog_load` are in a model request only
+  while a deferrable tool waits behind the catalog, while a tool source is
+  connecting, or when a tool source asks for them always; a call of one
+  outside that is refused with `access_denied`. A session on the RPC server
+  (`rkat-rpc`, `rkat rpc`) with nothing to defer carries neither, and a
+  session whose only deferrable tools are WorkGraph's two attention tools
+  carries those two and no control tool. The WorkGraph tool surface no
+  longer sets `ToolCatalogCapabilities::may_require_catalog_control_plane`.
+  See Changed and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`,
+  `meerkat-session`: `Agent::dispatch_external_tool_call`,
+  `Agent::dispatch_external_tool_call_with_timeout_policy` and the session
+  services' methods of the same names now commit a deferred tool load the
+  call made before they return, and can answer a tool error where they
+  answered an acceptance: when the commit is refused, or when the session's
+  active tool filter hides every tool of the load. See Fixed.
+- Behaviour-only (not measured by the gate): `meerkat`:
+  `ServiceMemberLiveHost::new` installs a channel refresher on the
+  `LiveAdapterHost` it is given, replacing one the host already had. See
+  Fixed.
+- Behaviour-only (not measured by the gate): `meerkat-live`:
+  `LiveAdapterHost`, for a live tool call that loaded deferred tools for the
+  session, asks the installed refresher to queue a `Refresh` before it
+  submits the call's result, and adds `availability`, `availability_note`
+  and `tool_availability` to that result's JSON body. See Fixed.
+
+- Behaviour-only (not measured by the gate): `meerkat-memory`,
+  `meerkat-mob`, `meerkat-mob-mcp`:
+  `MemorySearchDispatcher::tool_catalog_capabilities`,
+  `MemberUpcallToolDispatcher::tool_catalog_capabilities` and
+  `AgentMobToolSurface::tool_catalog_capabilities` now answer
+  `exact_catalog: true` where they answered the trait default (`false`), so
+  a dispatcher composed over them can report an exact catalog and its
+  session can use the deferred tool catalog. See Changed and the Upgrade
+  notes.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a mob member,
+  or a session with memory search, whose tool dispatcher mounts the shell
+  monitor tool (`monitor_start`) and which runs on a realm with durable
+  shell jobs is now refused the live bridge (a live channel opened under an
+  execution identity, `mob/member_live_open` with `execution_identity`),
+  before any provider request or tool dispatch, when its tool catalog is
+  exact. The refusal names the tool: `live bridge execution cannot run a
+  tool that has no Fast execution mode; this member has: monitor_start`.
+  With durable jobs the monitor tool runs detached only, and a live bridge
+  operation runs Fast tool calls only. The rule is not new: a member
+  without mob tools and memory search was already refused for such a tool.
+  It reaches these members now because their tool catalog is exact (see
+  Changed); a member whose catalog is not exact is not refused, and each
+  call of the tool inside an operation is refused instead (see Fixed). No
+  stock composition mounts `monitor_start`: it is off by default, and only
+  a host that builds its own tool dispatcher with a policy that enables it
+  (`ToolPolicyLayer::enable_tool`) has such a member. The one way out is
+  not to mount the tool on a member that uses the live bridge: leave
+  `monitor_start` out of the tool policy of the dispatcher that member is
+  built with. A member whose `shell` can run background jobs is not
+  affected (see Changed).
 
 ### Added
 
@@ -1164,6 +1268,61 @@ them.
   session's level (`turn/start`, `mob/turn_start`) goes through
   `resolve_session_provider_params`, the rule it wraps.
 
+- `meerkat-core`, `meerkat-mcp`, `meerkat-tools`: for Rust tool sources and
+  hosts, how a source needs the deferred catalog's control tools shown (see
+  Changed). `AgentToolDispatcher::tool_catalog_control_plane` is a new
+  defaulted method that answers with the new enum
+  `meerkat_core::ToolCatalogControlPlane`: `Always`, `OnDemand` or `Never`.
+  The enum is `#[non_exhaustive]`, so a match on it outside `meerkat-core`
+  needs a wildcard arm. The default answers `Always` for a source that sets
+  `ToolCatalogCapabilities::may_require_catalog_control_plane` and `Never`
+  otherwise, so existing sources behave as before; the flag keeps meaning
+  "mount the control tools for this source".
+  `McpRouterAdapter::with_control_plane_on_demand` (`meerkat-mcp`) makes a
+  router ask on demand.
+  `CatalogControlDispatcher::should_announce_for` (`meerkat-tools`) says
+  whether a session's system prompt explains the control tools.
+
+- `meerkat-core`: a deferred tool load can be committed outside a run of the
+  agent loop, and its result can say where each tool is callable.
+  `ToolVisibilityOwner::commit_requested_deferred_tools` (a provided method;
+  its default refuses, so an owner that does not implement it never reports
+  a commit) commits the requested deferred tools that still wait for a
+  boundary and leaves a staged filter waiting;
+  `GeneratedToolVisibilityOwner::commit_requested_deferred_tools` and
+  `ToolScope::commit_requested_deferred_tools` forward to it.
+  `ToolDispatchOutcome::deferred_tool_load` reports the names a
+  `tool_catalog_load` call accepted as a `DeferredToolLoad` with its
+  `DeferredToolLoadStage` (`Requested`, or `LoadedForSession` once the owner
+  of the boundary after an external call committed them);
+  `ToolDispatchOutcome::with_deferred_tool_load` sets it. A tool of a load
+  that cannot be called where the load was made is one of the load's refused
+  tools (`DeferredToolLoad::refuse`, `DeferredToolLoad::refused`,
+  `DeferredToolLoadRefusal`, `DeferredToolLoadRefusalReason`:
+  `HiddenBySessionFilter`, `RefusedByConversationProvider`). A host that
+  knows the conversation states the result with
+  `ToolDispatchOutcome::with_deferred_load_availability` and
+  `DeferredToolLoadAvailability` (`available_now`,
+  `loaded_not_in_this_conversation`, `not_loaded`): one `tool_availability`
+  entry per tool and the summary field `availability`, which is
+  `DEFERRED_TOOL_LOAD_AVAILABILITY_MIXED` (`mixed`) when the tools differ;
+  the sentence the model reads beside `mixed` is
+  `meerkat_core::tool_catalog::DEFERRED_TOOL_LOAD_AVAILABILITY_MIXED_NOTE`.
+- `meerkat-core`: `LiveAdapter::refused_tools` (a provided method; its
+  default refuses none) and `LiveToolRefusal`: a live adapter says, without
+  provider I/O, which tool definitions its provider would refuse.
+- `meerkat-live`: `LiveChannelRefresher`, `LiveChannelRefreshError`,
+  `LiveAdapterHost::set_live_channel_refresher`,
+  `LiveAdapterHost::has_live_channel_refresher` and
+  `LiveAdapterHost::tools_refused_by_channel`. The live adapter host asks
+  the installed refresher to refresh a channel whose session loaded deferred
+  tools in a live tool call, before it submits the load's result; the
+  refresher returns the tools it left out because the channel's provider
+  would refuse them. `meerkat::surface::ServiceMemberLiveHost::new` installs
+  one over its own refresh pipeline
+  (`LiveOrchestrator::refresh_live_channel_after_tool_load`); a host that
+  composes `LiveAdapterHost` without it installs its own (see Fixed).
+
 ### Changed
 
 - Provider error text (see Security): in the errors of the OpenAI
@@ -1493,6 +1652,162 @@ them.
   resolved for the route of the session's own client, when that client
   writes the summary. A summary that a bound controller writes does not
   carry the level.
+
+- `meerkat-core`: the deferred tool catalog now starts at a byte budget. A
+  session with an exact tool catalog leaves its deferrable tools out of the
+  model request (and sends `tool_catalog_search` and `tool_catalog_load`
+  instead) while a tool source is still connecting, as before, or when the
+  names, descriptions and schemas of those tools together reach 8,192 bytes.
+  Until now two such tools, or one of 160 bytes, were enough. The budget
+  counts every deferrable tool whatever its source: MCP server tools, tools
+  a client registered over RPC with `tools/register` and a host's own
+  deferred-eligible tools. The `external_tools` of an RPC session are not
+  deferrable: they are in every request whatever their size, as before, and
+  the budget does not count them.
+  - Who changes: a session whose deferrable tools are under the budget (a
+    few small MCP or registered tools) now gets them in every request and
+    calls them directly, where before the model had to search and load them
+    first. Measured in the test rows: two small tools (294 bytes) and ten
+    medium ones (4,260 bytes) stay in the request; twenty medium ones (8,530
+    bytes) are deferred. The same holds for a session whose only deferrable
+    tools are WorkGraph's `workgraph_attention_reassign` and
+    `workgraph_policy_escalate`: both are in every request now, and their
+    calls are still refused outside an attention turn.
+  - Who does not change: a session over the budget, a session with a source
+    still connecting, and a session whose tool sources do not report an
+    exact catalog. No session is moved to the deferred catalog by this
+    change.
+  - Why: the mode adds about 1.2 KB to every request and two model requests
+    to a tool's first use, so below the budget it cost more than it saved.
+  - The number is a constant, not a setting.
+
+- `meerkat-core`, `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`,
+  `meerkat-workgraph`: the catalog control tools are in a model request
+  only when they are useful.
+  `tool_catalog_search` and `tool_catalog_load` are mounted by the same rule
+  as before (an exact catalog with a deferrable tool, a tool source that is
+  still connecting, or a tool source that declares them). They are now sent
+  only while a deferrable tool waits behind the catalog, while a tool source
+  is still connecting, or when a tool source declares that it needs them.
+  Otherwise they are left out, together with the system prompt line about
+  them, and a call of one is refused like a call of any tool the session
+  does not show (`access_denied`).
+  - Unchanged: a session with an MCP server that the build configured keeps
+    both control tools in every request (a router asks for them always
+    unless its host says otherwise), and so does every host that composes
+    its own router.
+  - Changed on the RPC server (`rkat-rpc`, `rkat rpc`): a session's
+    requests carry no catalog control tools until something can be
+    deferred. The server gives every session a router so that a server can
+    be added later (`mcp/add`), and that router now asks for the control
+    tools on demand, as the tools a client registers do. A session with no
+    server and a few small registered tools (`tools/register`,
+    `external_tools`) sends neither control tool and no prompt line about
+    them. When a later registration or a server added later takes the
+    session over the byte budget, the next request carries both control
+    tools, the tools that arrived wait behind the catalog, and the notice
+    that names them says how to load them. A mob member that runs on the
+    server follows the same rule for the tools its connection registers,
+    whether they were registered before or after the member was spawned.
+  - Changed everywhere: once every deferred tool of a session is loaded,
+    the control tools leave its requests (unless a source asks for them
+    always), and a session whose only deferrable tools are WorkGraph's two
+    sends neither control tool.
+  - A session with no source that asks for the control tools and nothing to
+    defer when it starts mounts none, as before. Tools that arrive later
+    stay in every request for its lifetime, whatever their size; the next
+    session defers them.
+  - For Rust embedders (the new API is under Added): a wrapper forwards
+    its inner dispatcher's `tool_catalog_control_plane` answer and a
+    composition takes the strongest; a wrapper that forwards only the
+    capabilities turns an inner `OnDemand` into `Always`. The RPC callback
+    dispatcher keeps the flag
+    `ToolCatalogCapabilities::may_require_catalog_control_plane` and asks
+    on demand; the WorkGraph tool surface no longer sets the flag.
+
+- `meerkat-core`: a session whose catalog starts to defer keeps the tools
+  its model already had. When registered or MCP tools take a running session
+  over the byte budget, or a tool source starts connecting, the tools that
+  were in its requests stay there and are called with no load; only tools
+  that arrive with or after the change wait behind the catalog. Until now
+  every deferrable tool left the next request, and a call of one was refused
+  until the model loaded it. Crossing the budget up and down again never
+  hides a tool the model had.
+
+- `meerkat-tools`, `meerkat`: the text the model reads about
+  `tool_catalog_load` follows what a load does. The tool's description no
+  longer says a loaded tool appears "on the next boundary": an accepted tool
+  can be called from the model's next step, unless the result's
+  `availability` field, or the tool's entry in `tool_availability`, says it
+  cannot be called in this conversation yet. The system prompt line of a
+  session in the deferred mode says "to load the ones you need: a loaded tool
+  can be called from your next step, unless the load's result says
+  otherwise" where it said "to stage the ones you need", and the built-in
+  utilities skill says the same.
+
+- `meerkat-mob`, `meerkat-mob-mcp`, `meerkat-memory`: mob members with many
+  tools now send a short tool list and load the rest on demand. The mob
+  operator tools (`spawn_member` and the rest, for local members and for
+  members placed on a mob host), the agent mob tools (`fork_off`, `delegate`,
+  the `mob_*` tools) and `memory_search` now report an exact tool catalog, so
+  a member or session that mounts them follows the rule of every other
+  session (see the byte budget above): once its deferrable tools are over
+  the budget, their definitions are left out of the model request, which
+  carries `tool_catalog_search` and `tool_catalog_load` instead, and the
+  model loads a tool before it calls it. Until now a session with mob tools
+  or memory search sent every tool definition in every request, whatever
+  their size. The mob, memory, comms, schedule and builtin tools themselves
+  stay in every request. In a test, a member with builtins, comms, memory
+  search, the mob operator tools and 40 host tools sent 68 tool definitions
+  (64,940 bytes as JSON) per request before, and 30 (44,791 bytes) after.
+  Under the budget nothing changes: a member with a few small MCP or
+  registered tools, or whose only deferrable tools are WorkGraph's two
+  attention tools, keeps them in every request. No setting switches this
+  off. See Upgrade notes.
+
+- `meerkat-memory`: the same change reaches every session of the RPC server.
+  `rkat-rpc`, `rkat rpc` and the mob host mount memory search in every
+  session by default, so until now none of their sessions used the deferred
+  tool catalog, whatever tools they had, and neither the byte budget nor the
+  on-demand control tools described above reached them. Now a session there
+  whose deferrable tools (tools a client registered with `tools/register`,
+  MCP server tools) are over the byte budget sends `tool_catalog_search` and
+  `tool_catalog_load` instead of their definitions, and the model loads a
+  tool before it calls it. That includes sessions started through the Python
+  and TypeScript SDKs, which run `rkat-rpc`. A session there under the
+  budget, or with no deferrable tool, is unchanged. See Upgrade notes.
+
+- `meerkat-core`, `meerkat-mob-mcp`: a helper or member that inherits its
+  parent's tools (`delegate` and `mob_spawn_member` with `tooling` in the
+  `inherit_parent`, `minimal` or `profile` mode) is capped by the parent's
+  tools, the ones behind the parent's deferred tool catalog included. The
+  cap was taken from the tools the parent's model sees, which was the same
+  set as long as an agent with the mob tools never deferred; now that such
+  an agent can defer, a tool it can load at any time stays in the cap, so
+  its helper can see or load it. Whether the helper defers is decided for
+  the helper, by the rule of every session. A tool the parent's own filter
+  hides, and a tool only a scoped grant opened for the parent, stay outside
+  the cap as before
+  (`ParentToolCompositionAuthority::authorize_inherited_tool_visibility`
+  and `authorize_inherited_tool_visibility_with_overlays`;
+  `snapshot_visible_tools` still returns the visible tools only).
+
+- `meerkat-core`: more members can run live bridge operations (a live
+  channel opened under an execution identity, where the member's own model
+  does the delegated work). A member with an exact tool catalog is refused
+  the live bridge for a tool only when that tool has no Fast execution mode
+  at all, and the refusal names the tool; a member whose catalog is not
+  exact is not checked, as before. A tool that runs Fast and can also run
+  detached or streaming no longer excludes its member: the rule is applied
+  to each call instead, for every member (see Fixed). Until now a member
+  with an exact tool catalog was refused for every tool whose contract was
+  not Fast only, which a `shell` with durable background jobs is, while a
+  member with mob tools or memory search was never checked. Since mob
+  members and sessions with memory search now have exact catalogs (above),
+  the old rule would have refused every such member that has a shell with
+  durable jobs. A member with
+  ordinary-turn hooks, or one that shows a tool a client serves over a
+  callback route, is refused as before.
 
 ### Deprecated
 
@@ -1931,6 +2246,103 @@ them.
   account also no longer holds the earlier sign-in's token in that window
   (it was refused there and served no request).
 
+- `meerkat-core`, `meerkat-live`, `meerkat`, `meerkat-tools`,
+  `meerkat-runtime`: a deferred tool loaded inside a live (realtime)
+  conversation can be called in that conversation (0.6.6 through 0.9.14). A
+  session whose tools form an exact catalog and whose deferrable tools (MCP
+  tools, tools a client registered) are over the deferred catalog's byte
+  budget shows the model the catalog control tools and loads the rest on
+  demand. In a live conversation that did not work: `tool_catalog_load`
+  answered `accepted`, and answered it again on a second try, but the load
+  waited for the next model call of an ordinary turn, which a live
+  conversation never makes, and the provider kept the tool list the
+  conversation was opened with. A call of the tool was refused
+  (`access_denied`) until an ordinary turn had run and the channel was
+  refreshed or reopened. Now:
+  - the load is committed for the session before the tool call returns,
+    through the machine's existing deferred-name commit. Only requested
+    names are committed (the ones this call requested and any an earlier
+    turn left waiting); a staged tool filter still waits for the next model
+    call of an ordinary turn, and no row is added to the transcript;
+  - the live host refreshes the channel before it submits the load's result,
+    so the provider gets the new tool list first (the realtime adapter's
+    existing `session.update`) and the model can call the tool in the same
+    exchange;
+  - the result says what is true, per tool. It carries `tool_availability`,
+    one entry per tool, and the summary field `availability` (the one value
+    when every tool has the same, `mixed` otherwise). `available_now`: the
+    update of the conversation's tool list was accepted by the channel's
+    queue ahead of the result. `loaded_not_in_this_conversation`: the tool is
+    loaded for the session but is not on the conversation's tool list,
+    because the list could not be updated (no channel refresher is
+    installed, or the refresh was refused or not queued within the tool
+    timeout) or because the realtime adapter's check refused the tool's
+    parameter schema.
+    `not_loaded`: the session's active tool filter still hides the tool, and
+    the request stays recorded for the next ordinary turn. A load that
+    cannot be committed, or all of whose tools the filter hides, is a tool
+    error. A second load of a loaded tool, made while the control tools are
+    still shown, refreshes again and reports the same; when a load leaves
+    nothing behind the catalog, the update takes the control tools off the
+    conversation's tool list with it (unless a tool source asks for them
+    always);
+  - a load does not end its conversation over a tool schema the realtime
+    adapter's own check refuses. Before the update is queued the adapter
+    runs its schema normalizer for the provider over each tool; a tool whose
+    parameter schema it refuses (a schema whose root is not an object, for
+    one) is left out of the update and named in the result with the reason.
+    That check reads the schema and nothing else: a definition the provider
+    refuses for another reason (a description longer than the provider
+    takes, for one) is still sent, and the channel closes when the provider
+    refuses the update. (`live/refresh` still sends the session's whole tool
+    list and ends the channel when the provider refuses it.) `available_now`
+    means accepted, not applied: a channel that then cannot apply the update
+    closes as it does for `live/refresh`, when the provider refuses the
+    update, or when the session's model or provider changed, or its
+    transcript or system prompt was rewritten, since the channel was opened;
+  - only the boundary after the tool call says a tool is loaded. A
+    dispatcher that reports a load complete goes through the same commit and
+    the same check that the tool is visible.
+
+  Ordinary turns are unchanged. `ServiceMemberLiveHost` installs the
+  refresher, so the mob host daemon, `rkat-rpc` and Meta's gateways need no
+  change. A Rust host that composes `LiveAdapterHost` without
+  `ServiceMemberLiveHost` calls `set_live_channel_refresher` to get the
+  in-conversation update; without it loads report
+  `loaded_not_in_this_conversation`. Not proven by a test: that the realtime
+  provider applies a tool list update sent between a function call and its
+  continuation (the tests prove the order in which the adapter receives the
+  update and the result).
+
+- `meerkat-core`: a live bridge operation (a live channel opened under an
+  execution identity, where the member's own model does the delegated work
+  on a disposable transcript) no longer fails when its model loads a deferred
+  tool (0.8.30 through 0.9.14). The operation commits nothing to the session,
+  and it treated the load's request as a forbidden change: the whole
+  operation ended with `live bridge tools may append output to the
+  disposable operation transcript but may not mutate deferred-tool or mob
+  authority state`. The load now joins that operation's own tool list: the
+  tool is in the operation's next model call, the session's visibility state
+  is untouched, and a later operation loads it again. A tool the session's
+  filters hide, a tool whose source changed since the model was shown it, or
+  a tool the bridge profile cannot run (callback provenance, or no Fast
+  execution mode) is refused as that call's tool error, and the operation
+  goes on.
+
+- `meerkat-core`: a background `shell` call inside a live bridge operation
+  no longer starts a job (through 0.9.14). A live bridge operation cannot
+  hold asynchronous work, but the check for that ran after the tool call: a
+  member with mob tools or memory search whose model called `shell` with
+  `background: true` had the job submitted and running, and then the whole
+  operation ended with `live bridge tools may not create asynchronous
+  operations or callback continuations`. Now a call whose resolved execution
+  is not Fast (a background `shell` command, a streaming call) is refused
+  before anything is dispatched, as that call's own tool error (`a live
+  bridge operation runs Fast tool calls only: ...`): no job is submitted,
+  the model reads the error, and the operation goes on. A `shell` call
+  without `background` runs as before. The check after the tool call stays
+  as a last line for a tool that reports asynchronous work from a Fast call.
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
@@ -2080,6 +2492,23 @@ them.
 
   Affects 0.3.0 through 0.9.14.
 
+- `meerkat-tools`, `meerkat-core`: a session's deferred tool catalog holds
+  only the tools its tool filters allow, as the tool list of a session
+  without a deferred catalog does. A session no longer finds a tool its
+  filters do not allow through the catalog: `tool_catalog_search` does not
+  return or count it, `tool_catalog_load` answers as for a name no source
+  provides, and the deferred-catalog notice and its `tool_config_changed`
+  event do not offer or count it. The filters are the ones the tool scope
+  composes for every session: the tools the session's model can use, an
+  inherited ceiling, the launch tool policy, the host's staged filter, the
+  scoped tool grant gate and, for one turn, that turn's tool overlay. The
+  tool is findable and loadable again from the moment the filters allow it,
+  with no rebuild. A search whose session tool scope cannot be read names no
+  tool. A call of such a tool is refused as before. See Breaking and the
+  Upgrade notes.
+
+  Affects 0.5.2 through 0.9.14.
+
 - Mob: the fork and resume launches of `spawn_member` and
   `spawn_many_members` keep to the host's member tool audience
   (`MobBuilder::with_member_tool_audience`). A fork launch (a placed
@@ -2210,6 +2639,18 @@ them.
   the document's top-level key: `error` is a failure, `status`
   (`"pending_tool_call"`) a run waiting for an external tool result, and
   anything else the run result. Text and HTML output are unchanged.
+
+- A host, test or prompt that read `blocked_by_filter` in a
+  `tool_catalog_search` result, or `not_filterable` in a `tool_catalog_load`
+  answer, as its sign that a tool exists and is filtered no longer gets
+  either (see Security). From inside the session a filtered tool is absent:
+  no search row, and `unknown_key` on its load. A Rust host tells a filtered
+  tool from one no source provides with `tool_catalog_view` on the session
+  services, which still reports the tool as `Hidden`. A tool a turn's own
+  overlay blocks is absent in that turn and back in the next, and an
+  overlay that only hides tools writes no deferred-catalog notice. A tool whose
+  source is still connecting may not be findable yet: repeat the search once
+  `pending_sources` no longer names the source.
 
 - A definition update that drops a profile agents were created on. Before
   the update, keep the profile, or update those agents to another profile
@@ -2469,6 +2910,81 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- Deferred tool catalog (see Changed and Breaking):
+  - Sessions with a few small MCP or registered tools: the tools are in
+    every request and are called directly. A prompt or client that tells
+    the model to call `tool_catalog_search` or `tool_catalog_load` first
+    should stop doing so for such a session: the control tools are not in
+    its requests (unless its build configured an MCP server, or a host
+    composed its own router), and a call of one returns an `access_denied`
+    error result. A load of a tool that is already in the request, where
+    the control tools are present, still answers as a no-op.
+  - RPC clients: a session's requests carry no catalog control tools until
+    something can be deferred. They appear, with one notice that says how
+    to use them, when a registration or a server added with `mcp/add` takes
+    the session over 8,192 bytes of deferrable tools, or while a server is
+    connecting.
+  - A resumed session is built in the mode its tools select at that
+    moment. If its deferrable tools are over the budget then, a tool its
+    earlier turns called directly and never loaded waits behind the
+    catalog: its first request names the deferred tools in a notice, and a
+    call before a load returns `access_denied`, once. The same happens,
+    whatever the size of its tools, when one of its tool sources is still
+    connecting at that moment. Within a running session this does not
+    happen: the tools it had stay.
+  - Rust code that names `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` no longer
+    compiles; there is no replacement, the count rule is gone.
+  - Rust tool sources and wrappers: a wrapper around another dispatcher
+    should forward `tool_catalog_control_plane` beside
+    `tool_catalog_capabilities`. One that does not keeps today's behaviour
+    for its inner source (control tools always shown when the flag is
+    set).
+
+- Mob members, and sessions with memory search, now use the deferred tool
+  catalog when their deferrable tools are over its byte budget (see
+  Changed). After the upgrade such a member or session sends its requests
+  without the definitions of those tools:
+  - Who is affected: mob members with mob tools or memory search, and every
+    session of `rkat-rpc`, `rkat rpc` and the mob host (they mount memory
+    search by default), SDK sessions included, whose deferrable tools
+    together reach 8,192 bytes of names, descriptions and schemas. Under the
+    budget nothing changes: a client that registers a few small tools on an
+    RPC session still gets them in every request and calls them directly.
+  - Deferrable tools are MCP server tools, tools a client registered over
+    RPC with `tools/register`, a host's own deferred-eligible tools, and
+    WorkGraph's `workgraph_attention_reassign` and
+    `workgraph_policy_escalate`. WorkGraph's two count toward the budget
+    with the others; alone they are under it and stay in every request.
+  - The model finds a tool with `tool_catalog_search` and loads it with
+    `tool_catalog_load`. A loaded tool is in the next model request and
+    stays loaded, across a restart too. A call of a tool that is not loaded
+    returns an `access_denied` error result. In a live (realtime)
+    conversation a load takes effect in that conversation (see Fixed).
+  - A session resumed after the upgrade is in the same position: a tool its
+    earlier turns called directly is loaded once before its next call. Its
+    first request names the deferred tools in a notice.
+  - Nothing changes for a session that mounts a tool source without an exact
+    catalog (a host `AgentToolDispatcher` that keeps the trait default), and
+    for a member with neither builtin nor external tools: they still send
+    every definition.
+  - Rust hosts that read `tool_catalog_view`: these sessions now report
+    `exact_catalog: true`, and the `Deferred` mode when they defer.
+  - To keep a tool in every request whatever the budget: an RPC client
+    passes the tool in `session/create`'s `external_tools` (those entries
+    are inline) instead of registering it with `tools/register`; a Rust tool
+    source lists it with `ToolCatalogEntry::session_inline`. An MCP server's
+    tool has no such switch.
+  - Rust hosts that prepare a construction: for these members and sessions
+    `PreparedToolSurface::catalog` is now `PreparedToolCatalog::Complete`
+    where it was `VisibleOnly`, and `PreparedToolSurface::tools` gains
+    `tool_catalog_search` and `tool_catalog_load` when the composition can
+    need them (an MCP router, the RPC callback dispatcher, a deferrable
+    tool). A host that compares a prepared surface with a list it stored
+    under an earlier version must rebuild that list.
+  - Meta: its gateway gives every agent the mob tools and memory search, so
+    the same applies to Meta agents with many connector or SDK tools (see
+    Meta's changelog).
+
 ### Known limitations
 
 - An input queued behind a turn that fails at its start is not run. The
@@ -2652,6 +3168,22 @@ them.
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
   either direction: it rests on the version requirements Connect 0.9.14
   published.
+
+- A session that has loaded a tool whose parameter schema the realtime
+  provider refuses cannot open or refresh a live conversation until that
+  tool is corrected or removed at its source. A load made inside a live
+  conversation leaves such a tool out of that conversation and names it in
+  the load's result (see Fixed), but the tool stays loaded for the session,
+  and `live/open` and `live/refresh` send every loaded tool and fail when
+  the provider refuses one. Before this release the same state was reached
+  one ordinary turn later, when the staged load took effect.
+
+- A deferred tool loaded inside a live conversation whose definition the
+  realtime provider refuses for a reason other than its parameter schema (a
+  description longer than the provider takes, for one) ends that
+  conversation: the load answers `available_now`, the provider refuses the
+  tool list update, and the channel closes. The adapter's check before the
+  update reads the schema only.
 
 ## [0.9.14] - 2026-11-11
 

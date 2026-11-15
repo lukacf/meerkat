@@ -711,6 +711,37 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(state.clone())
     }
+
+    /// Commit the requested deferred tools through the machine's
+    /// `CommitDeferredNames` input alone. The staged filter and the
+    /// visibility revision are not touched: they are promoted by
+    /// [`Self::boundary_applied`] at the next model-call boundary, which
+    /// commits the same deferred names again without changing them.
+    fn commit_requested_deferred_tools(
+        &self,
+    ) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        let authority = self.dsl_authority_for_apply()?;
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let staged_deferred_authorities = guard.state().staged_deferred_authorities.clone();
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::CommitDeferredNames {
+                authorities: staged_deferred_authorities,
+            },
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "CommitDeferredNames"),
+        })?;
+
+        mirror_visibility_projection_from_authority(&mut state, &guard);
+        Ok(state.clone())
+    }
 }
 
 impl MeerkatMachine {

@@ -243,7 +243,8 @@ succeeds after it. `MobError` is `#[non_exhaustive]`. Details in
 - `delegate` and `mob_spawn_member` accept `tooling`: `{mode:
   "inherit_parent"}` (default, with optional `allow_overlay` and
   `deny_overlay`), `{mode: "minimal"}` (comms tools only) or `{mode:
-  "profile", source: ...}`, capped by the caller's visible tools. They also
+  "profile", source: ...}`, capped by the caller's tools (the ones its model
+  sees and the ones waiting behind its deferred tool catalog). They also
   accept an optional `placement`. Host-only fields such as `mcp_servers` and
   `rust_bundles` are refused, and managed hosts without a child tool policy
   refuse `mob_create` and `delegate` (`child_tool_policy_required`).

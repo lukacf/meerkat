@@ -255,6 +255,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s105_gpt_live_public_fork_and_merge_parallel, 105);
             scenario(e2e_smoke_s106_gpt_live_public_long_haul, 106);
             scenario(e2e_smoke_s107_gpt_live_public_stuck_close_convergence, 107);
+            scenario(e2e_smoke_s108_live_deferred_tool_load_rpc_ws, 108);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -4735,6 +4736,32 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 test_target: "gpt_live_public_e2e",
                 test_name: "e2e_scenario_107_gpt_live_public_stuck_close_convergence",
                 features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        108 => Some(&Spec {
+            id: Some(108),
+            lane: Lane::Smoke,
+            title: "Live adapter deferred tool loaded and called in one conversation",
+            timeout_secs: 600,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &["rkat-rpc"],
+            pre_commands: &[&[
+                "cargo",
+                "build",
+                "-p",
+                "meerkat-rpc",
+                "--features",
+                "comms,mcp,schedule,workgraph,mob",
+            ]],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_shared_realm",
+                test_name: "e2e_scenario_108_live_deferred_tool_load_rpc_ws",
+                features: &[],
                 all_features: false,
             },
         }),

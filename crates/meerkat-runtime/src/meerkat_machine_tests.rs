@@ -46450,6 +46450,111 @@ async fn machine_owned_visibility_owner_promotes_deferred_authority_at_boundary(
     );
 }
 
+/// A deferred tool requested outside a run (a live conversation's load) is
+/// committed through the machine's own `CommitDeferredNames` input, with no
+/// run in progress, and the commit covers names only: a staged filter and
+/// its revision keep waiting for the next model-call boundary.
+#[tokio::test]
+async fn machine_owned_visibility_owner_commits_requested_deferred_tools_outside_a_run() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let deferred_tool = runtime_deferred_tool("deferred_tool", "test");
+    let filtered_tool = runtime_deferred_tool("filtered_tool", "test");
+    seed_deferred_tool_authority_catalog(
+        &bindings,
+        vec![Arc::clone(&deferred_tool), Arc::clone(&filtered_tool)],
+        &["deferred_tool"],
+    );
+    let witness = meerkat_core::ToolVisibilityWitness {
+        last_seen_provenance: deferred_tool.provenance.clone(),
+    };
+    let filter =
+        meerkat_core::ToolFilter::Deny(["filtered_tool".to_string()].into_iter().collect());
+    adapter
+        .stage_persistent_filter(
+            &session_id,
+            filter.clone(),
+            [(
+                "filtered_tool".into(),
+                meerkat_core::ToolVisibilityWitness {
+                    last_seen_provenance: filtered_tool.provenance.clone(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .await
+        .expect("stage a filter");
+    adapter
+        .request_deferred_tools(
+            &session_id,
+            vec![deferred_load_authority("deferred_tool", witness.clone())],
+        )
+        .await
+        .expect("request should succeed");
+
+    let committed = bindings
+        .tool_visibility_owner()
+        .commit_requested_deferred_tools()
+        .expect("the commit should succeed outside a run");
+    assert!(
+        committed
+            .active_requested_deferred_names
+            .contains("deferred_tool"),
+        "the requested deferred tool is active: {committed:?}"
+    );
+    assert_eq!(committed.staged_filter, filter);
+    assert_ne!(
+        committed.active_filter, committed.staged_filter,
+        "the staged filter is not promoted by a deferred-tool commit"
+    );
+    assert_ne!(
+        committed.active_revision, committed.staged_revision,
+        "the visibility revision keeps waiting for the model-call boundary"
+    );
+
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            authority
+                .state()
+                .active_deferred_authorities
+                .get("deferred_tool"),
+            Some(&crate::meerkat_machine::dsl::ToolVisibilityWitness::from(
+                &witness
+            )),
+            "the commit is the generated authority's own state, not a copy beside it"
+        );
+        assert_ne!(
+            authority.state().active_filter,
+            crate::meerkat_machine::dsl::ToolFilter::from(&filter),
+            "the generated authority still holds the filter as staged only"
+        );
+    }
+
+    // The next model-call boundary promotes the filter and keeps the names.
+    let promoted = bindings
+        .tool_visibility_owner()
+        .boundary_applied()
+        .expect("boundary promotion should succeed");
+    assert_eq!(promoted.active_filter, filter);
+    assert_eq!(promoted.active_revision, promoted.staged_revision);
+    assert!(
+        promoted
+            .active_requested_deferred_names
+            .contains("deferred_tool")
+    );
+}
+
 #[tokio::test]
 async fn machine_owned_turn_overlay_routes_through_generated_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

@@ -1259,6 +1259,27 @@ pub trait LiveAdapter: Send + Sync {
     ) -> Result<(), LiveAdapterError> {
         Ok(())
     }
+
+    /// The tools of `tools` this adapter's provider would refuse, each with
+    /// the provider-side reason. A local check of the tool definitions: no
+    /// provider I/O.
+    ///
+    /// A host asks before it adds a tool the model loaded during the
+    /// conversation to the channel's tool list, so a definition the provider
+    /// refuses is withheld and reported instead of ending the conversation.
+    ///
+    /// The default names none: an adapter with no local check takes every
+    /// tool, and its provider decides when the list arrives.
+    fn refused_tools(&self, _tools: &[ToolDef]) -> Vec<LiveToolRefusal> {
+        Vec::new()
+    }
+}
+
+/// A tool a live adapter's provider would refuse, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveToolRefusal {
+    pub name: ToolName,
+    pub reason: String,
 }
 
 /// Errors from the adapter layer. These are transport/provider errors,

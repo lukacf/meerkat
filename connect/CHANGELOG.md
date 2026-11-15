@@ -33,6 +33,40 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+### Changed
+
+- A service approved without catalog visibility now has its approved
+  operations offered to the agent directly when the session's deferrable
+  tools are under Meerkat's deferred catalog budget (8,192 bytes of names,
+  descriptions and schemas; see Core's changelog). Before, they were offered
+  directly only when tiny (one tool under 160 bytes); otherwise they waited
+  behind the catalog and could not be used without the catalog grant. After
+  the upgrade such an approval works as approved: the agent sees the
+  approved operations and calls them, each call still checked against its
+  own grant. Over the budget nothing changes: the operations wait behind the
+  catalog, and using them needs the catalog selection.
+  `tool_catalog_search` and `tool_catalog_load` still need the catalog
+  selection and reveal no more than before: in this release they no longer
+  find or load a tool the session's tool filters do not allow (see Core's
+  changelog). An operation outside the reviewed
+  set is still in no request, and a call of it is refused.
+
+- Behaviour-only: the tool lists stored with an installation made with an
+  earlier release do not cover this release's tool surface for one member
+  shape. For a member whose profile switches on the mob tools (or the
+  memory tools, where the realm allows them) beside a tool source that can
+  need the catalog control tools (an MCP router, a deferrable tool), Core
+  now prepares a complete catalog that includes `tool_catalog_search` and
+  `tool_catalog_load` (see Core's changelog), and an installed member is
+  checked against the tool list its setup stored. Nothing supported is
+  affected: an installed application keeps the release it was installed
+  with, an in-place update to this release is refused at Stage as every
+  runtime change is, and a new installation (a new, empty folder, with
+  fresh state) compiles its own lists. Running this release's runtime under
+  an installation made with an earlier release is not supported, and such a
+  member then refuses to build with `prepared tool has no selected
+  installed-artifact association`.
+
 ### Fixed
 
 - On macOS, a prompt whose input is a socket failed with "Operation not

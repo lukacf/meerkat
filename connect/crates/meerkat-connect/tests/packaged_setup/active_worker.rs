@@ -396,6 +396,8 @@ pub(super) async fn run() -> Result {
         trace: fixture.root.join("native-dispatch.jsonl"),
         stall: std::sync::atomic::AtomicBool::new(false),
         started: tokio::sync::Notify::new(),
+        denied: PREPARATION_DENIED,
+        shown: Mutex::new(Vec::new()),
     });
     let connection = fixture.connection(&prepared.artifact_directory, &probe)?;
     let options = connection.preparation_session(SessionOptions {
@@ -410,6 +412,11 @@ pub(super) async fn run() -> Result {
             ..Default::default()
         },
     })?;
+    // Host side: only the preparation ceiling is in force here. This session
+    // is the positive control for the caller's ceiling of the composition
+    // acceptance: `enter` finds and loads `setup_catalog_entry`, which that
+    // ceiling hides.
+    require_setup_ceiling(&options, PREPARATION_DENIED)?;
     let session = ConnectSession::open_with_config(storage, Config::default(), options).await?;
     let entered = enter(&session, &fixture, &probe).await;
     let close = session.close();
@@ -427,5 +434,7 @@ pub(super) async fn run() -> Result {
         "native_close":closed.as_ref().map(|value| format!("{value:?}")), "failure_cleanup_used":result.is_err()}));
     // Preserve a native failure's retained owner in the returned error.
     closed.ok_or("original native close has no terminal observation")??;
-    result
+    result?;
+    // The model side of the preparation ceiling over the whole acceptance.
+    probe.require_no_denied_name_shown()
 }

@@ -274,6 +274,30 @@ where
     }
 }
 
+const LIVE_BRIDGE_CALLBACK_TOOL_REFUSAL: &str =
+    "live bridge execution does not support callback-provenance tools";
+const LIVE_BRIDGE_NO_FAST_MODE_TOOL_REFUSAL: &str =
+    "live bridge execution cannot run a tool that has no Fast execution mode";
+
+/// A tool a client serves over a callback route: the experimental live
+/// bridge profile runs none.
+fn is_callback_provenance_tool(tool: &crate::types::ToolDef) -> bool {
+    tool.provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.kind == crate::ToolSourceKind::Callback)
+}
+
+/// Whether the experimental live bridge profile can run a tool at all: the
+/// tool has a Fast execution mode. A tool that can also run detached or
+/// streaming is not excluded for that. A call of it that resolves to
+/// anything but Fast is refused when it is dispatched, as that call's own
+/// tool error (`refuse_non_fast_live_bridge_call` in `agent.rs`).
+fn can_run_fast(execution: &crate::ToolExecutionContract) -> bool {
+    execution
+        .supported_modes()
+        .contains(&crate::ToolExecutionMode::Fast)
+}
+
 fn precheck_visible_tool_call<T>(
     dispatcher: &T,
     visible_names: &ToolNameSet,
@@ -1426,13 +1450,96 @@ where
         let context = self
             .observed_tool_dispatch_context(self.operation_review.clone())
             .outside_round();
+        let call_id = call.id.clone();
         let outcome = self
             .dispatch_host_tool_call(call, timeout_policy, context)
             .await?;
         if !outcome.session_effects.is_empty() {
             self.apply_session_effects(&outcome.session_effects, None)?;
         }
-        Ok(outcome)
+        match outcome.deferred_tool_load() {
+            Some(load) => {
+                self.commit_deferred_tool_load_after_external_call(call_id, outcome, load)
+            }
+            None => Ok(outcome),
+        }
+    }
+
+    /// The boundary an external call's `tool_catalog_load` gets.
+    ///
+    /// A load made by the agent loop takes effect at the loop's next
+    /// model-call boundary. An external call (a live conversation's tool
+    /// call) is followed by no such boundary, so the request it made, and
+    /// any request still waiting from before, is committed here, before the
+    /// call returns. The session actor runs external calls only between
+    /// turns, so no model call can see the set half applied. Only the
+    /// requested deferred tools are committed: a staged filter keeps its own
+    /// boundary, and nothing is added to the transcript.
+    ///
+    /// Every reported load passes through here, whatever stage its
+    /// dispatcher gave it: only this boundary says a tool is loaded for the
+    /// session, after the commit and the check that the tool is visible.
+    ///
+    /// The result says what is true, per tool. Committed and visible: the
+    /// outcome reports the tool loaded for the session. Committed but still
+    /// hidden by the session's active tool filter: the tool is named as not
+    /// loaded, and when the load holds no other tool the call is a tool
+    /// error. Commit refused: a tool error. A refused request stays recorded
+    /// for the next model-call boundary.
+    fn commit_deferred_tool_load_after_external_call(
+        &mut self,
+        call_id: String,
+        outcome: ToolDispatchOutcome,
+        load: crate::ops::DeferredToolLoad,
+    ) -> Result<ToolDispatchOutcome, AgentError> {
+        if let Err(error) = self.tool_scope.commit_requested_deferred_tools() {
+            return Ok(crate::ops::terminal_tool_outcome_for_error(
+                call_id,
+                ToolError::ExecutionFailed {
+                    message: format!(
+                        "the requested tools could not be loaded now ({error}); the request \
+                         stays recorded and takes effect at the session's next model call"
+                    ),
+                },
+            ));
+        }
+        self.publish_committed_visible_set().map_err(|error| {
+            AgentError::InternalError(format!(
+                "failed to persist canonical tool visibility state after a deferred tool load: {error}"
+            ))
+        })?;
+        let visible_tool_names = self
+            .tool_scope
+            .visible_tool_names()
+            .map_err(|error| AgentError::InternalError(error.to_string()))?;
+        let hidden = load
+            .names()
+            .iter()
+            .filter(|name| !visible_tool_names.contains(name.as_str()))
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        if !hidden.is_empty() && hidden.len() == load.names().len() {
+            return Ok(crate::ops::terminal_tool_outcome_for_error(
+                call_id,
+                ToolError::ExecutionFailed {
+                    message: format!(
+                        "these tools are requested for the session but cannot be called now: {}; \
+                         they become callable at the session's next model call if its tool \
+                         filter allows them",
+                        hidden.join(", ")
+                    ),
+                },
+            ));
+        }
+        let load = hidden.iter().fold(load, |load, name| {
+            load.refuse(
+                name,
+                crate::ops::DeferredToolLoadRefusalReason::HiddenBySessionFilter,
+            )
+        });
+        Ok(outcome
+            .with_deferred_tool_load(load.loaded_for_session())
+            .with_deferred_load_refusals_stated())
     }
 
     async fn dispatch_host_tool_call(
@@ -1590,9 +1697,16 @@ where
         let capabilities = self.tools.tool_catalog_capabilities();
         let exact_catalog = capabilities.exact_catalog;
         let catalog = self.tools.tool_catalog();
+        let pending_sources = if exact_catalog {
+            self.tools.pending_catalog_sources()
+        } else {
+            Arc::from([])
+        };
         let projection = crate::tool_catalog::catalog_boundary_projection(
             capabilities,
+            self.tools.tool_catalog_control_plane(),
             exact_catalog.then_some(catalog.as_ref()),
+            pending_sources.as_ref(),
             crate::select_tool_catalog_mode(self.tools.as_ref()),
         );
         let mode = if projection.defers {
@@ -1605,17 +1719,14 @@ where
             .preview_catalog_visibility(
                 self.tools.tools(),
                 projection.control_tool_names,
+                projection.control_tools_always_visible,
                 projection.deferred_tool_names,
             )
             .ok()?;
         Some(crate::ToolCatalogView {
             mode,
             exact_catalog,
-            pending_sources: if exact_catalog {
-                self.tools.pending_catalog_sources().to_vec()
-            } else {
-                Vec::new()
-            },
+            pending_sources: pending_sources.to_vec(),
             staged_changes_pending: preview.staged_changes_pending,
             entries: catalog
                 .iter()
@@ -1702,13 +1813,12 @@ where
                 "live bridge could not resolve the member's committed tool surface: {error}"
             ))
         })?;
-        if visible_tools.iter().any(|tool| {
-            tool.provenance
-                .as_ref()
-                .is_some_and(|provenance| provenance.kind == crate::ToolSourceKind::Callback)
-        }) {
+        if visible_tools
+            .iter()
+            .any(|tool| is_callback_provenance_tool(tool))
+        {
             return Err(AgentError::ConfigError(
-                "live bridge execution does not support callback-provenance tools".to_string(),
+                LIVE_BRIDGE_CALLBACK_TOOL_REFUSAL.to_string(),
             ));
         }
         if self.tools.tool_catalog_capabilities().exact_catalog {
@@ -1716,22 +1826,105 @@ where
                 .iter()
                 .map(|tool| tool.name.clone())
                 .collect::<std::collections::BTreeSet<_>>();
-            let has_non_fast_contract = self.tools.tool_catalog().iter().any(|entry| {
-                visible_names.contains(&entry.tool.name)
-                    && (entry.execution.default_mode() != crate::ToolExecutionMode::Fast
-                        || entry.execution.supported_modes().len() != 1
-                        || !entry
-                            .execution
-                            .supported_modes()
-                            .contains(&crate::ToolExecutionMode::Fast))
-            });
-            if has_non_fast_contract {
-                return Err(AgentError::ConfigError(
-                    "live bridge execution supports only tools with a Fast-only execution contract"
-                        .to_string(),
-                ));
+            let without_fast_mode = self
+                .tools
+                .tool_catalog()
+                .iter()
+                .filter(|entry| {
+                    visible_names.contains(&entry.tool.name) && !can_run_fast(&entry.execution)
+                })
+                .map(|entry| entry.tool.name.to_string())
+                .collect::<std::collections::BTreeSet<_>>();
+            if !without_fast_mode.is_empty() {
+                return Err(AgentError::ConfigError(format!(
+                    "{LIVE_BRIDGE_NO_FAST_MODE_TOOL_REFUSAL}; this member has: {}",
+                    without_fast_mode.into_iter().collect::<Vec<_>>().join(", ")
+                )));
             }
         }
+        Ok(())
+    }
+
+    /// Load deferred tools for the live bridge operation in progress, and
+    /// for it only.
+    ///
+    /// A live bridge operation commits nothing to the member's session, so a
+    /// `tool_catalog_load` its model makes cannot request tools from the
+    /// session's visibility owner. The accepted tools join the operation's
+    /// own frozen tool list instead: they are in its next model call, and the
+    /// next operation starts from the session's committed tools again.
+    ///
+    /// A name is loaded only when the session's committed filters allow the
+    /// tool, the model may see it, the request's witness (when the call
+    /// carried one) matches the tool, and the bridge profile can run it. If
+    /// any accepted name fails that, none is loaded and the refusal is
+    /// returned for the caller to give the call as its own tool error; the
+    /// operation goes on.
+    pub(crate) fn load_deferred_tools_for_live_bridge_operation(
+        &mut self,
+        load: &crate::ops::DeferredToolLoad,
+        requested: &[crate::DeferredToolLoadAuthority],
+    ) -> Result<(), ToolError> {
+        let loadable = self
+            .tool_scope
+            .host_visible_tools_result()
+            .map_err(|error| ToolError::ExecutionFailed {
+                message: format!("the operation's tool scope could not be read: {error}"),
+            })?;
+        let catalog = self
+            .tools
+            .tool_catalog_capabilities()
+            .exact_catalog
+            .then(|| self.tools.tool_catalog());
+        let mut tool_defs = self
+            .live_bridge_tool_defs
+            .as_ref()
+            .map(|tool_defs| tool_defs.to_vec())
+            .unwrap_or_default();
+        let mut refused = Vec::new();
+        for name in load.names() {
+            if tool_defs.iter().any(|tool| tool.name == *name) {
+                continue;
+            }
+            let Some(tool) = loadable
+                .iter()
+                .find(|tool| tool.name == *name && tool.audience.allows_model())
+            else {
+                refused.push(format!("{name} (not available to this session)"));
+                continue;
+            };
+            let witnessed = requested
+                .iter()
+                .find(|authority| authority.name == *name)
+                .is_none_or(|authority| authority.witness.last_seen_provenance == tool.provenance);
+            if !witnessed {
+                refused.push(format!("{name} (its source changed since it was listed)"));
+                continue;
+            }
+            if is_callback_provenance_tool(tool) {
+                refused.push(format!("{name} ({LIVE_BRIDGE_CALLBACK_TOOL_REFUSAL})"));
+                continue;
+            }
+            let no_fast_mode = catalog.as_deref().is_some_and(|catalog| {
+                catalog
+                    .iter()
+                    .any(|entry| entry.tool.name == *name && !can_run_fast(&entry.execution))
+            });
+            if no_fast_mode {
+                refused.push(format!("{name} ({LIVE_BRIDGE_NO_FAST_MODE_TOOL_REFUSAL})"));
+                continue;
+            }
+            tool_defs.push(Arc::clone(tool));
+        }
+        if !refused.is_empty() {
+            return Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "these tools cannot be loaded in this live operation: {}",
+                    refused.join("; ")
+                ),
+            });
+        }
+        self.live_bridge_tool_defs = Some(tool_defs.into());
         Ok(())
     }
 

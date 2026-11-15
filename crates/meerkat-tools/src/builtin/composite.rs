@@ -1046,6 +1046,13 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.external
+            .as_ref()
+            .map(|dispatcher| dispatcher.tool_catalog_control_plane())
+            .unwrap_or_default()
+    }
+
     fn pending_catalog_sources(&self) -> Arc<[String]> {
         self.external
             .as_ref()

@@ -20,6 +20,7 @@ use crate::ops_lifecycle::OperationCompletionWakeClass;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
+use crate::tool_scope::TurnOverlayInFilter;
 use crate::turn_execution_authority::{
     CallTimeoutVerdict, ContentShape, LlmFailureRecoveryKind, TurnExecutionEffect,
     TurnExecutionInput, TurnExecutionTransition, TurnFailureSource, TurnPhase, TurnPrimitiveKind,
@@ -8477,11 +8478,14 @@ where
             // The same projection a host's catalog view previews.
             let crate::tool_catalog::CatalogBoundaryProjection {
                 control_tool_names,
+                control_tools_always_visible,
                 deferred_tool_names,
                 ..
             } = crate::tool_catalog::catalog_boundary_projection(
                 catalog_capabilities,
+                self.tools.tool_catalog_control_plane(),
                 current_catalog.as_deref(),
+                current_pending_catalog_sources.as_ref(),
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
@@ -8493,23 +8497,31 @@ where
                 self.apply_tool_grant_open_set_at_boundary(ctx, &gate, &dispatcher_tools)
                     .await;
             }
-            let apply_result = match self.tool_scope.promote_staged_visibility() {
+            // A boundary that starts to defer keeps the tools the model
+            // already had: they are requested like loaded tools before the
+            // staged visibility promotes.
+            let apply_result = match self
+                .tool_scope
+                .adopt_visible_tools_before_deferral(&dispatcher_tools, &deferred_tool_names)
+                .and_then(|()| self.tool_scope.promote_staged_visibility())
+            {
                 Ok(visibility_state) => {
-                    if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
-                        self.tool_scope.apply_staged_projection_with_previous(
-                            dispatcher_tools.clone(),
-                            control_tool_names.into_iter().collect(),
-                            deferred_tool_names.into_iter().collect(),
-                            previous_visibility_state,
-                            &visibility_state,
-                        )
-                    } else {
-                        self.tool_scope.apply_staged_projection(
-                            dispatcher_tools.clone(),
-                            control_tool_names,
-                            deferred_tool_names,
-                            &visibility_state,
-                        )
+                    // Without the state read before the promotion, read the
+                    // promoted one as the previous state too.
+                    match previous_visibility_state
+                        .map_or_else(|| self.tool_scope.visibility_state(), Ok)
+                    {
+                        Ok(previous_visibility_state) => {
+                            self.tool_scope.apply_staged_catalog_projection(
+                                dispatcher_tools.clone(),
+                                control_tool_names.into_iter().collect(),
+                                control_tools_always_visible,
+                                deferred_tool_names.into_iter().collect(),
+                                &previous_visibility_state,
+                                &visibility_state,
+                            )
+                        }
+                        Err(err) => Err(err),
                     }
                 }
                 Err(err) => Err(err),
@@ -8565,6 +8577,22 @@ where
                             // gated by its provenance from the moment it
                             // appears.
                             let visibility_state = self.tool_scope.visibility_state().ok();
+                            // The notice offers what a catalog search finds:
+                            // a name the session's filters do not allow is
+                            // not in its deferred catalog. The scope's one
+                            // predicate decides for search, load and this
+                            // notice. It is read once for this boundary;
+                            // when it cannot be read, nothing is named.
+                            let session_filter = self.tool_scope.staged_session_filter().ok();
+                            // What the session was offered is a record of
+                            // its own filters and its catalog: a turn's
+                            // overlay alone neither takes a name out of it
+                            // nor puts one in. A name this turn's overlay
+                            // hides is not offered in this turn; unless the
+                            // session was offered it before, it joins the
+                            // record at the first boundary whose overlay
+                            // does not hide it.
+                            let offered_before = &self.last_hidden_deferred_catalog_names;
                             current_catalog
                                 .as_ref()
                                 .map(|catalog| {
@@ -8595,6 +8623,17 @@ where
                                     )
                                     .into_iter()
                                     .filter(|name| !closed_by_grant_gate.contains(name))
+                                    .filter(|name| {
+                                        session_filter.as_ref().is_some_and(|filter| {
+                                            filter
+                                                .allows(name.as_str(), TurnOverlayInFilter::Ignored)
+                                                && (offered_before.contains(name)
+                                                    || filter.allows(
+                                                        name.as_str(),
+                                                        TurnOverlayInFilter::Applied,
+                                                    ))
+                                        })
+                                    })
                                     .collect()
                                 })
                                 .unwrap_or_default()
@@ -8684,6 +8723,31 @@ where
                             notice_parts.push(format!(
                                 "sources still connecting: {}",
                                 pending_sources.join(", ")
+                            ));
+                        }
+                        // A session whose control tools enter its requests at
+                        // this boundary was built while they were left out,
+                        // so its system prompt never explained them. Say it
+                        // here, appended, where the notice names what waits.
+                        let control_tools_entered =
+                            current_catalog.as_ref().is_some_and(|catalog| {
+                                catalog
+                                    .iter()
+                                    .filter(|entry| {
+                                        entry.plane == crate::tool_catalog::ToolPlaneClass::Control
+                                    })
+                                    .any(|entry| {
+                                        visible_names_set.contains(&entry.tool.name)
+                                            && !applied
+                                                .previous_visible_names
+                                                .contains(&entry.tool.name)
+                                    })
+                            });
+                        if control_tools_entered && !notice_parts.is_empty() {
+                            notice_parts.push(format!(
+                                "use `{}` to find deferred tools and `{}` to load the ones you need",
+                                crate::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+                                crate::tool_catalog::TOOL_CATALOG_LOAD_NAME
                             ));
                         }
                         if !notice_parts.is_empty() {
@@ -10829,6 +10893,7 @@ where
         let mut deferred_failure = None;
         for (_, tc, dispatch_result, duration_ms) in dispatch_results {
             let mut tool_session_effects = Vec::new();
+            let mut deferred_tool_load = None;
             let mut timed_out_ms = None;
             let mut tool_result = match dispatch_result {
                 Ok(mut outcome) => {
@@ -10853,6 +10918,7 @@ where
                             operation: operation.clone(),
                         }
                     }));
+                    deferred_tool_load = outcome.deferred_tool_load();
                     all_async_ops.extend(outcome.async_ops);
                     tool_session_effects = outcome.session_effects;
                     outcome.result
@@ -10899,6 +10965,34 @@ where
 
             if tool_result.tool_use_id.is_empty() {
                 tool_result.tool_use_id = tc.id.clone();
+            }
+
+            // A live bridge operation commits nothing to the member's
+            // session, so a deferred tool its model loads is not requested
+            // from the session's visibility owner: it joins the operation's
+            // own tool list, for the operation's next model call. A tool the
+            // operation cannot take is that call's error, not the
+            // operation's.
+            if self.noncommitting_live_bridge_run {
+                let mut requested = Vec::new();
+                tool_session_effects.retain(|effect| match effect {
+                    crate::ops::SessionEffect::RequestDeferredTools { authorities } => {
+                        requested.extend(authorities.iter().cloned());
+                        false
+                    }
+                    _ => true,
+                });
+                if let Some(load) = deferred_tool_load.as_ref()
+                    && let Err(error) =
+                        self.load_deferred_tools_for_live_bridge_operation(load, &requested)
+                {
+                    let settlement_failures = std::mem::take(&mut tool_result.settlement_failures);
+                    tool_result = crate::ops::terminal_tool_outcome_for_error(
+                        tc.id.clone(),
+                        error.with_settlement_failures(settlement_failures),
+                    )
+                    .result;
+                }
             }
 
             // Reject unsupported video tool results BEFORE any
@@ -16935,6 +17029,16 @@ mod tests {
         }
     }
 
+    /// A description that alone puts a deferred-eligible tool over the
+    /// deferred catalog's byte budget, so a fixture with it selects the
+    /// deferred mode.
+    fn over_catalog_budget(text: &str) -> String {
+        format!(
+            "{text} {}",
+            "x".repeat(crate::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+        )
+    }
+
     struct DeferredLoadDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[crate::ToolCatalogEntry]>,
@@ -16958,9 +17062,9 @@ mod tests {
             let deferred_two = Arc::new(ToolDef {
                 audience: Default::default(),
                 name: "deferred_tool_two".into(),
-                description:
-                    "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
-                        .to_string(),
+                description: over_catalog_budget(
+                    "second deferred tool used only to keep the test dispatcher above the deferred catalog's byte budget.",
+                ),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
@@ -17030,24 +17134,53 @@ mod tests {
             call: ToolCallView<'_>,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             if call.name == "tool_catalog_load" {
+                // The names to request (the fixture's first tool when the
+                // call names none), and whether this stand-in claims the
+                // load is already complete instead of requesting anything.
+                #[derive(serde::Deserialize, Default)]
+                struct LoadArgs {
+                    #[serde(default)]
+                    names: Vec<String>,
+                    #[serde(default)]
+                    report_loaded: bool,
+                }
+                let args = call.parse_args::<LoadArgs>().unwrap_or_default();
+                let names = if args.names.is_empty() {
+                    vec!["deferred_tool".to_string()]
+                } else {
+                    args.names
+                };
                 let mut outcome = crate::ops::ToolDispatchOutcome::sync_result(ToolResult::new(
                     call.id.to_string(),
                     "loaded".to_string(),
                     false,
                 ));
+                if args.report_loaded {
+                    return Ok(outcome.with_deferred_tool_load(
+                        crate::ops::DeferredToolLoad::requested(
+                            names.iter().map(|name| name.as_str().into()),
+                        )
+                        .loaded_for_session(),
+                    ));
+                }
                 outcome
                     .session_effects
                     .push(crate::ops::SessionEffect::RequestDeferredTools {
-                        authorities: vec![crate::DeferredToolLoadAuthority::new(
-                            "deferred_tool",
-                            crate::ToolVisibilityWitness {
-                                last_seen_provenance: Some(crate::ToolProvenance {
-                                    kind: crate::ToolSourceKind::Callback,
-                                    source_id: "test".into(),
-                                    artifact: None,
-                                }),
-                            },
-                        )],
+                        authorities: names
+                            .iter()
+                            .map(|name| {
+                                crate::DeferredToolLoadAuthority::new(
+                                    name.as_str(),
+                                    crate::ToolVisibilityWitness {
+                                        last_seen_provenance: Some(crate::ToolProvenance {
+                                            kind: crate::ToolSourceKind::Callback,
+                                            source_id: "test".into(),
+                                            artifact: None,
+                                        }),
+                                    },
+                                )
+                            })
+                            .collect(),
                     });
                 return Ok(outcome);
             }
@@ -17078,9 +17211,9 @@ mod tests {
             let deferred_two = Arc::new(ToolDef {
                 audience: Default::default(),
                 name: "deferred_tool_two".into(),
-                description:
-                    "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
-                        .to_string(),
+                description: over_catalog_budget(
+                    "second deferred tool used only to keep the direct builder dispatcher above the deferred catalog's byte budget.",
+                ),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
@@ -28163,6 +28296,1494 @@ mod tests {
         }
     }
 
+    /// A deferred tool loaded by an external call (a call made outside any
+    /// run of the agent's loop, as a live conversation's tool calls are) is
+    /// callable as soon as the load returns: no model-call boundary of an
+    /// ordinary turn comes between a live conversation's calls, so a load
+    /// that waited for one would never take effect there.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_external_load_makes_the_deferred_tool_callable_at_once() {
+        let client = Arc::new(StaticLlmClient);
+        let tools = Arc::new(DeferredLoadDispatcher::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+        let visible_names = |tools: Vec<ToolDef>| {
+            tools
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            visible_names(agent.visible_tool_defs()),
+            vec!["tool_catalog_load".to_string()],
+            "before the load only the control tool is visible"
+        );
+
+        let load = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "external-load".to_string(),
+                "tool_catalog_load".to_string(),
+                serde_json::json!({ "names": ["deferred_tool"] }),
+            ))
+            .await
+            .expect("the external load dispatches");
+        assert!(!load.result.is_error, "the load succeeds: {load:?}");
+
+        assert_eq!(
+            visible_names(agent.visible_tool_defs()),
+            vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+            "the loaded tool is visible as soon as the external load returns; \
+             the tool nobody loaded stays behind the catalog"
+        );
+        let call = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "external-call".to_string(),
+                "deferred_tool".to_string(),
+                serde_json::json!({}),
+            ))
+            .await
+            .expect("the external call of the loaded tool dispatches");
+        assert!(
+            !call.result.is_error,
+            "the loaded tool is callable, not refused: {call:?}"
+        );
+        assert_eq!(call.result.text_content(), "ran deferred_tool");
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    async fn deferred_load_agent(
+        owner: crate::GeneratedToolVisibilityOwner,
+    ) -> (
+        super::Agent<DeferredLoadVisibilityClient, DeferredLoadDispatcher, NoopStore>,
+        Arc<DeferredLoadVisibilityClient>,
+    ) {
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(owner)
+            .build_standalone(
+                Arc::clone(&client),
+                Arc::new(DeferredLoadDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        (agent, client)
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    async fn external_load(
+        agent: &mut super::Agent<DeferredLoadVisibilityClient, DeferredLoadDispatcher, NoopStore>,
+    ) -> crate::ops::ToolDispatchOutcome {
+        agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "external-load".to_string(),
+                "tool_catalog_load".to_string(),
+                serde_json::json!({ "names": ["deferred_tool"] }),
+            ))
+            .await
+            .expect("the external load returns an outcome")
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    fn visible_tool_names(
+        agent: &super::Agent<DeferredLoadVisibilityClient, DeferredLoadDispatcher, NoopStore>,
+    ) -> Vec<String> {
+        agent
+            .visible_tool_defs()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    fn deferred_test_authority(name: &str) -> crate::DeferredToolLoadAuthority {
+        crate::DeferredToolLoadAuthority::new(
+            name,
+            crate::ToolVisibilityWitness {
+                last_seen_provenance: Some(crate::ToolProvenance {
+                    kind: crate::ToolSourceKind::Callback,
+                    source_id: "test".into(),
+                    artifact: None,
+                }),
+            },
+        )
+    }
+
+    /// The outcome of an external load carries the typed fact a live host
+    /// acts on: the accepted names, loaded for the session. A second load of
+    /// the same tool reports the same fact, and neither adds a row to the
+    /// session's transcript.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_external_load_reports_the_tools_loaded_for_the_session() {
+        let (mut agent, _client) = deferred_load_agent(explicit_test_visibility_owner()).await;
+        let rows_before = agent.session().messages().len();
+
+        let first = external_load(&mut agent).await;
+        let load = first.deferred_tool_load().expect("the load's typed fact");
+        assert_eq!(
+            load.stage(),
+            crate::ops::DeferredToolLoadStage::LoadedForSession
+        );
+        assert_eq!(load.names(), ["deferred_tool"]);
+        let state = agent
+            .tool_scope
+            .visibility_state()
+            .expect("visibility state");
+        assert!(
+            state
+                .active_requested_deferred_names
+                .contains("deferred_tool"),
+            "the request is committed in the visibility owner: {state:?}"
+        );
+
+        let second = external_load(&mut agent).await;
+        assert!(!second.result.is_error, "a repeated load succeeds");
+        assert_eq!(
+            second.deferred_tool_load().map(|load| load.stage()),
+            Some(crate::ops::DeferredToolLoadStage::LoadedForSession),
+            "a second load of a loaded tool reports it loaded"
+        );
+        assert_eq!(
+            agent.session().messages().len(),
+            rows_before,
+            "a load made by an external call adds no transcript row"
+        );
+    }
+
+    /// An owner that does not implement the commit refuses it: the load is a
+    /// tool error that says so, the request stays staged, and the next
+    /// model-call boundary applies it as before.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_external_load_whose_commit_is_refused_is_a_tool_error_and_stays_staged() {
+        // This fixture forwards the methods the owner trait requires and no
+        // other, so it stands for an owner written before the commit existed.
+        let inner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+        let owner = crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::new(
+            ExtendRefusingOwner(inner),
+        ));
+        let (mut agent, client) = deferred_load_agent(owner).await;
+
+        let outcome = external_load(&mut agent).await;
+        assert!(outcome.result.is_error, "the load fails: {outcome:?}");
+        let text = outcome.result.text_content();
+        assert!(
+            text.contains("could not be loaded now") && text.contains("stays recorded"),
+            "the error says the request waits for the next model call: {text}"
+        );
+        assert_eq!(
+            outcome.deferred_tool_load(),
+            None,
+            "a refused commit reports no loaded tools"
+        );
+        let state = agent
+            .tool_scope
+            .visibility_state()
+            .expect("visibility state");
+        assert!(
+            state
+                .staged_requested_deferred_names
+                .contains("deferred_tool")
+                && !state
+                    .active_requested_deferred_names
+                    .contains("deferred_tool"),
+            "the request stays staged and is not active: {state:?}"
+        );
+        assert_eq!(
+            visible_tool_names(&agent),
+            vec!["tool_catalog_load".to_string()]
+        );
+
+        agent.config.max_turns = Some(2);
+        agent
+            .run("prompt".to_string().into())
+            .await
+            .expect("an ordinary turn");
+        assert!(
+            client.seen_tools()[0].contains(&"deferred_tool".to_string()),
+            "the next model-call boundary applies the staged request: {:?}",
+            client.seen_tools()
+        );
+    }
+
+    /// The commit covers every requested name that still waits, including a
+    /// request an earlier turn left staged, and nothing but names: a staged
+    /// filter keeps waiting for its own model-call boundary.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_external_load_commits_waiting_names_and_leaves_a_staged_filter() {
+        use crate::ToolCatalogVisibility;
+        let (mut agent, _client) = deferred_load_agent(explicit_test_visibility_owner()).await;
+        // A request left over from an earlier turn that ended before its
+        // next model call.
+        agent
+            .apply_session_effects(
+                &[crate::ops::SessionEffect::RequestDeferredTools {
+                    authorities: vec![deferred_test_authority("deferred_tool_two")],
+                }],
+                None,
+            )
+            .expect("stage the earlier request");
+        assert_eq!(
+            visible_tool_names(&agent),
+            vec!["tool_catalog_load".to_string()],
+            "the earlier request only waits"
+        );
+        let filter =
+            crate::ToolFilter::Deny(["deferred_tool_two".to_string()].into_iter().collect());
+        agent
+            .tool_scope
+            .handle()
+            .stage_external_filter(filter.clone())
+            .expect("stage a filter");
+
+        let outcome = external_load(&mut agent).await;
+        assert!(!outcome.result.is_error, "the load succeeds: {outcome:?}");
+        assert_eq!(
+            visible_tool_names(&agent),
+            vec!["deferred_tool".to_string(), "deferred_tool_two".to_string()],
+            "the waiting request is committed with the new one, and the staged \
+             filter that would hide it is not applied; with both tools loaded \
+             nothing waits behind the catalog, so the control tool is no longer shown"
+        );
+        let state = agent
+            .tool_scope
+            .visibility_state()
+            .expect("visibility state");
+        assert_eq!(state.staged_filter, filter);
+        assert_ne!(
+            state.active_filter, state.staged_filter,
+            "the staged filter is not promoted by the load"
+        );
+        assert_ne!(
+            state.active_revision, state.staged_revision,
+            "the filter's revision still waits for its boundary"
+        );
+        let view = agent.tool_catalog_view().expect("catalog view");
+        assert!(view.staged_changes_pending);
+
+        agent.config.max_turns = Some(2);
+        agent
+            .run("prompt".to_string().into())
+            .await
+            .expect("an ordinary turn");
+        let view = agent
+            .tool_catalog_view()
+            .expect("catalog view after the turn");
+        assert!(!view.staged_changes_pending);
+        assert_eq!(
+            catalog_view_visibility(&view, "deferred_tool_two"),
+            Some(ToolCatalogVisibility::Hidden),
+            "the filter applies at its own model-call boundary"
+        );
+        assert_eq!(
+            catalog_view_visibility(&view, "deferred_tool"),
+            Some(ToolCatalogVisibility::Visible)
+        );
+    }
+
+    /// A committed request that the session's active tool filter still hides
+    /// is not reported as loaded: the load is a tool error that names the
+    /// tool, never a bare acceptance.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_external_load_of_a_tool_the_active_filter_hides_is_a_tool_error() {
+        let (mut agent, _client) = deferred_load_agent(explicit_test_visibility_owner()).await;
+        agent
+            .tool_scope
+            .handle()
+            .stage_external_filter(crate::ToolFilter::Deny(
+                ["deferred_tool".to_string()].into_iter().collect(),
+            ))
+            .expect("stage a filter");
+        let base_tools = agent.tool_scope.base_tools_snapshot().expect("base tools");
+        agent
+            .tool_scope
+            .apply_staged(base_tools)
+            .expect("the filter becomes active");
+
+        let outcome = external_load(&mut agent).await;
+        assert!(outcome.result.is_error, "the load fails: {outcome:?}");
+        let text = outcome.result.text_content();
+        assert!(
+            text.contains("cannot be called now: deferred_tool"),
+            "the error names the hidden tool: {text}"
+        );
+        assert_eq!(outcome.deferred_tool_load(), None);
+        assert_eq!(
+            visible_tool_names(&agent),
+            vec!["tool_catalog_load".to_string()]
+        );
+    }
+
+    /// Only the boundary says a tool is loaded. A dispatcher that reports a
+    /// load complete for a tool the session cannot see gets no such result:
+    /// the report goes through the same commit and the same visible-name
+    /// check as a request, and the call is a tool error.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_dispatcher_cannot_report_a_tool_the_session_cannot_see_as_loaded() {
+        let (mut agent, _client) = deferred_load_agent(explicit_test_visibility_owner()).await;
+
+        let outcome = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "external-load".to_string(),
+                "tool_catalog_load".to_string(),
+                serde_json::json!({ "names": ["deferred_tool"], "report_loaded": true }),
+            ))
+            .await
+            .expect("the external load returns an outcome");
+
+        assert!(
+            outcome.result.is_error,
+            "a claimed load of a tool the session cannot see is refused: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.deferred_tool_load(),
+            None,
+            "nothing is reported loaded, so no live host says available"
+        );
+        assert_eq!(
+            visible_tool_names(&agent),
+            vec!["tool_catalog_load".to_string()]
+        );
+    }
+
+    /// A load of several tools where the session's active filter hides one
+    /// is one truthful result, per tool: the tool that is callable is
+    /// reported loaded (so a live host updates its conversation with it), and
+    /// the hidden one is named as not loaded.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_external_load_names_the_loaded_and_the_hidden_tools() {
+        let (mut agent, _client) = deferred_load_agent(explicit_test_visibility_owner()).await;
+        agent
+            .tool_scope
+            .handle()
+            .stage_external_filter(crate::ToolFilter::Deny(
+                ["deferred_tool".to_string()].into_iter().collect(),
+            ))
+            .expect("stage a filter");
+        let base_tools = agent.tool_scope.base_tools_snapshot().expect("base tools");
+        agent
+            .tool_scope
+            .apply_staged(base_tools)
+            .expect("the filter becomes active");
+
+        let outcome = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "external-load".to_string(),
+                "tool_catalog_load".to_string(),
+                serde_json::json!({ "names": ["deferred_tool", "deferred_tool_two"] }),
+            ))
+            .await
+            .expect("the external load returns an outcome");
+
+        assert!(
+            !outcome.result.is_error,
+            "a load that made one tool callable is not an error: {outcome:?}"
+        );
+        let load = outcome.deferred_tool_load().expect("the load's typed fact");
+        assert_eq!(
+            load.stage(),
+            crate::ops::DeferredToolLoadStage::LoadedForSession
+        );
+        assert_eq!(
+            load.names(),
+            ["deferred_tool_two"],
+            "only the callable tool is reported loaded"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("a JSON result body");
+        assert_eq!(
+            body["tool_availability"],
+            serde_json::json!([{
+                "name": "deferred_tool",
+                "availability": "not_loaded",
+                "reason": "The session's tool filter hides this tool. It becomes callable at the \
+                           session's next model call if the filter allows it.",
+            }]),
+            "the hidden tool is named as not loaded: {body}"
+        );
+        let mut visible = visible_tool_names(&agent);
+        visible.sort();
+        assert_eq!(
+            visible,
+            vec!["deferred_tool_two".to_string()],
+            "the loaded tool is visible; the filter hides the other, so nothing \
+             waits behind the catalog and the control tool is no longer shown"
+        );
+    }
+
+    // -- A deferred tool loaded inside a live bridge operation --
+
+    /// A deferred catalog for live bridge operations: two tools the bridge
+    /// profile can run, one it cannot (callback provenance), and the load
+    /// control tool, which requests exactly the names it is given. One tool's
+    /// description puts the catalog over the deferred catalog's byte budget,
+    /// so the session defers these tools; under the budget they would all be
+    /// in the operation's tool list from the start.
+    #[cfg(feature = "workspace-tests")]
+    struct BridgeDeferredDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        catalog: Arc<[crate::ToolCatalogEntry]>,
+        dispatched: Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    impl BridgeDeferredDispatcher {
+        fn provenance(kind: crate::ToolSourceKind) -> crate::ToolProvenance {
+            crate::ToolProvenance {
+                kind,
+                source_id: "bridge-test".into(),
+                artifact: None,
+            }
+        }
+
+        fn new() -> Self {
+            let described = |name: &str, description: String, kind: crate::ToolSourceKind| {
+                Arc::new(ToolDef {
+                    audience: Default::default(),
+                    name: name.into(),
+                    description,
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: Some(Self::provenance(kind)),
+                })
+            };
+            let deferred = |name: &str, kind: crate::ToolSourceKind| {
+                described(name, format!("deferred bridge test tool {name}"), kind)
+            };
+            let runnable = deferred("bridge_deferred", crate::ToolSourceKind::Mcp);
+            let other = described(
+                "bridge_deferred_other",
+                over_catalog_budget("deferred bridge test tool bridge_deferred_other"),
+                crate::ToolSourceKind::Mcp,
+            );
+            let callback = deferred("bridge_callback", crate::ToolSourceKind::Callback);
+            // A tool the load's request describes with a source the tool no
+            // longer has (see `dispatch`), one that runs Fast and can also
+            // stream, and one that can only stream.
+            let stale = deferred("bridge_stale", crate::ToolSourceKind::Mcp);
+            let streaming = deferred("bridge_streaming", crate::ToolSourceKind::Mcp);
+            let no_fast = deferred("bridge_no_fast", crate::ToolSourceKind::Mcp);
+            let control = Arc::new(ToolDef {
+                audience: Default::default(),
+                name: "tool_catalog_load".into(),
+                description: "control load tool".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: None,
+            });
+            let deferred_entry = |tool: &Arc<ToolDef>, kind: crate::ToolSourceKind| {
+                crate::ToolCatalogEntry::session_deferred(
+                    Arc::clone(tool),
+                    true,
+                    Self::provenance(kind),
+                )
+            };
+            let mut streaming_entry = deferred_entry(&streaming, crate::ToolSourceKind::Mcp);
+            streaming_entry.execution = crate::ToolExecutionContract::new(
+                [
+                    crate::ToolExecutionMode::Fast,
+                    crate::ToolExecutionMode::Streaming,
+                ]
+                .into_iter()
+                .collect(),
+                crate::ToolExecutionMode::Fast,
+                Some(
+                    crate::tool_execution::StreamingToolExecutionPolicy::new(
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_mins(1),
+                    )
+                    .expect("a streaming policy"),
+                ),
+                None,
+            )
+            .expect("a Fast and Streaming execution contract");
+            let mut no_fast_entry = deferred_entry(&no_fast, crate::ToolSourceKind::Mcp);
+            no_fast_entry.execution = crate::ToolExecutionContract::new(
+                [crate::ToolExecutionMode::Streaming].into_iter().collect(),
+                crate::ToolExecutionMode::Streaming,
+                Some(
+                    crate::tool_execution::StreamingToolExecutionPolicy::new(
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_mins(1),
+                    )
+                    .expect("a streaming policy"),
+                ),
+                None,
+            )
+            .expect("a Streaming only execution contract");
+            Self {
+                catalog: vec![
+                    deferred_entry(&runnable, crate::ToolSourceKind::Mcp),
+                    deferred_entry(&other, crate::ToolSourceKind::Mcp),
+                    deferred_entry(&callback, crate::ToolSourceKind::Callback),
+                    deferred_entry(&stale, crate::ToolSourceKind::Mcp),
+                    streaming_entry,
+                    no_fast_entry,
+                    crate::ToolCatalogEntry::control_inline(Arc::clone(&control), true),
+                ]
+                .into(),
+                tools: vec![
+                    runnable, other, callback, stale, streaming, no_fast, control,
+                ]
+                .into(),
+                dispatched: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn dispatched(&self) -> Vec<String> {
+            self.dispatched.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[async_trait]
+    impl AgentToolDispatcher for BridgeDeferredDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            self.dispatched.lock().unwrap().push(call.name.to_string());
+            if call.name != "tool_catalog_load" {
+                return Ok(ToolResult::new(
+                    call.id.to_string(),
+                    format!("ran {}", call.name),
+                    false,
+                )
+                .into());
+            }
+            #[derive(serde::Deserialize)]
+            struct LoadArgs {
+                names: Vec<String>,
+            }
+            let args =
+                call.parse_args::<LoadArgs>()
+                    .map_err(|error| ToolError::InvalidArguments {
+                        name: call.name.into(),
+                        reason: error.to_string(),
+                    })?;
+            let authorities = args
+                .names
+                .iter()
+                .filter_map(|name| {
+                    let tool = self.tools.iter().find(|tool| tool.name == name.as_str())?;
+                    // The request for `bridge_stale` describes the tool as
+                    // its source was before it changed.
+                    let last_seen_provenance = if name == "bridge_stale" {
+                        Some(crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Mcp,
+                            source_id: "bridge-test-before-it-changed".into(),
+                            artifact: None,
+                        })
+                    } else {
+                        tool.provenance.clone()
+                    };
+                    Some(crate::DeferredToolLoadAuthority::new(
+                        name.as_str(),
+                        crate::ToolVisibilityWitness {
+                            last_seen_provenance,
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let mut outcome = crate::ops::ToolDispatchOutcome::sync_result(ToolResult::new(
+                call.id.to_string(),
+                "accepted".to_string(),
+                false,
+            ));
+            outcome
+                .session_effects
+                .push(crate::ops::SessionEffect::RequestDeferredTools { authorities });
+            Ok(outcome)
+        }
+    }
+
+    /// A bridge operation's model, scripted one model call at a time: each
+    /// step is a tool call or the final text. It records the tool list and
+    /// the tool results every model call was given.
+    #[cfg(feature = "workspace-tests")]
+    struct BridgeScriptClient {
+        steps: Mutex<std::collections::VecDeque<Option<(&'static str, serde_json::Value)>>>,
+        seen_tools: Mutex<Vec<Vec<String>>>,
+        seen_tool_results: Mutex<Vec<(String, bool)>>,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    impl BridgeScriptClient {
+        fn new(steps: Vec<Option<(&'static str, serde_json::Value)>>) -> Self {
+            Self {
+                steps: Mutex::new(steps.into()),
+                seen_tools: Mutex::new(Vec::new()),
+                seen_tool_results: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[async_trait]
+    impl AgentLlmClient for BridgeScriptClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_tools
+                .lock()
+                .unwrap()
+                .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+            if let Some(Message::ToolResults { results, .. }) = messages.last() {
+                self.seen_tool_results.lock().unwrap().extend(
+                    results
+                        .iter()
+                        .map(|result| (result.text_content(), result.is_error)),
+                );
+            }
+            let step = self.steps.lock().unwrap().pop_front().flatten();
+            let (blocks, stop_reason) = match step {
+                Some((tool, args)) => (
+                    vec![AssistantBlock::ToolUse {
+                        id: format!("call-{tool}"),
+                        name: tool.into(),
+                        args: serde_json::value::RawValue::from_string(args.to_string()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                ),
+                None => (
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                ),
+            };
+            Ok(super::LlmStreamResult::new(
+                blocks,
+                stop_reason,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    struct AdmitBridgeDispatch;
+
+    #[cfg(feature = "workspace-tests")]
+    #[async_trait]
+    impl crate::ToolDispatchAdmission for AdmitBridgeDispatch {
+        async fn await_dispatch_admission(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&crate::ToolDispatchContext>,
+            _effect_kind: crate::LiveBridgeEffectKind,
+        ) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
+
+    /// One live bridge operation over the deferred bridge catalog, with the
+    /// model scripted by `steps`. Returns the operation's result, the client
+    /// and dispatcher records, and the agent the operation ran on.
+    #[cfg(feature = "workspace-tests")]
+    async fn run_bridge_operation(
+        steps: Vec<Option<(&'static str, serde_json::Value)>>,
+    ) -> (
+        Result<crate::types::RunResult, AgentError>,
+        Arc<BridgeScriptClient>,
+        Arc<BridgeDeferredDispatcher>,
+        super::Agent<BridgeScriptClient, BridgeDeferredDispatcher, NoopStore>,
+    ) {
+        run_bridge_operation_after(steps, |_agent| {}).await
+    }
+
+    /// [`run_bridge_operation`], with the session prepared by `prepare`
+    /// before the operation starts.
+    #[cfg(feature = "workspace-tests")]
+    async fn run_bridge_operation_after(
+        steps: Vec<Option<(&'static str, serde_json::Value)>>,
+        prepare: impl FnOnce(&mut super::Agent<BridgeScriptClient, BridgeDeferredDispatcher, NoopStore>),
+    ) -> (
+        Result<crate::types::RunResult, AgentError>,
+        Arc<BridgeScriptClient>,
+        Arc<BridgeDeferredDispatcher>,
+        super::Agent<BridgeScriptClient, BridgeDeferredDispatcher, NoopStore>,
+    ) {
+        let client = Arc::new(BridgeScriptClient::new(steps));
+        let tools = Arc::new(BridgeDeferredDispatcher::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(Arc::clone(&client), Arc::clone(&tools), Arc::new(NoopStore))
+            .await;
+        prepare(&mut agent);
+        let snapshot = agent.session().clone();
+        let session_id = snapshot.id().clone();
+        let revision = snapshot
+            .canonical_context_revision()
+            .expect("the snapshot's revision");
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        let result = agent
+            .run_live_bridge_noncommitting(
+                snapshot,
+                "use the deferred tool".to_string().into(),
+                crate::LiveBridgeToolDispatchAdmission::__test_new(
+                    "bridge-deferred-load",
+                    Arc::new(AdmitBridgeDispatch),
+                ),
+                crate::LiveBridgeNoncommittingRunPermit::__test_new(
+                    "bridge-deferred-load",
+                    session_id,
+                    revision,
+                ),
+                cancel_rx,
+            )
+            .await;
+        (result, client, tools, agent)
+    }
+
+    /// The model of a live bridge operation loads a deferred tool and calls
+    /// it in the same operation. The load joins that operation's own tool
+    /// list: the operation commits nothing, so the session's visibility
+    /// state, its visible tools and its transcript are as they were.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_live_bridge_operation_can_load_and_call_a_deferred_tool() {
+        let (result, client, tools, agent) = run_bridge_operation(vec![
+            Some((
+                "tool_catalog_load",
+                serde_json::json!({ "names": ["bridge_deferred"] }),
+            )),
+            Some(("bridge_deferred", serde_json::json!({}))),
+            None,
+        ])
+        .await;
+
+        let result = result.expect("the operation completes: a load does not fail it");
+        assert_eq!(result.text, "done");
+        let seen_tools = client.seen_tools.lock().unwrap().clone();
+        assert_eq!(
+            seen_tools,
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec![
+                    "tool_catalog_load".to_string(),
+                    "bridge_deferred".to_string()
+                ],
+                vec![
+                    "tool_catalog_load".to_string(),
+                    "bridge_deferred".to_string()
+                ],
+            ],
+            "the loaded tool is on the operation's tool list from its next model call; \
+             the tool nobody loaded is not"
+        );
+        assert_eq!(
+            tools.dispatched(),
+            vec![
+                "tool_catalog_load".to_string(),
+                "bridge_deferred".to_string()
+            ],
+            "the loaded tool runs in the same operation"
+        );
+        assert_eq!(
+            client.seen_tool_results.lock().unwrap().clone(),
+            vec![
+                ("accepted".to_string(), false),
+                ("ran bridge_deferred".to_string(), false),
+            ]
+        );
+
+        // The operation committed nothing.
+        let state = agent
+            .tool_scope
+            .visibility_state()
+            .expect("visibility state");
+        assert!(
+            state.staged_requested_deferred_names.is_empty()
+                && state.active_requested_deferred_names.is_empty(),
+            "the session's visibility owner is untouched: {state:?}"
+        );
+        assert_eq!(
+            agent
+                .visible_tool_defs()
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>(),
+            vec!["tool_catalog_load".to_string()],
+            "the session's own visible tools are unchanged"
+        );
+        assert!(
+            agent.session().messages().is_empty(),
+            "nothing of the operation reaches the session's transcript"
+        );
+    }
+
+    /// A tool the bridge profile cannot run is refused as the load call's
+    /// own tool error, which names the tool and the reason. The operation
+    /// goes on and completes, and a call that asked for a runnable tool
+    /// together with a refused one loads neither.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_live_bridge_load_the_profile_cannot_run_is_that_calls_error() {
+        let (result, client, tools, agent) = run_bridge_operation(vec![
+            Some((
+                "tool_catalog_load",
+                serde_json::json!({ "names": ["bridge_deferred", "bridge_callback"] }),
+            )),
+            None,
+        ])
+        .await;
+
+        let result = result.expect("the operation completes: a refused load does not fail it");
+        assert_eq!(result.text, "done");
+        let tool_results = client.seen_tool_results.lock().unwrap().clone();
+        assert_eq!(tool_results.len(), 1, "{tool_results:?}");
+        let (text, is_error) = &tool_results[0];
+        assert!(*is_error, "the load call fails: {text}");
+        assert!(
+            text.contains("cannot be loaded in this live operation")
+                && text.contains("bridge_callback")
+                && text.contains("callback-provenance"),
+            "the error names the tool and why: {text}"
+        );
+        assert!(
+            !text.contains("bridge_deferred ("),
+            "the runnable tool is not reported as refused: {text}"
+        );
+        assert_eq!(
+            client.seen_tools.lock().unwrap().clone(),
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec!["tool_catalog_load".to_string()],
+            ],
+            "a call with a refused name loads nothing"
+        );
+        assert_eq!(tools.dispatched(), vec!["tool_catalog_load".to_string()]);
+        let state = agent
+            .tool_scope
+            .visibility_state()
+            .expect("visibility state");
+        assert!(
+            state.staged_requested_deferred_names.is_empty()
+                && state.active_requested_deferred_names.is_empty(),
+            "the session's visibility owner is untouched: {state:?}"
+        );
+    }
+
+    /// The one refused load call of a bridge operation: its error text, and
+    /// the proof that the operation went on, loaded nothing and committed
+    /// nothing.
+    #[cfg(feature = "workspace-tests")]
+    fn refused_bridge_load(
+        result: Result<crate::types::RunResult, AgentError>,
+        client: &BridgeScriptClient,
+        agent: &super::Agent<BridgeScriptClient, BridgeDeferredDispatcher, NoopStore>,
+    ) -> String {
+        let result = result.expect("the operation completes: a refused load does not fail it");
+        assert_eq!(result.text, "done");
+        let tool_results = client.seen_tool_results.lock().unwrap().clone();
+        assert_eq!(tool_results.len(), 1, "{tool_results:?}");
+        let (text, is_error) = tool_results[0].clone();
+        assert!(is_error, "the load call fails: {text}");
+        assert_eq!(
+            client.seen_tools.lock().unwrap().clone(),
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec!["tool_catalog_load".to_string()],
+            ],
+            "a refused load adds nothing to the operation's tool list"
+        );
+        let state = agent
+            .tool_scope
+            .visibility_state()
+            .expect("visibility state");
+        assert!(
+            state.staged_requested_deferred_names.is_empty()
+                && state.active_requested_deferred_names.is_empty(),
+            "the session's visibility owner is untouched: {state:?}"
+        );
+        text
+    }
+
+    /// A tool the session's active filter hides cannot be loaded into a
+    /// bridge operation: the operation's load honours the session's filters.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_live_bridge_load_of_a_tool_the_sessions_filter_hides_is_that_calls_error() {
+        let (result, client, _tools, agent) = run_bridge_operation_after(
+            vec![
+                Some((
+                    "tool_catalog_load",
+                    serde_json::json!({ "names": ["bridge_deferred_other"] }),
+                )),
+                None,
+            ],
+            |agent| {
+                agent
+                    .tool_scope
+                    .handle()
+                    .stage_external_filter(crate::ToolFilter::Deny(
+                        ["bridge_deferred_other".to_string()].into_iter().collect(),
+                    ))
+                    .expect("stage a filter");
+                let base_tools = agent.tool_scope.base_tools_snapshot().expect("base tools");
+                agent
+                    .tool_scope
+                    .apply_staged(base_tools)
+                    .expect("the filter becomes active");
+            },
+        )
+        .await;
+
+        let text = refused_bridge_load(result, &client, &agent);
+        assert!(
+            text.contains("bridge_deferred_other (not available to this session)"),
+            "the error names the tool and why: {text}"
+        );
+    }
+
+    /// A load whose request describes the tool as its source was before it
+    /// changed is refused: the operation loads the tool the model was shown,
+    /// or nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_live_bridge_load_of_a_tool_whose_source_changed_is_that_calls_error() {
+        let (result, client, _tools, agent) = run_bridge_operation(vec![
+            Some((
+                "tool_catalog_load",
+                serde_json::json!({ "names": ["bridge_stale"] }),
+            )),
+            None,
+        ])
+        .await;
+
+        let text = refused_bridge_load(result, &client, &agent);
+        assert!(
+            text.contains("bridge_stale (its source changed since it was listed)"),
+            "the error names the tool and why: {text}"
+        );
+    }
+
+    /// A tool with no Fast execution mode is one the bridge profile cannot
+    /// run, so it cannot be loaded into a bridge operation.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_live_bridge_load_of_a_tool_that_cannot_run_fast_is_that_calls_error() {
+        let (result, client, _tools, agent) = run_bridge_operation(vec![
+            Some((
+                "tool_catalog_load",
+                serde_json::json!({ "names": ["bridge_no_fast"] }),
+            )),
+            None,
+        ])
+        .await;
+
+        let text = refused_bridge_load(result, &client, &agent);
+        assert!(
+            text.contains("bridge_no_fast (")
+                && text.contains("a tool that has no Fast execution mode"),
+            "the error names the tool and why: {text}"
+        );
+    }
+
+    /// A tool that runs Fast and can also stream is one the bridge profile
+    /// can run: it is loaded into the operation, and its Fast call runs.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_live_bridge_load_of_a_tool_that_can_also_stream_joins_the_operation() {
+        let (result, client, tools, _agent) = run_bridge_operation(vec![
+            Some((
+                "tool_catalog_load",
+                serde_json::json!({ "names": ["bridge_streaming"] }),
+            )),
+            Some(("bridge_streaming", serde_json::json!({}))),
+            None,
+        ])
+        .await;
+
+        let result = result.expect("the operation completes");
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            tools.dispatched(),
+            vec![
+                "tool_catalog_load".to_string(),
+                "bridge_streaming".to_string()
+            ]
+        );
+        assert_eq!(
+            client.seen_tool_results.lock().unwrap().clone(),
+            vec![
+                ("accepted".to_string(), false),
+                ("ran bridge_streaming".to_string(), false),
+            ]
+        );
+    }
+
+    /// The tools of a member for the live bridge rows below: `shell`, with
+    /// the execution contract a shell with durable jobs declares (Fast by
+    /// default, Detached for a background command), `member_status`, a plain
+    /// Fast tool, `tail_log`, which runs Fast or streams, and whatever tool a
+    /// row adds. Every tool is inline, so the member's model sees all of
+    /// them. A plan is resolved from the call's arguments, as the shell
+    /// resolves its own.
+    #[cfg(feature = "workspace-tests")]
+    struct BridgeShellDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        catalog: Arc<[crate::ToolCatalogEntry]>,
+        dispatched: Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    impl BridgeShellDispatcher {
+        fn detached_policy() -> crate::DetachedToolExecutionPolicy {
+            crate::DetachedToolExecutionPolicy::new(
+                crate::RunnerIdentity::new("test.bridge-shell", "v1").expect("a runner identity"),
+                crate::RestartClass::NonResumable,
+                crate::IdempotencyScope::ToolCall,
+                std::time::Duration::from_secs(30),
+            )
+            .expect("a detached policy")
+        }
+
+        fn streaming_policy() -> crate::tool_execution::StreamingToolExecutionPolicy {
+            crate::tool_execution::StreamingToolExecutionPolicy::new(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_mins(1),
+            )
+            .expect("a streaming policy")
+        }
+
+        /// The contract of a shell that can start durable background jobs.
+        fn fast_and_detached() -> crate::ToolExecutionContract {
+            crate::ToolExecutionContract::new(
+                [
+                    crate::ToolExecutionMode::Fast,
+                    crate::ToolExecutionMode::Detached,
+                ]
+                .into_iter()
+                .collect(),
+                crate::ToolExecutionMode::Fast,
+                None,
+                Some(Self::detached_policy()),
+            )
+            .expect("a Fast and Detached execution contract")
+        }
+
+        fn fast_and_streaming() -> crate::ToolExecutionContract {
+            crate::ToolExecutionContract::new(
+                [
+                    crate::ToolExecutionMode::Fast,
+                    crate::ToolExecutionMode::Streaming,
+                ]
+                .into_iter()
+                .collect(),
+                crate::ToolExecutionMode::Fast,
+                Some(Self::streaming_policy()),
+                None,
+            )
+            .expect("a Fast and Streaming execution contract")
+        }
+
+        /// The contract the shell monitor tool declares where jobs are
+        /// durable: detached, and nothing else.
+        fn detached_only() -> crate::ToolExecutionContract {
+            crate::ToolExecutionContract::new(
+                [crate::ToolExecutionMode::Detached].into_iter().collect(),
+                crate::ToolExecutionMode::Detached,
+                None,
+                Some(Self::detached_policy()),
+            )
+            .expect("a Detached only execution contract")
+        }
+
+        fn streaming_only() -> crate::ToolExecutionContract {
+            crate::ToolExecutionContract::new(
+                [crate::ToolExecutionMode::Streaming].into_iter().collect(),
+                crate::ToolExecutionMode::Streaming,
+                Some(Self::streaming_policy()),
+                None,
+            )
+            .expect("a Streaming only execution contract")
+        }
+
+        fn new(extra: Option<(&'static str, crate::ToolExecutionContract)>) -> Self {
+            let tool = |name: &str| {
+                Arc::new(ToolDef {
+                    audience: Default::default(),
+                    name: name.into(),
+                    description: format!("bridge member tool {name}"),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: None,
+                })
+            };
+            let mut tools = Vec::new();
+            let mut catalog = Vec::new();
+            let mut add = |name: &str, contract: Option<crate::ToolExecutionContract>| {
+                let def = tool(name);
+                let entry = crate::ToolCatalogEntry::session_inline(Arc::clone(&def), true);
+                catalog.push(match contract {
+                    Some(contract) => entry.with_execution_contract(contract),
+                    None => entry,
+                });
+                tools.push(def);
+            };
+            add("shell", Some(Self::fast_and_detached()));
+            add("member_status", None);
+            add("tail_log", Some(Self::fast_and_streaming()));
+            if let Some((name, contract)) = extra {
+                add(name, Some(contract));
+            }
+            Self {
+                tools: tools.into(),
+                catalog: catalog.into(),
+                dispatched: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn dispatched(&self) -> Vec<String> {
+            self.dispatched.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[async_trait]
+    impl AgentToolDispatcher for BridgeShellDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            call: ToolCallView<'_>,
+            _dispatch_context: &crate::ToolDispatchContext,
+            resolution_context: &crate::ToolExecutionResolutionContext,
+        ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+            #[derive(Default, serde::Deserialize)]
+            struct ModeArgs {
+                #[serde(default)]
+                background: bool,
+                #[serde(default)]
+                follow: bool,
+            }
+            let entry = self
+                .catalog
+                .iter()
+                .find(|entry| entry.tool.name == call.name)
+                .ok_or_else(|| crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                })?;
+            let args = call.parse_args::<ModeArgs>().unwrap_or_default();
+            let mode = if args.background {
+                crate::ToolExecutionMode::Detached
+            } else if args.follow {
+                crate::ToolExecutionMode::Streaming
+            } else {
+                entry.execution.default_mode()
+            };
+            entry
+                .execution
+                .resolve(mode, resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            self.dispatched.lock().unwrap().push(call.name.to_string());
+            Ok(ToolResult::new(call.id.to_string(), format!("ran {}", call.name), false).into())
+        }
+
+        /// This source owns every mode it declares, as the builtin tools do:
+        /// a detached or streaming call that reaches it starts. Without this
+        /// the trait's default would refuse such a call for want of a mode
+        /// owner, and a row could not tell whether the call was stopped
+        /// before the dispatcher or by it.
+        async fn dispatch_resolved_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            _context: &crate::ToolDispatchContext,
+            _plan: &crate::ResolvedToolExecutionPlan,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            self.dispatch(call).await
+        }
+    }
+
+    /// One live bridge operation of a member with [`BridgeShellDispatcher`]'s
+    /// tools, the model scripted by `steps`. Returns the member's policy
+    /// check as it stands before the operation, the operation's result, and
+    /// the client and dispatcher records.
+    #[cfg(feature = "workspace-tests")]
+    async fn run_shell_member_bridge_operation(
+        extra: Option<(&'static str, crate::ToolExecutionContract)>,
+        steps: Vec<Option<(&'static str, serde_json::Value)>>,
+    ) -> (
+        Result<(), AgentError>,
+        Result<crate::types::RunResult, AgentError>,
+        Arc<BridgeScriptClient>,
+        Arc<BridgeShellDispatcher>,
+    ) {
+        let client = Arc::new(BridgeScriptClient::new(steps));
+        let tools = Arc::new(BridgeShellDispatcher::new(extra));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(Arc::clone(&client), Arc::clone(&tools), Arc::new(NoopStore))
+            .await;
+        let policy = agent.validate_noncommitting_live_bridge_policy();
+        let snapshot = agent.session().clone();
+        let session_id = snapshot.id().clone();
+        let revision = snapshot
+            .canonical_context_revision()
+            .expect("the snapshot's revision");
+        let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+        let result = agent
+            .run_live_bridge_noncommitting(
+                snapshot,
+                "do the delegated work".to_string().into(),
+                crate::LiveBridgeToolDispatchAdmission::__test_new(
+                    "bridge-shell-member",
+                    Arc::new(AdmitBridgeDispatch),
+                ),
+                crate::LiveBridgeNoncommittingRunPermit::__test_new(
+                    "bridge-shell-member",
+                    session_id,
+                    revision,
+                ),
+                cancel_rx,
+            )
+            .await;
+        (policy, result, client, tools)
+    }
+
+    /// A member whose `shell` can also start background jobs is not refused
+    /// the live bridge for it: the tool can run Fast. The member's operation
+    /// starts, and a `shell` call without `background` runs.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_member_whose_shell_can_also_run_detached_runs_a_fast_shell_call_in_a_live_bridge_operation()
+     {
+        let (policy, result, client, tools) = run_shell_member_bridge_operation(
+            None,
+            vec![
+                Some(("shell", serde_json::json!({ "command": "true" }))),
+                None,
+            ],
+        )
+        .await;
+
+        policy.expect("a tool that can run Fast does not make its member ineligible");
+        let result = result.expect("the operation completes");
+        assert_eq!(result.text, "done");
+        assert_eq!(tools.dispatched(), vec!["shell".to_string()]);
+        assert_eq!(
+            client.seen_tool_results.lock().unwrap().clone(),
+            vec![("ran shell".to_string(), false)]
+        );
+        assert_eq!(
+            client.seen_tools.lock().unwrap().first().cloned(),
+            Some(vec![
+                "shell".to_string(),
+                "member_status".to_string(),
+                "tail_log".to_string(),
+            ]),
+            "the operation's model is given the member's tools"
+        );
+    }
+
+    /// A `shell` call that asks for a background job inside a live bridge
+    /// operation is that call's own tool error, before anything is
+    /// dispatched: no job is submitted, the model reads the error, and the
+    /// operation goes on and completes. The check after a tool call that
+    /// ends an operation which created asynchronous work is therefore not
+    /// reached through a shell call.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_detached_shell_call_in_a_live_bridge_operation_is_that_calls_error_and_starts_nothing()
+     {
+        let (policy, result, client, tools) = run_shell_member_bridge_operation(
+            None,
+            vec![
+                Some((
+                    "shell",
+                    serde_json::json!({ "command": "sleep 600", "background": true }),
+                )),
+                Some(("member_status", serde_json::json!({}))),
+                None,
+            ],
+        )
+        .await;
+
+        policy.expect("the member is eligible");
+        let result = result
+            .expect("the operation completes: it is not ended by the check for asynchronous work");
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            tools.dispatched(),
+            vec!["member_status".to_string()],
+            "the background shell call never reaches the dispatcher: nothing is submitted"
+        );
+        let tool_results = client.seen_tool_results.lock().unwrap().clone();
+        assert_eq!(tool_results.len(), 2, "{tool_results:?}");
+        let (text, is_error) = &tool_results[0];
+        assert!(*is_error, "the background shell call fails: {text}");
+        assert!(
+            text.contains("a live bridge operation runs Fast tool calls only")
+                && text.contains("shell")
+                && text.contains("detached"),
+            "the error names the tool and the execution it asked for: {text}"
+        );
+        assert!(
+            !text.contains("may not create asynchronous operations"),
+            "the error is the call's, not the late check's: {text}"
+        );
+        assert_eq!(
+            tool_results[1],
+            ("ran member_status".to_string(), false),
+            "the operation goes on: the next call runs"
+        );
+    }
+
+    /// A call that resolves to streaming execution inside a live bridge
+    /// operation is refused the same way: the rule is "Fast calls only", not
+    /// "no detached calls".
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_streaming_call_in_a_live_bridge_operation_is_that_calls_error() {
+        let (policy, result, client, tools) = run_shell_member_bridge_operation(
+            None,
+            vec![
+                Some(("tail_log", serde_json::json!({ "follow": true }))),
+                Some(("tail_log", serde_json::json!({}))),
+                None,
+            ],
+        )
+        .await;
+
+        policy.expect("the member is eligible");
+        let result = result.expect("the operation completes");
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            tools.dispatched(),
+            vec!["tail_log".to_string()],
+            "only the Fast call reaches the dispatcher"
+        );
+        let tool_results = client.seen_tool_results.lock().unwrap().clone();
+        assert_eq!(tool_results.len(), 2, "{tool_results:?}");
+        let (text, is_error) = &tool_results[0];
+        assert!(*is_error, "the streaming call fails: {text}");
+        assert!(
+            text.contains("a live bridge operation runs Fast tool calls only")
+                && text.contains("tail_log")
+                && text.contains("streaming"),
+            "the error names the tool and the execution it asked for: {text}"
+        );
+        assert_eq!(tool_results[1], ("ran tail_log".to_string(), false));
+    }
+
+    /// A refused member: its policy check and its operation both fail with
+    /// the same refusal before any model call or tool dispatch.
+    #[cfg(feature = "workspace-tests")]
+    async fn refused_shell_member(
+        tool: &'static str,
+        contract: crate::ToolExecutionContract,
+    ) -> String {
+        let (policy, result, client, tools) = run_shell_member_bridge_operation(
+            Some((tool, contract)),
+            vec![Some(("member_status", serde_json::json!({}))), None],
+        )
+        .await;
+        let refusal = policy
+            .expect_err("a tool with no Fast mode makes its member ineligible")
+            .to_string();
+        assert_eq!(
+            result
+                .expect_err("the operation does not start")
+                .to_string(),
+            refusal,
+            "the operation is refused as the member's policy check is"
+        );
+        assert!(
+            client.seen_tools.lock().unwrap().is_empty(),
+            "no model call was made"
+        );
+        assert!(tools.dispatched().is_empty(), "no tool was dispatched");
+        refusal
+    }
+
+    /// A tool with no Fast execution mode still refuses its member the live
+    /// bridge, before any model call or dispatch, and the refusal names the
+    /// tool.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_member_with_a_tool_that_has_no_fast_mode_is_refused_the_live_bridge_by_name() {
+        let refusal =
+            refused_shell_member("stream_only", BridgeShellDispatcher::streaming_only()).await;
+        assert!(
+            refusal.contains("a tool that has no Fast execution mode")
+                && refusal.contains("this member has: stream_only"),
+            "the refusal names the tool: {refusal}"
+        );
+        assert!(
+            !refusal.contains("shell") && !refusal.contains("tail_log"),
+            "a tool that can run Fast is not named: {refusal}"
+        );
+    }
+
+    /// The shell monitor tool declares detached execution only where jobs
+    /// are durable, so a member that has it is refused the live bridge, and
+    /// the refusal names `monitor_start`.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_member_with_the_shell_monitor_tool_is_refused_the_live_bridge_by_name() {
+        let refusal =
+            refused_shell_member("monitor_start", BridgeShellDispatcher::detached_only()).await;
+        assert!(
+            refusal.contains("a tool that has no Fast execution mode")
+                && refusal.contains("this member has: monitor_start"),
+            "the refusal names the monitor tool: {refusal}"
+        );
+    }
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn llm_hidden_tool_policy_staging_requires_generated_visibility_authority() {
@@ -29993,11 +31614,14 @@ mod tests {
 
         let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
+        // Once `deferred_tool` is loaded, the only tool still behind the
+        // catalog is the one its closed gate hides. Nothing can be loaded,
+        // so the control tool leaves the request with it.
         assert_eq!(
             client.seen_tools(),
             vec![
                 vec!["tool_catalog_load".to_string()],
-                vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string()],
             ]
         );
 
@@ -30031,6 +31655,504 @@ mod tests {
                 .all(|body| !body.contains("deferred_tool_two")),
             "the closed gated name is never offered: {deferred_notices:?}"
         );
+    }
+
+    /// The deferred-catalog notices of a session, in order: the model-facing
+    /// body, the typed delta the event stream carries, and the host status
+    /// text with its counts.
+    #[cfg(feature = "workspace-tests")]
+    fn deferred_catalog_notices(
+        session: &crate::Session,
+    ) -> Vec<(String, crate::event::DeferredCatalogDelta, String)> {
+        session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.kind == SystemNoticeKind::ToolScope
+                        && notice.body.as_deref().is_some_and(|body| {
+                            body.starts_with("Deferred catalog changed at turn boundary:")
+                        }) =>
+                {
+                    let [crate::types::SystemNoticeBlock::ToolConfig { payload }] =
+                        notice.blocks.as_slice()
+                    else {
+                        panic!("expected one tool-config block: {:?}", notice.blocks);
+                    };
+                    Some((
+                        notice.body.clone().expect("a notice body"),
+                        payload
+                            .deferred_catalog_delta
+                            .clone()
+                            .expect("a deferred catalog delta"),
+                        payload.status_text(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What a session whose filters do not allow `deferred_tool_two` is told
+    /// about its deferred catalog: the notice, the typed delta and the
+    /// counts name `deferred_tool` only.
+    #[cfg(feature = "workspace-tests")]
+    fn assert_notices_never_name_the_filtered_tool(session: &crate::Session, case: &str) {
+        let notices = deferred_catalog_notices(session);
+        let (body, delta, status) = notices
+            .first()
+            .unwrap_or_else(|| panic!("{case}: a deferred catalog notice"));
+        assert_eq!(
+            body,
+            "Deferred catalog changed at turn boundary: new deferred tools available: \
+             deferred_tool",
+            "{case}: {notices:?}"
+        );
+        assert_eq!(
+            delta.added_hidden_names,
+            vec![crate::ToolName::from("deferred_tool")],
+            "{case}: the typed delta does not name the filtered tool"
+        );
+        assert_eq!(
+            status, "deferred_catalog_delta(added_hidden=1,removed_hidden=0,pending_sources=0)",
+            "{case}: no count includes the filtered tool"
+        );
+        for (body, delta, _) in &notices {
+            assert!(
+                !body.contains("deferred_tool_two")
+                    && !delta
+                        .added_hidden_names
+                        .iter()
+                        .chain(&delta.removed_hidden_names)
+                        .any(|name| name.as_str() == "deferred_tool_two"),
+                "{case}: the filtered tool is never named: {notices:?}"
+            );
+        }
+    }
+
+    /// A deny list over a deferrable tool: the deferred-catalog notice does
+    /// not name it. Once the deny list is lifted, the next boundary's notice
+    /// offers the tool, on the same agent.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_never_names_a_tool_the_deny_list_hides_until_it_is_lifted() {
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(
+                client.clone(),
+                Arc::new(DeferredLoadDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["deferred_tool_two".to_string()].into_iter().collect(),
+            ))
+            .expect("stage the deny list");
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        // After the load nothing the session may use waits behind the
+        // catalog (the one tool left is the denied one), so the control tool
+        // leaves the request with it: a denied tool does not keep it shown.
+        assert_eq!(
+            client.seen_tools(),
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string()],
+            ]
+        );
+        assert_notices_never_name_the_filtered_tool(agent.session(), "a deny list");
+        let before_lift = deferred_catalog_notices(agent.session()).len();
+
+        agent
+            .stage_external_tool_filter(ToolFilter::All)
+            .expect("lift the deny list");
+        let result = agent.run("again".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        let (body, delta, status) = notices
+            .get(before_lift)
+            .unwrap_or_else(|| panic!("a notice once the deny list is lifted: {notices:?}"));
+        // The control tools left the request with the last usable deferred
+        // tool; now that one waits again they are back, and the notice says
+        // how to reach it.
+        assert_eq!(
+            body,
+            "Deferred catalog changed at turn boundary: new deferred tools available: \
+             deferred_tool_two; use `tool_catalog_search` to find deferred tools and \
+             `tool_catalog_load` to load the ones you need"
+        );
+        assert_eq!(
+            delta.added_hidden_names,
+            vec![crate::ToolName::from("deferred_tool_two")]
+        );
+        assert_eq!(
+            status,
+            "deferred_catalog_delta(added_hidden=1,removed_hidden=0,pending_sources=0)"
+        );
+    }
+
+    /// A launch policy that makes a deferrable tool unreachable: the
+    /// deferred-catalog notice does not name it.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_never_names_a_tool_the_launch_policy_denies() {
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_policy_base_filter(ToolFilter::Deny(
+                ["deferred_tool_two".to_string()].into_iter().collect(),
+            ))
+            .build_standalone(
+                client.clone(),
+                Arc::new(DeferredLoadDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_notices_never_name_the_filtered_tool(agent.session(), "a launch policy deny");
+    }
+
+    /// A turn whose overlay blocks a deferrable tool: the deferred-catalog
+    /// notice of that turn does not name it, as the turn's tool list would
+    /// not hold it. The next turn, without the overlay, is offered the tool.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_never_names_a_tool_the_turn_overlay_blocks_until_the_next_turn()
+     {
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(
+                client.clone(),
+                Arc::new(DeferredLoadDispatcher::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .set_turn_tool_overlay(Some(crate::service::TurnToolOverlay {
+                blocked_tools: Some(vec!["deferred_tool_two".into()]),
+                ..Default::default()
+            }))
+            .expect("set the turn overlay");
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_notices_never_name_the_filtered_tool(agent.session(), "a turn overlay");
+        let before_next_turn = deferred_catalog_notices(agent.session()).len();
+
+        agent
+            .set_turn_tool_overlay(None)
+            .expect("the next turn has no overlay");
+        let result = agent.run("again".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        let (body, delta, _) = notices
+            .get(before_next_turn)
+            .unwrap_or_else(|| panic!("a notice in the turn without the overlay: {notices:?}"));
+        assert_eq!(
+            body,
+            "Deferred catalog changed at turn boundary: new deferred tools available: \
+             deferred_tool_two"
+        );
+        assert_eq!(
+            delta.added_hidden_names,
+            vec![crate::ToolName::from("deferred_tool_two")]
+        );
+    }
+
+    /// A session that was offered its deferred tools and loaded
+    /// `deferred_tool` in its first turn: the agent and its model client.
+    #[cfg(feature = "workspace-tests")]
+    async fn offered_session<T>(
+        tools: Arc<T>,
+    ) -> (
+        crate::agent::Agent<DeferredLoadVisibilityClient, T, NoopStore>,
+        Arc<DeferredLoadVisibilityClient>,
+    )
+    where
+        T: AgentToolDispatcher + 'static,
+    {
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(Arc::clone(&client), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+        let result = agent.run("offered".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let bodies = deferred_catalog_notices(agent.session())
+            .into_iter()
+            .map(|(body, _, _)| body)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies,
+            vec![
+                "Deferred catalog changed at turn boundary: new deferred tools available: \
+                 deferred_tool, deferred_tool_two"
+                    .to_string(),
+                "Deferred catalog changed at turn boundary: deferred tools now available to \
+                 call: deferred_tool"
+                    .to_string(),
+            ],
+            "precondition: the session was offered both tools and loaded one"
+        );
+        (agent, client)
+    }
+
+    /// A turn that allows only the tool the model already holds, which hides
+    /// every other deferred tool for that turn.
+    #[cfg(feature = "workspace-tests")]
+    fn allow_only_the_loaded_tool() -> crate::service::TurnToolOverlay {
+        crate::service::TurnToolOverlay {
+            allowed_tools: Some(vec!["deferred_tool".into()]),
+            ..Default::default()
+        }
+    }
+
+    /// A turn's overlay changes nothing of what the session was offered. An
+    /// allow-list turn hides every other deferred tool for the turn, and
+    /// writes no deferred-catalog notice; the turn after it writes none
+    /// either. Every flow step and every other turn with an allow list is
+    /// such a turn.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_overlay_turn_writes_no_deferred_catalog_notice_and_neither_does_the_next_turn() {
+        let (mut agent, client) = offered_session(Arc::new(DeferredLoadDispatcher::new())).await;
+
+        agent
+            .set_turn_tool_overlay(Some(allow_only_the_loaded_tool()))
+            .expect("set the turn overlay");
+        let result = agent.run("overlay turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        assert_eq!(
+            notices.len(),
+            2,
+            "an overlay alone writes no deferred-catalog notice: {notices:?}"
+        );
+
+        agent
+            .set_turn_tool_overlay(None)
+            .expect("the next turn has no overlay");
+        let result = agent.run("next turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        assert_eq!(
+            notices.len(),
+            2,
+            "the turn after an overlay writes none either: {notices:?}"
+        );
+
+        // A turn that blocks the tool the model holds: the tool is out of
+        // this turn's tool list and back in the next one's, and neither turn
+        // says anything about the catalog.
+        agent
+            .set_turn_tool_overlay(Some(crate::service::TurnToolOverlay {
+                blocked_tools: Some(vec!["deferred_tool".into()]),
+                ..Default::default()
+            }))
+            .expect("set the turn overlay");
+        let result = agent
+            .run("second overlay turn".to_string().into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "done");
+        agent
+            .set_turn_tool_overlay(None)
+            .expect("the next turn has no overlay");
+        let result = agent.run("last turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        assert_eq!(
+            notices.len(),
+            2,
+            "an overlay that hides a held tool writes none, nor does the turn after: {notices:?}"
+        );
+        let seen_tools = client.seen_tools();
+        assert_eq!(
+            seen_tools[2..]
+                .iter()
+                .map(|tools| tools.iter().any(|tool| tool == "deferred_tool"))
+                .collect::<Vec<_>>(),
+            vec![true, true, false, true],
+            "the held tool in the four turns' tool lists, each overlay for its turn only: \
+             {seen_tools:?}"
+        );
+    }
+
+    /// A tool that enters the catalog during a turn whose overlay hides it is
+    /// not announced in that turn. It is announced once, at the first
+    /// boundary where the model's tool list could hold it.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_tool_added_in_an_overlay_turn_gets_its_deferred_catalog_notice_once_when_visible() {
+        struct LateDeferredDispatcher {
+            deferred: DeferredLoadDispatcher,
+            late: Arc<ToolDef>,
+            present: std::sync::atomic::AtomicBool,
+        }
+
+        impl LateDeferredDispatcher {
+            fn late_present(&self) -> bool {
+                self.present.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for LateDeferredDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                let mut tools = self.deferred.tools().to_vec();
+                if self.late_present() {
+                    tools.push(Arc::clone(&self.late));
+                }
+                tools.into()
+            }
+
+            fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+                self.deferred.tool_catalog_capabilities()
+            }
+
+            fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+                let mut catalog = self.deferred.tool_catalog().to_vec();
+                if self.late_present() {
+                    catalog.push(crate::ToolCatalogEntry::session_deferred(
+                        Arc::clone(&self.late),
+                        true,
+                        crate::ToolProvenance {
+                            kind: crate::ToolSourceKind::Callback,
+                            source_id: "test".into(),
+                            artifact: None,
+                        },
+                    ));
+                }
+                catalog.into()
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.deferred.dispatch(call).await
+            }
+        }
+
+        let tools = Arc::new(LateDeferredDispatcher {
+            deferred: DeferredLoadDispatcher::new(),
+            late: Arc::new(ToolDef {
+                audience: Default::default(),
+                name: "deferred_tool_late".into(),
+                description: "deferred tool its source adds during an overlay turn.".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: Some(crate::ToolProvenance {
+                    kind: crate::ToolSourceKind::Callback,
+                    source_id: "test".into(),
+                    artifact: None,
+                }),
+            }),
+            present: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (mut agent, _client) = offered_session(Arc::clone(&tools)).await;
+
+        // The source adds the tool; this turn's overlay hides it.
+        tools
+            .present
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        agent
+            .set_turn_tool_overlay(Some(allow_only_the_loaded_tool()))
+            .expect("set the turn overlay");
+        let result = agent.run("overlay turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        assert_eq!(
+            notices.len(),
+            2,
+            "a tool the turn's overlay hides is not announced in that turn: {notices:?}"
+        );
+
+        // The first boundary where the tool list could hold it: announced,
+        // alone (the other deferred tool keeps the standing it had).
+        agent
+            .set_turn_tool_overlay(None)
+            .expect("the next turn has no overlay");
+        let result = agent.run("next turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        assert_eq!(notices.len(), 3, "{notices:?}");
+        let (body, delta, status) = &notices[2];
+        assert_eq!(
+            body,
+            "Deferred catalog changed at turn boundary: new deferred tools available: \
+             deferred_tool_late"
+        );
+        assert_eq!(
+            delta.added_hidden_names,
+            vec![crate::ToolName::from("deferred_tool_late")]
+        );
+        assert!(delta.removed_hidden_names.is_empty());
+        assert_eq!(
+            status,
+            "deferred_catalog_delta(added_hidden=1,removed_hidden=0,pending_sources=0)"
+        );
+
+        // Once: a further turn says nothing more.
+        let result = agent
+            .run("a further turn".to_string().into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(deferred_catalog_notices(agent.session()).len(), 3);
+    }
+
+    /// A change of the session's own filters is reported in the turn it is
+    /// applied, overlay or not: the tool the filter now blocks is no longer
+    /// available, and the overlay's own hiding adds nothing to the notice.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_session_filter_change_in_an_overlay_turn_keeps_its_deferred_catalog_notice() {
+        let (mut agent, _client) = offered_session(Arc::new(DeferredLoadDispatcher::new())).await;
+
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["deferred_tool_two".to_string()].into_iter().collect(),
+            ))
+            .expect("stage the deny list");
+        agent
+            .set_turn_tool_overlay(Some(allow_only_the_loaded_tool()))
+            .expect("set the turn overlay");
+        let result = agent.run("overlay turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        let notices = deferred_catalog_notices(agent.session());
+        assert_eq!(notices.len(), 3, "{notices:?}");
+        let (body, delta, status) = &notices[2];
+        assert_eq!(
+            body,
+            "Deferred catalog changed at turn boundary: deferred tools no longer available: \
+             deferred_tool_two"
+        );
+        assert!(delta.added_hidden_names.is_empty());
+        assert_eq!(
+            delta.removed_hidden_names,
+            vec![crate::ToolName::from("deferred_tool_two")]
+        );
+        assert_eq!(
+            status,
+            "deferred_catalog_delta(added_hidden=0,removed_hidden=1,pending_sources=0)"
+        );
+
+        agent
+            .set_turn_tool_overlay(None)
+            .expect("the next turn has no overlay");
+        let result = agent.run("next turn".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(deferred_catalog_notices(agent.session()).len(), 3);
     }
 
     #[cfg(feature = "workspace-tests")]

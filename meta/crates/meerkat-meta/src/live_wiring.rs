@@ -5664,6 +5664,49 @@ mod tests {
         }
     }
 
+    /// A deferred tool the realtime model loads inside a live conversation
+    /// reaches the provider through a refresh of the channel, which the live
+    /// adapter host can only ask for when a refresher is installed on it.
+    /// The member live host this gateway builds for every live method and
+    /// every live door installs it, on the gateway's own adapter host: the
+    /// gateway keeps no wiring of its own for it, and this row fails if the
+    /// composition ever stops providing it.
+    #[tokio::test]
+    async fn the_gateway_live_composition_installs_the_channel_refresher() {
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::new(meerkat::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("refresher fixture persistence");
+        let temp = tempfile::tempdir().expect("refresher fixture state");
+        let factory = AgentFactory::new(temp.path()).builtins(false);
+        let mut builder = meerkat::FactoryAgentBuilder::new(factory.clone(), Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, machine) =
+            meerkat::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the runtime-backed service");
+        let service = Arc::new(service);
+        let ctx = attach_live(
+            Arc::clone(&service),
+            Arc::clone(&machine),
+            &factory,
+            Config::default(),
+            "ws://127.0.0.1/refresher".to_string(),
+            None,
+        );
+        assert!(
+            !ctx.host.has_live_channel_refresher(),
+            "the adapter host alone has no refresh pipeline"
+        );
+
+        let _member_host = shared_live_host(&ctx, &service, &machine);
+        assert!(
+            ctx.host.has_live_channel_refresher(),
+            "the member live host installs the channel refresher on the gateway's adapter host"
+        );
+    }
+
     /// meerkat #1652: composing a live door binds its delegation coordinator
     /// as the open authority's post-close work source, so a reopened channel
     /// can say that earlier work is still finishing. Without it only

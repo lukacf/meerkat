@@ -11370,6 +11370,9 @@ mod tests {
             next_call: AtomicUsize,
             offered: mpsc::UnboundedSender<BTreeSet<String>>,
             results: mpsc::UnboundedSender<String>,
+            /// How many notices of the latest request say how to use the
+            /// deferred catalog.
+            catalog_instructions: AtomicUsize,
         }
 
         impl ScriptedProbeClient {
@@ -11405,6 +11408,19 @@ mod tests {
                         .collect()
                 };
                 let probe = |tool: String| (tool, serde_json::json!({"message": "probe"}));
+                self.catalog_instructions.store(
+                    request
+                        .messages
+                        .iter()
+                        .filter(|message| {
+                            matches!(message, Message::SystemNotice(notice)
+                            if notice.body.as_deref().is_some_and(|body| {
+                                body.contains("to load the ones you need")
+                            }))
+                        })
+                        .count(),
+                    Ordering::SeqCst,
+                );
                 // The latest turn message: a boundary's system notice may
                 // follow the tool results it answers.
                 let latest = request
@@ -11507,6 +11523,7 @@ mod tests {
                 next_call: AtomicUsize::new(0),
                 offered: offered_tx,
                 results: results_tx,
+                catalog_instructions: AtomicUsize::new(0),
             });
             let factory = AgentFactory::new(temp.path().join("sessions"));
             let config = anthropic_test_config();
@@ -11884,6 +11901,146 @@ mod tests {
         /// revoke they are hidden again and a call is refused
         /// `tool_grant_revoked`. A session subject's list carries no member
         /// gate.
+        const CONTROL_TOOLS: [&str; 2] = [
+            meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+            meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+        ];
+
+        /// A plain session: created with no server and no registered tool,
+        /// its first turn run.
+        async fn plain_session(rig: &Rig) -> String {
+            ok(
+                rig,
+                "session/create",
+                serde_json::json!({"prompt": "hello"}),
+                "a plain session is created",
+            )
+            .await["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string()
+        }
+
+        /// Wait on the session router's own readiness: every server it
+        /// started has connected or failed.
+        async fn servers_ready(rig: &Rig, session_id: &str) {
+            rig.router
+                .runtime
+                .mcp_wait_until_ready_for_test(
+                    &meerkat_core::SessionId::parse(session_id).expect("session id"),
+                    PROBE_BOUND,
+                )
+                .await
+                .expect("the added server settles within the bound");
+        }
+
+        /// A plain RPC session sends no catalog control tool. A server over
+        /// the byte budget added with `mcp/add` brings both control tools into
+        /// the request at the boundary that starts it, its tools wait behind
+        /// the catalog once it has connected, a load brings one in, and the
+        /// model is told how to use the catalog exactly once, in an appended
+        /// notice.
+        #[tokio::test]
+        async fn a_server_over_the_budget_added_to_a_plain_session_is_deferred_with_the_control_tools()
+         {
+            let mut rig = rig().await;
+            let session_id = plain_session(&rig).await;
+            let plain = turn(&mut rig, &session_id, &[], None).await;
+            for control in CONTROL_TOOLS {
+                assert!(
+                    !plain.offers(control),
+                    "a plain session's request carries no catalog control tool: {plain:?}"
+                );
+            }
+            assert_eq!(rig.client.catalog_instructions.load(Ordering::SeqCst), 0);
+
+            let started = rig.temp.path().join("started");
+            let mut server = fixture_server("big", "big_", &started);
+            if let meerkat_core::mcp_config::McpTransportConfig::Stdio(stdio) =
+                &mut server.transport
+            {
+                stdio.args.extend([
+                    "--describe-bytes".to_string(),
+                    meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD
+                        .to_string(),
+                ]);
+            }
+            add_server(&rig, &session_id, server).await;
+
+            // The boundary of this turn starts the server: while it connects
+            // the control tools are in the request.
+            let connecting = turn(&mut rig, &session_id, &[], None).await;
+            for control in CONTROL_TOOLS {
+                assert!(
+                    connecting.offers(control),
+                    "{control} is offered from the boundary that starts the server: {connecting:?}"
+                );
+            }
+            servers_ready(&rig, &session_id).await;
+
+            let deferred = turn(&mut rig, &session_id, &[], None).await;
+            for control in CONTROL_TOOLS {
+                assert!(
+                    deferred.offers(control),
+                    "{control} is offered while the server's tools wait: {deferred:?}"
+                );
+            }
+            assert!(
+                !deferred.offers_any("big_"),
+                "the server's tools wait behind the catalog: {deferred:?}"
+            );
+            assert_eq!(
+                rig.client.catalog_instructions.load(Ordering::SeqCst),
+                1,
+                "the model is told once how to use the catalog"
+            );
+
+            let loaded = turn(&mut rig, &session_id, &["big_echo"], Some("big_echo")).await;
+            assert!(
+                loaded.offers("big_echo"),
+                "the loaded tool is in the request: {loaded:?}"
+            );
+            assert!(loaded.ran(), "the loaded tool runs: {loaded:?}");
+            assert_eq!(
+                rig.client.catalog_instructions.load(Ordering::SeqCst),
+                1,
+                "the instruction is appended once, not repeated"
+            );
+        }
+
+        /// The small twin: a server under the byte budget added to a plain
+        /// session has its tools offered directly once it has connected,
+        /// and the control tools leave the request again.
+        #[tokio::test]
+        async fn a_server_under_the_budget_added_to_a_plain_session_is_offered_directly() {
+            let mut rig = rig().await;
+            let session_id = plain_session(&rig).await;
+            let started = rig.temp.path().join("started");
+            add_server(
+                &rig,
+                &session_id,
+                fixture_server("small", "small_", &started),
+            )
+            .await;
+            turn(&mut rig, &session_id, &[], None).await;
+            servers_ready(&rig, &session_id).await;
+
+            let inline = turn(&mut rig, &session_id, &[], Some("small_echo")).await;
+            for tool in ["small_echo", "small_add", "small_slow", "small_fail"] {
+                assert!(
+                    inline.offers(tool),
+                    "{tool} is offered directly: {inline:?}"
+                );
+            }
+            for control in CONTROL_TOOLS {
+                assert!(
+                    !inline.offers(control),
+                    "with every tool in the request {control} is left out: {inline:?}"
+                );
+            }
+            assert!(inline.ran(), "the tool is called with no load: {inline:?}");
+        }
+
         #[tokio::test]
         async fn a_gated_server_opens_only_under_a_server_grant() {
             let mut rig = rig().await;
@@ -15323,6 +15480,149 @@ mod tests {
                 } if text.contains("helper finished via comms")
             )),
             "live peer ingress must project the peer message to the active live adapter; got {recorded:?}"
+        );
+    }
+
+    /// The RPC composition can update a conversation's tool list after a
+    /// live tool call loaded deferred tools for the session. The router
+    /// builds the member live host with its live transport, and that host
+    /// installs the channel refresher on the router's adapter host. This row
+    /// opens a channel with `live/open` and feeds the host a tool call whose
+    /// outcome reports tools loaded for the session: the refresh must run
+    /// through the RPC composition's own pipeline and reach the adapter
+    /// before the tool result, and the result must then say the tools are
+    /// available now. The load itself (request, commit, the typed report) is
+    /// pinned in meerkat-core and in the facade's live pipeline battery; the
+    /// dispatch seam this router installs is pinned by
+    /// `live_tool_dispatcher_routes_through_session_composed_tools`.
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn the_rpc_live_composition_refreshes_a_channel_before_a_load_result() {
+        use meerkat_core::live_adapter::{LiveAdapterCommand, LiveAdapterObservation};
+
+        /// Stands in for a `tool_catalog_load` the session committed.
+        struct LoadedForSessionDispatcher;
+
+        #[async_trait::async_trait]
+        impl meerkat_live::LiveToolDispatcher for LoadedForSessionDispatcher {
+            async fn dispatch_live_tool_call(
+                &self,
+                _session_id: &SessionId,
+                call: meerkat_core::ToolCall,
+            ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_live::LiveToolDispatchError>
+            {
+                Ok(
+                    meerkat_core::ToolDispatchOutcome::from(meerkat_core::types::ToolResult::new(
+                        call.id,
+                        r#"{"accepted_names":["loaded_tool"]}"#.to_string(),
+                        false,
+                    ))
+                    .with_deferred_tool_load(
+                        meerkat_core::DeferredToolLoad::requested(["loaded_tool".into()])
+                            .loaded_for_session(),
+                    ),
+                )
+            }
+        }
+
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
+        let (router, _notif_rx) = test_openai_live_router().await;
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let feedback = || {
+            Arc::new(
+                crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &router.runtime,
+                )),
+            )
+        };
+        let close_feedback: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = feedback();
+        let status_feedback: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = feedback();
+        let token_authority: Arc<dyn meerkat_live::LiveWsTokenAuthority> = feedback();
+        let live_ws = Arc::new(meerkat_live::LiveWsState::new(
+            Arc::clone(&host),
+            close_feedback,
+            status_feedback,
+            token_authority,
+        ));
+        let command_log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = router
+            .with_live_ws(live_ws, "ws://127.0.0.1:0".to_string())
+            .with_live_session_factory(Arc::new(RecordingLiveFactory {
+                log: Arc::clone(&command_log),
+            }));
+        assert!(
+            host.has_live_channel_refresher(),
+            "the RPC live composition installs a channel refresher on its host"
+        );
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "live refresh wiring fixture",
+                    "initial_turn": "deferred",
+                    "model": "gpt-realtime-2",
+                    "provider": "openai"
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let open_resp = router
+            .dispatch(make_request(
+                "live/open",
+                serde_json::json!({ "session_id": session_id, "transport": "websocket" }),
+            ))
+            .await
+            .expect("live/open response");
+        let channel_id = result_value(&open_resp)["channel_id"]
+            .as_str()
+            .expect("channel_id")
+            .to_string();
+
+        host.set_live_tool_dispatcher(Arc::new(LoadedForSessionDispatcher));
+        host.apply_observation(
+            &meerkat_live::LiveChannelId::new(&channel_id),
+            &LiveAdapterObservation::ToolCallRequested {
+                provider_call_id: meerkat_core::ToolCallId::new("call-load"),
+                tool_name: "tool_catalog_load".into(),
+                arguments: serde_json::json!({ "names": ["loaded_tool"] }),
+            },
+        )
+        .await
+        .expect("the host handles the provider's tool call");
+
+        let recorded = command_log.lock().await;
+        let refreshed_at = recorded
+            .iter()
+            .position(|command| matches!(command, LiveAdapterCommand::Refresh { .. }));
+        let (result_at, result_text) = recorded
+            .iter()
+            .enumerate()
+            .find_map(|(index, command)| match command {
+                LiveAdapterCommand::SubmitToolResult { result }
+                    if result.call_id.0 == "call-load" =>
+                {
+                    Some((index, meerkat_core::types::text_content(&result.content)))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the load's result is submitted: {recorded:?}"));
+        assert!(
+            refreshed_at.is_some_and(|refreshed_at| refreshed_at < result_at),
+            "the RPC composition's refresh reaches the adapter before the load's result: \
+             {recorded:?}"
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&result_text).expect("the load's JSON result");
+        assert_eq!(
+            result["availability"], "available_now",
+            "the load's result says the tools can be called now: {result}"
         );
     }
 

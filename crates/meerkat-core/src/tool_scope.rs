@@ -363,6 +363,26 @@ pub trait ToolVisibilityOwner: Send + Sync {
     }
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError>;
+
+    /// Commit the requested deferred tools that still wait for a boundary,
+    /// and nothing else: a staged filter keeps waiting for its own boundary.
+    ///
+    /// An external tool call (a live conversation's call) runs outside any
+    /// run of the agent loop, so no model-call boundary follows it. The
+    /// agent commits a load made that way through this method before the
+    /// call returns.
+    ///
+    /// The default has no commit authority and refuses, so the request stays
+    /// staged for the next model-call boundary: an owner that does not
+    /// implement this never reports a commit it did not make.
+    fn commit_requested_deferred_tools(
+        &self,
+    ) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        Err(ToolScopeApplyError::Owner {
+            message: "generated MeerkatMachine deferred-tool commit authority is required"
+                .to_string(),
+        })
+    }
 }
 
 /// Generated-authority handoff for durable tool-visibility state.
@@ -474,6 +494,13 @@ impl GeneratedToolVisibilityOwner {
 
     pub fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
         self.owner.boundary_applied()
+    }
+
+    /// See [`ToolVisibilityOwner::commit_requested_deferred_tools`].
+    pub fn commit_requested_deferred_tools(
+        &self,
+    ) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        self.owner.commit_requested_deferred_tools()
     }
 }
 
@@ -1548,6 +1575,25 @@ mod generated_visibility_test_owner {
                 "CommitDeferredNames",
             )
         }
+
+        fn commit_requested_deferred_tools(
+            &self,
+        ) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+            let staged_authorities = {
+                let state = self
+                    .state
+                    .read()
+                    .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+                state_witness_map(&state, "staged_deferred_authorities")?
+            };
+            self.apply_for_apply(
+                input(
+                    "CommitDeferredNames",
+                    [("authorities", witness_map_value(&staged_authorities))],
+                ),
+                "CommitDeferredNames",
+            )
+        }
     }
 }
 
@@ -1560,6 +1606,10 @@ struct ToolScopeState {
     base_tools: Arc<[Arc<ToolDef>]>,
     known_base_names: ToolNameSet,
     control_tool_names: ToolNameSet,
+    // Whether the control-plane tools show to the model whatever is deferred:
+    // a source asked for them, or a source is still connecting. When false
+    // they show only while a deferred tool waits behind the catalog.
+    control_tools_always_visible: bool,
     deferred_tool_names: ToolNameSet,
     active_turn_allow: Option<ToolNameSet>,
     active_turn_deny: ToolNameSet,
@@ -1604,6 +1654,36 @@ impl ComposedToolFilter {
     pub fn allows(&self, name: &str) -> bool {
         let allowed = self.allow.as_ref().is_none_or(|set| set.contains(name));
         allowed && !self.deny.contains(name)
+    }
+}
+
+/// Whether [`StagedSessionFilter::allows`] counts the current turn's tool
+/// overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnOverlayInFilter {
+    /// What the turn's tool list shows: the session's filters and the
+    /// turn's overlay.
+    Applied,
+    /// What the session is offered across turns: the session's own filters.
+    Ignored,
+}
+
+/// The filters behind [`ToolScope::staged_session_filters_allow_name`], from
+/// one read of the scope: the session's own filters and the current turn's
+/// overlay, kept apart so one caller can ask the same name both ways.
+#[derive(Debug, Clone)]
+pub(crate) struct StagedSessionFilter {
+    session: ComposedToolFilter,
+    turn_overlay: ComposedToolFilter,
+}
+
+impl StagedSessionFilter {
+    /// The one predicate. The session's own filters always decide; the
+    /// current turn's overlay decides with them unless the caller asks for
+    /// the session's answer across turns.
+    pub(crate) fn allows(&self, name: &str, turn_overlay: TurnOverlayInFilter) -> bool {
+        self.session.allows(name)
+            && (turn_overlay == TurnOverlayInFilter::Ignored || self.turn_overlay.allows(name))
     }
 }
 
@@ -1721,6 +1801,7 @@ impl ToolScope {
                 base_tools,
                 known_base_names,
                 control_tool_names: control_tool_names.into_iter().collect(),
+                control_tools_always_visible: true,
                 deferred_tool_names,
                 active_turn_allow: None,
                 active_turn_deny: ToolNameSet::new(),
@@ -1730,6 +1811,21 @@ impl ToolScope {
             visibility_authority,
             fail_next_boundary_apply: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Say whether this scope's control-plane tools show to the model
+    /// whatever is deferred (a tool source asked for them, or one is still
+    /// connecting) or only while a deferred tool waits behind the catalog.
+    /// A scope shows them always until told otherwise.
+    pub(crate) fn set_control_tools_always_visible(
+        &self,
+        always: bool,
+    ) -> Result<(), ToolScopeApplyError> {
+        self.state
+            .write()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?
+            .control_tools_always_visible = always;
+        Ok(())
     }
 
     fn ensure_generated_authority_for_apply(
@@ -1800,6 +1896,42 @@ impl ToolScope {
             &visibility_state,
             require_filter_witnesses,
         ))
+    }
+
+    /// The session's effective tools with the scoped tool grant gate closed:
+    /// the visible tools and the tools that wait behind its deferred catalog
+    /// (deferred, allowed by the session's filters, not yet loaded), from one
+    /// read of the visibility state. It is what the session can reach by
+    /// itself, where the visible tools are what its next request carries. A
+    /// parent's snapshot for an inheriting child uses this, so a child
+    /// inherits the tools its parent may load, not only the ones its parent
+    /// has loaded so far. A tool the session's filters hide is in neither.
+    pub(crate) fn effective_tools_with_grant_gate_closed_result(
+        &self,
+    ) -> Result<Arc<[Arc<ToolDef>]>, ToolScopeApplyError> {
+        use crate::tool_catalog::ToolCatalogVisibility;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let mut visibility_state = self.visibility_owner.visibility_state()?;
+        visibility_state.tool_grant_open_names.clear();
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
+        let composed =
+            Self::compose_state_filters(&state, &visibility_state, require_filter_witnesses);
+
+        Ok(state
+            .base_tools
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    Self::tool_visibility(&state, &visibility_state, &composed, tool),
+                    ToolCatalogVisibility::Visible | ToolCatalogVisibility::Deferred
+                )
+            })
+            .map(Arc::clone)
+            .collect::<Vec<_>>()
+            .into())
     }
 
     /// Project source tools for host inspection through the committed member filters.
@@ -1920,6 +2052,112 @@ impl ToolScope {
         self.visibility_owner.boundary_applied()
     }
 
+    /// Commit the requested deferred tools that still wait for a boundary,
+    /// against the scope's current projection. A staged filter is left for
+    /// its own boundary, and nothing is projected again from the dispatcher.
+    ///
+    /// With nothing waiting this changes nothing. A scope without generated
+    /// visibility authority, or whose owner does not implement the commit,
+    /// refuses and the request stays staged.
+    pub fn commit_requested_deferred_tools(&self) -> Result<(), ToolScopeApplyError> {
+        self.ensure_generated_authority_for_apply("committing requested deferred tools")?;
+        let visibility_state = self.visibility_owner.visibility_state()?;
+        if visibility_state.active_requested_deferred_names
+            == visibility_state.staged_requested_deferred_names
+        {
+            return Ok(());
+        }
+        self.visibility_owner
+            .commit_requested_deferred_tools()
+            .map(|_| ())
+    }
+
+    /// Keep in the model's requests every tool it had before a boundary that
+    /// starts to defer it.
+    ///
+    /// When the catalog starts to defer (its deferrable tools crossed the
+    /// byte budget, or a source started connecting), each tool the coming
+    /// projection defers, that this scope did not defer until now and that
+    /// was visible to the model, is requested like a loaded tool, so the
+    /// boundary's promotion keeps it visible and the request is durable.
+    /// Tools that arrive with or after the change wait behind the catalog.
+    /// Call it before [`Self::promote_staged_visibility`]. A scope without
+    /// generated visibility authority adopts nothing: it cannot load a
+    /// deferred tool either.
+    pub(crate) fn adopt_visible_tools_before_deferral(
+        &self,
+        new_base_tools: &[Arc<ToolDef>],
+        new_deferred_tool_names: &HashSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        if self.visibility_authority != ToolVisibilityAuthorityKind::GeneratedMachine
+            || new_deferred_tool_names.is_empty()
+        {
+            return Ok(());
+        }
+        let visibility_state = self.visibility_owner.visibility_state()?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
+        let new_deferred_tool_names: ToolNameSet =
+            new_deferred_tool_names.iter().cloned().collect();
+        let newly_deferred =
+            deferred_authority_catalog_for_base_tools(new_base_tools, &new_deferred_tool_names);
+        let adopted: Vec<DeferredToolLoadAuthority> = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+            let candidates = newly_deferred
+                .iter()
+                .filter(|(name, _)| !state.deferred_tool_names.contains(name.as_str()))
+                .filter(|(name, _)| {
+                    !visibility_state
+                        .staged_requested_deferred_names
+                        .contains(name.as_str())
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                return Ok(());
+            }
+            // What the session showed, not what one turn's overlay narrowed
+            // it to: a tool a turn overlay leaves out is still the model's.
+            let mut session_state = state.clone();
+            session_state.active_turn_allow = None;
+            session_state.active_turn_deny.clear();
+            let visible_before = Self::visible_names_for_state(
+                &session_state,
+                &visibility_state,
+                require_filter_witnesses,
+            );
+            candidates
+                .into_iter()
+                .filter(|(name, _)| visible_before.contains(*name))
+                .map(|(name, witness)| {
+                    DeferredToolLoadAuthority::new(name.clone(), witness.clone())
+                })
+                .collect()
+        };
+        if adopted.is_empty() {
+            return Ok(());
+        }
+        // A request names a tool of the deferred authority catalog, so the
+        // owner learns the coming deferred set first.
+        let mut deferred_authority_catalog = std::collections::BTreeMap::new();
+        extend_deferred_authority_catalog_from_visibility_state(
+            &mut deferred_authority_catalog,
+            &visibility_state,
+        );
+        for (name, witness) in newly_deferred {
+            deferred_authority_catalog.entry(name).or_insert(witness);
+        }
+        self.visibility_owner
+            .replace_deferred_tool_authority_catalog(deferred_authority_catalog)?;
+        self.visibility_owner
+            .request_deferred_tools(adopted)
+            .map_err(|err| ToolScopeApplyError::Owner {
+                message: err.to_string(),
+            })?;
+        Ok(())
+    }
+
     /// Atomically apply refreshed projection inputs against a supplied boundary state.
     pub fn apply_staged_projection(
         &self,
@@ -1942,6 +2180,49 @@ impl ToolScope {
         &self,
         new_base_tools: Arc<[Arc<ToolDef>]>,
         control_tool_names: ToolNameSet,
+        deferred_tool_names: ToolNameSet,
+        previous_visibility_state: &SessionToolVisibilityState,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        self.apply_projection(
+            new_base_tools,
+            control_tool_names,
+            None,
+            deferred_tool_names,
+            previous_visibility_state,
+            visibility_state,
+        )
+    }
+
+    /// As [`Self::apply_staged_projection_with_previous`], and from this
+    /// boundary on the control-plane tools show always
+    /// (`control_tools_always_visible`) or only while a deferred tool waits
+    /// behind the catalog. The names visible before the boundary are read
+    /// under the rule the scope held until now.
+    pub(crate) fn apply_staged_catalog_projection(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: ToolNameSet,
+        control_tools_always_visible: bool,
+        deferred_tool_names: ToolNameSet,
+        previous_visibility_state: &SessionToolVisibilityState,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        self.apply_projection(
+            new_base_tools,
+            control_tool_names,
+            Some(control_tools_always_visible),
+            deferred_tool_names,
+            previous_visibility_state,
+            visibility_state,
+        )
+    }
+
+    fn apply_projection(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: ToolNameSet,
+        control_tools_always_visible: Option<bool>,
         deferred_tool_names: ToolNameSet,
         previous_visibility_state: &SessionToolVisibilityState,
         visibility_state: &SessionToolVisibilityState,
@@ -1991,6 +2272,9 @@ impl ToolScope {
 
         state.base_tools = new_base_tools;
         state.control_tool_names = control_tool_names;
+        if let Some(always) = control_tools_always_visible {
+            state.control_tools_always_visible = always;
+        }
         state.deferred_tool_names = deferred_tool_names;
         state.known_base_names = state
             .base_tools
@@ -2084,10 +2368,13 @@ impl ToolScope {
             .into()
     }
 
-    /// How one base tool shows to the model: a control-plane tool always,
-    /// any other only when the composed filters allow it and, if it is
-    /// deferred, it was requested. A deferred tool the filters allow but
-    /// nothing requested is behind the deferred catalog.
+    /// How one base tool shows to the model. A control-plane tool shows
+    /// when the scope shows them always, or while a deferred tool waits
+    /// behind the catalog (no filter hides a control-plane tool); otherwise
+    /// it is hidden: with nothing to search or load it would only cost its
+    /// definition. Any other tool shows only when the composed filters allow
+    /// it and, if it is deferred, it was requested. A deferred tool the
+    /// filters allow but nothing requested is behind the deferred catalog.
     fn tool_visibility(
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
@@ -2099,7 +2386,13 @@ impl ToolScope {
             return ToolCatalogVisibility::Hidden;
         }
         if state.control_tool_names.contains(tool.name.as_str()) {
-            return ToolCatalogVisibility::Visible;
+            return if state.control_tools_always_visible
+                || Self::a_deferred_tool_waits(state, visibility_state, composed)
+            {
+                ToolCatalogVisibility::Visible
+            } else {
+                ToolCatalogVisibility::Hidden
+            };
         }
         if !composed.allows(tool.name.as_str()) {
             return ToolCatalogVisibility::Hidden;
@@ -2109,6 +2402,21 @@ impl ToolScope {
         } else {
             ToolCatalogVisibility::Deferred
         }
+    }
+
+    /// Whether at least one tool is behind the deferred catalog: deferred,
+    /// allowed by the composed filters and not yet requested.
+    fn a_deferred_tool_waits(
+        state: &ToolScopeState,
+        visibility_state: &SessionToolVisibilityState,
+        composed: &ComposedToolFilter,
+    ) -> bool {
+        state.base_tools.iter().any(|tool| {
+            tool.audience.allows_model()
+                && !state.control_tool_names.contains(tool.name.as_str())
+                && composed.allows(tool.name.as_str())
+                && !Self::is_requested_session_tool_visible(state, visibility_state, tool)
+        })
     }
 
     /// How a boundary that projected `base_tools` with these control-plane
@@ -2121,6 +2429,7 @@ impl ToolScope {
         &self,
         base_tools: Arc<[Arc<ToolDef>]>,
         control_tool_names: HashSet<ToolName>,
+        control_tools_always_visible: bool,
         deferred_tool_names: HashSet<ToolName>,
     ) -> Result<CatalogVisibilityPreview, ToolScopeApplyError> {
         let visibility_state = self.visibility_owner.visibility_state()?;
@@ -2137,6 +2446,7 @@ impl ToolScope {
                     .collect(),
                 base_tools,
                 control_tool_names: control_tool_names.into_iter().collect(),
+                control_tools_always_visible,
                 deferred_tool_names: deferred_tool_names.into_iter().collect(),
                 active_turn_allow: state.active_turn_allow.clone(),
                 active_turn_deny: state.active_turn_deny.clone(),
@@ -2475,12 +2785,26 @@ impl ToolScope {
         })
     }
 
-    /// Return whether the staged durable session filters would allow a session-plane tool name
-    /// to become visible after the next boundary.
+    /// Return whether the session's filters allow a session-plane tool name
+    /// in its deferred catalog: the staged durable session filters (what the
+    /// next boundary applies), the closed grant gate, and the current turn's
+    /// overlay, which the model's tool list honours for this turn. The
+    /// catalog shows a turn what the turn's tool list would show.
     pub fn staged_session_filters_allow_name(
         &self,
         name: &str,
     ) -> Result<bool, ToolScopeApplyError> {
+        Ok(self
+            .staged_session_filter()?
+            .allows(name, TurnOverlayInFilter::Applied))
+    }
+
+    /// The filters behind [`Self::staged_session_filters_allow_name`], from
+    /// one read of the owner's visibility state: a caller with many names
+    /// reads them once and asks for each, with the turn's overlay
+    /// ([`TurnOverlayInFilter::Applied`], the public predicate's answer) or
+    /// without it.
+    pub(crate) fn staged_session_filter(&self) -> Result<StagedSessionFilter, ToolScopeApplyError> {
         let state = self
             .state
             .read()
@@ -2517,7 +2841,22 @@ impl ToolScope {
         if let Some(closed) = Self::closed_grant_gate_filter(&state, &visibility_state) {
             filters.push(closed);
         }
-        Ok(Self::compose(&filters).allows(name))
+        // The turn's own overlay, the same input the visible projection
+        // composes (`compose_state_filters`): a tool this turn blocks is not
+        // in this turn's tool list, so it is not in this turn's catalog. It
+        // is kept apart from the session's own filters: it lasts one turn
+        // and is no change of what the session is offered.
+        let mut turn_overlay = Vec::new();
+        if let Some(allow) = &state.active_turn_allow {
+            turn_overlay.push(ToolFilter::Allow(allow.clone()));
+        }
+        if !state.active_turn_deny.is_empty() {
+            turn_overlay.push(ToolFilter::Deny(state.active_turn_deny.clone()));
+        }
+        Ok(StagedSessionFilter {
+            session: Self::compose(&filters),
+            turn_overlay: Self::compose(&turn_overlay),
+        })
     }
 
     /// Replace this build's grant gate on the generated visibility owner:
@@ -3662,6 +4001,69 @@ mod tests {
         assert!(matches!(replaced, Err(ToolScopeApplyError::Owner { .. })));
     }
 
+    /// An owner that does not implement the deferred-tool commit refuses it,
+    /// and so does a scope without generated visibility authority: neither
+    /// reports a commit it did not make.
+    #[test]
+    fn committing_requested_deferred_tools_fails_closed_without_commit_authority() {
+        let owner = LocalToolVisibilityOwner::new();
+        assert!(
+            matches!(
+                owner.commit_requested_deferred_tools(),
+                Err(ToolScopeApplyError::Owner { ref message })
+                    if message.contains("deferred-tool commit authority is required")
+            ),
+            "the owner trait's default refuses the commit"
+        );
+
+        let scope = ToolScope::new(tools(&["visible", "secret"]));
+        assert!(matches!(
+            scope.commit_requested_deferred_tools(),
+            Err(ToolScopeApplyError::Owner { .. })
+        ));
+    }
+
+    /// The commit promotes the staged requested names through the generated
+    /// owner and nothing else; with nothing waiting it changes nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn committing_requested_deferred_tools_makes_only_the_requested_names_visible() {
+        let scope = scope_with_generated_projection_names(
+            vec![
+                tool_with_provenance("deferred_a", "source"),
+                tool_with_provenance("deferred_b", "source"),
+            ]
+            .into(),
+            raw_set(&["deferred_a", "deferred_b"]),
+        );
+        scope
+            .commit_requested_deferred_tools()
+            .expect("nothing waits: the commit is a no-op");
+        assert!(scope.visible_tool_names().unwrap().is_empty());
+
+        let witness = ToolVisibilityWitness {
+            last_seen_provenance: tool_with_provenance("deferred_a", "source")
+                .provenance
+                .clone(),
+        };
+        scope
+            .add_requested_deferred_authorities(&[DeferredToolLoadAuthority::new(
+                "deferred_a",
+                witness,
+            )])
+            .expect("request the deferred tool");
+        assert!(
+            scope.visible_tool_names().unwrap().is_empty(),
+            "a request alone only waits"
+        );
+
+        scope
+            .commit_requested_deferred_tools()
+            .expect("commit the request");
+        let visible = scope.visible_tool_names().unwrap();
+        assert!(visible.contains("deferred_a") && !visible.contains("deferred_b"));
+    }
+
     #[test]
     fn local_tool_scope_cannot_authorize_or_stage_visibility() {
         let scope = ToolScope::new(tools(&["visible", "secret"]));
@@ -3837,6 +4239,48 @@ mod tests {
                 .store(open_first, std::sync::atomic::Ordering::SeqCst);
             let names: Vec<String> = scope
                 .visible_tools_with_grant_gate_closed_result()
+                .expect("the view reads")
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            assert_eq!(
+                names,
+                ["read_file"],
+                "the gated name stays out of the view (open on the first read: {open_first})"
+            );
+            assert_eq!(
+                owner.reads.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "one read of the visibility state (open on the first read: {open_first})"
+            );
+        }
+    }
+
+    /// The effective view an inheriting child's ceiling is built from (the
+    /// visible tools and the ones behind the deferred catalog) closes the
+    /// grant gate as the visible view does, and from one read too: a name a
+    /// scoped grant opened never enters a child's ceiling.
+    #[test]
+    fn the_effective_closed_gate_view_keeps_a_grant_opened_name_out() {
+        let owner = Arc::new(GrantFlippingOwner {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            open_on_next_read: std::sync::atomic::AtomicBool::new(true),
+        });
+        let scope = ToolScope::new_with_visibility_owner(
+            tools(&["read_file", "deploy"]),
+            HashSet::new(),
+            HashSet::new(),
+            generated_visibility_owner_from(Arc::clone(&owner)),
+        )
+        .expect("the fixture accepts the initial catalogs");
+
+        for open_first in [true, false] {
+            owner.reads.store(0, std::sync::atomic::Ordering::SeqCst);
+            owner
+                .open_on_next_read
+                .store(open_first, std::sync::atomic::Ordering::SeqCst);
+            let names: Vec<String> = scope
+                .effective_tools_with_grant_gate_closed_result()
                 .expect("the view reads")
                 .iter()
                 .map(|tool| tool.name.to_string())

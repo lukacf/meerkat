@@ -375,6 +375,10 @@ impl AgentToolDispatcher for ToolDispatcher {
         }
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.router.tool_catalog_control_plane()
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         self.admitted_catalog_snapshot()
     }

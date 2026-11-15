@@ -1612,6 +1612,7 @@
         "target": "lib",
         "scope": "package",
         "sources": [
+          "crates/meerkat-tools/src/control_plane.rs",
           "crates/meerkat-tools/src/lib.rs"
         ]
       }

@@ -307,7 +307,9 @@ All three are reads: they never wake an agent and load nothing.
 
 ## Tool list size
 
-The eight tools may wait behind the deferred tool catalog. In a session whose
-tool catalog is exact and large enough to defer, their definitions are left
-out of the model request, and the model finds them with `tool_catalog_search`
-and loads them with `tool_catalog_load` before its first call.
+The eight tools are in every request of an agent that may create agents, so
+the agent has them in the first request of its first run. They never wait
+behind the deferred tool catalog: in a session whose tool catalog is exact
+and large enough to defer, the deferrable tools of the agent's other
+sources (MCP server tools, a host's deferrable tools) are left out of the
+model request and loaded on demand, and the eight definitions stay.

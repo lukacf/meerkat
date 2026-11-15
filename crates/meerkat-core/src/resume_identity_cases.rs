@@ -3,13 +3,17 @@
 //! Every resume merge (the mob's, the factory's) must produce the same
 //! identity for the same durable session, build values and resume mask. These
 //! cases are the one table both merges are checked against: masks
-//! {none, model, provider, model+provider, provider_params, auth_binding} over
-//! a same-provider change, a provider change, an explicit binding, an
-//! env-default durable binding and a self-hosted server change.
+//! {none, model, provider, model+provider, provider_params, auth_binding,
+//! reasoning_effort, provider_params+reasoning_effort} over a same-provider
+//! change, a provider change, an explicit binding, an env-default durable
+//! binding, a self-hosted server change, and a session that stored a
+//! reasoning effort level (resumed by a build whose params name no level, and
+//! by one whose params name another).
 
 #![allow(clippy::expect_used)]
 
 use crate::lifecycle::run_primitive::ProviderParamsOverride;
+use crate::model_profile::capabilities::EffortLevel;
 use crate::service::ResumeOverrideMask;
 use crate::{AuthBindingRef, BindingId, BindingOrigin, Provider, RealmId, SessionLlmIdentity};
 
@@ -46,6 +50,32 @@ fn params(temperature: f32) -> Option<ProviderParamsOverride> {
     })
 }
 
+fn params_with_level(temperature: f32, level: EffortLevel) -> Option<ProviderParamsOverride> {
+    Some(ProviderParamsOverride {
+        temperature: Some(temperature),
+        reasoning_effort: Some(level),
+        ..Default::default()
+    })
+}
+
+/// `params` with its level replaced by `level`.
+fn with_level(
+    params: Option<ProviderParamsOverride>,
+    level: Option<EffortLevel>,
+) -> Option<ProviderParamsOverride> {
+    match (params, level) {
+        (Some(mut params), level) => {
+            params.reasoning_effort = level;
+            Some(params)
+        }
+        (None, Some(level)) => Some(ProviderParamsOverride {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }),
+        (None, None) => None,
+    }
+}
+
 fn identity(
     model: &str,
     provider: Provider,
@@ -62,13 +92,18 @@ fn identity(
     }
 }
 
-const MASKS: [&str; 6] = [
-    "none",
-    "model",
-    "provider",
-    "model+provider",
-    "provider_params",
-    "auth_binding",
+/// Each mask with the column of a row's `bindings` and `servers` it reads.
+/// The reasoning effort level moves neither the binding nor the server, so
+/// its two masks read the columns of `none` and `provider_params`.
+const MASKS: [(&str, usize); 8] = [
+    ("none", 0),
+    ("model", 1),
+    ("provider", 2),
+    ("model+provider", 3),
+    ("provider_params", 4),
+    ("auth_binding", 5),
+    ("reasoning_effort", 0),
+    ("provider_params+reasoning_effort", 4),
 ];
 
 fn mask(name: &str) -> ResumeOverrideMask {
@@ -82,6 +117,11 @@ fn mask(name: &str) -> ResumeOverrideMask {
         }
         "provider_params" => mask.provider_params = true,
         "auth_binding" => mask.auth_binding = true,
+        "reasoning_effort" => mask.reasoning_effort = true,
+        "provider_params+reasoning_effort" => {
+            mask.provider_params = true;
+            mask.reasoning_effort = true;
+        }
         _ => {}
     }
     mask
@@ -144,7 +184,28 @@ pub fn resume_identity_cases() -> Vec<ResumeIdentityCase> {
         "test-self-hosted-other",
         Provider::SelfHosted,
         None,
+        build_params.clone(),
+        None,
+    );
+    let durable_with_level = identity(
+        "test-openai-default",
+        Provider::OpenAI,
+        None,
+        params_with_level(0.9, EffortLevel::Medium),
+        Some(openai.clone()),
+    );
+    let build_without_level = identity(
+        "test-openai-other",
+        Provider::OpenAI,
+        None,
         build_params,
+        None,
+    );
+    let build_with_level = identity(
+        "test-openai-other",
+        Provider::OpenAI,
+        None,
+        params_with_level(0.1, EffortLevel::High),
         None,
     );
 
@@ -182,7 +243,7 @@ pub fn resume_identity_cases() -> Vec<ResumeIdentityCase> {
                 Some(openai.clone()),
                 None,
                 None,
-                Some(openai),
+                Some(openai.clone()),
                 None,
             ],
             servers: [None; 6],
@@ -231,12 +292,63 @@ pub fn resume_identity_cases() -> Vec<ResumeIdentityCase> {
                 Some("muse_vllm"),
             ],
         },
+        Row {
+            scenario: "stored level, build params without a level",
+            durable: durable_with_level.clone(),
+            candidate: build_without_level,
+            bindings: [
+                Some(openai.clone()),
+                Some(openai.clone()),
+                Some(openai.clone()),
+                Some(openai.clone()),
+                Some(openai.clone()),
+                None,
+            ],
+            servers: [None; 6],
+        },
+        Row {
+            scenario: "stored level, build params with another level",
+            durable: durable_with_level,
+            candidate: build_with_level,
+            bindings: [
+                Some(openai.clone()),
+                Some(openai.clone()),
+                Some(openai.clone()),
+                Some(openai.clone()),
+                Some(openai),
+                None,
+            ],
+            servers: [None; 6],
+        },
     ];
 
     let mut cases = Vec::new();
     for row in rows {
-        for (index, mask_name) in MASKS.iter().enumerate() {
+        for (mask_name, index) in MASKS {
             let mask = mask(mask_name);
+            // The params a resumed build seats, stated per claim: a build
+            // that claims neither keeps the stored params; one that claims
+            // its params replaces them and keeps the stored level unless its
+            // params name one; one that claims the level replaces only the
+            // level (with none, when its params name none); one that claims
+            // both seats its own params.
+            let level = |identity: &SessionLlmIdentity| {
+                identity
+                    .provider_params
+                    .as_ref()
+                    .and_then(|params| params.reasoning_effort)
+            };
+            let expected_params = match (mask.provider_params, mask.reasoning_effort) {
+                (false, false) => row.durable.provider_params.clone(),
+                (true, false) => with_level(
+                    row.candidate.provider_params.clone(),
+                    level(&row.candidate).or(level(&row.durable)),
+                ),
+                (false, true) => {
+                    with_level(row.durable.provider_params.clone(), level(&row.candidate))
+                }
+                (true, true) => row.candidate.provider_params.clone(),
+            };
             let expected = SessionLlmIdentity {
                 model: if mask.model {
                     row.candidate.model.clone()
@@ -249,11 +361,7 @@ pub fn resume_identity_cases() -> Vec<ResumeIdentityCase> {
                     row.durable.provider
                 },
                 self_hosted_server_id: row.servers[index].map(str::to_string),
-                provider_params: if mask.provider_params {
-                    row.candidate.provider_params.clone()
-                } else {
-                    row.durable.provider_params.clone()
-                },
+                provider_params: expected_params,
                 auth_binding: row.bindings[index].clone(),
             };
             cases.push(ResumeIdentityCase {

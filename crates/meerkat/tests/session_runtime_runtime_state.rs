@@ -574,6 +574,118 @@ async fn archive_runtime_cleanup_dispatches_to_trait_hooks() {
     assert!(mob_ran.load(Ordering::SeqCst));
 }
 
+/// The completion cleanup's scope is the machine's action and nothing else:
+/// `RetainRuntime` names no cleanup, `CleanupRuntime` the cleanup of a
+/// session that stays, `CleanupArchivedSession` the cleanup of an archived
+/// session. A surface hands the action over and runs what comes back.
+#[test]
+fn a_completion_cleanup_is_of_an_archived_session_only_by_the_machines_action() {
+    use meerkat::session_runtime::runtime_state::RuntimeCleanupScope;
+    use meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction as Action;
+
+    assert_eq!(
+        RuntimeCleanupScope::of_completion_action(Action::RetainRuntime),
+        None
+    );
+    assert_eq!(
+        RuntimeCleanupScope::of_completion_action(Action::CleanupRuntime),
+        Some(RuntimeCleanupScope::KeptSession)
+    );
+    assert_eq!(
+        RuntimeCleanupScope::of_completion_action(Action::CleanupArchivedSession),
+        Some(RuntimeCleanupScope::ArchivedSession)
+    );
+}
+
+/// The cleanup of a session that stays retires its live runtime (the MCP
+/// hook runs) and leaves what the session owns alone: the mob hook, which
+/// destroys the session's mobs, runs for an archived session only. The
+/// unscoped entry points are the archive's.
+#[tokio::test]
+async fn a_cleanup_of_a_kept_session_runs_no_mob_hook() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use meerkat::session_runtime::runtime_state::{
+        ArchiveRuntimeCleanup, ArchiveRuntimeMcpState, ArchiveRuntimeMobState, RuntimeCleanupScope,
+    };
+    use meerkat_core::service::SessionError;
+    use meerkat_core::types::SessionId;
+    use meerkat_runtime::MeerkatMachine;
+
+    struct McpStub {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ArchiveRuntimeMcpState for McpStub {
+        async fn cleanup(&self, _session_id: &SessionId) {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct MobStub {
+        ran: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ArchiveRuntimeMobState for MobStub {
+        async fn cleanup(&self, _session_id: &SessionId) -> Result<(), SessionError> {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let mcp_ran = Arc::new(AtomicUsize::new(0));
+    let mob_ran = Arc::new(AtomicUsize::new(0));
+    let cleanup = ArchiveRuntimeCleanup {
+        runtime_adapter: Arc::new(MeerkatMachine::ephemeral()),
+        pending_session_event_streams: None,
+        mcp_state: Some(Arc::new(McpStub {
+            ran: Arc::clone(&mcp_ran),
+        })),
+        mob_state: Some(Arc::new(MobStub {
+            ran: Arc::clone(&mob_ran),
+        })),
+    };
+    let session_id = SessionId::new();
+
+    cleanup
+        .run_scoped(&session_id, RuntimeCleanupScope::KeptSession)
+        .await
+        .expect("the cleanup of a kept session runs");
+    assert_eq!(
+        (
+            mcp_ran.load(Ordering::SeqCst),
+            mob_ran.load(Ordering::SeqCst)
+        ),
+        (1, 0),
+        "(MCP hook runs, mob hook runs) for a session that stays"
+    );
+
+    cleanup
+        .run_scoped(&session_id, RuntimeCleanupScope::ArchivedSession)
+        .await
+        .expect("the cleanup of an archived session runs");
+    assert_eq!(
+        (
+            mcp_ran.load(Ordering::SeqCst),
+            mob_ran.load(Ordering::SeqCst)
+        ),
+        (2, 1),
+        "(MCP hook runs, mob hook runs) after an archived session's cleanup"
+    );
+
+    cleanup.run(&session_id).await.expect("the archive cleanup");
+    assert_eq!(
+        (
+            mcp_ran.load(Ordering::SeqCst),
+            mob_ran.load(Ordering::SeqCst)
+        ),
+        (3, 2),
+        "(MCP hook runs, mob hook runs): the unscoped cleanup is the archive's"
+    );
+}
+
 #[tokio::test]
 async fn archive_runtime_cleanup_preserves_downstream_anchors_when_unregister_fails() {
     use std::collections::HashMap;

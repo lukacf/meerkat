@@ -1940,6 +1940,9 @@ mod orchestrator {
             }
         }
 
+        /// Take back the runtime registration a failed recovery created.
+        /// The session was not archived: it keeps what it owns
+        /// ([`ArchiveRuntimeCleanup::run_runtime_only`]).
         async fn cleanup_recovered_runtime_if_new(
             &self,
             session_id: &SessionId,
@@ -1948,7 +1951,9 @@ mod orchestrator {
             if runtime_was_registered {
                 return Ok(());
             }
-            self.archive_runtime_cleanup.run(session_id).await
+            self.archive_runtime_cleanup
+                .run_runtime_only(session_id)
+                .await
         }
 
         /// Promote a staged (deferred) session into the live service map
@@ -3086,6 +3091,7 @@ mod orchestrator {
                         self_hosted_server_id: None,
                         provider_params: None,
                         auth_binding: None,
+                        reasoning_effort: None,
                     };
                     if let Err(err) = self
                         .runtime_adapter

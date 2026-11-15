@@ -6891,10 +6891,15 @@ fn unmasked_resume_divergence(
 /// snapshotted into `SpawnMemberSpec::override_profile` with
 /// `auto_compact_threshold` replaced by the floor, which meerkat-mob lowers
 /// into `SessionBuildOptions::auto_compact_threshold_override` (the strongest
-/// compaction-threshold authority). The registry is in-memory only and the
-/// verb clears the entry after the forced compaction fires; a floor is never
-/// persisted, so a crash mid-verb degrades to the original profile value on
-/// the next boot rather than freezing a compact-every-turn build.
+/// compaction-threshold authority). The registry is in-memory only, and the
+/// verb clears the entry when it rebuilds the member without the floor. The
+/// floor itself is persisted all the same: Core journals a spawn's override
+/// profile on the seat's `MemberSpawned` row and replays it at a restart, so
+/// a member seated with the floor builds with it until a later seat is made
+/// without it (the verb's restoring rebuild; a reset; a respawn of an
+/// identity the host's roster declares). A crash mid-verb therefore leaves
+/// the member compacting at the floor after the next boot, with no entry
+/// here.
 #[derive(Debug, Default)]
 pub struct CompactionFloorRegistry {
     floors: std::sync::Mutex<std::collections::BTreeMap<String, CompactionFloorEntry>>,
@@ -9284,6 +9289,7 @@ fn merge_provider_params_missing_from(
     fill(&mut target.top_p, &defaults.top_p);
     fill(&mut target.max_output_tokens, &defaults.max_output_tokens);
     fill(&mut target.reasoning, &defaults.reasoning);
+    fill(&mut target.reasoning_effort, &defaults.reasoning_effort);
     fill(
         &mut target.thinking_budget_tokens,
         &defaults.thinking_budget_tokens,
@@ -14168,6 +14174,44 @@ mod tests {
         let tag = spawn_openai_tag(&spawn);
         assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(tag.prompt_cache_options, Some(implicit_30m()));
+    }
+
+    /// The provider-neutral reasoning effort level is a declared knob like
+    /// the others: a draft that sets an unrelated knob keeps the level the
+    /// profile declared, and a draft that names a level of its own wins.
+    #[test]
+    fn build_spawn_spec_keeps_the_profile_reasoning_effort_level() {
+        use meerkat_models::EffortLevel;
+
+        let mut base_profile = profile_with_provider("openai");
+        base_profile.provider_params = Some(ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::Medium),
+            ..Default::default()
+        });
+
+        let unrelated = draft_with_provider_params(Some(ProviderParamsOverride {
+            thinking_budget_tokens: Some(1024),
+            ..Default::default()
+        }));
+        let spawn =
+            build_spawn_spec(&durable_spec(), &unrelated, Some(&base_profile)).expect("spawn spec");
+        assert_eq!(
+            spawn_params(&spawn).reasoning_effort,
+            Some(EffortLevel::Medium),
+            "the profile's level survives a draft that sets an unrelated knob"
+        );
+        assert_eq!(spawn_params(&spawn).thinking_budget_tokens, Some(1024));
+
+        let own_level = draft_with_provider_params(Some(ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        }));
+        let spawn =
+            build_spawn_spec(&durable_spec(), &own_level, Some(&base_profile)).expect("spawn spec");
+        assert_eq!(
+            spawn_params(&spawn).reasoning_effort,
+            Some(EffortLevel::High)
+        );
     }
 
     /// The profile snapshots Meta builds for a spawn (a pinned-provider

@@ -122,6 +122,45 @@ fn preserves_request_requirements(
     }
 }
 
+/// `params`, a fallback target's effective params, as the target's client
+/// is handed them for a request: the session's reasoning effort level they
+/// carry, resolved strictly for the route that client observes now and the
+/// model's catalog row. A copy that carries no provider tag takes the tag
+/// the target's client applies by default first, so the level is judged,
+/// and the probe built, on what that client sends. `Ok(None)` when the
+/// params carry no level (nothing is judged); `Err` when the route refuses
+/// the level (unsupported, unknown, unavailable, or in conflict with the
+/// target's own params or its client's default tag).
+fn resolved_for_target(
+    target: &ModelFallbackCandidate,
+    params: &ProviderParamsOverride,
+) -> Result<Option<ProviderParamsOverride>, Box<meerkat_core::ReasoningEffortRefusal>> {
+    let Some(level) = params.reasoning_effort else {
+        return Ok(None);
+    };
+    let mut resolved = params.clone();
+    resolved.reasoning_effort = None;
+    if resolved.provider_tag.is_none() {
+        resolved.provider_tag = target.client.default_provider_tag();
+    }
+    let mut resolved = Some(resolved);
+    let observation = target.client.reasoning_route();
+    meerkat_core::resolve_reasoning_effort(
+        meerkat_core::ReasoningResolveInput::new(
+            level,
+            target.identity.provider,
+            &target.identity.model,
+            observation.as_ref(),
+            target.target_profile.catalog_capabilities(),
+            meerkat_core::ReasoningEffortDecidedBy::Request,
+        ),
+        &mut resolved,
+        meerkat_core::ReasoningResolveMode::Strict,
+    )
+    .map_err(Box::new)?;
+    Ok(resolved)
+}
+
 impl ModelFallbackClient {
     pub fn new(
         candidates: Vec<ModelFallbackCandidate>,
@@ -164,6 +203,22 @@ impl AgentLlmClient for ModelFallbackClient {
         self.candidates[self.active_index()]
             .client
             .controller_model_selection()
+    }
+
+    /// The route of the candidate this client is serving: a fallback moves
+    /// the answer to the target's route with it.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.candidates[self.active_index()]
+            .client
+            .reasoning_route()
+    }
+
+    /// The default tag of the candidate this client is serving: a fallback
+    /// moves the answer to the target's client with it.
+    fn default_provider_tag(&self) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        self.candidates[self.active_index()]
+            .client
+            .default_provider_tag()
     }
 
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
@@ -428,12 +483,27 @@ impl AgentLlmClient for ModelFallbackClient {
             params.tool_choice = request
                 .provider_params
                 .and_then(|source| source.tool_choice.clone());
+            // A target carries the session's reasoning effort level in its
+            // own params. A target whose route refuses it is skipped before
+            // any probe or switch: a fallback never changes the effort
+            // silently. The probe below is handed the resolved copy, as a
+            // request on the target would be; the switch keeps the neutral
+            // level, which the attempt and every later turn resolve again on
+            // the target's route.
+            let Ok(resolved) = resolved_for_target(next, &params) else {
+                skipped_targets.push(AgentLlmFallbackSkippedTarget::new(
+                    next.identity.clone(),
+                    ModelFallbackSkipReason::ReasoningEffortUnsupported,
+                ));
+                continue;
+            };
+            let probe_params = resolved.as_ref().unwrap_or(&params);
             let pressure = match next.client.request_pressure(
                 request.messages,
                 request.tools,
                 request.max_tokens,
                 request.temperature,
-                Some(&params),
+                Some(probe_params),
             ) {
                 Ok(Some(pressure)) => pressure,
                 result => {
@@ -599,6 +669,53 @@ mod tests {
         pressure_available: bool,
     }
 
+    /// The route a scripted candidate of `provider` reports: its family's
+    /// direct backend, and none for a provider without one.
+    fn scripted_route(provider: Provider) -> Option<meerkat_core::ReasoningRouteObservation> {
+        use meerkat_core::provider_matrix::{
+            AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind,
+        };
+        use meerkat_core::{ModelApi, ReasoningBackend};
+        let (backend, api) = match provider {
+            Provider::OpenAI => (
+                ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
+                ModelApi::Responses,
+            ),
+            Provider::Anthropic => (
+                ReasoningBackend::Anthropic(AnthropicBackendKind::AnthropicApi),
+                ModelApi::Messages,
+            ),
+            Provider::Gemini => (
+                ReasoningBackend::Google(GoogleBackendKind::GoogleGenAi),
+                ModelApi::GenerateContent,
+            ),
+            _ => return None,
+        };
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend,
+            api,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
+    /// The default tag a scripted candidate of `provider` reports: one that
+    /// differs per provider, and none for a provider the rows do not use.
+    fn scripted_default_tag(
+        provider: Provider,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+        let seed = match provider {
+            Provider::OpenAI => 1,
+            Provider::Anthropic => 2,
+            _ => return None,
+        };
+        Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(seed),
+            ..Default::default()
+        }))
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ScriptedClient {
@@ -628,6 +745,16 @@ mod tests {
                 self.controller_model_selection()?,
                 self,
             ))
+        }
+
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            scripted_route(self.provider)
+        }
+
+        fn default_provider_tag(
+            &self,
+        ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+            scripted_default_tag(self.provider)
         }
 
         fn request_pressure(
@@ -804,6 +931,73 @@ mod tests {
             .unwrap();
         assert_eq!(primary_seen.lock().await.len(), 1);
         assert!(target_seen.lock().await.is_empty());
+    }
+
+    /// The fallback client reports the route of its active candidate,
+    /// before and after a fallback moves it to another target. It answers
+    /// with the candidate's own observation and adds nothing to it.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        let primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let target = candidate(
+            Provider::Anthropic,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let previous = primary.identity.clone();
+        let next = target.identity.clone();
+        let client =
+            ModelFallbackClient::new(vec![primary, target], Default::default(), Vec::new(), None)
+                .unwrap();
+
+        let primary_route = scripted_route(Provider::OpenAI);
+        let target_route = scripted_route(Provider::Anthropic);
+        assert!(primary_route.is_some() && primary_route != target_route);
+        assert_eq!(client.reasoning_route(), primary_route);
+        client.commit_model_fallback(&previous, &next).unwrap();
+        assert_eq!(client.reasoning_route(), target_route);
+    }
+
+    /// The fallback client reports the default tag of its active candidate,
+    /// before and after a fallback moves it to another target: a level
+    /// resolved for a request is written into the tag of the client that
+    /// will serve it.
+    #[test]
+    fn the_fallback_client_reports_its_active_candidates_default_tag() {
+        let primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let target = candidate(
+            Provider::Anthropic,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let previous = primary.identity.clone();
+        let next = target.identity.clone();
+        let client =
+            ModelFallbackClient::new(vec![primary, target], Default::default(), Vec::new(), None)
+                .unwrap();
+
+        let primary_tag = scripted_default_tag(Provider::OpenAI);
+        let target_tag = scripted_default_tag(Provider::Anthropic);
+        assert!(primary_tag.is_some() && primary_tag != target_tag);
+        assert_eq!(client.default_provider_tag(), primary_tag);
+        client.commit_model_fallback(&previous, &next).unwrap();
+        assert_eq!(client.default_provider_tag(), target_tag);
     }
 
     #[test]
@@ -1684,5 +1878,570 @@ mod tests {
             )
             .expect("a request without an entry row takes the backup");
         assert_eq!(switch.new_identity.model, "prefix-backup");
+    }
+
+    // ---- the session's reasoning effort level at a fallback ----
+
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    /// A fallback target whose client reports a scripted route and a
+    /// scripted default tag, and records the params its pressure probe is
+    /// handed.
+    struct RouteClient {
+        model: String,
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+        default_tag: Option<meerkat_core::lifecycle::run_primitive::ProviderTag>,
+        probed: Arc<std::sync::Mutex<Vec<Option<ProviderParamsOverride>>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for RouteClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route.clone()
+        }
+
+        fn default_provider_tag(
+            &self,
+        ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+            self.default_tag.clone()
+        }
+
+        fn request_pressure(
+            &self,
+            _messages: &[meerkat_core::Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&ProviderParamsOverride>,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
+            self.probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(provider_params.cloned());
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(
+                123,
+                meerkat_models::approximate_request_byte_cap(Provider::OpenAI),
+            )))
+        }
+
+        async fn stream_response(
+            &self,
+            _messages: &[meerkat_core::Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&ProviderParamsOverride>,
+        ) -> Result<LlmStreamResult, AgentError> {
+            Ok(LlmStreamResult::new(
+                Vec::new(),
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        fn model(&self) -> &str {
+            &self.model
+        }
+    }
+
+    /// The route of an account whose list states `levels` for the model.
+    fn account_route(levels: &[EffortLevel]) -> meerkat_core::ReasoningRouteObservation {
+        meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+            ),
+            api: meerkat_core::ModelApi::Responses,
+            account: meerkat_core::AccountLevelStatement::Stated(levels.to_vec()),
+            operator_levels: None,
+        }
+    }
+
+    /// The params of a chain target of a session whose level is `level`: the
+    /// neutral level and nothing else.
+    fn level_only(level: EffortLevel) -> ProviderParamsOverride {
+        ProviderParamsOverride {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }
+    }
+
+    type Probed = Arc<std::sync::Mutex<Vec<Option<ProviderParamsOverride>>>>;
+
+    /// A chain target as a session with `level` builds it: its identity and
+    /// its request policy carry the neutral level. `route` is what its
+    /// client observes.
+    fn leveled_target(
+        model: &str,
+        level: EffortLevel,
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+    ) -> (ModelFallbackCandidate, Probed) {
+        leveled_target_with_default_tag(model, level, route, None)
+    }
+
+    /// [`leveled_target`] whose client applies `default_tag` to a request
+    /// that carries no tag of its own.
+    fn leveled_target_with_default_tag(
+        model: &str,
+        level: EffortLevel,
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+        default_tag: Option<meerkat_core::lifecycle::run_primitive::OpenAiProviderTag>,
+    ) -> (ModelFallbackCandidate, Probed) {
+        let probed = Probed::default();
+        let mut target = candidate(
+            Provider::OpenAI,
+            model,
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        target.identity.provider_params = Some(level_only(level));
+        target.request_policy.provider_params = Some(level_only(level));
+        target.client = Arc::new(RouteClient {
+            model: model.to_string(),
+            route,
+            default_tag: default_tag
+                .map(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi),
+            probed: Arc::clone(&probed),
+        });
+        (target, probed)
+    }
+
+    /// The primary of a session whose level is `level`.
+    fn leveled_primary(level: EffortLevel) -> ModelFallbackCandidate {
+        let mut primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        primary.identity.provider_params = Some(level_only(level));
+        primary.request_policy.provider_params = Some(level_only(level));
+        primary
+    }
+
+    fn reason_name(reason: ModelFallbackSkipReason) -> String {
+        serde_json::to_value(reason)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    /// A target whose route does not accept the session's level is skipped
+    /// with `reasoning_effort_unsupported` before any switch, and the next
+    /// target that accepts the level is taken. The skipped target's client
+    /// is never probed.
+    #[test]
+    fn a_fallback_target_that_does_not_accept_the_level_is_skipped() {
+        let (refusing, refusing_probed) = leveled_target(
+            "refusing",
+            EffortLevel::High,
+            Some(account_route(&[EffortLevel::Low, EffortLevel::Medium])),
+        );
+        let (accepting, _) = leveled_target(
+            "accepting",
+            EffortLevel::High,
+            Some(account_route(&[EffortLevel::Low, EffortLevel::High])),
+        );
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), refusing, accepting],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let request_params = level_only(EffortLevel::High);
+        let switch = client
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &ModelFallbackRequest {
+                    provider_params: Some(&request_params),
+                    ..request(&[])
+                },
+            )
+            .expect("the target that accepts the level is taken");
+        assert_eq!(switch.new_identity.model, "accepting");
+        let skipped = switch
+            .skipped_targets
+            .iter()
+            .map(|target| (target.identity.model.as_str(), reason_name(target.reason)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            skipped,
+            vec![("refusing", "reasoning_effort_unsupported".to_string())],
+            "the target that refuses the level is skipped with the typed reason"
+        );
+        assert!(
+            refusing_probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a target skipped for the level is not probed"
+        );
+    }
+
+    /// Unknown and unavailable support are refusals too: a target whose
+    /// client reports no route, and a target whose account list is not
+    /// loaded, are skipped with the same reason. With every target skipped
+    /// the original failure stands (no switch), with the skipped list.
+    #[test]
+    fn a_target_with_unknown_or_unavailable_support_is_skipped() {
+        let (unobserved, _) = leveled_target("unobserved", EffortLevel::High, None);
+        let mut list_not_loaded = account_route(&[]);
+        list_not_loaded.account = meerkat_core::AccountLevelStatement::ListUnavailable;
+        let (unavailable, _) =
+            leveled_target("unavailable", EffortLevel::High, Some(list_not_loaded));
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), unobserved, unavailable],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let skipped = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect_err("no target accepts the level: the original failure stands");
+        let skipped = skipped
+            .iter()
+            .map(|target| (target.identity.model.as_str(), reason_name(target.reason)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            skipped,
+            vec![
+                ("unobserved", "reasoning_effort_unsupported".to_string()),
+                ("unavailable", "reasoning_effort_unsupported".to_string()),
+            ]
+        );
+        assert_eq!(client.model(), "primary", "nothing was switched");
+    }
+
+    /// An accepted target keeps the NEUTRAL level in the switch: its
+    /// identity and its sticky request policy carry `reasoning_effort` and
+    /// no provider-specific effort field, marker or route witness, so the
+    /// attempt and every later turn resolve the level again on the target's
+    /// own route. The target's pressure probe is handed the resolved copy:
+    /// the route's typed field and no neutral level.
+    #[test]
+    fn the_switch_carries_the_neutral_level_and_the_probe_the_resolved_one() {
+        let (target, probed) = leveled_target(
+            "target",
+            EffortLevel::High,
+            Some(account_route(&[EffortLevel::Low, EffortLevel::High])),
+        );
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), target],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("the target accepts the level");
+
+        assert_eq!(
+            switch.new_identity.provider_params,
+            Some(level_only(EffortLevel::High)),
+            "the identity the sticky commit writes carries the level"
+        );
+        assert_eq!(
+            switch.request_policy.provider_params,
+            Some(level_only(EffortLevel::High)),
+            "the sticky policy carries the neutral level and nothing resolved"
+        );
+        // The candidate is still found exactly: the switch can be committed.
+        client
+            .commit_model_fallback(&switch.previous_identity, &switch.new_identity)
+            .expect("the switch's identities are the client's own candidates");
+        assert_eq!(
+            client.active_model_fallback_identity().as_ref(),
+            Some(&switch.new_identity)
+        );
+
+        let probed = probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(probed.len(), 1, "one probe of the accepted target");
+        let probe = probed[0].as_ref().expect("the probe carries params");
+        assert_eq!(
+            probe.reasoning_effort, None,
+            "the probe is not handed the unresolved level"
+        );
+        let Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) =
+            probe.provider_tag.as_ref()
+        else {
+            panic!("the probe carries the route's typed field: {probe:?}");
+        };
+        assert_eq!(
+            serde_json::to_value(tag.reasoning_effort).ok(),
+            Some(serde_json::json!("high")),
+            "the probe carries the level as the route's own field"
+        );
+    }
+
+    /// A session without a level is untouched: no judgement (a target whose
+    /// client reports no route is taken as before), and the switch's
+    /// identity, policy and probe carry no level and no effort field.
+    #[test]
+    fn a_session_without_a_level_falls_back_as_before() {
+        let probed = Probed::default();
+        let mut target = candidate(
+            Provider::OpenAI,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        target.client = Arc::new(RouteClient {
+            model: "target".to_string(),
+            route: None,
+            default_tag: None,
+            probed: Arc::clone(&probed),
+        });
+        let expected_identity = target.identity.clone();
+        let client = ModelFallbackClient::new(
+            vec![
+                candidate(
+                    Provider::OpenAI,
+                    "primary",
+                    Some(1_000_000),
+                    Some(8192),
+                    Arc::default(),
+                ),
+                target,
+            ],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("a session without a level falls back as before");
+        assert_eq!(switch.new_identity, expected_identity);
+        assert_eq!(switch.request_policy.provider_params, None);
+        assert!(switch.skipped_targets.is_empty());
+        assert_eq!(
+            *probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![Some(ProviderParamsOverride::default())],
+            "the probe carries the target's own params, with no effort field"
+        );
+    }
+
+    /// A target is judged on what its client sends: a client that applies a
+    /// default tag to a request without one is judged with that tag. A
+    /// default tag that sets another provider-specific effort than the
+    /// session's level is a conflict on that target, so it is skipped with
+    /// the typed reason and never probed; the next target, whose client has
+    /// no such default, is taken.
+    #[test]
+    fn a_target_whose_default_tag_conflicts_with_the_level_is_skipped() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ReasoningEffort};
+
+        let route = || Some(account_route(&[EffortLevel::Low, EffortLevel::High]));
+        let (conflicting, conflicting_probed) = leveled_target_with_default_tag(
+            "conflicting",
+            EffortLevel::High,
+            route(),
+            Some(OpenAiProviderTag {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                ..Default::default()
+            }),
+        );
+        let (accepting, _) = leveled_target("accepting", EffortLevel::High, route());
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), conflicting, accepting],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("the target without a conflicting default is taken");
+        assert_eq!(switch.new_identity.model, "accepting");
+        let skipped = switch
+            .skipped_targets
+            .iter()
+            .map(|target| (target.identity.model.as_str(), reason_name(target.reason)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            skipped,
+            vec![("conflicting", "reasoning_effort_unsupported".to_string())],
+            "a default tag that sets another effort is a conflict on that target"
+        );
+        assert!(
+            conflicting_probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a target skipped for the level is not probed"
+        );
+    }
+
+    /// A default tag that does not touch the effort travels with the probe:
+    /// the probe copy carries the client's own field beside the level, as a
+    /// request on the target would. The switch still carries the neutral
+    /// level and nothing of the default tag, which stays the client's.
+    #[test]
+    fn the_probe_carries_the_targets_default_tag_beside_the_level() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+        use meerkat_core::model_profile::capabilities::OpenAiTextVerbosity;
+
+        let (target, probed) = leveled_target_with_default_tag(
+            "target",
+            EffortLevel::High,
+            Some(account_route(&[EffortLevel::Low, EffortLevel::High])),
+            Some(OpenAiProviderTag {
+                text_verbosity: Some(OpenAiTextVerbosity::Low),
+                ..Default::default()
+            }),
+        );
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), target],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("an orthogonal default tag is no conflict");
+        assert_eq!(
+            switch.request_policy.provider_params,
+            Some(level_only(EffortLevel::High)),
+            "the sticky policy carries the neutral level alone"
+        );
+
+        let probed = probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(probed.len(), 1, "one probe of the accepted target");
+        let probe = probed[0].as_ref().expect("the probe carries params");
+        assert_eq!(probe.reasoning_effort, None);
+        let Some(ProviderTag::OpenAi(tag)) = probe.provider_tag.as_ref() else {
+            panic!("the probe carries an OpenAI tag: {probe:?}");
+        };
+        assert_eq!(
+            tag.text_verbosity,
+            Some(OpenAiTextVerbosity::Low),
+            "the probe carries the client's default field"
+        );
+        assert_eq!(
+            serde_json::to_value(tag.reasoning_effort).ok(),
+            Some(serde_json::json!("high")),
+            "beside the level as the route's own field"
+        );
+    }
+
+    /// A target served by a real provider adapter is judged by its model's
+    /// catalog row on the adapter's own route, and probed with the resolved
+    /// copy (the adapter refuses a request that still carries the neutral
+    /// level): a level the row lists is taken and stays neutral in the
+    /// switch; a level the row does not list is skipped with the typed
+    /// reason.
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn a_real_adapter_target_is_judged_by_its_catalog_row() {
+        let catalog_target = |level: EffortLevel| {
+            let model = "claude-sonnet-4-6";
+            let mut target = anthropic_adapter_candidate(model);
+            target.target_profile = meerkat_core::ModelRegistry::from_config(
+                &meerkat_core::Config::default(),
+                meerkat_models::canonical(),
+            )
+            .expect("the canonical registry")
+            .profile_witness_for_provider(Provider::Anthropic, model)
+            .expect("a catalog model");
+            target.identity.provider_params = Some(level_only(level));
+            target.request_policy.provider_params = Some(level_only(level));
+            target
+        };
+        let failure = retryable_error(Provider::OpenAI);
+
+        let listed = ModelFallbackClient::new(
+            vec![
+                leveled_primary(EffortLevel::High),
+                catalog_target(EffortLevel::High),
+            ],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = listed
+            .prepare_model_fallback(&failure, &request(&[]))
+            .expect("the row lists the level: the adapter target is taken");
+        assert_eq!(
+            switch.request_policy.provider_params,
+            Some(level_only(EffortLevel::High))
+        );
+
+        let unlisted = ModelFallbackClient::new(
+            vec![
+                leveled_primary(EffortLevel::Xhigh),
+                catalog_target(EffortLevel::Xhigh),
+            ],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let skipped = unlisted
+            .prepare_model_fallback(&failure, &request(&[]))
+            .expect_err("the row does not list the level");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(
+            reason_name(skipped[0].reason),
+            "reasoning_effort_unsupported"
+        );
+    }
+
+    /// A refused level never starts a fallback: the refusal is no trigger,
+    /// so the client proposes nothing and skips nothing, although a target
+    /// that accepts the level is configured.
+    #[test]
+    fn a_refused_level_never_starts_a_fallback() {
+        // Read from the wire form: the type is built only by the resolver.
+        let refused: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(serde_json::json!({
+                "requested": "high", "provider": "openai", "model": "primary",
+                "route": null, "reason": "unsupported_level",
+                "supported": ["low"], "facts": "account",
+            }))
+            .expect("a refusal reads from its wire form");
+        let refusal = AgentError::ReasoningEffortRefused(Box::new(refused));
+        assert_eq!(model_fallback_trigger(&refusal), None);
+        let (accepting, probed) = leveled_target(
+            "accepting",
+            EffortLevel::High,
+            Some(account_route(&[EffortLevel::High])),
+        );
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), accepting],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let skipped = client
+            .prepare_model_fallback(&refusal, &request(&[]))
+            .expect_err("a refusal proposes no switch");
+        assert!(skipped.is_empty(), "and skips nothing: {skipped:?}");
+        assert!(
+            probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
     }
 }

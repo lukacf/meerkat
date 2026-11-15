@@ -8272,6 +8272,66 @@ impl std::fmt::Display for Provider {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum QueuedInputAbandonDisposition {
+    #[default]
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+    #[serde(rename = "NotQueued")]
+    NotQueued,
+    #[serde(rename = "AlreadyTerminal")]
+    AlreadyTerminal,
+    #[serde(rename = "Untracked")]
+    Untracked,
+}
+impl QueuedInputAbandonDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Abandoned => "Abandoned",
+            Self::NotQueued => "NotQueued",
+            Self::AlreadyTerminal => "AlreadyTerminal",
+            Self::Untracked => "Untracked",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for QueuedInputAbandonDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Abandoned" => Ok(Self::Abandoned),
+            "NotQueued" => Ok(Self::NotQueued),
+            "AlreadyTerminal" => Ok(Self::AlreadyTerminal),
+            "Untracked" => Ok(Self::Untracked),
+            other => Err(format!(
+                "invalid QueuedInputAbandonDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for QueuedInputAbandonDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for QueuedInputAbandonDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RealtimeTranscriptLaneKind {
     #[default]
     #[serde(rename = "Display")]
@@ -10550,12 +10610,15 @@ pub enum RuntimeCompletionCleanupAction {
     RetainRuntime,
     #[serde(rename = "CleanupRuntime")]
     CleanupRuntime,
+    #[serde(rename = "CleanupArchivedSession")]
+    CleanupArchivedSession,
 }
 impl RuntimeCompletionCleanupAction {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::RetainRuntime => "RetainRuntime",
             Self::CleanupRuntime => "CleanupRuntime",
+            Self::CleanupArchivedSession => "CleanupArchivedSession",
         }
     }
 }
@@ -10565,6 +10628,7 @@ impl std::convert::TryFrom<&str> for RuntimeCompletionCleanupAction {
         match value {
             "RetainRuntime" => Ok(Self::RetainRuntime),
             "CleanupRuntime" => Ok(Self::CleanupRuntime),
+            "CleanupArchivedSession" => Ok(Self::CleanupArchivedSession),
             other => Err(format!(
                 "invalid RuntimeCompletionCleanupAction value `{other}`"
             )),
@@ -19294,6 +19358,11 @@ pub mod inputs {
     pub struct ConsumeCompactionRequest {
         pub run_id: RunId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbandonQueuedInput {
+        pub input_id: String,
+        pub reason: InputAbandonReason,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19737,6 +19806,7 @@ pub enum Input {
     BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
     RequestCompaction(inputs::RequestCompaction),
     ConsumeCompactionRequest(inputs::ConsumeCompactionRequest),
+    AbandonQueuedInput(inputs::AbandonQueuedInput),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20346,6 +20416,7 @@ impl Input {
             Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
             Self::RequestCompaction(_) => InputKind::RequestCompaction,
             Self::ConsumeCompactionRequest(_) => InputKind::ConsumeCompactionRequest,
+            Self::AbandonQueuedInput(_) => InputKind::AbandonQueuedInput,
         }
     }
 }
@@ -20778,6 +20849,7 @@ pub enum InputKind {
     BindInputRequesterBatchKey,
     RequestCompaction,
     ConsumeCompactionRequest,
+    AbandonQueuedInput,
 }
 
 pub mod signals {
@@ -22577,6 +22649,12 @@ pub mod effects {
     pub struct CompactionRequestConsumed {
         pub run_id: RunId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct QueuedInputAbandonResolved {
+        pub input_id: String,
+        pub disposition: QueuedInputAbandonDisposition,
+        pub phase: Option<InputPhase>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22859,6 +22937,7 @@ pub enum Effect {
     ExactRunBoundaryCancel(effects::ExactRunBoundaryCancel),
     CompactionRequestResolved(effects::CompactionRequestResolved),
     CompactionRequestConsumed(effects::CompactionRequestConsumed),
+    QueuedInputAbandonResolved(effects::QueuedInputAbandonResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -23128,6 +23207,7 @@ pub enum EffectKind {
     ExactRunBoundaryCancel,
     CompactionRequestResolved,
     CompactionRequestConsumed,
+    QueuedInputAbandonResolved,
 }
 
 pub mod command_capabilities {
@@ -24093,8 +24173,14 @@ pub enum TransitionId {
     ResolveRuntimeCompletionCleanupArchivedRetired,
     ResolveRuntimeCompletionCleanupArchivedStopped,
     ResolveRuntimeCompletionCleanupRuntimeTerminatedInitializing,
+    /// Retired: never fired. No transition has this id any more; the
+    /// variant keeps its place so that no published discriminant moves.
     ResolveRuntimeCompletionCleanupRuntimeTerminatedIdle,
+    /// Retired: never fired. No transition has this id any more; the
+    /// variant keeps its place so that no published discriminant moves.
     ResolveRuntimeCompletionCleanupRuntimeTerminatedAttached,
+    /// Retired: never fired. No transition has this id any more; the
+    /// variant keeps its place so that no published discriminant moves.
     ResolveRuntimeCompletionCleanupRuntimeTerminatedRunning,
     ResolveRuntimeCompletionCleanupRuntimeTerminatedRetired,
     ResolveRuntimeCompletionCleanupRuntimeTerminatedStopped,
@@ -26426,6 +26512,36 @@ pub enum TransitionId {
     ConsumeCompactionRequestInertAttached,
     ConsumeCompactionRequestInertStopped,
     ConsumeCompactionRequestInertDestroyed,
+    AbandonQueuedInputIdle,
+    AbandonQueuedInputAttached,
+    AbandonQueuedInputRunning,
+    AbandonQueuedInputRetired,
+    AbandonQueuedInputStopped,
+    AbandonQueuedInputNotQueuedInitializing,
+    AbandonQueuedInputNotQueuedIdle,
+    AbandonQueuedInputNotQueuedAttached,
+    AbandonQueuedInputNotQueuedRunning,
+    AbandonQueuedInputNotQueuedRetired,
+    AbandonQueuedInputNotQueuedStopped,
+    AbandonQueuedInputNotQueuedDestroyed,
+    AbandonQueuedInputAlreadyTerminalInitializing,
+    AbandonQueuedInputAlreadyTerminalIdle,
+    AbandonQueuedInputAlreadyTerminalAttached,
+    AbandonQueuedInputAlreadyTerminalRunning,
+    AbandonQueuedInputAlreadyTerminalRetired,
+    AbandonQueuedInputAlreadyTerminalStopped,
+    AbandonQueuedInputAlreadyTerminalDestroyed,
+    AbandonQueuedInputUntrackedInitializing,
+    AbandonQueuedInputUntrackedIdle,
+    AbandonQueuedInputUntrackedAttached,
+    AbandonQueuedInputUntrackedRunning,
+    AbandonQueuedInputUntrackedRetired,
+    AbandonQueuedInputUntrackedStopped,
+    AbandonQueuedInputUntrackedDestroyed,
+    ResolveRuntimeCompletionCleanupInputTerminatedWhileServingIdle,
+    ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached,
+    ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning,
+    ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

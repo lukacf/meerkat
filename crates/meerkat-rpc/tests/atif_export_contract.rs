@@ -110,6 +110,7 @@ async fn seed_committed_turn(event_store: &Arc<dyn EventStore>, session_id: &Ses
             session_id,
             &[
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: session_id.clone(),

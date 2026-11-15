@@ -20,6 +20,11 @@ pub struct SelfHostedServerRef {
     pub transport: SelfHostedTransport,
     pub api_style: SelfHostedApiStyle,
     pub base_url: String,
+    /// The reasoning effort levels the operator declared for the model
+    /// (`[self_hosted.models.<id>] reasoning_effort_levels`): each level
+    /// once, from `none` to `max`. `None` when the entry declares none; an
+    /// empty list declares that the model takes no effort level.
+    pub reasoning_effort_levels: Option<Vec<crate::model_profile::capabilities::EffortLevel>>,
 }
 
 #[derive(Debug, Clone)]
@@ -788,6 +793,7 @@ fn append_self_hosted(
             transport: server.transport,
             api_style: server.api_style,
             base_url: normalize_base_url(&server.base_url),
+            reasoning_effort_levels: model.declared_reasoning_effort_levels(model_id)?,
         };
         let image_tool_results = model.image_tool_results
             && matches!(
@@ -911,6 +917,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         config
@@ -1129,6 +1136,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
     }
@@ -1205,6 +1213,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: None,
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         let err = match ModelRegistry::from_config(&config, test_catalog()) {
@@ -1245,6 +1254,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: None,
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         let err = match ModelRegistry::from_config(&config, test_catalog()) {

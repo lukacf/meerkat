@@ -1704,9 +1704,16 @@ where
     {
         return args;
     }
+    // A `reasoning_effort` member written on the prompt action is not a
+    // member of a mob send: the target goes on as it was written, so the
+    // schedule reader sees the member and refuses it (a `null` member names
+    // no level, as the reader reads it).
     if action_value_is_non_empty(action.get("system_prompt"))
         || action_value_is_non_empty(action.get("skill_refs"))
         || action_value_is_non_empty(action.get("additional_instructions"))
+        || action
+            .get("reasoning_effort")
+            .is_some_and(|level| !level.is_null())
     {
         return args;
     }
@@ -3354,6 +3361,51 @@ mod tests {
         .await;
 
         assert_eq!(rewritten, args);
+    }
+
+    /// A `reasoning_effort` member written directly on the prompt action of
+    /// a mob member's session target is not rewritten away: the target
+    /// reaches the schedule reader as it was written, and the reader refuses
+    /// the member. A `null` member names no level and is rewritten as before.
+    #[tokio::test]
+    async fn resumable_session_target_with_a_direct_reasoning_effort_member_is_not_rewritten() {
+        let target = |level: Value| {
+            json!({
+                "target": {
+                    "target_kind": "session",
+                    "type": "resumable_session",
+                    "session_id": "019ee0a7-a594-7670-b530-97e7c9e263b7",
+                    "action": {
+                        "type": "prompt",
+                        "prompt": "Run at a level.",
+                        "reasoning_effort": level
+                    }
+                }
+            })
+        };
+        let resolve = |_| async { Some(("example".to_string(), "domain:security".to_string())) };
+
+        let args = target(json!("high"));
+        let rewritten = rewrite_resumable_session_target_to_mob_member(args.clone(), resolve).await;
+        assert_eq!(rewritten, args, "the member reaches the schedule reader");
+        let refused = serde_json::from_value::<meerkat::TargetBinding>(rewritten["target"].clone())
+            .expect_err("the schedule reader refuses the member")
+            .to_string();
+        assert!(
+            refused.contains("reasoning_effort")
+                && refused.contains("not accepted on a schedule's prompt action"),
+            "{refused}"
+        );
+
+        let rewritten =
+            rewrite_resumable_session_target_to_mob_member(target(Value::Null), resolve).await;
+        assert_eq!(rewritten["target"]["target_kind"], "mob");
+        assert_eq!(rewritten["target"]["type"], "member");
+        assert!(
+            rewritten["target"]["action"]
+                .get("reasoning_effort")
+                .is_none()
+        );
     }
 
     #[tokio::test]

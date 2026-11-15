@@ -1201,7 +1201,7 @@ impl TargetBinding {
 
     pub fn validate_public_api(&self) -> Result<(), String> {
         match self {
-            Self::Session(_) => Ok(()),
+            Self::Session(binding) => binding.refuse_reasoning_effort_level(),
             Self::Identity(binding) => binding.validate_public_api(),
             Self::Mob(binding) => binding.validate_public_api(),
             Self::HostRunnable(_) => Ok(()),
@@ -1217,6 +1217,70 @@ impl TargetBinding {
 /// parsing the payload.
 pub const MOB_MEMBER_IDENTITY_TARGET_PREFIX: &str = "mob_member:";
 
+/// What reading a schedule request answers when `reasoning_effort` is written
+/// directly in a session spec (`create`), the form `session/create` takes.
+const REASONING_EFFORT_DIRECTLY_IN_CREATE: &str = "`create.reasoning_effort` is not accepted in a schedule's session settings in this \
+     release; a provider's own effort setting under `create.provider_params.provider_tag` is";
+
+/// What reading a schedule request answers when `reasoning_effort` is written
+/// directly on a prompt action, the form a turn request takes.
+const REASONING_EFFORT_DIRECTLY_ON_PROMPT_ACTION: &str =
+    "`action.reasoning_effort` is not accepted on a schedule's prompt action in this release";
+
+/// The refusal behind a failed read of a schedule request, when the read
+/// failed because the request writes `reasoning_effort` directly in a
+/// session spec (`create`) or on a prompt action: the refusal's own
+/// sentence, without the parser's position. `None` for every other failure.
+///
+/// A schedule does not take the provider-neutral level in this release. On
+/// session and identity targets a level a request writes is refused, not
+/// dropped. The two members are not
+/// fields of the spec or the action, so only the read itself can see them:
+/// it refuses them (the readers of `SessionTargetBinding`'s `create` and of
+/// [`ScheduledSessionAction`]), and each door that reads such a target
+/// answers its own invalid-request error. A mob target (`MobTargetBinding`,
+/// `ScheduledMobAction`) does not refuse the member yet: it is still read as
+/// an unknown member there and dropped. A parser reports a failure as text
+/// only, so a door whose parse failures answer differently from its refused
+/// schedules (REST: 422 against 400) asks here whether a failed read was
+/// this refusal, and gives it the answer the `provider_params` form gets.
+/// The sentences are this module's own and nothing else writes them.
+pub fn direct_reasoning_effort_refusal(parse_error: &str) -> Option<&'static str> {
+    [
+        REASONING_EFFORT_DIRECTLY_IN_CREATE,
+        REASONING_EFFORT_DIRECTLY_ON_PROMPT_ACTION,
+    ]
+    .into_iter()
+    .find(|refusal| parse_error.contains(refusal))
+}
+
+/// Whether `value` writes a `reasoning_effort` member of its own: one that
+/// is present and not `null` (a `null` member names no level).
+fn writes_reasoning_effort_member(value: &serde_json::Value) -> bool {
+    value
+        .get("reasoning_effort")
+        .is_some_and(|level| !level.is_null())
+}
+
+/// Reads the `create` spec of a session created on demand and refuses a
+/// `reasoning_effort` member written directly in it. Every other unknown
+/// member is dropped as before, and a spec that does not read keeps its own
+/// error.
+fn deserialize_create_spec<'de, D>(
+    deserializer: D,
+) -> Result<Box<SessionMaterializationSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let writes_level = writes_reasoning_effort_member(&value);
+    let spec = SessionMaterializationSpec::deserialize(value).map_err(DeError::custom)?;
+    if writes_level {
+        return Err(DeError::custom(REASONING_EFFORT_DIRECTLY_IN_CREATE));
+    }
+    Ok(Box::new(spec))
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1230,6 +1294,7 @@ pub enum SessionTargetBinding {
         action: ScheduledSessionAction,
     },
     MaterializeOnDemandSession {
+        #[serde(deserialize_with = "deserialize_create_spec")]
         create: Box<SessionMaterializationSpec>,
         action: ScheduledSessionAction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1251,6 +1316,28 @@ impl SessionTargetBinding {
 
     pub fn stable_key(&self) -> Result<String, String> {
         semantic_json_key("session_target", self)
+    }
+
+    /// A schedule's session spec does not take the provider-neutral
+    /// `reasoning_effort` level in this release: a request that would store
+    /// one is refused when the schedule is created or updated. A provider's
+    /// own effort under `provider_tag` is accepted as before, and a level that
+    /// is already stored is still judged when an occurrence is delivered.
+    fn refuse_reasoning_effort_level(&self) -> Result<(), String> {
+        if let Self::MaterializeOnDemandSession { create, .. } = self
+            && create
+                .provider_params
+                .as_ref()
+                .is_some_and(|params| params.reasoning_effort.is_some())
+        {
+            return Err(
+                "provider_params.reasoning_effort is not accepted in a schedule's session settings \
+                 in this release; a provider's own effort setting under \
+                 provider_params.provider_tag is"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     pub fn action(&self) -> &ScheduledSessionAction {
@@ -1364,7 +1451,7 @@ impl IdentityTargetBinding {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScheduledSessionAction {
     Prompt {
@@ -1385,6 +1472,65 @@ pub enum ScheduledSessionAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         render_metadata: Option<RenderMetadata>,
     },
+}
+
+/// The derived reader of [`ScheduledSessionAction`]: the same variants and
+/// members. The compiler checks a member, and a variant added here, against
+/// the type. A variant added to the type alone would be written and then not
+/// read back, so the action's own `Deserialize`, which wraps this reader,
+/// names every variant of the type and stops building until it is added
+/// here too.
+#[derive(Deserialize)]
+#[serde(
+    remote = "ScheduledSessionAction",
+    tag = "type",
+    rename_all = "snake_case"
+)]
+enum ScheduledSessionActionReader {
+    Prompt {
+        prompt: ContentInput,
+        #[serde(default)]
+        system_prompt: Option<String>,
+        #[serde(default)]
+        render_metadata: Option<RenderMetadata>,
+        #[serde(default)]
+        skill_refs: Vec<SkillRef>,
+        #[serde(default)]
+        additional_instructions: Vec<String>,
+    },
+    Event {
+        event_type: String,
+        payload: serde_json::Value,
+        #[serde(default)]
+        render_metadata: Option<RenderMetadata>,
+    },
+}
+
+/// Reads an action as before and refuses a `reasoning_effort` member written
+/// directly on a prompt action, on every target that carries one. Every
+/// other unknown member is dropped as before, an event action's members are
+/// not judged (its payload is the event's own data), and an action that does
+/// not read keeps its own error.
+impl<'de> Deserialize<'de> for ScheduledSessionAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let writes_level = writes_reasoning_effort_member(&value);
+        let action = ScheduledSessionActionReader::deserialize(value).map_err(DeError::custom)?;
+        // Every variant is named: a variant added to the type does not build
+        // here until it is given an arm, and a reader in
+        // `ScheduledSessionActionReader`.
+        let takes_no_level = match &action {
+            Self::Prompt { .. } => true,
+            Self::Event { .. } => false,
+        };
+        if writes_level && takes_no_level {
+            return Err(DeError::custom(REASONING_EFFORT_DIRECTLY_ON_PROMPT_ACTION));
+        }
+        Ok(action)
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -3405,6 +3551,383 @@ mod tests {
     fn validate_public_api_accepts_none_tooling() {
         let spec = HelperOptionsSpec::default();
         assert!(spec.validate_public_api().is_ok());
+    }
+
+    /// A create request whose session target is created on demand with
+    /// `provider_params` in its spec, as the wire carries it.
+    fn create_request_with_provider_params(
+        provider_params: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": "2026-04-21T09:00:00Z",
+                "every_seconds": 3600
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": {"model": "claude-sonnet-4-6", "provider_params": provider_params},
+                "action": {"type": "prompt", "prompt": "Check."}
+            }
+        })
+    }
+
+    /// The provider-neutral reasoning effort level is not accepted in a
+    /// schedule's session settings in this release: a create that names it is
+    /// refused, and the text names the key and says where it is not accepted.
+    /// The level is refused alone and beside a provider's own effort under
+    /// `provider_tag`, which is accepted on its own.
+    #[test]
+    fn a_schedule_session_spec_that_names_a_reasoning_effort_level_is_refused_at_create() {
+        for provider_params in [
+            serde_json::json!({"reasoning_effort": "high"}),
+            serde_json::json!({
+                "reasoning_effort": "high",
+                "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
+            }),
+        ] {
+            let request: CreateScheduleRequest = serde_json::from_value(
+                create_request_with_provider_params(provider_params.clone()),
+            )
+            .unwrap();
+            let refused = request.validate_public_api().unwrap_err();
+            assert!(
+                refused.contains("reasoning_effort")
+                    && refused.contains("not accepted in a schedule's session settings"),
+                "{provider_params}: {refused}"
+            );
+        }
+    }
+
+    /// An update that gives a schedule such a target is refused the same
+    /// way; an update that names no target is not judged.
+    #[test]
+    fn a_schedule_session_spec_that_names_a_reasoning_effort_level_is_refused_at_update() {
+        let target: TargetBinding =
+            serde_json::from_value(
+                create_request_with_provider_params(
+                    serde_json::json!({"reasoning_effort": "high"}),
+                )["target"]
+                    .clone(),
+            )
+            .unwrap();
+        let refused = UpdateScheduleRequest {
+            target: Some(target),
+            ..Default::default()
+        }
+        .validate_public_api()
+        .unwrap_err();
+        assert!(
+            refused.contains("reasoning_effort")
+                && refused.contains("not accepted in a schedule's session settings"),
+            "{refused}"
+        );
+        assert_eq!(
+            UpdateScheduleRequest::default().validate_public_api(),
+            Ok(())
+        );
+    }
+
+    /// A spec without a level is accepted as before, and so is a provider's
+    /// own effort under `provider_tag`.
+    #[test]
+    fn a_schedule_session_spec_without_a_level_or_with_a_provider_effort_is_accepted() {
+        for provider_params in [
+            serde_json::json!({}),
+            serde_json::json!({"temperature": 0.2}),
+            serde_json::json!({"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}),
+        ] {
+            let request: CreateScheduleRequest = serde_json::from_value(
+                create_request_with_provider_params(provider_params.clone()),
+            )
+            .unwrap();
+            assert_eq!(request.validate_public_api(), Ok(()), "{provider_params}");
+        }
+    }
+
+    /// A create request, as the wire carries it, for a schedule on `target`.
+    fn create_request_on(target: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": "2026-04-21T09:00:00Z",
+                "every_seconds": 3600
+            },
+            "target": target
+        })
+    }
+
+    /// Each target a schedule can deliver a prompt action to, with `create`
+    /// and `action` as given: a session created on demand (the one target
+    /// with a `create` spec), an exact and a resumable session, and a
+    /// resumable identity.
+    fn prompt_targets(
+        create: serde_json::Value,
+        action: serde_json::Value,
+    ) -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            (
+                "materialize_on_demand_session",
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "materialize_on_demand_session",
+                    "create": create,
+                    "action": action
+                }),
+            ),
+            (
+                "exact_session",
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "exact_session",
+                    "session_id": SessionId::new(),
+                    "action": action
+                }),
+            ),
+            (
+                "resumable_session",
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "resumable_session",
+                    "session_id": SessionId::new(),
+                    "action": action
+                }),
+            ),
+            (
+                "resumable_identity",
+                serde_json::json!({
+                    "target_kind": "identity",
+                    "type": "resumable_identity",
+                    "identity": "domain:ops",
+                    "action": action
+                }),
+            ),
+        ]
+    }
+
+    /// What reading `target` as a create request and as an update request
+    /// answers: the two parse errors, or `None` where the request reads.
+    fn create_and_update_parse_errors(target: serde_json::Value) -> [Option<String>; 2] {
+        let create =
+            serde_json::from_value::<CreateScheduleRequest>(create_request_on(target.clone()))
+                .err()
+                .map(|error| error.to_string());
+        let update =
+            serde_json::from_value::<UpdateScheduleRequest>(serde_json::json!({"target": target}))
+                .err()
+                .map(|error| error.to_string());
+        [create, update]
+    }
+
+    /// A `reasoning_effort` member written directly in a schedule's `create`
+    /// spec, the form `session/create` takes, is refused when the request is
+    /// read, at create and at update, whether or not its value is a level:
+    /// it was read as an unknown member and dropped without a word. The text
+    /// names the member and says where it is not accepted.
+    #[test]
+    fn a_reasoning_effort_member_written_directly_in_a_schedule_create_spec_is_refused() {
+        for level in [
+            serde_json::json!("high"),
+            serde_json::json!("not-a-level"),
+            serde_json::json!({"action": "clear"}),
+        ] {
+            let target = prompt_targets(
+                serde_json::json!({"model": "claude-sonnet-4-6", "reasoning_effort": level}),
+                serde_json::json!({"type": "prompt", "prompt": "Check."}),
+            )
+            .remove(0)
+            .1;
+            for refused in create_and_update_parse_errors(target) {
+                let refused = refused.unwrap_or_else(|| panic!("{level}: the request is refused"));
+                assert!(
+                    refused.contains("`create.reasoning_effort`")
+                        && refused.contains("not accepted in a schedule's session settings"),
+                    "{level}: {refused}"
+                );
+            }
+        }
+    }
+
+    /// A `reasoning_effort` member written directly on a schedule's prompt
+    /// action, the form a turn request takes, is refused the same way on
+    /// every target that delivers a prompt: a session created on demand, an
+    /// exact session, a resumable session and a resumable identity.
+    #[test]
+    fn a_reasoning_effort_member_written_directly_on_a_schedule_prompt_action_is_refused() {
+        for (name, target) in prompt_targets(
+            serde_json::json!({"model": "claude-sonnet-4-6"}),
+            serde_json::json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+        ) {
+            for refused in create_and_update_parse_errors(target) {
+                let refused = refused.unwrap_or_else(|| panic!("{name}: the request is refused"));
+                assert!(
+                    refused.contains("`action.reasoning_effort`")
+                        && refused.contains("not accepted on a schedule's prompt action"),
+                    "{name}: {refused}"
+                );
+            }
+        }
+    }
+
+    /// Only that one member is refused, and only in those two places. Another
+    /// unknown member in `create` or on the action is read and dropped as
+    /// before, so the stored target does not carry it, and so is a
+    /// `reasoning_effort` that is `null`, which names no level. An event
+    /// action is not a prompt: a `reasoning_effort` member on it is an
+    /// unknown member like any other, and a payload that names one is the
+    /// event's own data and is kept.
+    #[test]
+    fn only_a_direct_reasoning_effort_member_of_a_schedule_spec_is_refused() {
+        for (create_extra, action_extra) in [
+            (
+                ("colour", serde_json::json!("blue")),
+                ("colour", serde_json::json!("blue")),
+            ),
+            (
+                ("reasoning_effort", serde_json::Value::Null),
+                ("reasoning_effort", serde_json::Value::Null),
+            ),
+        ] {
+            let mut create = serde_json::json!({"model": "claude-sonnet-4-6"});
+            create[create_extra.0] = create_extra.1;
+            let mut action = serde_json::json!({"type": "prompt", "prompt": "Check."});
+            action[action_extra.0] = action_extra.1;
+            for (name, target) in prompt_targets(create, action) {
+                assert_eq!(
+                    create_and_update_parse_errors(target.clone()),
+                    [None, None],
+                    "{name}"
+                );
+                let request: CreateScheduleRequest =
+                    serde_json::from_value(create_request_on(target)).unwrap();
+                assert_eq!(request.validate_public_api(), Ok(()), "{name}");
+                let stored = serde_json::to_string(&request.target).unwrap();
+                assert!(
+                    !stored.contains("colour") && !stored.contains("reasoning_effort"),
+                    "{name}: {stored}"
+                );
+                let read_back: TargetBinding = serde_json::from_str(&stored).unwrap();
+                assert_eq!(read_back, request.target, "{name}");
+            }
+        }
+
+        let event = serde_json::json!({
+            "type": "event",
+            "event_type": "tick",
+            "payload": {"reasoning_effort": "high"},
+            "reasoning_effort": "high"
+        });
+        for (name, target) in
+            prompt_targets(serde_json::json!({"model": "claude-sonnet-4-6"}), event)
+        {
+            assert_eq!(
+                create_and_update_parse_errors(target.clone()),
+                [None, None],
+                "{name}"
+            );
+            let request: CreateScheduleRequest =
+                serde_json::from_value(create_request_on(target)).unwrap();
+            let stored = serde_json::to_value(&request.target).unwrap();
+            assert_eq!(
+                stored["action"]["payload"],
+                serde_json::json!({"reasoning_effort": "high"}),
+                "{name}"
+            );
+            assert!(stored["action"].get("reasoning_effort").is_none(), "{name}");
+        }
+    }
+
+    /// A door that answers a failed read differently from a refused schedule
+    /// asks whether the read failed for this refusal:
+    /// [`direct_reasoning_effort_refusal`] finds each of the two sentences in
+    /// the read's error, behind a parser's path and position too, and no
+    /// other failure is taken for it. A spec that does not read for another
+    /// reason keeps its own error, also when it writes the member.
+    #[test]
+    fn a_failed_read_is_recognised_as_the_direct_reasoning_effort_refusal() {
+        let targets = |create: serde_json::Value, action: serde_json::Value| {
+            prompt_targets(create, action).remove(0).1
+        };
+        let prompt = serde_json::json!({"type": "prompt", "prompt": "Check."});
+        let [in_create, in_create_update] = create_and_update_parse_errors(targets(
+            serde_json::json!({"model": "claude-sonnet-4-6", "reasoning_effort": "high"}),
+            prompt.clone(),
+        ));
+        let [on_action, on_action_update] = create_and_update_parse_errors(targets(
+            serde_json::json!({"model": "claude-sonnet-4-6"}),
+            serde_json::json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+        ));
+        for refused in [in_create, in_create_update] {
+            assert_eq!(
+                direct_reasoning_effort_refusal(&refused.unwrap()),
+                Some(REASONING_EFFORT_DIRECTLY_IN_CREATE)
+            );
+        }
+        for refused in [on_action, on_action_update] {
+            assert_eq!(
+                direct_reasoning_effort_refusal(&refused.unwrap()),
+                Some(REASONING_EFFORT_DIRECTLY_ON_PROMPT_ACTION)
+            );
+        }
+        // As a parser of a request body reports it: a path before the
+        // sentence and a position after it.
+        let from_text = serde_json::from_str::<CreateScheduleRequest>(
+            &create_request_on(targets(
+                serde_json::json!({"model": "claude-sonnet-4-6", "reasoning_effort": "high"}),
+                prompt.clone(),
+            ))
+            .to_string(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(from_text.contains(" at line 1 column "), "{from_text}");
+        assert_eq!(
+            direct_reasoning_effort_refusal(&format!("target.create: {from_text}")),
+            Some(REASONING_EFFORT_DIRECTLY_IN_CREATE)
+        );
+
+        // Requests that do not read for another reason: each is a failed
+        // read, and none is taken for the refusal.
+        for (create, action) in [
+            // No model: the spec does not read, with or without the member.
+            (serde_json::json!({}), prompt.clone()),
+            (
+                serde_json::json!({"reasoning_effort": "high"}),
+                prompt.clone(),
+            ),
+            // No prompt: the action does not read.
+            (
+                serde_json::json!({"model": "claude-sonnet-4-6"}),
+                serde_json::json!({"type": "prompt", "reasoning_effort": "high"}),
+            ),
+        ] {
+            for failure in create_and_update_parse_errors(targets(create.clone(), action.clone())) {
+                let failure = failure
+                    .unwrap_or_else(|| panic!("{create} {action}: the request does not read"));
+                assert_eq!(
+                    direct_reasoning_effort_refusal(&failure),
+                    None,
+                    "{create} {action}: {failure}"
+                );
+            }
+        }
+        // The provider-params form reads: the schedule service refuses it,
+        // not the read.
+        assert_eq!(
+            create_and_update_parse_errors(targets(
+                serde_json::json!({
+                    "model": "claude-sonnet-4-6",
+                    "provider_params": {"reasoning_effort": "high"}
+                }),
+                prompt,
+            )),
+            [None, None]
+        );
+        assert_eq!(
+            direct_reasoning_effort_refusal("unknown field `reasoning_effort`"),
+            None
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -457,6 +457,8 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "SessionInputStateParams",
     "SessionInputStateSelector",
     "SessionInputStateResult",
+    "RecallInputParams",
+    "RecallInputResult",
     "RealmIdParams",
     "RestoreSessionTranscriptRevisionParams",
     "RewriteSessionTranscriptParams",
@@ -555,6 +557,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireRunStopCompletion",
     "WireInputTerminalOutcome",
     "WireCompactionRequestOutcome",
+    "WireQueuedInputRecall",
     "WireDeviceCompleteResult",
     "AuthLogoutParams",
     "AuthStatusParams",
@@ -1188,6 +1191,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         # A compaction request's outcome stays named inside
         # `CompactSessionResult` / `MobCompactMemberResult`.
         "WireCompactionRequestOutcome",
+        # The queued-input recall's typed answer stays a named union inside
+        # `RecallInputResult`.
+        "WireQueuedInputRecall",
     }
 
 
@@ -3611,7 +3617,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    structured_output: Optional[Any] = None\n"
     types_content += "    extraction_error: Optional[dict[str, Any]] = None\n"
     types_content += "    schema_warnings: Optional[list[Any]] = None\n"
-    types_content += "    skill_diagnostics: Optional[dict] = None\n\n\n"
+    types_content += "    skill_diagnostics: Optional[dict] = None\n"
+    types_content += "    reasoning_effort: Optional[dict[str, Any]] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireToolResult:\n"
     types_content += '    """Tool result transcript item."""\n'
@@ -4659,6 +4666,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  structured_output?: unknown;\n"
     types_content += "  extraction_error?: { last_output: string; attempts: number; reason: string };\n"
     types_content += "  schema_warnings?: Array<{ provider: string; path: string; message: string }>;\n"
+    types_content += (
+        "  reasoning_effort?: { requested: string; sent: Array<{ level: string; provider: string; "
+        "model: string; route: { backend: string; api: string }; fields: string[]; facts: string; "
+        "decided_by: string; requests: number }> };\n"
+    )
     types_content += "}\n\n"
 
     types_content += "export interface WireToolResult {\n"
@@ -6182,6 +6194,13 @@ export interface SessionConfig {
   additionalInstructions?: string[];
   /** Opaque application context. */
   appContext?: unknown;
+  /**
+   * The session's provider-neutral reasoning effort level. Meerkat checks it
+   * against the model on the route that serves the request and writes the
+   * provider's own field; a level the model or route does not accept is
+   * refused before any provider request.
+   */
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 /** Fail-closed parse guard for WASM `init_runtime*` output (K19/K21).
@@ -6236,7 +6255,7 @@ def generate_web_session_types(schemas: dict, output_dir: Path) -> None:
     wire = schemas["wire-types"]
     definitions: dict[str, Any] = {}
     roots: dict[str, Any] = {}
-    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt"):
+    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt", "WireQueuedInputRecall"):
         schema = _lookup_named_schema(wire, name)
         if not schema:
             raise KeyError(f"canonical {name} schema is missing")

@@ -59,6 +59,7 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     labels: config.labels,
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
+    reasoning_effort: config.reasoningEffort,
   };
 }
 
@@ -121,6 +122,7 @@ export interface WasmModule {
   get_session_state: (handle: number) => Promise<string>;
   interrupt_session: (handle: number) => Promise<void>;
   stop_session_run: (handle: number, runId: string, reason: string) => Promise<string>;
+  recall_session_input: (handle: number, inputId: string) => Promise<string>;
   session_wire_peer: (handle: number, peerHandle: number) => Promise<void>;
   destroy_session: (handle: number) => Promise<void>;
   poll_events: (handle: number) => string;
@@ -421,6 +423,7 @@ export class MeerkatRuntime {
       this.wasm.interrupt_session,
       this.wasm.session_wire_peer,
       this.wasm.stop_session_run,
+      this.wasm.recall_session_input,
     );
   }
 

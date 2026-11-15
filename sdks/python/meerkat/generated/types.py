@@ -56,6 +56,7 @@ class WireRunResult:
     extraction_error: Optional[dict[str, Any]] = None
     schema_warnings: Optional[list[Any]] = None
     skill_diagnostics: Optional[dict] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -921,6 +922,25 @@ WireInputTerminalOutcome = Literal['completed', 'abandoned', 'superseded', 'coal
 # check consumed yet was already recorded; nothing changed, and the next
 # check compacts once.
 WireCompactionRequestOutcome = Literal['requested', 'already_requested']
+
+# Typed answer of a queued-input recall.
+class WireQueuedInputRecallAbandoned(TypedDict, total=False):
+    attempt_count: NotRequired[int]
+    input_id: Required[str]
+    outcome: Required[Literal['abandoned']]
+
+class WireQueuedInputRecallNotQueued(TypedDict, total=False):
+    input_id: Required[str]
+    outcome: Required[Literal['not_queued']]
+    phase: Required[Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']]
+    run_id: NotRequired[Optional[str]]
+
+class WireQueuedInputRecallAlreadyTerminal(TypedDict, total=False):
+    input_id: Required[str]
+    outcome: Required[Literal['already_terminal']]
+    terminal: Required[WireInputTerminalOutcome]
+
+WireQueuedInputRecall = WireQueuedInputRecallAbandoned | WireQueuedInputRecallNotQueued | WireQueuedInputRecallAlreadyTerminal
 
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
@@ -1882,6 +1902,7 @@ class HelpResponse:
     turns: int
     usage: WireUsage
     extraction_error: Optional[dict[str, Any]] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
     request_usage: Optional[list[dict[str, Any]]] = None
     run_usage: Optional[WireUsage] = None
     schema_warnings: Optional[list[dict[str, Any]]] = None
@@ -2095,6 +2116,24 @@ class SessionInputStateSelector:
 class SessionInputStateResult:
     """Result for `session/input_status`."""
     state: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class RecallInputParams:
+    """Parameters for `session/recall_input`.
+
+`selector` names the input exactly as `session/input_status` does: by the
+runtime input id the submit answered, or by the idempotency key the caller
+submitted it under."""
+    selector: SessionInputStateSelector
+    session_id: str
+
+
+@dataclass
+class RecallInputResult:
+    """Result for `session/recall_input`."""
+    recall: WireQueuedInputRecall
+    session_id: str
 
 
 @dataclass
@@ -4124,6 +4163,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
     provider_params: Optional[dict[str, Any]] = None
+    reasoning_effort: Optional[dict[str, Any]] = None
     self_hosted_server_id: Optional[str] = None
     session_events: Optional[bool] = None
     skill_refs: Optional[list[SkillKey]] = None
@@ -5209,6 +5249,7 @@ class WireProviderParamsOverride:
     max_output_tokens: Optional[int] = None
     provider_tag: Optional[WireProviderTag] = None
     reasoning: Optional[WireReasoningMode] = None
+    reasoning_effort: Optional[Any] = None
     temperature: Optional[float] = None
     thinking_budget_tokens: Optional[int] = None
     top_p: Optional[float] = None
@@ -7545,6 +7586,7 @@ class WireModelProfile:
     image_tool_results: Optional[bool] = None
     inline_video: Optional[bool] = None
     realtime: Optional[bool] = None
+    reasoning_effort_levels: Optional[list[Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']]] = None
     release_stage: Optional[Literal['stable', 'experimental', 'operator_defined']] = None
     supports_mid_conversation_system_messages: Optional[bool] = None
     supports_web_search: Optional[bool] = None
@@ -7993,7 +8035,7 @@ WireMobBackendKind = Literal['session', 'external']
 #
 # Wire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case
 # vocabulary, parsed fail-closed at the wire boundary.
-WireMobResumeOverrideField = Literal['model', 'provider', 'provider_params']
+WireMobResumeOverrideField = Literal['model', 'provider', 'provider_params', 'reasoning_effort']
 
 # Runtime binding for spawn requests.
 #

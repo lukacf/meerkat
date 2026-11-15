@@ -624,6 +624,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "CompactSessionResult": schema_for!(crate::wire::CompactSessionResult),
         "MobCompactMemberResult": schema_for!(crate::wire::MobCompactMemberResult),
         "WireCompactionRequestOutcome": schema_for!(crate::wire::WireCompactionRequestOutcome),
+        "RecallInputResult": schema_for!(crate::wire::RecallInputResult),
+        "WireQueuedInputRecall": schema_for!(crate::wire::WireQueuedInputRecall),
         "ConfigEnvelope": schema_for!(meerkat_core::ConfigEnvelope),
         "ConfigSetParams": schema_for!(crate::wire::ConfigSetParams),
         "ConfigPatchParams": schema_for!(crate::wire::ConfigPatchParams),
@@ -861,6 +863,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "SessionInputStateSelector": schema_for!(crate::wire::SessionInputStateSelector),
         "SessionInputStateParams": schema_for!(crate::wire::SessionInputStateParams),
         "SessionInputStateResult": schema_for!(crate::wire::SessionInputStateResult),
+        "RecallInputParams": schema_for!(crate::wire::RecallInputParams),
         "InterruptParams": schema_for!(crate::wire::InterruptParams),
         "StopRunParams": schema_for!(crate::wire::StopRunParams),
         "MobStopMemberRunParams": schema_for!(crate::wire::MobStopMemberRunParams),
@@ -2527,6 +2530,44 @@ mod tests {
         fs::remove_dir_all(&output_dir).unwrap();
     }
 
+    /// A reasoning effort refusal's `route`, `supported` and `facts` are
+    /// always present on the wire and `null` when they have no value: the
+    /// schema requires each and lets each be null. The two `conflicting_*`
+    /// members are left out when absent, so the schema does not require
+    /// them.
+    #[test]
+    fn the_refusals_always_present_members_are_required_and_nullable() {
+        fn admits_null(schema: &serde_json::Value) -> bool {
+            let ty = &schema["type"];
+            ty.as_str() == Some("null")
+                || ty
+                    .as_array()
+                    .is_some_and(|types| types.iter().any(|ty| ty.as_str() == Some("null")))
+                || ["anyOf", "oneOf"].iter().any(|key| {
+                    schema[*key]
+                        .as_array()
+                        .is_some_and(|arms| arms.iter().any(admits_null))
+                })
+        }
+        let schema =
+            serde_json::to_value(schemars::schema_for!(meerkat_core::ReasoningEffortRefusal))
+                .expect("the refusal's schema is JSON");
+        let required = schema["required"]
+            .as_array()
+            .expect("the refusal's schema lists its required members");
+        let is_required = |member: &str| required.iter().any(|name| name.as_str() == Some(member));
+        for member in ["route", "supported", "facts"] {
+            assert!(is_required(member), "{member} is required: {schema}");
+            assert!(
+                admits_null(&schema["properties"][member]),
+                "{member} may be null: {schema}"
+            );
+        }
+        for member in ["conflicting_param", "conflicting_level"] {
+            assert!(!is_required(member), "{member} is left out when absent");
+        }
+    }
+
     #[test]
     fn emitted_rest_openapi_contains_wire_contracts_not_only_paths() {
         let output_dir = temp_output_dir("rest-openapi-contracts");
@@ -2631,6 +2672,56 @@ mod tests {
             continue_session_properties.contains_key("enable_web_search"),
             "RestContinueSessionRequest schema missing live surface field enable_web_search"
         );
+        // The continue's `reasoning_effort` is described as its own type
+        // reads it: a bare level, the explicit set form whose value is a
+        // level, or clear. Its value is never another override's value type
+        // (the document merges components by name). Each documented form
+        // reads into the request type.
+        let level = serde_json::json!({ "$ref": "#/components/schemas/EffortLevel" });
+        assert_eq!(
+            continue_session_properties
+                .get("reasoning_effort")
+                .and_then(|schema| schema.get("anyOf")),
+            Some(&serde_json::json!([
+                level,
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "set" },
+                        "value": level
+                    },
+                    "required": ["action", "value"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "clear" }
+                    },
+                    "required": ["action"]
+                }
+            ])),
+            "the continue's reasoning_effort schema states the three forms of a level"
+        );
+        assert!(
+            components.contains_key("EffortLevel"),
+            "the level's own component is published"
+        );
+        for form in [
+            serde_json::json!("high"),
+            serde_json::json!({ "action": "set", "value": "high" }),
+            serde_json::json!({ "action": "clear" }),
+        ] {
+            let request: Result<crate::wire::RestContinueSessionRequest, _> =
+                serde_json::from_value(serde_json::json!({
+                    "session_id": "session",
+                    "prompt": "next",
+                    "reasoning_effort": form,
+                }));
+            assert!(
+                request.is_ok_and(|request| request.reasoning_effort.is_some()),
+                "the documented form {form} reads into the request type"
+            );
+        }
 
         let create_session = &rest_openapi["paths"]["/sessions"]["post"];
         assert_eq!(

@@ -80,4 +80,11 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     // the `active` set after the entry and a delta's `changes`. An
     // observation: the session's instruction status read is the authority.
     "operator_instructions_applied",
+    // One provider request was sent with the session's provider-neutral
+    // `reasoning_effort` level: `resolution` (the level the request named,
+    // the level sent, provider, model, route, provider fields, the source
+    // of the route's levels and who decided the level), with `turn_number`
+    // for a request of a turn and `fallback_attempt` for a model-fallback
+    // attempt.
+    "request_reasoning_effort_resolved",
 ];

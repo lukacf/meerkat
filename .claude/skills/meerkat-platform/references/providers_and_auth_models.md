@@ -78,7 +78,7 @@ Rules:
 | No hints at all (global default) | `gpt-6-astra` |
 | Anthropic | `claude-opus-5-5` |
 | OpenAI | `gpt-6-astra` |
-| Gemini | `gemini-4-argon` (paid Gemini API tiers; on the free tier select `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
+| Gemini | `gemini-4-argon` (paid Gemini API tiers; on the free tier select `gemini-4-hydrogen` (0.9.15) or `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
 | Self-hosted | `[self_hosted] default_model`, or the only configured alias |
 | Image generation (OpenAI / Gemini) | `gpt-image-2.6-sunburst` / `gemini-nano-banana-2.1` |
 
@@ -168,15 +168,23 @@ Gemini (all 1,048,576 / 65,536 tokens, thinking via `thinking_level`):
 `gemini-4-carbon` (0.9.12, R; Google's strongest Gemini 4 reasoning model;
 paid Gemini API tiers only; levels `low`, `medium`, `high`, default
 `medium`), `gemini-4-argon` (default, R; paid Gemini API tiers only; levels
-`low`, `medium`, `high`, default `medium`), `gemini-3.8-flash` (R; the
+`low`, `medium`, `high`, default `medium`), `gemini-4-hydrogen` (0.9.15, R;
+Google's fast Gemini 4 model, on the free tier and the paid Gemini API
+tiers; levels `low`, `medium`, `high`; Google's default for it is `high`,
+which applies when a request names no level), `gemini-3.8-flash` (R; the
 recommended Flash model, also on the free tier), then `gemini-3.7-flash`,
 `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`,
 `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite` and
 `gemini-3.1-flash-lite-preview` (S). `gemini-4-carbon`, `gemini-4-argon`,
 `gemini-3.8-flash`, `gemini-3.7-flash` and `gemini-3.1-pro-preview` accept
-only `low`, `medium` and `high` (Google refuses `minimal` for them); the
+only `low`, `medium` and `high` (Google refuses `minimal` for them), and
+the `gemini-4-hydrogen` row lists the same three; the
 other rows also accept `minimal`, which is the default on
-`gemini-3.5-flash-lite` and the 3.1 Flash-Lite rows.
+`gemini-3.5-flash-lite` and the 3.1 Flash-Lite rows. Google also documents
+`xhigh` for `gemini-4-hydrogen`; Meerkat does not send it in 0.9.15: a
+`reasoning_effort` of `xhigh` on that model is refused as
+`unsupported_level` (`supported`: `low`, `medium`, `high`), and the Gemini
+`provider_tag` has no such value.
 
 Custom hosted models (an API provider serves an id the catalog lacks):
 
@@ -220,13 +228,15 @@ Capability flags come from the catalog row, never from the model name:
   `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash` and
   `gemini-3.5-flash-lite` take no
   `temperature`, `top_p` or `top_k` (`supports_temperature: false`). The Anthropic and
-  OpenAI clients drop a generic `temperature` for them.
+  OpenAI clients drop a generic `temperature` for them. The
+  `gemini-4-hydrogen` row carries the same three flags false, so its catalog
+  profile reports `supports_temperature: false`.
 - Default per-call timeout (catalog `call_timeout_secs`): 300 s for Claude
   Opus and Fable rows, 120 s for Sonnet rows, `claude-haiku-5-5` and the
   Gemini Flash and Flash-Lite rows, 60 s for Haiku 4.5, 600 s for OpenAI rows
-  and `gemini-3.1-pro-preview`, 900 s for `gemini-4-carbon` and
-  `gemini-4-argon`, 7200 s for `gpt-5.5-pro`. Custom and self-hosted entries
-  set their own.
+  and `gemini-3.1-pro-preview`, 900 s for `gemini-4-carbon`,
+  `gemini-4-argon` and `gemini-4-hydrogen`, 7200 s for `gpt-5.5-pro`. Custom
+  and self-hosted entries set their own.
 
 Thinking and effort are typed per model (tables above); `between_tools`, and
 `disabled` on `claude-opus-5` and `claude-haiku-5-5`, are accepted only at
@@ -251,6 +261,52 @@ refused when the agent is built and before each request.
 (not on `POST /sessions/{id}/messages`); MCP `meerkat_run`; mob profiles;
 Rust `AgentBuildConfig.provider_params`. A realm-level
 `[agent] provider_params` table is a configuration error.
+
+### Reasoning effort (provider-neutral, 0.9.15)
+
+`reasoning_effort` is one setting for every provider: `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh` or `max` (one spelling each; `x_high` is not
+accepted here). Set it with CLI `rkat run --reasoning-effort <LEVEL>` (on
+`--resume` also `--no-reasoning-effort` to remove it); RPC `session/create`
+(a level) and `turn/start` / `mob/turn_start` (a level, `{"action":"clear"}`,
+or absent to keep); REST `POST /sessions` and `POST /sessions/{id}/messages`;
+MCP `meerkat_run` and `meerkat_resume`; Python `reasoning_effort=` and
+TypeScript `reasoningEffort` on create and turns; Web
+`SessionConfig.reasoningEffort`; a mob profile's
+`provider_params = { reasoning_effort = "high" }`. It is the same setting as
+`provider_params.reasoning_effort`; both given must be equal. Not on
+schedules in 0.9.15: a schedule's `create` spec or prompt action that
+carries it is refused.
+
+```bash
+rkat run -m gpt-5.5 --reasoning-effort high "Plan the migration"
+rkat run --resume last --no-reasoning-effort "Continue"
+```
+
+Meerkat checks the level against the model on the route that serves the
+request and writes the provider's own field (`reasoning.effort` on OpenAI
+Responses, `reasoning_effort` and `reasoning.effort` on Chat Completions,
+`output_config.effort` on Anthropic, `thinkingConfig.thinkingLevel` on
+Gemini). The supported levels come from the model catalog on direct provider
+routes, from the account's model list on GitHub Copilot, and from the
+operator's `reasoning_effort_levels` for a self-hosted model. A level the
+model or route does not accept, levels no source states, and a conflict with
+a provider-specific effort, a thinking budget or `reasoning: off` are refused
+before any provider request: `INVALID_PARAMS` (CLI exit status 2) with data
+`{"kind": "reasoning_effort_refused", "retryable": <bool>,
+"reasoning_effort_refusal": {requested, provider, model, route, reason,
+supported, facts}}`. Reasons: `unsupported_level`,
+`supported_levels_unknown`, `supported_levels_unavailable` (the only
+transient one: the Copilot account's list is not loaded yet),
+`conflicting_provider_effort`, `conflicting_thinking_budget`,
+`conflicting_thinking_type`, `conflicting_reasoning_body`,
+`conflicting_reasoning_mode`. Meerkat never lowers the level, changes the
+model or moves to another route. The level is sticky on the session and
+independent of the other provider params. Runs report it: `run_started` /
+`run_resumed` `reasoning_effort`, the event
+`request_reasoning_effort_resolved` per provider request, and the run
+result's `reasoning_effort` block (`requested`, `sent[]`). `models/catalog`
+lists a model's direct-route levels as `reasoning_effort_levels`.
 
 `provider_tag` fields:
 
@@ -277,8 +333,9 @@ Rust `AgentBuildConfig.provider_params`. A realm-level
 - Gemini (`"provider": "gemini"`): `thinking` (`include_thoughts`,
   `thinking_level`, `thinking_budget`), `thinking_level` (`minimal`, `low`,
   `medium`, `high`; each model's `params_schema` lists the levels it accepts:
-  `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.7-flash`
-  and `gemini-3.1-pro-preview` refuse `minimal`), `thinking_budget`, `top_k`,
+  `gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen`,
+  `gemini-3.8-flash`, `gemini-3.7-flash` and `gemini-3.1-pro-preview` refuse
+  `minimal`), `thinking_budget`, `top_k`,
   `top_p`, `cached_content_name`.
 
 ```bash

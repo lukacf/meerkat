@@ -112,6 +112,14 @@ read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
 and MCP servers keep; a session on the in-memory ephemeral session service,
 which keeps none, delegates on the route it was built with.
 
+A session's implicit mob (its delegates and the forks seated there) and the
+mobs its agent created belong to the session, and they end with it: they are
+destroyed when the session is archived. From 0.9.15, besides that, only the
+route change described above replaces the implicit mob, and a mob the agent
+created ends when it is destroyed by name: a turn that fails, is cancelled
+or is abandoned, a request that is cancelled, and a stop of the host end
+none of them, and the session keeps its mobs for its next turn.
+
 <Warning>
 Known issue, noted 2026-11-13: in releases up to and including 0.9.14 (the first affected release differs by case: see the release page for the range of each), a turn that cannot be started can permanently destroy the mobs its session owns. See
 the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
@@ -432,9 +440,50 @@ image_generation_provider = "gemini"
 auto_compact_threshold = 60000
 # Profile fields that win over durable session metadata when a member
 # resumes. Without this, editing `model` in the definition does NOT apply to
-# resumed durable sessions. Vocabulary: model | provider | provider_params.
+# resumed durable sessions. Vocabulary: model | provider | provider_params |
+# reasoning_effort (from 0.9.15).
 resume_overrides = ["model", "provider"]
 ```
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+A profile sets its members' provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) level in its
+provider params: `provider_params = { reasoning_effort = "high" }`. The
+member's build checks the level against the profile's model and route like
+any session's, and refuses it with the same typed `reasoning_effort_refused`
+data. A resumed member keeps the level its session recorded. With
+`provider_params` in `resume_overrides`, a level the profile's params name is
+seated with them, and params that name no level leave the recorded level in
+place; add `reasoning_effort` to `resume_overrides` to make the profile
+decide the level on resume in every case: the level its `provider_params`
+name, or none. A member host that runs 0.9.14 refuses
+a member spec that carries a level: it fails closed with a spec digest
+mismatch and does not ignore the level, so upgrade member hosts before a
+profile sets a level.
+
+From 0.9.15, a level in a profile is a one-way step for a rollback. A mob
+whose definition holds a level in any profile, even a profile no member ever
+used, cannot be read by 0.9.14: after a rollback 0.9.14 quarantines the whole
+mob (its content is kept, and the mob is whole again on 0.9.15), and a Meta
+gateway on 0.9.14 does not start on a state directory that holds such a mob,
+so nothing stored in that directory can be used there. Removing the level
+from the definition afterwards does not help; the only way back is to
+destroy the mob on 0.9.15 and create it anew, which loses its members,
+their conversations and its history. See
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
+
+If the route stops accepting the profile's level between a member's spawn
+and its resume (an account's model list changed, or the model was swapped),
+only that member is affected. Under on-demand restore it stays dormant until
+its first wake and is then listed as broken with the reason; under eager
+restore it is broken at start. The mob keeps running and nothing is lost: the
+member keeps its seat, its session and its conversation. To recover, make
+the route accept the level again or change the level, then respawn that
+member (the same session, the conversation kept) or restart the host. A
+plain retry does not seat it, and removing the level from the profile alone
+does not help, because a resumed member keeps the level its session
+recorded.
 
 A profile's `auth_binding` is an explicit build input: its members build on
 that binding, a resumed member included, and a spawn that names its own
@@ -936,11 +985,12 @@ worker's respawn (`respawn`, `mob/respawn`, the `mob_respawn` tool of
 so the mobs the old incarnation created and its delegates are not carried
 over to the successor.
 An identity entry's member is respawned on its own session
-(`MobHandle::respawn_member`, and `respawn` of such a member) and keeps its
-mobs, and its agent keeps managing the mobs it created with `mob_create`:
-that management follows a member through its same-session successors, and
-ends when the member is reset onto a fresh session or is retired and later
-seated again. Which side a member is on follows from how it was created: a member a
+(`MobHandle::respawn_member`, and `respawn` of such a member), so the mobs
+that session owns do not end with the respawn, and its agent keeps managing
+the mobs it created with `mob_create`: that management follows a member
+through its same-session successors, and ends when the member is reset onto
+a fresh session or is retired and later seated again. Which side a member
+is on follows from how it was created: a member a
 host seats through an identity entry (a declared or store-owned identity, the
 way a host keeps a durable roster) is an entry's member; a member spawned
 directly (a host's spawn call, an agent's `mob_spawn_member`, a helper) is a
@@ -1195,16 +1245,32 @@ untouched. Cancelling an idle member is not an error. On success the result
 is `{"mob_id": "...", "ok": true}`.
 
 <Warning>
-Known issue in 0.9.5 through 0.9.14 (the range read from the source; 0.8.51
-through 0.9.4 not determined), noted 2026-11-13, confirmed by a test for `turn/start` on the member's
-session id (`mob/turn_start` reaches the same path, read from the source):
-if a client has a turn of its own queued on that member's session,
-`mob/cancel_all_work` also abandons it, and the mobs that member's session
-owns are then destroyed. Work the mob itself admitted (member sends,
-submitted work) does not trigger this. See the
+Known issue in 0.9.5 through 0.9.14, noted 2026-11-13 and corrected
+2026-11-14 after runs on the published 0.9.14 `rkat-rpc` (measured on
+0.9.14; 0.9.5 through 0.9.13 read from the source; 0.8.51 through 0.9.4 not
+determined): `mob/cancel_all_work` can destroy the mobs that the member's
+session owns.
+
+- With a turn waiting: the mobs are destroyed when a turn a client sent to
+  the member's session (`turn/start` on its session id) or a
+  `mob/turn_start` is waiting behind the member's run when the cancel is
+  taken (measured on a default realm and on a realm created with
+  `--realm-backend jsonl`). The waiting turn itself may still run. With
+  nothing waiting, a default realm keeps the mobs.
+- On a realm created with `--realm-backend jsonl`, nothing needs to be
+  waiting: the first turn started on the member's session after the cancel
+  (measured for `turn/start`) is answered with an internal error (`-32603`)
+  and is not completed, and the mobs are destroyed at that turn. Before
+  0.9.14 this case is not determined.
+
+Work the mob itself admitted (member sends, submitted work) and still queued
+at the cancel does not count as a waiting turn. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
-Until a release with the fix, do not call `mob/cancel_all_work` while such a
-turn is queued.
+Until a release with the fix, do not call `mob/cancel_all_work` on a member
+while such a turn is queued. On a `jsonl` realm, do not call it at all on a
+member whose session owns mobs; if you already have, restart the process
+before the next turn is sent to that member (after a restart the next turn
+ran and the mobs were kept, in one run).
 </Warning>
 
 ## Flows
@@ -2333,6 +2399,17 @@ grants, merged observation, and teardown. The member host owns realm-local
 execution, session history, credentials, compaction, and memory. A remote
 member therefore uses its host's realm even when the controller has a realm
 with the same name.
+
+From 0.9.15: do not use a reasoning effort level on a placed member if you
+may ever go back to 0.9.14. While the member's host runs 0.9.14, the
+controlling mob cannot follow a placed member whose session ran a turn with
+a level, and no step on 0.9.14 ends that. After such a member's host has
+run 0.9.14 and returned, the controlling host can skip events when that
+member's event stream is resumed from a cursor, and a wait for the
+completion of its run can time out; the stored events are complete (read
+from the source, not run). What ends that condition, and what is not
+established about it, is in
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
 
 A placed member can also be wired to an external peer (`mob/wire` with an
 external peer descriptor). The edge is the same controller-owned external

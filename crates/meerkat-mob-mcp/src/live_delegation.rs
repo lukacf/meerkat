@@ -10702,6 +10702,7 @@ mod tests {
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::AgentEvent>,
         ) -> Result<meerkat_core::RunResult, meerkat_core::AgentError> {
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: "unused".to_string(),
                 session_id: self.session.id().clone(),
                 usage: meerkat_core::Usage::default(),

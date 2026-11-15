@@ -932,6 +932,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: id.clone(),
@@ -1082,6 +1083,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    reasoning_effort: None,
                     request_reasoning: None,
                     identity: Default::default(),
                     session_id: id.clone(),
@@ -1301,6 +1303,7 @@ mod tests {
     ) -> Vec<EventEnvelope<AgentEvent>> {
         let mut events = vec![
             AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: id.clone(),
@@ -1517,6 +1520,7 @@ mod tests {
         let reply = r#"{"comments":[]}"#;
         let events = [
             AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: id.clone(),
@@ -1674,6 +1678,7 @@ mod tests {
 
     fn run_started(id: &SessionId, text: &str) -> AgentEvent {
         AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: id.clone(),

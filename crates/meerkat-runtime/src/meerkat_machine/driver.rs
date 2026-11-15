@@ -10,6 +10,7 @@ use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunBoundaryReceipt
 use meerkat_core::types::SessionId;
 
 use crate::accept::{AcceptOutcome, ResolvedAdmission};
+pub(crate) use crate::driver::ephemeral::QueuedInputAbandon;
 use crate::driver::ephemeral::{EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver};
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
@@ -4085,7 +4086,11 @@ impl DriverEntry {
             finalization: existing_finalization,
         } = &owner.phase
         {
-            if existing_digest == &receipt_digest
+            if crate::input_state::interaction_terminal_payload_digest_matches(
+                &(authorized.outcome(), finalization),
+                existing_digest,
+            )
+            .is_ok_and(|same| same)
                 && existing_finalization == &finalization
                 && owner.outcome.as_ref().is_some_and(|outcome| {
                     interaction_terminal_payload_digest(&(outcome, finalization))
@@ -6310,6 +6315,41 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(driver) => driver.abandon_queued_input(input_id, reason),
             DriverEntry::Persistent(driver) => driver.abandon_queued_input(input_id, reason).await,
+        }
+    }
+
+    /// The error of a cancel point that read `input_id` as queued and was
+    /// then answered `false` by [`Self::abandon_queued_input`], under one
+    /// hold of this driver.
+    ///
+    /// The read (`stored_input_state(..).seed.phase`) and the machine's
+    /// `input_queued` guard are the same fact, `input_phases`, and every
+    /// input-lifecycle transition is applied under this driver's lock, so
+    /// the machine cannot contradict the read. If it ever does, the machine
+    /// decides: the cancel point undoes the termination it prepared, cancels
+    /// nothing on the word of its own read, and returns this.
+    pub(crate) fn queued_read_contradicted(input_id: &InputId) -> RuntimeDriverError {
+        RuntimeDriverError::Internal(format!(
+            "input {input_id} was read as queued and the machine answered that it is not \
+             queued; nothing was cancelled"
+        ))
+    }
+
+    /// What the machine's `AbandonQueuedInput` would answer for `input_id`,
+    /// without changing anything
+    /// ([`EphemeralRuntimeDriver::preview_queued_input_abandon`]). The answer
+    /// holds for [`Self::abandon_queued_input`] while this driver stays
+    /// locked.
+    pub(crate) fn preview_queued_input_abandon(
+        &self,
+        input_id: &InputId,
+        reason: crate::input_state::InputAbandonReason,
+    ) -> Result<QueuedInputAbandon, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => driver.preview_queued_input_abandon(input_id, reason),
+            DriverEntry::Persistent(driver) => driver
+                .inner_ref()
+                .preview_queued_input_abandon(input_id, reason),
         }
     }
 

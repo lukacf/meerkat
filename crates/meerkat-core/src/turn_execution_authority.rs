@@ -260,7 +260,10 @@ impl TurnFailureSourceKind {
             | AgentError::ControlAppendBlockedByCallbackBatch
             | AgentError::ClientModelChangeRequiresHotSwap { .. }
             | AgentError::InstructionActivation(_)
-            | AgentError::StagedPromptDirectedTurnRefused => Self::ConfigError,
+            | AgentError::StagedPromptDirectedTurnRefused
+            // A refused `reasoning_effort` level fails the run as the
+            // configuration refusal it is; no provider request was made.
+            | AgentError::ReasoningEffortRefused(_) => Self::ConfigError,
         })
     }
 

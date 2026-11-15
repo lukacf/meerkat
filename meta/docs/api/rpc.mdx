@@ -5087,7 +5087,20 @@ change with a tool error naming the candidate launch): queued work and
 changes belong to the authoritative launch. On the
 console, `subscriptions/put` refuses a `member` whose identity is `_system`
 or `__console__` (`-32602`), the identities the console reserves for its own
-events. The host announces a development to a mob hosted on
+events. On the console the methods keep an agent private to another person,
+and its records, from a caller who is not its owner (see
+[Access control](/concepts/access-control#private-side-chats)): a
+subscription, a delivery, a declared subscription and an escalation of such
+an agent are answered as ones that do not exist and are left as they are, a
+listing leaves their rows out and fills its page from the other rows, and
+an answer about a source, and a refusal, name no such agent. On the
+console, `declarations/apply` and `sources/put` refuse (`unknown_member`,
+nothing applied or written) a subscription of one member, and a source
+naming a member, that the applied declarations do not already hold
+unchanged, when the member is not seated, or is private to another person;
+the stdio gateway keeps such a subscription pending and stores such a
+source.
+The host announces a development to a mob hosted on
 this gateway, once per mob and source key. Every member subscription that
 names the mob and one of the announcement's topics captures it in the same
 transaction, and each subscriber receives what it is owed in bounded batches,

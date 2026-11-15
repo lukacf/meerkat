@@ -4147,6 +4147,10 @@ mod console_decision_caller_tests;
 mod console_approver_tests;
 
 #[cfg(test)]
+#[path = "console_announcement_audience_tests.rs"]
+mod console_announcement_audience_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -6519,8 +6523,9 @@ const ROLE_TARGET_MEMBERS: &[ConsoleMemberField] = &[subject(&["role_targets", "
 /// The local member a cross-mob edge wires.
 const LOCAL_MEMBER: &[ConsoleMemberField] = &[subject(&["local_member_id"])];
 
-/// The member an announcement subscription delivers into.
-const SUBSCRIBED_MEMBER: &[ConsoleMemberField] = &[recorded(&["member", "identity"])];
+/// The member an announcement subscription delivers into: the method reads
+/// it, and answers one that does not exist itself.
+const SUBSCRIBED_MEMBER: &[ConsoleMemberField] = &[subject(&["member", "identity"])];
 
 /// The member a WorkGraph goal or attention binding aims at.
 const TARGET_MEMBER: &[ConsoleMemberField] = &[recorded(&["target", "identity"])];
@@ -6549,7 +6554,7 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         "meta/run_flow" => ROLE_TARGET_MEMBERS,
         // The local member a cross-mob edge wires.
         "meta/cross_mob/wire_local" | "meta/cross_mob/unwire_local" => LOCAL_MEMBER,
-        // A subscription records the member its deliveries go to.
+        // A subscription names the member its deliveries go to.
         "meta/mob_announcements/subscriptions/put" => SUBSCRIBED_MEMBER,
         // Announcement reads filtered by a member.
         "meta/mob_announcements/subscriptions/list"
@@ -7021,35 +7026,6 @@ fn console_rpc_member_target_conflict(params: &Value) -> Option<JsonRpcError> {
             "fields": fields,
         })),
     })
-}
-
-/// Leave out of an announcement method's answer the rows of members hidden
-/// from the caller ([`AccessView::hides_agent`]): every row of a listing
-/// that names such a member, as its `member` (`{mob_id, identity}`) or its
-/// own `identity`.
-pub(crate) fn retain_announcement_rows_visible_to(
-    view: &AccessView,
-    method: &str,
-    result: &mut Value,
-) {
-    if !crate::mob_announcements::rpc::is_announcement_method(method) {
-        return;
-    }
-    let names_hidden_member = |row: &Value| {
-        [
-            row.get("member").and_then(|member| member.get("identity")),
-            row.get("identity"),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|identity| view.hides_agent(identity))
-    };
-    if let Some(listing) = result.as_object_mut() {
-        for rows in listing.values_mut().filter_map(Value::as_array_mut) {
-            rows.retain(|row| !names_hidden_member(row));
-        }
-    }
 }
 
 /// The members of a runtime administration read's answer (the routing
@@ -18219,9 +18195,11 @@ async fn handle_console_runtime_rpc_with_visibility(
         })
         .await,
         // After the read-only gate and the runtime.admin check above, through
-        // the stdin surface's own handler: a runtime without the owner answers
-        // here exactly as it does there. A subscription for a runtime-plane
-        // identity is refused first, as a send to one is.
+        // the stdin surface's own handler, handed the caller's view: a
+        // runtime without the owner answers here exactly as it does there,
+        // and a member hidden from the caller, or a record of one, is
+        // answered as one that does not exist. A subscription for a
+        // runtime-plane identity is refused first, as a send to one is.
         method if crate::mob_announcements::rpc::is_announcement_method(method) => {
             let outcome = match console_announcement_member_refusal(method, &request.params) {
                 Some(refusal) => Err(refusal),
@@ -18229,9 +18207,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                     runtime.handle().mob_id().to_string(),
                 ) {
                     Ok(own_mob) => {
-                        crate::mob_announcements::rpc::handle_announcement_method(
+                        crate::mob_announcements::rpc::handle_announcement_method_seen_by(
                             mob_announcements,
                             &own_mob,
+                            access_view,
                             method,
                             &request.params,
                         )
@@ -18241,13 +18220,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                 },
             };
             match outcome {
-                Ok(mut result) => {
-                    // A listing names no member hidden from the caller.
-                    if let Some(view) = access_view {
-                        retain_announcement_rows_visible_to(view, method, &mut result);
-                    }
-                    response_value(response_id, Some(result), None)
-                }
+                // The method left out what its caller may not see, on its
+                // own typed rows.
+                Ok(result) => response_value(response_id, Some(result), None),
                 Err(error) => response_value(response_id, None, Some(error)),
             }
         }

@@ -864,7 +864,11 @@ class IdentitiesHandle:
     ) -> IdentityChangeResult:
         """Stop a long-term agent and keep it: its name, record,
         conversation and memory stay, messages to it are refused, and
-        :meth:`unarchive` brings it back. Like any agent that leaves, it is
+        :meth:`unarchive` brings it back. An agent that still owns mobs it
+        created is not archived: the call is refused ``owns_mobs``
+        (``details["count"]``, and ``details["mobs"]`` for the host), and
+        nothing is changed; have the agent destroy its mobs first, or keep
+        the agent. Like any agent that leaves, it is
         owed the harvest and distillation of its last conversation, an exit
         interview and the retirement hook (cause ``unlisted``); no order is
         promised between them and this answer. The schedules that target it
@@ -912,7 +916,9 @@ class IdentitiesHandle:
         distillation of its last conversation, an exit interview, the
         retirement hook); a removal of an archived agent owes nothing more.
         Every schedule that targets it is ended (the first answer's agent
-        says which, ``schedules``). Use :meth:`archive` when it may be
+        says which, ``schedules``). An agent that still owns mobs it created
+        is not removed: the call is refused ``owns_mobs``, as its archive
+        is, and nothing is changed. Use :meth:`archive` when it may be
         needed later."""
         return await self._change_one(
             "remove", name, expected_spec_digest, request_id, proposer, source_evidence

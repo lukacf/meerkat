@@ -75784,6 +75784,7 @@ var REFUSAL_SENTENCES = {
   owner_read_only: "This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.",
   not_adoptable: "This agent cannot be released from the host's configuration now.",
   not_archived: "This agent is not archived, so there is nothing to bring back.",
+  owns_mobs: "This agent still has teams it created, and archiving or removing it would remove them. Have the agent end its teams first, or keep the agent.",
   declared_apply_open: "The host is applying its configuration. Try again shortly.",
   admission_unsettled: "This agent is in the middle of another step. Try again once it has finished.",
   predecessor_mismatch: "This agent is not as it was when the change was asked for. Read it again.",

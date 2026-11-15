@@ -1263,9 +1263,9 @@ recorded and grants or limits nothing.
 | `meta/identity/operation` | The state of one change, by the caller's `request_id` or by an outcome's `operation_id` |
 | `meta/identity/create` | Create 1 to 256 agents, all or nothing |
 | `meta/identity/update` | Update one agent |
-| `meta/identity/archive` | Stop an agent and keep it; the mobs it created are removed at the gateway's next start (see the method's entry below) |
+| `meta/identity/archive` | Stop an agent and keep it; refused `owns_mobs` while the agent still owns mobs it created (see the method's entry below) |
 | `meta/identity/unarchive` | Bring an archived agent back |
-| `meta/identity/remove` | Remove an agent for good |
+| `meta/identity/remove` | Remove an agent for good; refused `owns_mobs` while the agent still owns mobs it created (see the method's entry below) |
 | `meta/identity/withdraw` | Withdraw a change that still waits for a decision |
 | `meta/identity/changes_hold` | Hold, or release, every change of the mob's agents |
 | `meta/identity/directory` | What the caller may name in a create or an update: profiles and peers |
@@ -1277,9 +1277,11 @@ recorded and grants or limits nothing.
 its record and its place in the mob stay, and its next session starts empty.
 `meta/identity/remove` retires the name for good: the agent is gone, and no
 agent can ever be created under that name again. To stop an agent and have
-it back later, archive it. Archiving an agent removes the mobs it created:
-have the agent destroy its mobs before you archive it, and do not archive
-an agent whose mobs must stay (the method's entry below says what happens).
+it back later, archive it. An archive or a removal of an agent that still
+owns mobs it created is refused `owns_mobs`: have the agent destroy its
+mobs first, or keep the agent (the methods' entry below says what the
+refusal carries, its limits, and what happens on a host that calls Core's
+archive or removal itself).
 
 ### Requests, operations and retries
 
@@ -1382,6 +1384,7 @@ The kinds a caller of these methods meets:
 | `validation_refused` | The host's own check refused the request | `reason` |
 | `not_adoptable` | An adoption does not take this agent | `reason`: `nothing_to_adopt`, `not_an_agent`, `placed`, `no_session`, `hosted_on_first_use`, `awaiting_held_creation`, `awaiting_host_preparation` or `profile_override` |
 | `not_archived` | An unarchive of an agent that is not archived | |
+| `owns_mobs` | An archive or a removal of an agent that still owns mobs it created: have the agent destroy its mobs first, or keep the agent | `count`: how many; `mobs?`: their ids, for the stdio host and a Console administrator |
 | `self_change_refused`, `private_requester` | An agent asked to change itself; a member private to one person asked for a change | |
 | `approval_unavailable`, `decision_not_found`, `decision_open`, `decision_closed`, `subject_widened` | The change needs a decision nobody can be asked for; no decision is held for the operation; one is already open for the agent; it has ended; the request is no longer what was approved | `decision_id`, `state` |
 | `unsupported` | The request needs something this release does not carry out | `feature` |
@@ -1533,11 +1536,8 @@ the limits are in
 
 - **archive** stops the agent and keeps it: its name, record, conversation
   and memory stay, and a message to it is refused until its unarchive.
-  Archiving an agent removes the mobs it created. They stay until the
-  gateway next starts; then each of those mobs is removed with its store,
-  and unarchiving the agent does not bring them back. Have the agent
-  destroy its mobs before you archive it. Do not archive an agent whose
-  mobs must stay. An
+  An archive of an agent that still owns mobs it created is refused
+  `owns_mobs` (see below the list). An
   archive owes the agent what leaving the roster owes a configured agent:
   the compactions its last session holds are harvested, that session is
   distilled, an exit interview is queued and the host's retirement hook
@@ -1547,7 +1547,9 @@ the limits are in
   archive's answer.
 - **unarchive** brings it back on the session it was archived on.
 - **remove** is permanent: the agent's member retires, its name is never
-  available again, and the peers it listed are unwired. Its conversation
+  available again, and the peers it listed are unwired. A removal of an
+  agent that still owns mobs it created is refused `owns_mobs`, as its
+  archive is (see below the list). Its conversation
   and memory are kept and no other agent can reach them; after the
   retirement's end the removal owes the same harvest, distillation, exit
   interview and hook as an archive (a removal of an archived agent
@@ -1567,7 +1569,76 @@ the limits are in
 
 An agent the host's configuration declares answers `owner_read_only` to an
 update, an archive, an unarchive and a removal: change it in the
-configuration, or adopt it first.
+configuration, or adopt it first. Taking it out of the configuration is not
+refused for the mobs it owns (the last of the limits below).
+
+An archive and a removal both retire the agent's member, and the mobs the
+agent created end with that. So each is refused while the agent still owns
+one, and nothing is changed: error `-32058` whose `data` is `{"kind":
+"owns_mobs", "field": "name", "count", "mobs", "retryable": false,
+"detail"}`. `count` is how many mobs the agent owns. `mobs` is their ids:
+the stdio host and a Console caller with `runtime.admin` are given it, and
+every other caller is not. Have the agent destroy its mobs (its
+`mob_destroy` tool) and send the change again, or keep the agent. A plan of
+the change answers the same refusal, and a change that would wait for a
+decision is refused before one is held. An agent whose grant does not admit
+the change is answered by its grant, and is told nothing of the mobs. When
+the gateway cannot read which mobs it hosts at the moment the change is
+asked, the change is refused `admission_unsettled` with `correlation`
+`owned_mobs` (retryable), and nothing is changed. When that read succeeds
+and the one right before the commit fails, the answer is the family's
+`admission_unsettled` for a change that did not finish, with the
+operation's id as its `correlation`: nothing was written then either, and
+the same request asked again is judged again.
+
+What counts is every mob whose owner is the agent's session and that ends
+with that session's archive, whether or not the agent can still manage it;
+a mob the gateway holds before activation is one of them. The mob the
+agent's `delegate` helpers run in does not count. Four limits:
+
+- The remedy is the agent's own tool, and an agent can lose the management
+  of a mob its session owns: when a profile move or a runtime-mode change
+  seated it again (see `meta/identity/update`), when it was rebuilt at a
+  later generation on the same session (a respawn) and the gateway
+  restarted since, when its host took its right to create mobs away, when
+  the gateway holds the mob before activation, or when a Rust host created
+  the mob for the session.
+  No Meta host method destroys an agent's mob. On a gateway such an agent
+  is refused both changes while its session owns that mob; a mob held
+  before activation is observed again at the gateway's next start. What
+  counts is the session the agent is seated on now, so a gateway host's
+  way out is a reset of the agent (`meta/reset`; `meta/respawn_member` and
+  `meta/delete_identity` seat it the same way): the agent's conversation
+  ends, the agent is seated on a fresh session that owns no mob, and its
+  archive or its removal is no longer refused for those mobs, which still
+  stand and end no later than the gateway's next start.
+  A Rust host destroys the mob through the agent mob tools' state
+  (`MobMcpState::mob_destroy`, and `destroy_held_child_mob` for a held
+  one).
+- The agent's mobs are read when the change is asked and again right before
+  it is committed. A mob that appears after that is not seen: one the
+  agent creates in a run that is still going, or one a Rust host creates
+  for the agent's session. An agent that has no seated member is not read
+  at all: the removal of an archived agent is served unread, so an agent
+  that a Rust host archived through Core, or that was archived while a
+  mob appeared after the last read, is removed without this refusal. A
+  mob whose store did not restore (`quarantined_mobs`) is not counted: its
+  owner is not read.
+- The refusal is this family's. A Rust host that calls Core's
+  `archive_identity` or `remove_identity` itself is not refused, and there
+  the mobs the agent created are lost. When the agent is archived or
+  removed at the host's next start, each of those mobs is removed with its
+  store, and unarchiving the agent does not bring them back. When an
+  archived agent is unarchived and runs before that start, the mobs stay
+  hosted and the agent no longer manages them: it lists none of them, and
+  its calls on them are refused.
+- The refusal answers an archive and a removal asked of this family, and a
+  configured agent leaves another way. When the gateway applies a
+  configuration that no longer lists the agent, at its start or at a
+  roster refresh, the agent's member is retired without this refusal, and
+  the mobs the agent created end no later than the gateway's next start
+  after that. Have the agent destroy its mobs before you take it out of
+  the configuration.
 
 The schedules that target the agent follow these three changes, so that no
 schedule keeps firing at an agent that takes no delivery. A schedule targets

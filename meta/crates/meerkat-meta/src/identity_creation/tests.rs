@@ -3383,6 +3383,10 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             reason: NotAdoptableReason::HostedOnFirstUse,
         },
         IdentityRefusalKind::NotArchived,
+        IdentityRefusalKind::OwnsMobs {
+            count: 1,
+            mobs: None,
+        },
         IdentityRefusalKind::DeclaredApplyOpen,
         IdentityRefusalKind::AdmissionUnsettled {
             correlation: "c".to_owned(),
@@ -3453,6 +3457,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::OwnerReadOnly
             | IdentityRefusalKind::NotAdoptable { .. }
             | IdentityRefusalKind::NotArchived
+            | IdentityRefusalKind::OwnsMobs { .. }
             | IdentityRefusalKind::DeclaredApplyOpen
             | IdentityRefusalKind::AdmissionUnsettled { .. }
             | IdentityRefusalKind::PredecessorMismatch
@@ -3528,6 +3533,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "owner_read_only",
             "not_adoptable",
             "not_archived",
+            "owns_mobs",
             "declared_apply_open",
             "admission_unsettled",
             "predecessor_mismatch",
@@ -3566,7 +3572,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
         "one vocabulary for every identity: no template, creator or limit kind"
     );
     let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
-    assert_eq!(distinct.len(), 57);
+    assert_eq!(distinct.len(), 58);
     let retryable: BTreeSet<&str> = kinds
         .iter()
         .filter(|kind| kind.is_retryable())
@@ -3604,9 +3610,60 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(takers, ["identity", "removed", "worker", "unreadable"]);
 }
 
+/// When the launch cannot say which mobs it hosts, an archive and a removal
+/// are refused retryable, and the answer holds none of the launch's own
+/// error: that error can say where the host keeps its mobs.
+#[test]
+fn the_answer_for_mobs_that_cannot_be_read_holds_none_of_the_hosts_error() {
+    let error = meerkat_mob::MobError::Internal(
+        "failed to read persistent mob root '/host/private/mobs'".to_owned(),
+    );
+    let refusal = super::executor::owned_mobs_unread(&error);
+    assert_eq!(refusal.kind_token(), "admission_unsettled");
+    assert!(refusal.is_retryable());
+    let refused = refusal.to_refused();
+    assert_eq!(refused["correlation"], json!("owned_mobs"));
+    assert_eq!(
+        refused["detail"],
+        json!(
+            "Which mobs the agent owns could not be read just now, so the agent was not \
+             archived or removed: nothing was changed. Ask the same request again later."
+        )
+    );
+    let written = refused.to_string();
+    assert!(
+        !written.contains("/host/private") && !written.contains("mob root"),
+        "{written}"
+    );
+    // A caller that is not given lists reads the same answer.
+    assert_eq!(refusal.without_mob_list().to_refused(), refused);
+}
+
 #[test]
 fn refusal_data_carries_the_kind_its_field_and_its_payload() {
+    let owned = IdentityRefusal::new(IdentityRefusalKind::OwnsMobs {
+        count: 2,
+        mobs: Some(vec!["team-a".to_owned(), "team-b".to_owned()]),
+    })
+    .at("name");
     let cases = [
+        // An archive of an agent that still owns mobs: how many, and which
+        // for a caller that is given the list.
+        (
+            owned.clone(),
+            json!({"kind": "owns_mobs", "count": 2, "mobs": ["team-a", "team-b"], "field": "name"}),
+        ),
+        (
+            owned.without_mob_list(),
+            json!({"kind": "owns_mobs", "count": 2, "field": "name"}),
+        ),
+        // Every other refusal is given without lists as it is.
+        (
+            IdentityRefusal::new(IdentityRefusalKind::NotArchived)
+                .at("name")
+                .without_mob_list(),
+            json!({"kind": "not_archived", "field": "name"}),
+        ),
         (
             IdentityRefusal::new(IdentityRefusalKind::ProfileNotAllowed {
                 profile: "ghost".to_owned(),

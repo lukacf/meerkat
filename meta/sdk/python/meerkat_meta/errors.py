@@ -204,6 +204,7 @@ IDENTITY_REFUSAL_KINDS: frozenset[str] = frozenset(
         "owner_read_only",
         "not_adoptable",
         "not_archived",
+        "owns_mobs",
         "declared_apply_open",
         "admission_unsettled",
         "predecessor_mismatch",

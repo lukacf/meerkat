@@ -386,6 +386,82 @@ Security, Upgrade and Changed.
   just before its archive is paused for the agent once it is written. See
   the known limitations under "Agent changes" in the RPC reference.
 
+- An archive or a removal of an agent that still owns mobs it created is
+  refused, and nothing is changed (`meta/identity/archive` and
+  `meta/identity/remove` on the stdio gateway and on the Console, both
+  SDKs' `archive` and `remove`, the agents' `identity_archive` and
+  `identity_remove` tools, and either change when a person approved it). A
+  mob an agent creates with its own `mob_create` ends with the archive of
+  the agent's session, and both changes retire the agent's member, which
+  archives that session. The refusal is the family's error `-32058` with
+  the kind `owns_mobs`, about `name`: `count` is how many mobs the agent
+  owns and `mobs` is their ids, and its sentence says what to do: have the
+  agent destroy its mobs first, or keep the agent. The list (`mobs`) is the
+  host's, as the list of an agent's schedules is: it is written for the
+  stdio gateway's caller and for a Console caller with `runtime.admin`; an
+  agent that asks for the change and a Console caller without
+  `runtime.admin` are answered `count` and no list. From Rust, the family
+  (`IdentityFamily`) withholds the list only for an agent requester: a host
+  that serves any caller other than its operator through the family clears
+  `mobs` in the refusal's kind itself. A plan of the change answers the
+  same refusal, and a change that would wait for a person's decision is
+  refused before a decision is held. An agent whose grant does not admit
+  the change is answered by its grant and told nothing of the mobs. When
+  the gateway cannot read which mobs it hosts at the moment the change is
+  asked, the change is refused `admission_unsettled` (retryable,
+  `correlation` `owned_mobs`), with one sentence that carries none of the
+  host's error; when that read succeeds and the one right before the
+  commit fails, the answer is the family's `admission_unsettled` for a
+  change that did not finish, with the operation's id as its
+  `correlation`, and nothing was written. Once the agent has
+  destroyed its mobs the same request commits. What counts is every mob
+  whose owner is the agent's session and that ends with that session's
+  archive, a mob the gateway holds before activation included; the mob the
+  agent's `delegate` helpers run in does not count, since no agent tool
+  destroys it and it is made again at the next delegation. Both calls are
+  new in this release, so no host on an earlier release meets the refusal.
+  Four limits. The remedy is the agent's own tool, and no Meta host method
+  destroys an agent's mob: an agent that can no longer manage a mob its
+  session owns (a profile move or a runtime-mode change seated it again, it
+  was rebuilt at a later generation on the same session and the gateway
+  restarted since, its host took its right to create mobs away, the gateway
+  holds the mob before activation, or a Rust host created the mob for the
+  session) is refused both changes through Meta while its session owns
+  that mob; a mob held before activation is observed again at
+  the gateway's next start, and a Rust host destroys the mob through the
+  agent mob tools' state (`MobMcpState::mob_destroy`, and
+  `destroy_held_child_mob` for a held one). What counts is the session the
+  agent is seated on now, so a gateway host's way out is a reset of the
+  agent (`meta/reset`; `meta/respawn_member` and `meta/delete_identity`
+  seat it the same way): the agent's conversation ends, the agent is
+  seated on a fresh session that owns no mob, and its archive or its
+  removal is no longer refused for those mobs, which still stand and end
+  no later than the gateway's next start. The agent's mobs are read when
+  the change is asked and again right before it is committed, so a mob
+  that appears after that is not seen (one the agent creates in a run
+  still going, or one a Rust host creates for the agent's session); an
+  agent that has no seated member is not read at all, so the removal of an
+  archived agent is served unread; and a mob
+  whose store did not restore is not counted, since its owner is not read.
+  The refusal is Meta's, so a Rust host that calls Core's
+  `archive_identity` or `remove_identity` itself is not refused. There the
+  mobs the agent created are removed with their stores when the host next
+  starts, and unarchiving the agent does not bring them back; when an
+  archived agent is unarchived and runs before that start, the mobs stay
+  hosted and the agent no longer manages them. And the refusal answers a
+  change asked of this family: a configured agent that its host takes out
+  of the configuration is not refused. When the gateway applies a
+  configuration that no longer lists the agent, at its start or at a
+  roster refresh, the agent's member is retired, and the mobs the agent
+  created end no later than the gateway's next start after that; have the
+  agent destroy its mobs first. The Console says the refusal
+  in its own words and keeps the gateway's sentence in the Details. Rust:
+  `identity_creation::IdentityRefusalKind` gains `OwnsMobs { count, mobs }`;
+  the executor seam asks the launch which mobs a session owns through the
+  new trait `identity_creation::OwnedMobs`
+  (`CoreChangeExecutor::with_owned_mobs`), and the gateway's launch answers
+  it from the owner records of the mobs its agent mob tools host.
+
 - `meta/schedule/list` and every Console schedule write answer
   `paused_for_target: true` on a schedule that is paused because its agent
   is archived (absent otherwise), and the Console's schedule row and the
@@ -663,10 +739,11 @@ Security, Upgrade and Changed.
   - Request actions and normalization for an archive, an unarchive and an
     adoption (`ArchiveIdentitySpec`, `UnarchiveIdentitySpec`,
     `AdoptIdentitySpec`, `normalize_archive`, `normalize_unarchive`,
-    `normalize_adopt`), and ten refusal kinds: `privileged_field`,
+    `normalize_adopt`), and eleven refusal kinds: `privileged_field`,
     `grant_revoked`, `private_requester`, `owner_read_only`,
-    `not_adoptable`, `not_archived`, `declared_apply_open`, `purge_refused`,
-    `mob_not_running`, `purged`. Their variants of `IdentityRefusalKind`
+    `not_adoptable`, `not_archived`, `owns_mobs`, `declared_apply_open`,
+    `purge_refused`, `mob_not_running`, `purged`. Their variants of
+    `IdentityRefusalKind`
     (which is `non_exhaustive`) are declared after every earlier one, so no
     earlier variant's implicit discriminant moves. A refusal carries a
     detail sentence (`IdentityRefusal::detail`, `to_refused`).
@@ -707,7 +784,7 @@ Security, Upgrade and Changed.
   reads what became of it. Every refusal raises one error,
   `IdentityRefusedError` (`-32058`), with the typed `kind`, `field`, `detail`,
   `retryable` and the kind's own members. `IDENTITY_REFUSAL_KINDS` is the
-  closed vocabulary of 57 kinds: adding a kind is a breaking change of the
+  closed vocabulary of 58 kinds: adding a kind is a breaking change of the
   SDKs. Instruction outcomes and seats are closed vocabularies too; advisory
   values are kept as the gateway sent them. See the guide "Create and change
   long-term agents from host code".

@@ -848,7 +848,11 @@ export class IdentitiesHandle {
   /**
    * Stop a long-term agent and keep it: its name, record, conversation and
    * memory stay, messages to it are refused, and
-   * {@link IdentitiesHandle.unarchive} brings it back. Like any agent that
+   * {@link IdentitiesHandle.unarchive} brings it back. An agent that still
+   * owns mobs it created is not archived: the call is refused `owns_mobs`
+   * (`details.count`, and `details.mobs` for the host), and nothing is
+   * changed; have the agent destroy its mobs first, or keep the agent. Like
+   * any agent that
    * leaves, it is owed the harvest and distillation of its last
    * conversation, an exit interview and the retirement hook (cause
    * `unlisted`); no order is promised between them and this answer. The
@@ -880,7 +884,9 @@ export class IdentitiesHandle {
    * It is owed what an archive owes (the harvest and distillation of its
    * last conversation, an exit interview, the retirement hook); a removal of
    * an archived agent owes nothing more. Every schedule that targets it is
-   * ended (the first answer's agent says which, `schedules`). Use
+   * ended (the first answer's agent says which, `schedules`). An agent that
+   * still owns mobs it created is not removed: the call is refused
+   * `owns_mobs`, as its archive is, and nothing is changed. Use
    * {@link IdentitiesHandle.archive} when it may be needed later.
    */
   async remove(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {

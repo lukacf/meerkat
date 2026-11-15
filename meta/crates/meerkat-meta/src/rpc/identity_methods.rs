@@ -283,7 +283,10 @@ pub(crate) async fn handle_identity_family_rpc(
     };
     let (result, error) = match answer {
         Ok(result) => (Some(result), None),
-        Err(refusal) => (None, Some(refused(&refusal))),
+        // A caller that is not given lists is told how many mobs an agent
+        // owns, and not which: they are another agent's.
+        Err(refusal) if surface.lists_schedules() => (None, Some(refused(&refusal))),
+        Err(refusal) => (None, Some(refused(&refusal.without_mob_list()))),
     };
     Some(JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.to_string(),

@@ -1744,23 +1744,6 @@ them.
 
 ### Fixed
 
-- `meerkat-mob`: an agent under identity-owned wiring custody
-  (`wiring_custody: identity_owned`) that another agent's declaration wires
-  to (names as the far end of its owned wiring) stopped converging, and its
-  owner's changes did not become active. Its status read `repair_blocked`
-  with the detail "generated obligation ReconcileWiring has no actuator in
-  the retained sealed-intent reconciliation slice" on every reconcile pass,
-  a change committed for it stayed at its desired revision with the earlier
-  revision active, and no call cleared it: the pass held the agent to every
-  edge recorded as incident to it, the other agent's edge included. The pass
-  now holds each agent to the edges its own declaration owns, so such an
-  agent converges again and its owner's changes become active. The edge
-  stays in the store, and the agent whose declaration owns it is still held
-  to it (see Known limitations). An agent under the default custody was not
-  affected by this. Nothing stored and no request or answer changes.
-  Affected: 0.8.26 through 0.9.14 (run on Core and Meta 0.9.14; earlier
-  versions read from the source).
-
 - `meerkat-runtime`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`:
   ending one queued input of a session no longer ends the session's other
   work. A request cancelled while its turn was queued behind a running turn
@@ -1798,6 +1781,23 @@ them.
   the rule for a Rust host whose own relay asks the machine about a session
   it does not read as archived. A stopped runtime with inputs still queued
   is cleaned up as before.
+
+- `meerkat-mob`: an agent under identity-owned wiring custody
+  (`wiring_custody: identity_owned`) that another agent's declaration wires
+  to (names as the far end of its owned wiring) stopped converging, and its
+  owner's changes did not become active. Its status read `repair_blocked`
+  with the detail "generated obligation ReconcileWiring has no actuator in
+  the retained sealed-intent reconciliation slice" on every reconcile pass,
+  a change committed for it stayed at its desired revision with the earlier
+  revision active, and no call cleared it: the pass held the agent to every
+  edge recorded as incident to it, the other agent's edge included. The pass
+  now holds each agent to the edges its own declaration owns, so such an
+  agent converges again and its owner's changes become active. The edge
+  stays in the store, and the agent whose declaration owns it is still held
+  to it (see Known limitations). An agent under the default custody was not
+  affected by this. Nothing stored and no request or answer changes.
+  Affected: 0.8.26 through 0.9.14 (run on Core and Meta 0.9.14; earlier
+  versions read from the source).
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat`: a session that was cleaned up
   without being archived no longer loses the agents it created to the

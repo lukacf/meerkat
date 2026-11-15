@@ -1284,7 +1284,10 @@ jobs:
     needs: changes
     # A release projection runs its readers' and meerkat-contracts' rows.
     if: ${{ (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.release_projection == 'true') && needs.changes.outputs.unit_shard_count != '0' }}
-    runs-on: ubuntu-24.04
+    # The runner of a row that builds meerkat-meta can be named by a
+    # repository variable (see main-unit); unset, every row runs on
+    # ubuntu-24.04.
+    runs-on: ${{ contains(matrix.packages, '-p meerkat-meta') && fromJSON(vars.MEERKAT_CI_META_UNIT_RUNNER || '"ubuntu-24.04"') || 'ubuntu-24.04' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -2148,7 +2151,17 @@ jobs:
     # exactly as on a pull request. A manual dispatch runs them too, so a
     # branch can measure the main lanes before it merges.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_unit_first_count != '0' }}
-    runs-on: ubuntu-24.04
+    # A row that builds meerkat-meta runs on the label the repository
+    # variable MEERKAT_CI_META_UNIT_RUNNER names: one JSON string, read the
+    # way release.yml reads MEERKAT_CI_RUNNER. Every other row, and every
+    # row while the variable is unset, runs on ubuntu-24.04: unset, this
+    # line changes nothing. Setting it is the repository owner's decision.
+    # The label must be a GitHub-hosted x64 Linux one, such as a larger
+    # runner of the account: these jobs' sccache key prefix is linux-x64 and
+    # the attestation records the backend github-hosted-cargo. Nothing
+    # checks the value. The unit and main-unit-rest jobs carry the same
+    # line, which the lanes self-test compares.
+    runs-on: ${{ contains(matrix.packages, '-p meerkat-meta') && fromJSON(vars.MEERKAT_CI_META_UNIT_RUNNER || '"ubuntu-24.04"') || 'ubuntu-24.04' }}
     # Connect's rows compile the longest: cold, as after a release version
     # bump, the connect[console] and toolkit-mobkit[native-host] rows were
     # cancelled at the old 60 minutes on main push 42497143053 and
@@ -2394,7 +2407,8 @@ jobs:
     # The rest wave of `main-unit` (long rows first, scripts/ci-cargo-lanes.mjs):
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_unit_rest_count != '0' }}
-    runs-on: ubuntu-24.04
+    # The runner variable of the rows that build meerkat-meta (see main-unit).
+    runs-on: ${{ contains(matrix.packages, '-p meerkat-meta') && fromJSON(vars.MEERKAT_CI_META_UNIT_RUNNER || '"ubuntu-24.04"') || 'ubuntu-24.04' }}
     timeout-minutes: 150
     strategy:
       fail-fast: false

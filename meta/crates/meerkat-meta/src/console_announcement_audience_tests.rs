@@ -1167,6 +1167,300 @@ async fn a_role_templates_change_lists_no_child_of_a_hidden_member() -> TestResu
     Ok(())
 }
 
+/// The record of the role child `id` in a declarations view.
+fn role_child<'a>(view: &'a Value, id: &str) -> Option<&'a Value> {
+    view["records"]
+        .as_array()?
+        .iter()
+        .find(|record| record["kind"] == json!("role_child") && record["id"] == json!(id))
+}
+
+/// What a row of [`a_role_child_is_judged_by_the_member_it_was_made_for`]
+/// finds under the id of its child.
+#[derive(Clone, Copy, PartialEq)]
+enum UnderItsId {
+    /// No subscription has the child's id.
+    Nothing,
+    /// A subscription of another member, made at runtime, has the child's
+    /// id.
+    AnotherMembersSubscription,
+}
+
+/// A role template's child is the record of the member it was made for, at
+/// every status and whatever is under its id: the declared view and the
+/// escalation listings answer it to a caller who may see that member, and
+/// to no other.
+///
+/// The row declares a template for a role two members hold, the private one
+/// refused by its check, so that its child is pending and no subscription
+/// is made. For another `status` the check then passes and the child is
+/// made, is brought to the status, and its subscription is cancelled and
+/// removed by a retention pass; a template that is paused keeps a child as
+/// it is, since only a live template's children are reconciled.
+async fn a_role_child_is_judged_by_the_member_it_was_made_for(
+    status: &str,
+    under_its_id: UnderItsId,
+) -> TestResult {
+    const TEMPLATE: &str = "crew-news";
+    let (row, case) = match under_its_id {
+        UnderItsId::Nothing => (
+            format!("role-child-{status}"),
+            format!("the {status} child"),
+        ),
+        UnderItsId::AnotherMembersSubscription => (
+            format!("role-child-{status}-held-id"),
+            format!("the {status} child whose id another member's subscription holds"),
+        ),
+    };
+    let mut scenes = scenes(&row).await?;
+    for scene in &mut scenes {
+        let console = scene.console;
+        let (alice, bob, root) = (scene.alice.clone(), scene.bob.clone(), scene.root.clone());
+        for identity in [SHARED, PRIVATE] {
+            scene.owner.give_role(identity, "crew");
+        }
+        scene.owner.unseat(PRIVATE);
+        let crew = json!({
+            "revision": 1,
+            "declarations": {
+                "revision": 1,
+                "subscriptions": [{
+                    "subscription_id": TEMPLATE,
+                    "members": { "mob_id": MOB, "role": "crew" },
+                    "topics": ["news"],
+                }],
+            },
+        });
+        // An apply of the applied revision records nothing new and
+        // reconciles the template's children.
+        let applied = scene
+            .served(&alice, "declarations/apply", crew.clone())
+            .await;
+        let pending: Vec<&Value> = applied["records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|record| {
+                record["kind"] == json!("role_child") && record["status"] == json!("pending")
+            })
+            .collect();
+        assert_eq!(
+            pending.len(),
+            1,
+            "{console}: one pending child: {applied:#}"
+        );
+        let child = pending[0]["id"].as_str().expect("a child id").to_string();
+        let refusal = &pending[0]["refusal"];
+        assert_eq!(
+            refusal["kind"],
+            json!("unknown_member"),
+            "{console}: {applied:#}"
+        );
+        let told = refusal["message"].as_str().unwrap_or_default();
+        assert!(
+            told.contains(PRIVATE) && told.contains(MOB),
+            "{console}: the refusal names the member and its mob: {told}"
+        );
+        let read = json!({ "subscription_id": child });
+        let change = |verb: &str, id: &str, revision: &Value| {
+            json!({
+                "operation_id": format!("{verb}-{id}"),
+                "subscription_id": id,
+                "expected_revision": revision,
+            })
+        };
+
+        if status != "pending" {
+            scene.owner.seat(PRIVATE);
+            scene
+                .served(&alice, "declarations/apply", crew.clone())
+                .await;
+            let made = scene
+                .served(&alice, "subscriptions/get", read.clone())
+                .await;
+            assert_eq!(
+                (
+                    &made["subscription"]["member"],
+                    &made["subscription"]["state"]
+                ),
+                (&member(PRIVATE), &json!("active")),
+                "{console}: the child is made once its member's check passes: {made:#}"
+            );
+            if status == "left" {
+                scene.owner.give_role(PRIVATE, "bench");
+                scene
+                    .served(&alice, "declarations/apply", crew.clone())
+                    .await;
+            }
+            if status != "suppressed" {
+                let template = scene
+                    .served(
+                        &alice,
+                        "subscriptions/get",
+                        json!({ "subscription_id": TEMPLATE }),
+                    )
+                    .await;
+                scene
+                    .served(
+                        &alice,
+                        "subscriptions/pause",
+                        change("pause", TEMPLATE, &template["template"]["revision"]),
+                    )
+                    .await;
+            }
+            let found = scene
+                .served(&alice, "subscriptions/get", read.clone())
+                .await;
+            scene
+                .served(
+                    &alice,
+                    "subscriptions/cancel",
+                    change("cancel", &child, &found["subscription"]["revision"]),
+                )
+                .await;
+            if status == "suppressed" {
+                scene
+                    .served(&alice, "declarations/apply", crew.clone())
+                    .await;
+            }
+            scene.owner.retention_pass_at(2_000).await;
+        }
+        if under_its_id == UnderItsId::AnotherMembersSubscription {
+            scene
+                .served(&alice, "subscriptions/put", subscription(&child, SHARED))
+                .await;
+        }
+        // What the child's id reads as: checked here and again at the end.
+        let held_by = match under_its_id {
+            UnderItsId::Nothing => Value::Null,
+            UnderItsId::AnotherMembersSubscription => member(SHARED),
+        };
+        let found = scene
+            .served(&alice, "subscriptions/get", read.clone())
+            .await;
+        assert_eq!(
+            found["subscription"]["member"], held_by,
+            "{console}: {case}: what its id reads as: {found:#}"
+        );
+
+        let mut audience = vec![("the member's person", alice.clone())];
+        if scene.enforced {
+            audience.push(("an access administrator", root.clone()));
+        }
+        for (who, bearer) in &audience {
+            let view = scene.served(bearer, "declarations/get", json!({})).await;
+            assert_eq!(
+                role_child(&view, &child).map(|record| &record["status"]),
+                Some(&json!(status)),
+                "{console}: {case}: {who} reads its record: {view:#}"
+            );
+            let open = scene
+                .served(bearer, "escalations/list", json!({ "open": true }))
+                .await;
+            assert_eq!(
+                open.to_string().contains(&child),
+                status == "pending",
+                "{console}: {case}: {who} reads its escalation while it is pending: {open:#}"
+            );
+            let events = scene.served(bearer, "escalations/list", json!({})).await;
+            assert!(
+                events.to_string().contains(&child),
+                "{console}: {case}: {who} reads its escalation's events: {events:#}"
+            );
+        }
+
+        let asked = [
+            ("declarations/get", "declarations/get", json!({})),
+            (
+                "escalations/list (open)",
+                "escalations/list",
+                json!({ "open": true }),
+            ),
+            ("escalations/list (events)", "escalations/list", json!({})),
+            (
+                "the answer of declarations/apply",
+                "declarations/apply",
+                crew.clone(),
+            ),
+        ];
+        for (what, verb, params) in asked {
+            let others = scene.expected(&bob, verb, params).await.to_string();
+            scene.check(!others.contains(&child), || {
+                format!("{case}: {what} holds its id")
+            });
+            scene.check(!others.contains(PRIVATE), || {
+                format!("{case}: {what} names its member")
+            });
+            scene.check(!others.contains(MOB), || {
+                format!("{case}: {what} names its member's mob")
+            });
+        }
+        let listed = scene.expected(&bob, "declarations/get", json!({})).await;
+        let shown = listed["records"].as_array().map_or(0, Vec::len);
+        scene.check(
+            declared_ids(&listed).contains(TEMPLATE) && shown == 2,
+            || {
+                format!(
+                    "{case}: the caller is listed {:?}, not the template and the child of the \
+                     member it may see",
+                    declared_ids(&listed)
+                )
+            },
+        );
+
+        // The other caller's apply left the child, and what is under its
+        // id, as they stood.
+        let kept = scene.served(&alice, "declarations/get", json!({})).await;
+        assert_eq!(
+            role_child(&kept, &child).map(|record| &record["status"]),
+            Some(&json!(status)),
+            "{console}: {case}: it stands after the other caller's apply: {kept:#}"
+        );
+        let still = scene
+            .served(&alice, "subscriptions/get", read.clone())
+            .await;
+        assert_eq!(
+            still["subscription"]["member"], held_by,
+            "{console}: {case}: what its id reads as after the other caller's apply: {still:#}"
+        );
+    }
+    nothing_found(scenes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pending_role_child_is_judged_by_the_member_it_was_made_for() -> TestResult {
+    a_role_child_is_judged_by_the_member_it_was_made_for("pending", UnderItsId::Nothing).await
+}
+
+#[tokio::test]
+async fn an_applied_role_child_is_judged_by_the_member_it_was_made_for() -> TestResult {
+    a_role_child_is_judged_by_the_member_it_was_made_for("applied", UnderItsId::Nothing).await
+}
+
+#[tokio::test]
+async fn a_left_role_child_is_judged_by_the_member_it_was_made_for() -> TestResult {
+    a_role_child_is_judged_by_the_member_it_was_made_for("left", UnderItsId::Nothing).await
+}
+
+#[tokio::test]
+async fn a_suppressed_role_child_is_judged_by_the_member_it_was_made_for() -> TestResult {
+    a_role_child_is_judged_by_the_member_it_was_made_for("suppressed", UnderItsId::Nothing).await
+}
+
+/// A pending child whose id a subscription of another member holds (one
+/// made at runtime under that id) is still the record of the member it was
+/// made for.
+#[tokio::test]
+async fn a_role_child_under_another_members_id_is_judged_by_the_member_it_was_made_for()
+-> TestResult {
+    a_role_child_is_judged_by_the_member_it_was_made_for(
+        "pending",
+        UnderItsId::AnotherMembersSubscription,
+    )
+    .await
+}
+
 /// A member of a mob this gateway holds that runs no more is not seated: a
 /// declared subscription and a source that name one are refused with the
 /// one answer, whoever holds the name.

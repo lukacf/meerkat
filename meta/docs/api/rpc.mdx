@@ -1629,15 +1629,19 @@ the same request asked again is judged again.
 What counts is every mob whose owner is the agent's session and that ends
 with that session's archive, whether or not the agent can still manage it;
 a mob the gateway holds before activation is one of them. The mob the
-agent's `delegate` helpers run in does not count. Four limits:
+agent's `delegate` helpers run in does not count, unless the gateway
+holds it before activation; see the ways out for a held mob in the
+first limit. Four limits:
 
-- The remedy is the agent's own tool, and an agent can lose the management
-  of a mob its session owns: when a profile move or a runtime-mode change
-  seated it again (see `meta/identity/update`), when it was rebuilt at a
-  later generation on the same session (a respawn) and the gateway
-  restarted since, when its host took its right to create mobs away, when
-  the gateway holds the mob before activation, or when a Rust host created
-  the mob for the session.
+- The remedy is the agent's own tool, and an agent can be unable to use
+  it on a mob its session owns: when a profile move left it on a profile
+  without the mob tools (see `meta/identity/update`), when its member was
+  retired and woken again on its session (a respawn or a compact rebuild
+  of a member the same-session step does not serve, and every respawn a
+  gateway made on 0.9.9 through 0.9.14: the upgrade does not give that
+  management back), when its host took its right to create mobs away,
+  when the gateway holds the mob before activation, or when a Rust host
+  created the mob for the session.
   No Meta host method destroys an agent's mob. On a gateway such an agent
   is refused both changes while its session owns that mob; a mob held
   before activation is observed again at the gateway's next start. What

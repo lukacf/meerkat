@@ -930,15 +930,19 @@ Security, Upgrade and Changed.
   whose owner is the agent's session and that ends with that session's
   archive, a mob the gateway holds before activation included; the mob the
   agent's `delegate` helpers run in does not count, since no agent tool
-  destroys it and it is made again at the next delegation. Both calls are
+  destroys it and it is made again at the next delegation, unless the
+  gateway holds it before activation; see the ways out for a held mob in
+  the first limit. Both calls are
   new in this release, so no host on an earlier release meets the refusal.
   Four limits. The remedy is the agent's own tool, and no Meta host method
   destroys an agent's mob: an agent that can no longer manage a mob its
-  session owns (a profile move or a runtime-mode change seated it again, it
-  was rebuilt at a later generation on the same session and the gateway
-  restarted since, its host took its right to create mobs away, the gateway
-  holds the mob before activation, or a Rust host created the mob for the
-  session) is refused both changes through Meta while its session owns
+  session owns (a profile move left it on a profile without the mob tools,
+  its member was retired and woken again on its session, as a respawn of
+  a member the same-session step does not serve does and as every respawn
+  a gateway made on 0.9.9 through 0.9.14 did, its host took its right to
+  create mobs away, the gateway holds the mob before activation, or a Rust
+  host created the mob for the session) is refused both changes through
+  Meta while its session owns
   that mob; a mob held before activation is observed again at
   the gateway's next start, and a Rust host destroys the mob through the
   agent mob tools' state (`MobMcpState::mob_destroy`, and
@@ -1772,12 +1776,12 @@ Security, Upgrade and Changed.
   it can call. Another agent the host's rules let change it can do that to
   an agent through `identity_update` (a profile move), and a host through
   `meta/identity/update`; an agent cannot do it to itself. What still ends
-  that management is a reset or a delete of the agent and an archive
-  followed by an unarchive: have the agent destroy such a mob first. The
-  `identity_update` tool's description says so now, and so
-  do "Moving a profile" in the created agents guide, the long-term agents
-  guide and `meta/identity/update` in the RPC reference. Text only: no
-  call answers differently.
+  that management is a reset or a delete of the agent: have the agent
+  destroy such a mob first. An archive of an agent that still owns mobs it
+  created is refused `owns_mobs` (see Added). The `identity_update` tool's
+  description says so now, and so do "Moving a profile" in the created
+  agents guide, the long-term agents guide and `meta/identity/update` in
+  the RPC reference. Text only: no call answers differently.
 
 - `meta/decisions/list` on the Console pages over what its caller may see: a
   decision the caller may not see fills no place in a page and is never a
@@ -2317,12 +2321,15 @@ Security, Upgrade and Changed.
     then woken, as in 0.9.14); a raw member that is retired and attached
     again (`meta/retire_member`, then `meta/attach_existing_session` or
     `meta/ensure_member` with a resume session); an identity the roster
-    unlisted and lists again; an agent that is archived and unarchived.
-    The reset, the delete, and the archive with its unarchive are
-    confirmed by tests. That a respawn of a member that is not served
-    retires and wakes it is confirmed by a test; that a compact rebuild
-    of one does so is read from the source; not run. The others are read
-    from the source.
+    unlisted and lists again; an agent that is archived and unarchived
+    where the archive is not refused (a Rust host that calls Core's
+    `archive_identity` itself, or a mob the refusal does not count;
+    through Meta an archive of an agent that still owns mobs it created is
+    refused `owns_mobs`, see Added). The reset, the delete, and the
+    archive with its unarchive are confirmed by tests. That a respawn of a
+    member that is not served retires and wakes it is confirmed by a test;
+    that a compact rebuild of one does so is read from the source; not
+    run. The others are read from the source.
   - Not brought back: a mob whose creator lost its management on 0.9.9
     through 0.9.14 stays as it is. Upgrading does not bring the mob back
     into its creator's reach, and neither does a respawn of the identity

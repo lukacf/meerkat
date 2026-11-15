@@ -79,9 +79,9 @@ and of what this release carries out are not reached.
 
 The sample lets the host's archive of an assistant through without a
 decision while a removal waits for one. That does not make an archive the
-harmless one: an archive ends the agent's management of the mobs it
-created, and an unarchive does not give it back (see the `archive` class
-below).
+harmless one: it stops the agent until an unarchive, and it is refused
+`owns_mobs` while the agent still owns mobs it created (see the `archive`
+class below).
 
 | Member | Meaning |
 |--------|---------|
@@ -163,8 +163,8 @@ A rule is `{change, requester, target, outcome}`.
 | `peers` | Peers added or removed |
 | `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
 | `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |
-| `archive` | An archive, and an unarchive. An archive ends the agent's management of the mobs it created, and an unarchive does not give it back: the mobs are removed with their stores at the next start, unless the agent was unarchived and has run again before it; then they stay running with no agent managing them. Have the agent destroy them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)) |
-| `remove` | A removal: permanent, the name is never available again |
+| `archive` | An archive, and an unarchive. An archive of an agent that still owns mobs it created is refused `owns_mobs`: have the agent destroy them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)) |
+| `remove` | A removal: permanent, the name is never available again. Whatever the rule's outcome, a removal of an agent that still owns mobs it created is refused `owns_mobs`: have the agent destroy its mobs first |
 | `adopt` | The release of a configured agent from configuration (see [Adopting configured agents](#adopting-configured-agents)) |
 
 **`requester`** selects who asks, as the transport attributed it, never as a

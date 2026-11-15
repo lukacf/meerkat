@@ -379,7 +379,7 @@ impl Gateway {
         let answer = Box::pin(crate::rpc::handle_unified_rpc_json(
             &self.runtime,
             &request,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             None,
             None,
         ))

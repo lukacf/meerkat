@@ -4,6 +4,9 @@
 use super::*;
 use crate::installed_host::acquisition::recovery::AcquisitionRecovery;
 use crate::private_originals::governed_submit::tests::first_input_tests::dedicated::DedicatedFixture;
+use crate::private_originals::setup_workflow::launch::tests::{
+    prepare_planning, submit_planning_parent,
+};
 use futures::FutureExt;
 use meerkat_core::{SessionServiceHistoryExt, service::SessionHistoryQuery};
 use meerkat_mobkit::identity_first::{AgentIdentity, TurnOutcome, TurnOutput, TurnTicket};
@@ -85,11 +88,7 @@ pub(super) async fn prepare(c: &Fixture) -> Data {
         .prepare_workflow_parent_source(&c.parent.original)
         .await
         .unwrap();
-    let parent =
-        c.f.source
-            .submit_authenticated_original(c.parent.clone())
-            .await
-            .unwrap();
+    let parent = submit_planning_parent(&c.f.source, &c.parent).await;
     finish(c, "planning_parent", parent).await;
     let probe = c.f.probe.as_ref().unwrap();
     probe.arm_next_input();
@@ -98,16 +97,15 @@ pub(super) async fn prepare(c: &Fixture) -> Data {
     let dispatch = probe.captured();
     assert_eq!(dispatch.origin_session_id(), Some(&c.f.session));
     let original = c.f.source.acquisition_original(&dispatch).await.unwrap();
-    let planning =
-        c.f.source
-            .prepare_workflow_planning(
-                &c.parent.original,
-                c.lead.clone(),
-                c.terms.clone(),
-                c.lineage.clone(),
-            )
-            .await
-            .unwrap();
+    let planning = prepare_planning(
+        &c.f.source,
+        &c.parent.original,
+        &c.lead,
+        &c.terms,
+        &c.lineage,
+    )
+    .await
+    .unwrap();
     let scope =
         serde_json::to_value(dispatch.work_authorization().unwrap().execution_scope()).unwrap();
     let call = "controlled-committed-envelope";

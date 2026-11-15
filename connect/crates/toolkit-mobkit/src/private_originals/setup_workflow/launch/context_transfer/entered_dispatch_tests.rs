@@ -6,6 +6,9 @@ use crate::private_originals::governed_submit::tests::first_input_tests::dedicat
     DedicatedFixture,
     entered_fixture::{BOUND, CheckpointPosition, FIND_CALL, ReviewedWorkflow},
 };
+use crate::private_originals::setup_workflow::launch::tests::{
+    prepare_planning, submit_planning_parent,
+};
 use futures::{FutureExt, StreamExt};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::{
@@ -163,12 +166,7 @@ async fn exercise(position: CheckpointPosition) {
             .prepare_workflow_parent_source(&fixture.parent.original)
             .await
             .unwrap();
-        let parent = fixture
-            .f
-            .source
-            .submit_authenticated_original(fixture.parent.clone())
-            .await
-            .unwrap();
+        let parent = submit_planning_parent(&fixture.f.source, &fixture.parent).await;
         let PrivateOriginalSubmission::Admitted {
             turn_ticket: Some(ticket),
             ..
@@ -189,17 +187,15 @@ async fn exercise(position: CheckpointPosition) {
                 output: TurnOutput::Text { .. }
             }
         ));
-        let planning = fixture
-            .f
-            .source
-            .prepare_workflow_planning(
-                &fixture.parent.original,
-                fixture.lead.clone(),
-                fixture.terms.clone(),
-                fixture.lineage.clone(),
-            )
-            .await
-            .unwrap();
+        let planning = prepare_planning(
+            &fixture.f.source,
+            &fixture.parent.original,
+            &fixture.lead,
+            &fixture.terms,
+            &fixture.lineage,
+        )
+        .await
+        .unwrap();
         observed.select_planning(planning);
         let models_before = fixture.f.model_requests();
         let native_before = native_census(&fixture).await;

@@ -1397,10 +1397,14 @@ Security, Upgrade and Changed.
   turns are summarized and the most recent ones are kept, at the cost of one
   model turn and two in-place rebuilds of the member.
   A `meta/compact_member` call that is admitted rebuilds the identity,
-  whether it then compacts, compacts nothing or fails; for an identity that
-  created mobs with its own
-  tools that costs it the listing and management of those mobs (see the
-  `meta/compact_member` section of the RPC reference). Have such an identity
+  whether it then compacts, compacts nothing or fails. On a 0.9.15 gateway a
+  completed call keeps an identity's listing and management of the mobs it
+  created with its own tools (one run; a call that times out, or completes
+  without compacting, rebuilds by the same step: read from the source, not
+  run), unless the same-session step does not serve its member (see the RPC
+  reference); against a gateway on 0.9.9 through 0.9.14 the call costs it
+  that, and upgrading does not give it back (see the `meta/compact_member`
+  section of the RPC reference). Where the cost applies, have the identity
   destroy a mob it created before the call if it must not be left running
   unmanaged.
   A changed instruction that waits for a compaction (an update answered

@@ -475,11 +475,11 @@ is already in the agent's record.
   The SDKs can also compact the agent's conversation, which brings a waiting
   instruction into effect on the same conversation:
   `runtime.compact_member("editor")` in Python,
-  `runtime.compactMember("editor")` in TypeScript; read what the call costs
-  in the SDK reference
+  `runtime.compactMember("editor")` in TypeScript; before you use it on an
+  agent that created mobs, read the SDK reference
   ([Python](/sdks/python#compacting-a-member%E2%80%99s-conversation),
-  [TypeScript](/sdks/typescript#compacting-a-member%E2%80%99s-conversation))
-  before you use it on an agent that created mobs.
+  [TypeScript](/sdks/typescript#compacting-a-member%E2%80%99s-conversation)):
+  against a gateway before 0.9.15 the call costs the agent those mobs.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last

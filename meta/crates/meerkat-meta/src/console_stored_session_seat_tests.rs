@@ -523,7 +523,7 @@ impl Gateway {
                 entry.wired_to
             ));
         }
-        if !entry.definition_wiring().is_exempt() {
+        if !entry.definition_wiring.is_exempt() {
             wrong.push("it is expected exempt from the definition's wiring rules".to_string());
         }
         if entry.labels.get(PRIVATE_TO) != Some(&self.alice_owner) {

@@ -62,3 +62,56 @@ async fn output_failure_is_returned_and_closes_receiver() {
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     assert!(tx.is_closed());
 }
+
+/// A writer whose bytes the test can read back after `process_events` ends.
+#[derive(Clone, Default)]
+struct SharedOutput(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for SharedOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The real wiring, with a scripted model: the text delta the model client
+/// emits must reach the channel the example hands to the run, and the channel
+/// must close when the run is over.
+#[tokio::test]
+async fn scripted_model_delta_reaches_the_run_channel() {
+    use meerkat_client::TestClient;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let factory = AgentFactory::new(store_dir.clone());
+    let store = Arc::new(JsonlStore::new(store_dir));
+    store.init().await.unwrap();
+    let store = Arc::new(StoreAdapter::new(store));
+
+    // Answers every request with one text delta, "ok", and a normal end.
+    let client: Arc<dyn LlmClient> =
+        Arc::new(TestClient::for_provider(meerkat_core::Provider::Anthropic));
+
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(64);
+    let output = SharedOutput::default();
+    let processor = tokio::spawn(process_events(event_rx, output.clone()));
+
+    let result = run_streaming(&factory, client, store, "any prompt", event_tx)
+        .await
+        .unwrap();
+
+    // Ends only because the run dropped every sender of the channel.
+    tokio::time::timeout(std::time::Duration::from_secs(5), processor)
+        .await
+        .expect("the event channel closes when the run is over")
+        .unwrap()
+        .unwrap();
+    let streamed = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(streamed, "ok");
+    assert_eq!(result.text, "ok");
+}

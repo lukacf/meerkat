@@ -1246,7 +1246,10 @@ cancels the work that member had admitted when the cancel was taken, not one
 unit: the member's current run is cancelled at the run's next boundary, and
 the input it held queued is abandoned. Input admitted after the cancel is
 untouched. Cancelling an idle member is not an error. On success the result
-is `{"mob_id": "...", "ok": true}`.
+is `{"mob_id": "...", "ok": true}`. The cancel is of that member's work
+only: a flow run on another member stays active, and from 0.9.15 a stop of
+the mob is still refused while it is (see
+[Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 <Warning>
 Known issue in 0.9.5 through 0.9.14, noted 2026-11-13 and corrected
@@ -1564,6 +1567,29 @@ In text mode the same facts print as `usage`, `cost`, and `transcript` lines,
 the last of which carries the ready-to-run `rkat session export-atif <id>`
 command. `rkat run --export-atif` writes a trajectory for a single-session run.
 
+### Stopping a mob with an active flow run
+
+A mob refuses a stop while one of its flow runs is active. `mob/lifecycle`
+with `action: "stop"` (`MobHandle::stop` in embedded Rust) is answered with
+the invalid transition error (`MobError::InvalidTransition`, `invalid state
+transition: Running -> Stopped`), the mob stays running and the run goes on.
+On JSON-RPC this is error `-32602` with the message `invalid state
+transition: Running -> Stopped` and no error data.
+
+To stop the mob, wait for the run to end, or cancel it with `mob/flow_cancel`
+(`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` or `mob/run`
+returned) and send the stop once `mob/flow_status` reports the run terminal. A stop
+sent right after the run turns terminal can still be refused for a moment;
+send it again. A run that `mob/flow_cancel` does not bring to a terminal
+status keeps the stop refused; complete, reset or destroy the mob instead.
+
+Cancelling one member's work does not end a flow run on another member.
+From 0.9.15, after `mob/force_cancel`, `mob/hard_cancel_member` or
+`mob/cancel_all_work` on one member, a flow run that is active on another
+member is still active and the stop is still refused until that run ends or
+is cancelled. In 0.9.14 the stop was admitted and the run went on, no
+longer counted (read from the 0.9.14 source, not run on that release).
+
 ## Observe And Operate
 
 | Task | Methods |
@@ -1604,7 +1630,10 @@ cancelling a member whose runtime is no longer live, or one already retiring,
 converges as a no-op success rather than an admission error. An identity the
 roster has never seen is refused with a typed `MemberNotFound`. A member whose
 runtime registration needs a durability reload is refused with a typed
-`MemberReloadRequired` (`-32029`) until its registration is reloaded.
+`MemberReloadRequired` (`-32029`) until its registration is reloaded. The
+cancel is of that member's work only: a flow run on another member stays
+active, and from 0.9.15 a stop of the mob is still refused while it is (see
+[Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 ## Persistence
 

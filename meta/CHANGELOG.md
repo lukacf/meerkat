@@ -2047,6 +2047,11 @@ Security, Upgrade and Changed.
   the threshold until it is cleared (see Known limitations and the
   `meta/compact_member` section of the RPC reference).
 
+- A teardown of the runtime that follows a force cancel of a member now
+  cancels the mob's active flow runs before it stops the mob, as a teardown
+  without a force cancel always did (see Core's changelog, Fixed: the
+  mob's count of active flow runs).
+
 ### Known limitations
 
 - `meta/compact_member` still answers an error on a conversation its

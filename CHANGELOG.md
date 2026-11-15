@@ -2448,7 +2448,7 @@ them.
 
 - `meerkat-mob`: after an agent's identity declaration was adopted
   (`mob/adopt_member_identity_declaration`) or changed
-  (`mob/apply_member_tool_declaration`), or after a blocked one of them is
+  (`mob/apply_member_tool_declaration`), or after a blocked one of them was
   resolved (`mob/resolve_identity_convergence_block`), the agent and the
   agents it was wired to could no longer message each other: a send answered
   that the peer was not found or not trusted. How to see it: the two agents
@@ -3507,7 +3507,7 @@ them.
 - A wired pair that stopped messaging on an earlier version, after one of
   its agents was adopted (`mob/adopt_member_identity_declaration`) or had
   its declaration changed (`mob/apply_member_tool_declaration`), or after a
-  blocked one of them is resolved
+  blocked one of them was resolved
   (`mob/resolve_identity_convergence_block`), is not repaired by a running
   host on its own. The store kept the edge; only the running agents' trust
   of each other was lost, so their `peers` lists no longer hold each other

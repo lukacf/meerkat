@@ -629,6 +629,18 @@ under `## [0.9.15]`.
   The methods for agents created at run time (meta/identity) need a 0.9.15
   gateway: upgrade the gateway before the SDKs that call them. **Do:**
   upgrade the SDKs with the gateway.
+- Console: `meta/mob_announcements/declarations/apply` and
+  `meta/mob_announcements/sources/put` refuse a declared subscription of
+  one member, and a source, that names a member that is not seated or is
+  private to another person (`-32047` `unknown_member`, nothing applied or
+  written), and refuse for now while the member's check cannot be read
+  (`-32047` `native_unavailable`; the same request can be made again
+  later). 0.9.14 accepted a member that was not seated. What the applied
+  declarations already hold unchanged is carried as it is, and the stdio
+  gateway keeps such a subscription pending and stores such a source, as
+  before. **Do:** a client that applies announcement declarations or puts
+  an announcement source through the Console seats the member first, or
+  applies them over the stdio gateway.
 - `meta/compact_member`: a call whose maintenance turn ended for good
   without completing (`completion_type` `abandoned`,
   `abandoned_with_error`, `cancelled` or `completed_without_result`) now

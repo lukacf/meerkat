@@ -407,8 +407,9 @@ route (the four differences are listed under Changed in the changelog).
   the model, which can be fewer than the provider's own API accepts.
 - **Spelling.** The neutral level is `xhigh` only. The Claude-specific
   effort keeps accepting `xhigh` and `x_high`.
-- **The price of holding a level (JSON-RPC).** On a session that holds a
-  provider-neutral level, anything that changes the model identity (the
+- **The price of holding a level (JSON-RPC).** From 0.9.15, on a session
+  that holds a provider-neutral level, anything that changes the model
+  identity (the
   model, the provider, the self-hosted server, the provider params, the
   auth binding, or the level itself: set, change, clear) needs an idle
   session: sent while another turn of the session runs or is queued, such
@@ -418,9 +419,11 @@ route (the four differences are listed under Changed in the changelog).
   stores nothing. So a client that sets a level once and then varies
   `provider_params` per turn (a temperature, say) is answered busy
   whenever another turn runs or is queued: wait for the running turn's
-  answer, then send the request again. Plain turns and repeats of the
-  level with the field `reasoning_effort` queue; a level named inside
-  `provider_params` is never a repeat. A mob member built from a profile
+  answer, then send the request again. Naming a field counts as changing
+  it, also with the value the session already has. Plain turns and
+  repeats of the level with the field `reasoning_effort` queue, and that
+  is the only repeat: a level named inside `provider_params` is never
+  one. A mob member built from a profile
   whose `provider_params` carry a level holds that level. A session that
   holds no provider-neutral level queues everything as on 0.9.14, except
   a turn that sets a level. The table is in the
@@ -446,11 +449,32 @@ route (the four differences are listed under Changed in the changelog).
   or TypeScript SDK older than 0.9.15 raises `UNKNOWN_EVENT_TYPE` on it,
   wherever the level was set: on a request, by another client or in a mob
   profile. A session without a level emits no such event.
-- **The flat key.** From 0.9.15, `provider_params.reasoning_effort` on the wire is
-  read as the provider-neutral level and judged. 0.9.14 ignored it in a
-  REST `POST /sessions` body, on `mob/turn_start` and in a mob profile sent
-  to `mob/create`, so a client that sent the key there by mistake can
-  be refused from 0.9.15. A schedule's session settings do not take the
+- **The flat key: check before upgrading.** From 0.9.15,
+  `provider_params.reasoning_effort` on the wire is read as the
+  provider-neutral level and judged. On 0.9.14 the key did nothing in
+  five places, where it was accepted and dropped: a mob profile sent to
+  `mob/create`, `mob/spawn`'s `override_profile`, a `mob/turn_start`
+  request, a REST `POST /sessions` body, and a profile or definition an
+  agent's mob tools write (`mob/create`: by a run on the published 0.9.14
+  binary and by reading its source; the other four: by reading its
+  source; the CLI's mob verbs: not determined). Before upgrading, look
+  for the key in those five places. From 0.9.15 it sets a level there:
+  either remove it, or accept the level and the busy rule for those
+  members. If it stays: a value that is no level is refused when the
+  request is read; a profile that carries the key beside a different
+  provider effort, a thinking budget, a thinking type the model does not
+  accept with the level, a raw reasoning body or reasoning turned off, or
+  for a model whose route does not take the level, fails that member's
+  build; a `mob/turn_start` that carries the key, sent to a busy member,
+  is answered `-32002` (`SESSION_BUSY`) where 0.9.14 ignored the key and
+  queued the turn; and the members built from such a profile hold a
+  level, so a change of their model identity sent while they are busy is
+  answered busy where 0.9.14 queued it (see "The price of holding a
+  level" above). A mob already stored by 0.9.14 keeps no level: only a
+  definition or request sent again sets one. A level in a profile is
+  also the stored form that the rollback passage of this page warns about
+  (the passage that begins "To keep the option of rolling back").
+  A schedule's session settings do not take the
   key in 0.9.15: a schedule whose `create` spec carries it is refused when
   it is created or updated (0.9.14 refused it there as an unknown field).
 - **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the

@@ -494,7 +494,7 @@ never the message text.
 The refusal has the same shape wherever it is raised: when the session is
 created or resumed, on a turn that changes the level or the model, and before
 a provider request inside a turn (a Copilot account's list can change between
-turns). Over JSON-RPC a turn that names a refused level is answered when it
+turns). From 0.9.15, over JSON-RPC a turn that names a refused level is answered when it
 is asked, also while another turn of the session runs and for a stored
 session that is not loaded: it changes nothing, and the running turn and
 what is queued behind it go on. A turn that would change the session's

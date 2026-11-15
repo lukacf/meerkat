@@ -452,11 +452,14 @@ A profile sets its members' provider-neutral
 provider params: `provider_params = { reasoning_effort = "high" }`. The
 member's build checks the level against the profile's model and route like
 any session's, and refuses it with the same typed `reasoning_effort_refused`
-data. A member built from such a profile holds the level: while it has a
+data. From 0.9.15, a member built from such a profile holds the level
+(also when the profile came with `mob/spawn`'s `override_profile`): while it has a
 turn running or queued, a JSON-RPC `mob/turn_start` that changes its model,
 provider, provider params, auth binding or level is answered
 `SESSION_BUSY` at once and is not queued (see
 [Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+No flow step, kickoff, peer message, member send, scheduled delivery or
+wake is answered busy; the rule is on `turn/start` and `mob/turn_start`.
 A resumed member keeps the level its session recorded. With
 `provider_params` in `resume_overrides`, a level the profile's params name is
 seated with them, and params that name no level leave the recorded level in

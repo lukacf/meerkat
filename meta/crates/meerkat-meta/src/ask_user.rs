@@ -16,7 +16,11 @@
 //!   `ask_user` (a host's own tool of that name) keeps its own, and Meta
 //!   mounts none: the questions that tool asks are that tool's, so no
 //!   decision is held for them, the read lists none of them and no notice
-//!   is sent for them. Nothing is opened, read or started for the mount.
+//!   is sent for them. A member build that runs through its registration's
+//!   tool-surface gate (a host with a member registration hook decides the
+//!   build's prepared surface whole) gets none either: it carries only the
+//!   tools it was asked for. Nothing is opened, read or started for the
+//!   mount.
 //! - **Surface.** The slot is late-bound: the runtime fills it
 //!   ([`AskUserSurface`]) once it keeps durable decisions and serves its
 //!   long-term agents. A call answers `no_human_surface` at once, holding
@@ -263,7 +267,12 @@ impl AskUserSlot {
     /// build whose external tools or host tools already name `ask_user`, as
     /// a tool they list or an entry of their catalog (the host's own tool of
     /// that name stays reachable: a name two parts of a build's surface list
-    /// is offered by neither).
+    /// is offered by neither). Nothing changes either for a member build
+    /// that runs through its registration's tool-surface gate
+    /// (`built_through_surface_gate` of `crate::native_realm`): the host that
+    /// installed the gate decides the build's prepared surface whole, it can
+    /// accept or refuse it but take no tool out of it, so the build carries
+    /// only the tools it was asked for and Meta adds none of its own.
     pub(crate) fn mount(&self, req: &mut CreateSessionRequest) {
         let Some(build) = req.build.as_mut() else {
             return;
@@ -271,6 +280,14 @@ impl AskUserSlot {
         let Some(binding) = build.mob_member_binding.as_ref() else {
             return;
         };
+        if crate::native_realm::built_through_surface_gate(build) {
+            tracing::debug!(
+                member = %binding.member,
+                "the member's build runs through its registration's tool-surface gate: \
+                 Meta mounts no ask_user"
+            );
+            return;
+        }
         if [build.external_tools.as_ref(), build.host_tools.as_ref()]
             .into_iter()
             .flatten()

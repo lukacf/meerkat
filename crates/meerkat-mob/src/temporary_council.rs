@@ -120,7 +120,68 @@ impl TemporaryCouncilStoreDurability {
 pub const TEMPORARY_COUNCIL_FINGERPRINT_VERSION: u32 = 1;
 
 /// Deterministic prefix of every council-owned temporary mob id.
+///
+/// The form is reserved: only a council's own create makes a mob under an
+/// id that starts with it (see [`is_temporary_council_mob_id`]).
 pub const TEMPORARY_COUNCIL_MOB_ID_PREFIX: &str = "council--";
+
+/// Whether `mob_id` has the form reserved for the mob a temporary council
+/// runs in: it starts with [`TEMPORARY_COUNCIL_MOB_ID_PREFIX`].
+///
+/// The form says nothing about which mob holds the id. A mob stored under
+/// such an id before the form was reserved, or one a host built itself, is
+/// an ordinary mob; whether a mob is a council's own is decided by the
+/// council's record ([`TemporaryCouncilMobCustody`]), never by the id.
+#[must_use]
+pub fn is_temporary_council_mob_id(mob_id: &MobId) -> bool {
+    mob_id.as_str().starts_with(TEMPORARY_COUNCIL_MOB_ID_PREFIX)
+}
+
+/// The refusal of an ordinary mob under an id of the form temporary
+/// councils own ([`is_temporary_council_mob_id`]): the definition error
+/// every invalid definition answers with, naming the reserved identifier at
+/// `id`. Every create that refuses the form answers with this diagnostic.
+#[must_use]
+pub fn reserved_temporary_council_mob_id_refusal(mob_id: &MobId) -> crate::MobError {
+    crate::MobError::DefinitionError(vec![crate::Diagnostic {
+        code: crate::DiagnosticCode::ReservedSystemIdentifier,
+        message: format!(
+            "mob id '{mob_id}' has the form reserved for temporary councils \
+             ('{TEMPORARY_COUNCIL_MOB_ID_PREFIX}...'); choose another id"
+        ),
+        location: Some("id".to_string()),
+        severity: crate::DiagnosticSeverity::Error,
+    }])
+}
+
+/// What a council's record holds about the temporary mob the council
+/// creates.
+///
+/// Custody, like a participant's capability reference: the mob's lifecycle
+/// stays with the mob itself, and this names which mob the council may act
+/// on. A mob id is free again once its mob is destroyed, so the id alone
+/// does not say whether the mob found under it is the council's; the
+/// incarnation its create minted does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TemporaryCouncilMobCustody {
+    /// No create was issued for this council. A mob found under the
+    /// council's mob id is not the council's.
+    NotCreated,
+    /// The council's create was issued and its outcome is not durably
+    /// known: the coordinator persisted the intent and then crashed, or the
+    /// create failed. A mob the council created may exist.
+    Creating,
+    /// The council's create made the mob that runs at `incarnation`. Only
+    /// that incarnation is the council's: seating uses it, and cleanup
+    /// retires seats in it and destroys it, and no other mob that holds the
+    /// same id.
+    Created {
+        /// The incarnation the council's create minted.
+        incarnation: meerkat_core::service::MobIncarnationId,
+    },
+}
 
 /// Rejection of a malformed council identity.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -209,6 +270,20 @@ impl TemporaryCouncilId {
     #[must_use]
     pub fn temporary_mob_id(&self) -> MobId {
         MobId::from(format!("{TEMPORARY_COUNCIL_MOB_ID_PREFIX}{}", self.0))
+    }
+
+    /// The council whose temporary mob id `mob_id` would be: the inverse of
+    /// [`Self::temporary_mob_id`]. `None` when `mob_id` does not have the
+    /// reserved form or what follows the prefix is no council id a record
+    /// can be stored under. It names a council identity only; whether such
+    /// a council exists, and whether the mob under `mob_id` is its own, is
+    /// its record's to say.
+    #[must_use]
+    pub fn of_temporary_mob_id(mob_id: &MobId) -> Option<Self> {
+        let council = mob_id
+            .as_str()
+            .strip_prefix(TEMPORARY_COUNCIL_MOB_ID_PREFIX)?;
+        Self::decode_stored(council).ok()
     }
 
     /// Deterministic capability request id for one participant slot.
@@ -785,6 +860,31 @@ pub struct TemporaryCouncilResult {
     pub concluded_at: DateTime<Utc>,
 }
 
+/// Who convened a council through the agent-facing `council` tool.
+///
+/// The tool writes it once, with the council's first durable record, from
+/// the session its surface is bound to: never from a tool argument, a
+/// request or any other caller-supplied value. A council a host runs
+/// directly records none.
+///
+/// Part of the record's immutable request binding, and outside the request
+/// fingerprint: the council machine never reads it, and a replay or a joined
+/// call under the same council id leaves it as first written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TemporaryCouncilConvener {
+    /// The convener's session.
+    pub session_id: SessionId,
+}
+
+impl TemporaryCouncilConvener {
+    /// The convener that runs on `session_id`.
+    #[must_use]
+    pub fn new(session_id: SessionId) -> Self {
+        Self { session_id }
+    }
+}
+
 /// The detached tool job waiting on a council's outcome.
 ///
 /// A convener that runs a council detached gets a job id back and expects
@@ -967,6 +1067,51 @@ mod tests {
         assert_eq!(legacy.as_str(), "agent:0f1e");
         let ok = TemporaryCouncilId::new("council-A-1_2-x").expect("canonical id");
         assert_eq!(ok.as_str(), "council-A-1_2-x");
+    }
+
+    #[test]
+    fn the_council_mob_id_form_is_the_prefix_and_round_trips_to_its_council() {
+        let id = TemporaryCouncilId::new("demo").expect("id");
+        let mob_id = id.temporary_mob_id();
+        assert!(is_temporary_council_mob_id(&mob_id));
+        assert_eq!(TemporaryCouncilId::of_temporary_mob_id(&mob_id), Some(id));
+        // One hyphen is an ordinary id, and so is the prefix elsewhere.
+        for ordinary in ["council-demo", "my-council--demo", "council", "demo"] {
+            let ordinary = MobId::from(ordinary);
+            assert!(!is_temporary_council_mob_id(&ordinary), "{ordinary}");
+            assert_eq!(TemporaryCouncilId::of_temporary_mob_id(&ordinary), None);
+        }
+        // The form without a council id a record can be stored under.
+        for no_council in ["council--", "council--has space"] {
+            let no_council = MobId::from(no_council);
+            assert!(is_temporary_council_mob_id(&no_council), "{no_council}");
+            assert_eq!(TemporaryCouncilId::of_temporary_mob_id(&no_council), None);
+        }
+    }
+
+    #[test]
+    fn mob_custody_encodes_its_state_and_the_created_incarnation() {
+        let incarnation = meerkat_core::service::MobIncarnationId::mint();
+        for (custody, encoded) in [
+            (
+                TemporaryCouncilMobCustody::NotCreated,
+                serde_json::json!({"state": "not_created"}),
+            ),
+            (
+                TemporaryCouncilMobCustody::Creating,
+                serde_json::json!({"state": "creating"}),
+            ),
+            (
+                TemporaryCouncilMobCustody::Created { incarnation },
+                serde_json::json!({"state": "created", "incarnation": incarnation.to_string()}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(custody).expect("encode"), encoded);
+            assert_eq!(
+                serde_json::from_value::<TemporaryCouncilMobCustody>(encoded).expect("decode"),
+                custody
+            );
+        }
     }
 
     #[test]

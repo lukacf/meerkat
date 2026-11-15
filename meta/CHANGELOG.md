@@ -14,6 +14,12 @@ Security, Upgrade and Changed.
 
 ### Breaking
 
+- Behaviour only: a mob create under a mob id that starts with `council--`
+  through Meta's mob tools (an agent's `mob_create` included) is now
+  refused as an invalid definition; 0.9.14 accepted it. See Changed, and
+  Breaking in the Meerkat changelog. A mob already stored under such an id
+  keeps loading and working.
+
 - Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
   variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
   needs both arms.
@@ -318,6 +324,59 @@ Security, Upgrade and Changed.
   `xattr` does, and `tar`, the one crate that uses `xattr`, calls it only
   to set attributes while unpacking, so Meta's own use is not known to be
   affected.
+
+- A console whose visibility policy includes nested members listed the
+  participants of a running temporary council as members and read their
+  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
+  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
+  console, which hides them, was not affected. A participant is a fork of
+  its source member, so its history begins with a copy of the source's
+  earlier turns, and nothing linked it to its source: it was decided on its
+  own name, its council role and the labels it inherits. A caller the access
+  rules deny the source by identity, by role or through the member that
+  spawned it could therefore read the source's earlier turns in the
+  participant's frames, while the council ran and afterwards; such a
+  caller could also send to, inspect and retire the participant by name. A
+  rule on a label the participant inherits still applied, so a source
+  private to a person stayed private. A council participant is now a
+  console member on no policy: it is not listed, a member action by its
+  name (send, inspect, retire, blobs) answers as for an agent that does not
+  exist, the console reads none of its history, and a frame a console
+  stored for one with its member attributes is served to nobody, in a
+  timeline read by its name too; one stored without them is read as any
+  such frame is (see above).
+  Such a frame of a participant (every one a release that stored no member
+  attributes wrote, 0.8.27 through 0.8.49, and a record first written after
+  its council ended) can hold the participant's replies and, from those
+  releases, the copied earlier turns of its source. It is read only by that
+  frame's own name in the Console timeline: by an administrator on a Console
+  that can identify a person, and by the one anonymous operator on a Console
+  that can identify nobody. A council's mob is known from the council's own
+  record; a stored
+  frame whose mob id has a council mob's form (`council--...`) and names no
+  mob the runtime holds is treated the same, so those frames stay unserved
+  on a host that does not keep council records across a restart. Limits: an
+  ordinary mob whose id has that form is treated as a council's where the
+  console cannot tell the two apart, so under the id of a council that
+  settled a member named like one of that council's seats is listed while
+  its stored frames are not served, under that id every frame dated up to
+  the time the council settled stays unserved, whoever wrote it (the frames
+  of a later mob created under the id before the settling was recorded, and
+  its frames dated before the settling or without a real time, included),
+  and under the id of a council that still owes cleanup its members stay
+  unlisted and their frames unserved until the council settles. Members a
+  participant itself creates in another mob are ordinary nested members:
+  they are listed and served like any other. The change covers the
+  console's member views; mob announcements, which need the runtime
+  administration grant, are outside it and treat a council's mob like any
+  other mob the runtime hosts. Other nested members are listed and served
+  as before while a runtime is registered; with none registered no nested
+  mob's stored frames are served (see above). Frames a console stored for
+  participants before this release stay in its console store; those stored
+  with their member attributes are unserved.
+  Affected: 0.8.27 through 0.9.14. The 0.9.13 notes said the next release
+  would no longer list a council's participants; 0.9.14 shipped without
+  this change and still lists them.
 
 ### Upgrade
 
@@ -1353,6 +1412,21 @@ Security, Upgrade and Changed.
   id that names no decision; to keep reading them, list that person under
   `admins`.
 
+- The create admission of the agent mob tools reads who creates a temporary
+  council's mob from the council's convener, which Meerkat's create request
+  now carries (`MobCreateRequest::council`), instead of from the council's
+  own owner session, which names no member. A council's mob is therefore
+  recorded as private to whoever the member that convened it is private to,
+  like every other mob a member creates; a council no member convened has no
+  creator. The record decides who a member spawned into that mob later is
+  private to. Who a council participant is private to does not change: a
+  participant is a fork that copies its source's labels. No council that
+  Meta's own tools start changes: a private member's `council` call is still
+  refused before the tool runs (`private_member_council`), a shared member's
+  council stays private to no one, and so does a council a host runs
+  directly. A council's mob left over from before a restart is read as
+  private to no one, as before.
+
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is
   its row). Such an agent's member carries its row's labels and no others,
@@ -1674,6 +1748,25 @@ Security, Upgrade and Changed.
   (`console.private_to`): how many there are (active or paused), and how
   many of those do not have the id form the agent's own tool gives. The
   line names no agent and no subscription.
+
+- Meerkat reserves the mob id form `council--...` for temporary councils, so
+  a mob create under such an id through Meta's mob tools is refused as an
+  invalid definition (diagnostic `reserved_system_identifier`); see the
+  Meerkat changelog. A council also no longer runs inside a mob it did not
+  create: one convened under a council id whose mob id a mob of the runtime
+  already holds (the runtime's own mob included) ends at seating and seats
+  nobody there. The console's limits for an ordinary mob whose id has a
+  council mob's form therefore concern only a mob created under such an id
+  by Meta 0.9.14 or earlier, which keeps loading and working, and a mob a
+  host built and inserted itself. One consequence for such a mob: a council
+  convened under the matching council id creates no mob, and its record
+  still settles as a council whose temporary mob is gone. The console then
+  reads the ordinary mob as one under the id of a council that settled: it
+  serves none of the mob's frames dated up to the settling and lists a
+  member named like one of the council's seats without its stored frames,
+  and while that council is unfinished it lists none of the mob's members.
+  The console hides more than it has to there and serves nothing it did not
+  serve before.
 
 ### Fixed
 

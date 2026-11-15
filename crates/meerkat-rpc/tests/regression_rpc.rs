@@ -1436,6 +1436,54 @@ async fn mob_create_rejects_invalid_definition() {
     handle.await.unwrap().unwrap();
 }
 
+/// `mob/create` makes no ordinary mob under an id of the form temporary
+/// councils own: invalid params, as for any invalid definition, naming the
+/// reserved identifier. The same definition under an ordinary id is created.
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_an_id_of_the_council_form() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    let create = |id: u64, mob_id: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/create",
+            "params": {
+                "definition": {
+                    "id": mob_id,
+                    "profiles": {
+                        "worker": { "model": "claude-sonnet-4-5" }
+                    }
+                }
+            }
+        })
+    };
+    send_request(&mut writer, &create(1, "council--from-a-client")).await;
+    let resp = read_response(&mut reader).await;
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "mob/create under the council form must be refused as invalid params, got: {resp}"
+    );
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("reserved_system_identifier")
+            && message.contains("council--from-a-client"),
+        "the refusal names the reserved id: {resp}"
+    );
+
+    // Control: one hyphen is an ordinary id.
+    send_request(&mut writer, &create(2, "council-from-a-client")).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        resp["error"].is_null(),
+        "mob/create under an ordinary id succeeds, got: {resp}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
 #[cfg(feature = "mob")]
 #[tokio::test]
 async fn mob_create_rejects_reserved_internal_fields() {
@@ -1463,6 +1511,70 @@ async fn mob_create_rejects_reserved_internal_fields() {
     assert!(
         !resp["error"].is_null(),
         "mob/create with reserved internal fields must return an error, got: {resp}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+/// `mob/create` carries a definition and nothing else: a key that claims a
+/// temporary council or a convener, beside the definition or inside it, is
+/// refused as invalid parameters, and nothing is created. The same
+/// definition without such a key creates its mob.
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_refuses_a_claimed_council_or_convener() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+    let definition = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "profiles": {
+                "worker": {
+                    "model": "claude-sonnet-4-6",
+                    "tools": { "comms": true }
+                }
+            }
+        })
+    };
+    let claim = serde_json::json!({
+        "council_id": "claimed-council",
+        "convener_session_id": "019a0000-0000-7000-8000-000000000001",
+    });
+
+    let mut request_id = 0;
+    for key in ["council", "convener", "convener_session_id"] {
+        let mut beside = serde_json::json!({ "definition": definition("claimed_mob") });
+        beside[key] = claim.clone();
+        let mut inside = definition("claimed_mob");
+        inside[key] = claim.clone();
+        for params in [beside, serde_json::json!({ "definition": inside })] {
+            request_id += 1;
+            let req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "mob/create",
+                "params": params,
+            });
+            send_request(&mut writer, &req).await;
+            let resp = read_response(&mut reader).await;
+            assert_eq!(
+                resp["error"]["code"], -32602,
+                "mob/create with a claimed '{key}' is invalid parameters, got: {resp}"
+            );
+        }
+    }
+
+    let create = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id + 1,
+        "method": "mob/create",
+        "params": { "definition": definition("claimed_mob") },
+    });
+    send_request(&mut writer, &create).await;
+    let resp = read_response(&mut reader).await;
+    assert_eq!(
+        resp["result"]["mob_id"], "claimed_mob",
+        "no refused request took the id, and the plain definition creates its mob: {resp}"
     );
 
     drop(writer);

@@ -469,6 +469,54 @@ them.
   MobMachine's version is unchanged at 2. See Changed (the surfaces of the
   cancel), Fixed, the Upgrade notes and Known limitations.
 
+- Behaviour only: a mob id that starts with `council--` belongs to
+  temporary councils (a council's own mob is `council--<council_id>`), and
+  creating an ordinary mob under such an id is now refused, before anything
+  of the mob exists. Every create refuses it: the agent tool `mob_create`,
+  JSON-RPC `mob/create`, public MCP `meerkat_mob_create`, the Web runtime's
+  `mob_create`, a mobpack create (`rkat mob run <pack>`,
+  `rkat mob deploy <pack>` on both of its surfaces,
+  `MobMcpState::mob_create_from_mobpack`) and the Rust entries
+  `MobMcpState::mob_create_definition`,
+  `mob_create_definition_with_member_external_tools`,
+  `mob_create_definition_with_claim_verifier` and
+  `mob_create_definition_with_owner_bridge_session`. The refusal is the one
+  an invalid definition gets: `MobError::DefinitionError` with the
+  diagnostic `reserved_system_identifier` at `id`, which JSON-RPC and public
+  MCP answer as invalid params (`-32602`) and the agent tool as a failed
+  call. No signature changes and no new error kind. Two ways in are
+  unchanged: a host that builds a mob itself with `MobBuilder` and inserts
+  its handle (`MobMcpState::mob_insert_handle`, `try_mob_insert_handle`),
+  and the restore of a stored mob. `rkat mob run <pack>` and
+  `mob_create_from_mobpack` that name a mob already managed under the id
+  with the same verified pack still answer that mob; `rkat mob deploy`
+  builds its mob anew each time and is refused.
+  See Upgrade notes for a mob an earlier release created under such an id.
+
+- `meerkat-mob`: `store::TemporaryCouncilRecord` gains the field
+  `temporary_mob_custody: Option<TemporaryCouncilMobCustody>` (see Fixed),
+  and `temporary_council` gains the enum `TemporaryCouncilMobCustody` and
+  the functions `is_temporary_council_mob_id`,
+  `reserved_temporary_council_mob_id_refusal` (the refusal every create
+  gives) and `TemporaryCouncilId::of_temporary_mob_id`. Code that builds a
+  `TemporaryCouncilRecord` with a struct literal sets the new field: `None`
+  is what a record written by an earlier release reads as, and
+  `Some(TemporaryCouncilMobCustody::NotCreated)` is what a new council
+  starts with.
+
+- `meerkat-mob`: `meerkat_mob::store::TemporaryCouncilRecord` gains the
+  public field `convener: Option<TemporaryCouncilConvener>` (constructible
+  struct adds field; struct literals must set it, and `None` records no
+  convener). See Added.
+
+- `meerkat-mob-mcp`: `MobCreateRequest`, what a host's `MobBeforeCreate`
+  hook (`MobMcpState::set_before_create`) is told, gains the public field
+  `council: Option<MobCreateCouncilOrigin>` (see Added). The struct is
+  non-exhaustive and only the create path builds it, so no embedder code
+  stops compiling, and a hook that does not read the field decides as
+  before. A hook that told a council's mob by the form of its id, or by an
+  owner session that matches no member, can read `council` instead.
+
 ### Added
 
 - `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
@@ -612,6 +660,41 @@ them.
   `CleanupArchivedSession`. `ArchiveRuntimeCleanup::run_runtime_only` is the
   cleanup of a session that stays, for a caller that is never an archive
   (taking back the runtime registration a failed recovery or create made).
+
+- `meerkat-mob-mcp`, `meerkat-mob`: a temporary council records who convened
+  it, and the host's create hook (`MobMcpState::set_before_create`) is told.
+  `MobCreateRequest` gains `council: Option<MobCreateCouncilOrigin>`. It is
+  `Some` only for the mob a temporary council creates for itself, so a hook
+  tells a council's mob from every other create without reading the form of
+  its id; an agent's `mob_create`, the implicit delegation mob and a host's
+  definition or mobpack create report `None`. `MobCreateCouncilOrigin`
+  carries the `council_id` and `convener_session_id`: the session whose
+  `council` tool call convened the council (the session that tool's surface
+  is bound to), on the detached route and on the blocking one. A council a
+  host runs directly (`TemporaryCouncilCoordinator::run`, `run_detached`) has
+  `convener_session_id: None`. The mob's `owner_bridge_session_id` is
+  unchanged: for a council it is still a session of the council's own.
+  The council keeps the fact in its durable record,
+  `meerkat_mob::store::TemporaryCouncilRecord::convener`
+  (`meerkat_mob::temporary_council::TemporaryCouncilConvener { session_id }`,
+  built with `TemporaryCouncilConvener::new`),
+  written once with the record's first write, outside the request
+  fingerprint and the lifecycle machine. A replay, a second caller that
+  presents the same council id and request, the seal and a recovery after a
+  restart leave it as written.
+  Nothing a caller supplies sets either: the `council` tool has no convener
+  argument and ignores one, `TemporaryCouncilRequest` has no such field,
+  neither `MobCreateRequest` nor `MobCreateCouncilOrigin` can be
+  deserialized, JSON-RPC `mob/create` and the public MCP tool
+  `meerkat_mob_create` refuse a `council` or `convener` key as invalid
+  parameters (as they refuse any unknown key), and an agent's `mob_create`
+  ignores such a key beside the definition and refuses it inside.
+  The stored form is one optional key, `convener`, in the council record's
+  JSON: no migration, and no schema, SDK or wire change. Records written
+  before this release decode with no convener. An earlier release reads a
+  record that carries the key and ignores it; if it writes that record back
+  (a recovery seal or a cleanup) the key is dropped and nothing else
+  changes, so the council then counts as one with no convener.
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
@@ -2528,6 +2611,34 @@ them.
   run at a boundary. A stop does not cancel flow runs: the run was left to
   go on inside the stopped mob, no longer counted.
 
+- A temporary council's cleanup acts only on the mob that council created.
+  The council looked its temporary mob up by id when it seated, and again
+  when it cleaned up, and never checked which mob it found. So a council
+  convened under a council id whose mob id an ordinary mob already held
+  seated its participants in that mob and destroyed it when it ended, and a
+  cleanup that ran late (a retry of cleanup debt, or the recovery of a
+  council whose process died after it destroyed its mob and before it stored
+  the receipt) retired the members named like its seats in whatever mob
+  held the id by then and destroyed that mob. The council now records the
+  incarnation of the mob its own create made
+  (`TemporaryCouncilRecord::temporary_mob_custody`), before it seats
+  anyone. Seating uses a mob found under the id only when it is that
+  incarnation; otherwise the council ends with
+  `ParticipantSeatingFailed` for participant 0 and touches nothing. Cleanup
+  retires seats in, and destroys, that incarnation only (the destroy itself
+  is refused for any other), and reads any other mob under the id as "the
+  council's mob is gone". A record that names no incarnation (one written
+  by an earlier release, or one whose council stopped, or whose create
+  failed, between issuing the create and recording the mob) is cleaned up
+  by id: its cleanup leaves the mob alone when its last receipt
+  already says the temporary mob is destroyed, and otherwise destroys the
+  mob found under the id only when every member of it runs on a session the
+  record holds for a seat (or it has no member); a mob with a member the
+  record does not know is left untouched, the council keeps its cleanup
+  debt and logs a warning, and it settles once that mob is gone. Limit: such
+  a record still destroys a mob with no members that took the id.
+  Affected: 0.8.42 through 0.9.14.
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
@@ -3209,6 +3320,46 @@ them.
   this change stores nothing new and changes no stored form, so 0.9.14
   reads a store written with it as it reads its own (read from the
   source).
+
+- A deployment may hold an ordinary mob under a `council--` id, created by
+  0.9.14 or earlier: those releases refused no mob id of this form, so an
+  agent's `mob_create`, `mob/create`, `meerkat_mob_create`, a pack
+  (`rkat mob run`, `rkat mob deploy`) or a host's own definition could
+  make one. Nothing is migrated and no stored mob refuses to start. The
+  mob is restored and managed as before: it is listed, its members run,
+  members are spawned and retired, flows run, and it can be stopped,
+  resumed and destroyed; a mobpack run that names it still answers it. At
+  restore (and when a host inserts such a mob) the mob state logs one
+  warning per mob and process that names the mob id and says its id has the
+  form reserved for temporary councils. What changes for it: once it is
+  destroyed, no mob can be created under that id again; and a temporary
+  council whose council id matches (the mob id without `council--`) can no
+  longer be convened while the mob exists (it ends at seating and leaves the
+  mob untouched; before, it ran inside the mob and destroyed it). A pack
+  whose definition has such an id can no longer be deployed with
+  `rkat mob deploy`, which builds its mob anew each time. The mob's owner
+  has nothing to do to keep the stored mob running. To keep using an id of
+  that form for new mobs, pick another id; a definition's id is the only
+  thing to change.
+
+- Downgrade: a release through 0.9.14 reads a council record written by
+  this release and ignores the two keys it does not know,
+  `temporary_mob_custody` and `convener`. When it commits such a record (it
+  seals an interrupted council or records a cleanup) it writes the record
+  without them, so back on this release that council's later cleanup treats
+  the record as one an earlier release wrote (see Fixed) and the council
+  has no convener. What is lost with the custody is the fence: while
+  rolled back, the earlier release seats and cleans up by id alone, so a
+  council can again retire seats in, and destroy, another mob that holds
+  its mob id; and after the return a record the earlier release wrote again
+  is cleaned up by id under the two guards, so it can still destroy a mob
+  with no members that took the id. Losing the convener changes nothing
+  Meerkat does itself (no create follows a seal or a cleanup); a host that
+  reads the record sees no convener. This release reads
+  `temporary_mob_custody` strictly: a
+  record whose custody holds a state it does not know does not decode, and
+  the council's recovery cannot read it. This release writes three states
+  (`not_created`, `creating`, `created`).
 
 ### Known limitations
 

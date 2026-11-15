@@ -351,14 +351,15 @@ Security, Upgrade and Changed.
   session again, and it comes back private. Not covered: a host that seats a
   member on a stored session through the Rust runtime's own spawn calls
   decides the member's labels itself; use the two methods. And a host that
-  runs Meta's runtime without a session service is an exception: there a
-  session that the mob's member history never held is refused
-  (`session_owner_unknown`) where 0.9.14 attached it, and a private session
-  that 0.9.11 through 0.9.14 seated shared is still seated shared, since its
-  stored document cannot be read; retire such a member on a gateway with a
-  session service. (0.9.14 by runs on a build of its tag; 0.9.11 through
-  0.9.13 read from the source; 0.9.15 by its tests and by runs on this
-  release's code, the caller with no token among them.)
+  runs Meta's runtime without a session service is an exception: there the
+  host's own call, and an administrator's on the Console, are refused
+  (`session_owner_unknown`) for a session that the mob's member history
+  never held, where 0.9.14 attached it, and a private session that 0.9.11
+  through 0.9.14 seated shared is still seated shared, since its stored
+  document cannot be read; retire such a member on a gateway with a session
+  service. (0.9.14 by runs on a build of its tag; 0.9.11 through 0.9.13 read
+  from the source; 0.9.15 by its tests and by runs on this release's code,
+  the caller with no token among them.)
 - A deny rule naming an agent's memory now also withholds the realm's dream
   history when the console does not know that agent (for example after it
   was retired); before, such a rule was not consulted for signed-in people

@@ -66,7 +66,10 @@ fn assert_bounded(decision: &StoredDecision, asker: &str, run_id: &RunId, call_i
 
 /// The key of a call is what its hold seals, in both forms: the verbatim
 /// text whenever a decision takes it as a subject key, the bounded form
-/// otherwise.
+/// otherwise. What tells the forms apart is the `/`: a verbatim key holds
+/// its two separators and a bounded key holds none. How a key begins tells
+/// nothing: the verbatim key of an asker named like the bounded form
+/// begins as a bounded key does.
 #[test]
 fn the_key_of_a_call_is_what_its_hold_seals() {
     let (_clock, service) = fixture();
@@ -74,6 +77,7 @@ fn the_key_of_a_call_is_what_its_hold_seals() {
     let long = "c".repeat(2_000);
     for (asker, call_id) in [
         (ASKER, "call-1"),
+        ("ask_user.call:x", "call-1"),
         (ASKER, long.as_str()),
         (long.as_str(), "call-1"),
         (ASKER, "call\n1"),
@@ -86,12 +90,18 @@ fn the_key_of_a_call_is_what_its_hold_seals() {
         let verbatim = format!("{asker}/{RUN}/{call_id}");
         if DecisionSubjectKey::new(verbatim.clone()).is_ok() {
             assert_eq!(key.as_str(), verbatim);
+            assert!(key.as_str().matches('/').count() >= 2, "{key}");
         } else {
-            assert!(key.as_str().starts_with(ASK_USER_BOUNDED_SUBJECT_PREFIX));
             assert_eq!(key.as_str(), bounded_key(asker, &run_id, call_id));
+            assert!(!key.as_str().contains('/'), "{key}");
         }
     }
-    assert_eq!(ASK_USER_BOUNDED_SUBJECT_PREFIX, "ask_user.call:");
+    assert_eq!(
+        ask_user_subject_key("ask_user.call:x", &run_id, "call-1")
+            .expect("the key")
+            .as_str(),
+        "ask_user.call:x/018f4e2a-7c3b-7d11-9a55-3f2b6c8d9e01/call-1"
+    );
 }
 
 /// The hold of a call exactly as 0.9.15 builds it: the verbatim key, the

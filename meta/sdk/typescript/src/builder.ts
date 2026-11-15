@@ -8,7 +8,7 @@
  * const rt = await Meta.builder()
  *   .mob("config/mob.toml")
  *   .sessionService(builder)
- *   .roster(myRoster)
+ *   .rosterProvider(myRoster)
  *   .build();
  *
  * const handle = rt.mobHandle();

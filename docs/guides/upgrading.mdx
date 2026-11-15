@@ -406,6 +406,9 @@ route (the four differences are listed under Changed in the changelog).
   be refused from 0.9.15. A schedule's session settings do not take the
   key in 0.9.15: a schedule whose `create` spec carries it is refused when
   it is created or updated (0.9.14 refused it there as an unknown field).
+  A `reasoning_effort` written directly in a schedule's `create` spec or on
+  its prompt action, which 0.9.14 read as an unknown member and dropped, is
+  refused the same way from 0.9.15: remove it from the request.
 - **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the
   level is refused; with `--output json` stdout then ends with a failure
   document (`{"error": {...}}`) instead of a run result, so a script that
@@ -437,6 +440,27 @@ route (the four differences are listed under Changed in the changelog).
   fail, what was confirmed by a run and what was read from the source
   are in the item "A stored reasoning effort level" under
   [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
+
+### A catalog model you had defined yourself: `gemini-4-hydrogen`
+
+0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and 0.9.15 adds `gemini-4-hydrogen` to the catalog. A
+realm or project configuration, or a mob definition, that has
+`[models.gemini-4-hydrogen]` (for example because you ran the model before
+the catalog listed it) is refused with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
+a configuration by configuration validation, a mob definition when one of
+its members is built (the mob definition case was read from the source, not
+run).
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and thinking levels (`low`, `medium`, `high`; see
+[Providers](/concepts/providers)). After a rollback to 0.9.14 the catalog
+has no such row again: there, a session or configuration that names the
+model does not resolve it until the entry is back (read from the 0.9.14
+source, not run).
 
 ### Meta 0.9.15
 

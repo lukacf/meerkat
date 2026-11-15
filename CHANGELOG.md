@@ -50,6 +50,20 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `meerkat-schedule` and the
+  doors that take a schedule request, for session and identity targets: a
+  schedule create or update that writes `reasoning_effort` directly in a
+  session target's `create` spec or on the prompt action of a session or
+  identity target is refused (invalid params on JSON-RPC, HTTP 400 on REST,
+  an invalid-arguments error from the schedule tools) and nothing is stored.
+  0.9.14 read the member as an unknown one and dropped it, so such a request
+  was accepted and its schedule ran without a level. The refusal is given
+  when the request is read (`SessionTargetBinding`'s and
+  `ScheduledSessionAction`'s `Deserialize`); other unknown members are still
+  dropped, and the new `meerkat_schedule::direct_reasoning_effort_refusal`
+  tells a door whether a failed read was this refusal. A mob target does not
+  refuse the member yet. See Known limitations.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.
@@ -1182,6 +1196,17 @@ them.
   web runtime, and the REST and MCP resume inputs. A turn that changes a
   session's level (`turn/start`, `mob/turn_start`) goes through
   `resolve_session_provider_params`, the rule it wraps.
+
+- `meerkat-models`: Gemini 4 Hydrogen (`gemini-4-hydrogen`), Google's fast
+  Gemini 4 model, served on the free tier and the paid Gemini API tiers, is
+  a recommended catalog model with the limits and timeouts of Gemini 4 Argon
+  (a 1,048,576-token context window, 64K output, a 900 s call timeout and
+  stream-inactivity window) and the thinking levels `low`, `medium` and
+  `high` (a request that names none gets Google's default for the model,
+  `high`), while the `xhigh` level Google also documents for it is not sent
+  in this release (a `reasoning_effort` of `xhigh` is refused as
+  `unsupported_level`, and the Gemini `provider_tag` has no such value), and
+  the Gemini default model stays `gemini-4-argon`.
 
 ### Changed
 
@@ -2619,6 +2644,14 @@ them.
   active, and `rkat run --skill <id>` loads the built-in, not the copy,
   without a message. The copy can be removed.
 
+- A configuration or a mob definition that defines `gemini-4-hydrogen`
+  itself (`[models.gemini-4-hydrogen]`) must drop that entry when upgrading:
+  the catalog now has the id, and a second definition is refused with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries", a configuration by configuration validation and a mob definition
+  when one of its members is built (the mob definition case was read from
+  the source, not run). See Added.
+
 ### Known limitations
 
 - An input queued behind a turn that fails at its start is not run. The
@@ -2756,11 +2789,15 @@ them.
   (`POST /sessions`).
 
 - A schedule's session spec is the one surface where the reasoning effort
-  level is not accepted in this release. A schedule whose `create` spec
-  carries `provider_params.reasoning_effort` is refused when it is created
+  level is not accepted in this release. A schedule request that writes
+  `reasoning_effort` in its `create` spec (directly or in `provider_params`)
+  or on the prompt action of a session or identity target is refused when
+  the schedule is created
   or updated (invalid params on JSON-RPC, HTTP 400 on REST, an
   invalid-arguments error from the MCP server's and an agent's schedule
-  tools), and nothing is stored. A provider's own effort under
+  tools), and nothing is stored. A `reasoning_effort` member written on a
+  mob target (a member send, a helper) is still accepted and ignored: the
+  delivery runs without a level. A provider's own effort under
   `provider_tag` is accepted there as before. The level is planned to
   return on schedules in a later release, together with a way back for
   stores on a rollback.

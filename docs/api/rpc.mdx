@@ -4862,11 +4862,14 @@ with no turn running it rebuilds the session (see [REST](/api/rest) and
 [MCP](/api/mcp)).
 
 A level is judged again when its turn starts. A `turn/start` refused
-there, after its input was stored, is a failed start: its stored input ends
-as abandoned with the reason `stopped`, not with the refusal, the session's
-live runtime is retired, and the other requests queued on that session end
-without a run (see Known limitations in the changelog; a later release
-changes this). What can still be refused at its start: a deferred create's
+there, after its input was stored, ends alone while the session is live:
+it is answered the typed refusal, its stored input ends as abandoned with
+the reason `never_executed`, the session's live runtime stays, and the
+other requests queued on that session run. When the session is not live at
+the refusal (the level is refused by the session's build), the session's
+runtime registration is retired as after a failed start and the other
+requests queued on that session end without a run (see Known limitations
+in the changelog). What can still be refused at its start: a deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without
 waiting for another one, when it reaches admission in the time between

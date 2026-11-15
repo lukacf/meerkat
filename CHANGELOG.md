@@ -3110,11 +3110,15 @@ them.
   queues these turns. (Confirmed by tests of this change, on a session, on
   a mob member's session and through the JSON-RPC router.)
 
-  The reason: a level is judged again when its turn starts, and a level
-  refused at a turn's start is still a failed start, which ends the
-  session's other queued requests: the stored input of the refused turn
-  ends as abandoned with the reason `stopped`, not with the refusal, and
-  the requests queued behind it end without a run. What can still be
+  The reason: a level is judged again when its turn starts, and the rule
+  keeps a level change from being refused there behind other work. A turn
+  that is refused at its start all the same ends alone while the session
+  is live (see Fixed): it is answered the typed refusal, its stored input
+  ends as abandoned with the reason `never_executed`, and the requests
+  queued behind it run. When the session is not live at the refusal (the
+  level is refused by the session's build), the session's runtime
+  registration is retired as after a failed start and the requests queued
+  behind the refused turn end without a run. What can still be
   refused at its start: a deferred create's first turn; a turn on a stored
   session that is not live whose level cannot be judged yet
   (`supported_levels_unavailable`: an account's model list that is not

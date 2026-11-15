@@ -48,9 +48,10 @@ pub const DECISION_REASON_MAX_BYTES: usize = 4 * 1024;
 /// - A question id is at most 32 bytes of `a-z`, `0-9`, `_` and `-`, none of
 ///   which JSON escapes.
 /// - A written answer is at most 280 bytes. JSON writes a quote, a
-///   backslash, a line break and a tab as 2 bytes, and every other control
-///   character below U+0020 as 6 (`\u0001`), so 280 one-byte control
-///   characters are 1,680 bytes; every other character is written as it is.
+///   backslash, a backspace, a tab, a line feed, a form feed and a carriage
+///   return as 2 bytes, and every other control character below U+0020 as
+///   6 (`\u0001`), so 280 one-byte control characters are 1,680 bytes;
+///   every other character is written as it is.
 ///
 /// 32 + 10 x (58 + 32 + 6 x 280) + 9 = 17,741. The build fails when the
 /// tool's limits outgrow the bound.

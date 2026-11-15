@@ -505,8 +505,8 @@ model, the provider, the provider params, the auth binding or the level
 itself (setting, changing or clearing it; a level inside `provider_params`
 counts even when it equals the held one), and on a session that holds none
 a turn that sets one. While the session has unfinished work such a turn is
-answered `SESSION_BUSY` (send it again when the session is idle; data
-kind `reasoning_effort_change_needs_idle_session`, the same kind when the
+answered `SESSION_BUSY` (send it again when the session has no unfinished
+work; data kind `reasoning_effort_change_needs_idle_session`, the same kind when the
 request only changed the model) and changes nothing: wait for the running
 turn's answer, then send it again. That answer is not a level refusal.
 Plain turns and turns that repeat the session's level with

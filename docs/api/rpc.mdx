@@ -4763,7 +4763,7 @@ and `data`, never on the message text.
 | -32602 | Invalid params | Missing or invalid parameters. An input idempotency conflict has `data.code` `INPUT_IDEMPOTENCY_CONFLICT` and names the input the key is bound to in `data.existing_id`; a keyed `mob/member_send` conflict has `data.kind` `input_idempotency_conflict` and `data.delivery_id` |
 | -32603 | Internal error | Server error |
 | -32001 | Session not found | Session ID does not exist |
-| -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused, with one exception from 0.9.15: `data.kind` `reasoning_effort_change_needs_idle_session` answers a turn that would change the session's model settings beside a provider-neutral reasoning effort level (the cases are under `turn/start`, `reasoning_effort`; the one kind names the level also when the request only changed the model of a session that holds a level), while the session has unfinished work; nothing is stored, and the request is taken once the session is idle. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |
+| -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused, with one exception from 0.9.15: `data.kind` `reasoning_effort_change_needs_idle_session` answers a turn that would change the session's model settings beside a provider-neutral reasoning effort level (the cases are under `turn/start`, `reasoning_effort`; the one kind names the level also when the request only changed the model of a session that holds a level), while the session has unfinished work; nothing is stored, and the request is taken once the session has no unfinished work. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |
 | -32003 | Session not running | Session not in running state |
 | -32004 | Duplicate input | The request or input was already admitted; a deduplicated runtime input carries `data.existing_id` |
 | -32005 | Request cancelled | Cancelled before the response was published (see above) |
@@ -4851,7 +4851,8 @@ when the session has unfinished work (the cases are in the table under
 [Model settings on a busy session](#model-settings-on-a-busy-session)):
 that answer is not a level refusal, it
 carries no `reasoning_effort_refusal`, and the same request is taken once
-the session is idle. The other surfaces answer the same request in their
+the session has no unfinished work. The other surfaces answer the same
+request in their
 own way: REST answers a level on a message for a session it holds live
 with HTTP 500 `session is busy`. The MCP server's `meerkat_resume` that
 names the level while a turn of the session runs is answered the same busy

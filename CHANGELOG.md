@@ -1793,7 +1793,8 @@ them.
   and the session were not affected. Now a level the route refuses is
   refused with the typed refusal (`-32602`, `reasoning_effort_refused`)
   while that turn runs, and a request the route takes is answered `-32002`
-  (`SESSION_BUSY`: send it again when the session is idle) with the data
+  (`SESSION_BUSY`: send it again when the session has no unfinished work)
+  with the data
   `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
   stores nothing: wait for the running turn's answer, then send it again
   (the cases are under Known limitations). On a stored session that is not

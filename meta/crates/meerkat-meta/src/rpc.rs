@@ -10143,6 +10143,120 @@ shell = true
         .await?)
     }
 
+    /// An `openai-live` gateway with no live handler answers a stdio
+    /// `live/webrtc/answer`, sent as the SDKs send it, with the typed
+    /// `live_unavailable` refusal every `meta/live/*` method answers there.
+    /// The method is a live method, not a call of a module named `live`.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_without_a_live_handler_answers_live_unavailable()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-unavailable").await?;
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "identity": "worker-1",
+                        "channel_id": "no-such-channel",
+                        "pending_receipt": "no-such-pending-receipt",
+                        "readiness_receipt": "no-such-readiness-receipt",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": crate::live_wiring::LIVE_UNAVAILABLE_CODE,
+                "message": "live sessions are not available on this gateway",
+                "data": { "kind": crate::live_wiring::LIVE_UNAVAILABLE_KIND },
+            }),
+            "a stdio live/webrtc/answer with no live handler must answer live_unavailable: \
+             {response}"
+        );
+        Ok(())
+    }
+
+    /// An `openai-live` gateway with a live handler hands a stdio
+    /// `live/webrtc/answer` to that handler. The handler here has no answer
+    /// transport, so the request ends in the refusal only the live answer
+    /// handler gives.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_reaches_the_live_handler()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-handler").await?;
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::new(meerkat::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("live handler fixture persistence");
+        let live_state = tempfile::tempdir()?;
+        let factory = AgentFactory::new(live_state.path()).builtins(false);
+        let mut builder = meerkat::FactoryAgentBuilder::new(factory.clone(), Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, machine) =
+            meerkat::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the live handler fixture's service");
+        let service = Arc::new(service);
+        let context = Arc::new(crate::live_wiring::attach_live(
+            Arc::clone(&service),
+            Arc::clone(&machine),
+            &factory,
+            Config::default(),
+            "ws://127.0.0.1/stdio-live-answer".to_string(),
+            None,
+        ));
+        let live = crate::live_wiring::live_rpc_handler(context, Arc::clone(&service), machine);
+        let response: Value = serde_json::from_str(
+            &super::handle_unified_rpc_json_with_live(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "channel_id": "no-such-channel",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                None,
+                Some(&live),
+            )
+            .await,
+        )?;
+        service.shutdown().await;
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": super::CAPABILITY_UNAVAILABLE_CODE,
+                "message": "experimental live WebRTC answer transport is not available",
+            }),
+            "a stdio live/webrtc/answer must reach the live answer handler: {response}"
+        );
+        Ok(())
+    }
+
     /// The console treats frames under `_system` and `__console__` as the
     /// runtime's own events, so no member may take either. The RPC spawn
     /// refuses both, including spellings that become one once trimmed.

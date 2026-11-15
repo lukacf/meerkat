@@ -869,6 +869,11 @@ under `## [0.9.15]`.
   `schedule_not_found`, for a member that ended before the start, to every
   caller who is not an access administrator. **Do:** a client that reads
   schedules at start asks again before it treats the list as empty.
+- `meta/attach_existing_session` and `meta/ensure_member` with
+  `resume_session_id`: from 0.9.15 a member seated on the stored session of
+  a private side chat is private to the side chat's owner (see Security and
+  Changed). **Do:** retire every member that 0.9.11 through 0.9.14 seated on
+  such a session, and do not build on a shared member coming back from one.
 - `meta/compact_member`: a call whose maintenance turn ended for good
   without completing (`completion_type` `abandoned`,
   `abandoned_with_error`, `cancelled` or `completed_without_result`) now

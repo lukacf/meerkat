@@ -330,9 +330,35 @@ Security, Upgrade and Changed.
   request whose origin the Console does not know is shown to nobody there
   and decided by nobody there. Its host decides or withdraws it, or it runs
   into its timeout.
-- In 0.9.11 through 0.9.14, on a console that does not require sign-in and
-  whose access rules are off, a caller who sent no token could read the
-  conversation of a private side chat after that side chat had ended.
+- In 0.9.11 through 0.9.14 the session of a private side chat that had ended
+  could be attached again as a shared member
+  (`meta/attach_existing_session`, or `meta/ensure_member` with
+  `resume_session_id`): the member came back without its owner, and everyone
+  who could see it could send to it and read the whole conversation. It
+  happened when the side chat's own owner or an access administrator
+  attached the session; when a signed-in person who could spawn, view and
+  send to the name attached it after another member had been created under
+  that name and had ended; and, on a console that does not require sign-in
+  and whose access rules are off, when a caller who sent no token attached
+  it after such a member had ended, or after a restart before the console
+  had read who its members are private to. A caller other than the owner had
+  to know the session's id and the ended member's name. From 0.9.15 a member
+  seated on such a session is private to the side chat's owner again,
+  whoever attaches it, on the Console and on the stdio gateway; a caller who
+  sent no token gets a refusal or a member it cannot read, never a shared
+  one. A member that an earlier release attached in this way stays shared
+  until it is retired; its owner or an administrator can then attach its
+  session again, and it comes back private. Not covered: a host that seats a
+  member on a stored session through the Rust runtime's own spawn calls
+  decides the member's labels itself; use the two methods. And a host that
+  runs Meta's runtime without a session service is an exception: there a
+  session that the mob's member history never held is refused
+  (`session_owner_unknown`) where 0.9.14 attached it, and a private session
+  that 0.9.11 through 0.9.14 seated shared is still seated shared, since its
+  stored document cannot be read; retire such a member on a gateway with a
+  session service. (0.9.14 by runs on a build of its tag; 0.9.11 through
+  0.9.13 read from the source; 0.9.15 by its tests and by runs on this
+  release's code, the caller with no token among them.)
 - A deny rule naming an agent's memory now also withholds the realm's dream
   history when the console does not know that agent (for example after it
   was retired); before, such a rule was not consulted for signed-in people
@@ -703,6 +729,12 @@ Security, Upgrade and Changed.
   held a level starts and serves on 0.9.14 as before. Measured with
   development builds of both releases. See Meerkat's changelog (Upgrade
   notes) for sessions, Core hosts and realm profiles.
+
+- `meta/attach_existing_session` and `meta/ensure_member` with
+  `resume_session_id`: from 0.9.15 a member seated on the stored session of
+  a private side chat is private to the side chat's owner (see Security and
+  Changed). **Do:** retire every member that 0.9.11 through 0.9.14 seated on
+  such a session, and do not build on a shared member coming back from one.
 
 ### Added
 
@@ -1970,6 +2002,19 @@ Security, Upgrade and Changed.
   and while that council is unfinished it lists none of the mob's members.
   The console hides more than it has to there and serves nothing it did not
   serve before.
+
+- From 0.9.15 a member seated on the stored session of a member that was
+  private to a person (`meta/attach_existing_session`, or
+  `meta/ensure_member` with `resume_session_id`, on the Console and on the
+  stdio gateway) is private to that person again, whoever makes the call: it
+  carries the labels its first seat carried and, like every private member,
+  is not wired by the mob definition's wiring rules and is left out of
+  role-wide flow steps. A session that was private to no one is seated as
+  before. Where neither the mob's member history nor the session's stored
+  document says whose the session was, the call is refused (`-32030`,
+  `session_owner_unknown`); on the Console a session the caller may not know
+  of is still answered as a session that does not exist. A host that
+  attached such sessions and expected a shared member must not rely on that.
 
 ### Fixed
 

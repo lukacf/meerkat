@@ -2639,8 +2639,11 @@ async fn handle_unified_rpc_json_inner(
                 result["reserved_identity_members"] = reserved;
             }
             // Members Core holds broken (it could not restore them): a
-            // readiness probe's cue, as `/healthz` reports them.
-            let broken_members = runtime.broken_members().await;
+            // readiness probe's cue, as `/healthz` reports them. The
+            // gateway's init result carries the same entries for the moment
+            // it became ready.
+            let broken_members =
+                crate::mob_handle_runtime::broken_member_facts_of(&runtime.mob_handle()).await;
             if !broken_members.is_empty() {
                 result["broken_members"] =
                     crate::unified_runtime::http::broken_members_json(&broken_members);

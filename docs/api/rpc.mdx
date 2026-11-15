@@ -85,7 +85,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 
@@ -522,7 +522,7 @@ the effect and answers a repeat from that record; see
 
 Since 0.9.11 a request also carries `requester` when the run the call serves
 has an original requester (see
-[Authorization](/concepts/authorization#sources%2C-peers%2C-and-knowledge-services)):
+[Authorization](/concepts/authorization#sources-peers-and-knowledge-services)):
 `{"principal": {"kind": "human", "id": "...", "qualification": {"kind":
 "qualified", "trust_domain_id": "..."}}}`, with `"carried": true` when the
 run's work reached its agent through another actor, such as a peer hop. The

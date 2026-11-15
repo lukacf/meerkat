@@ -1557,12 +1557,25 @@ async fn stored_frames_keep_access_rules(deny: Option<AccessRule>) {
                 ));
             }
         }
+        // "To neither" signed-in person: the member's own person is not
+        // served the frame stored without its member attributes either.
+        if served["owner"].contains("private-member-without-capture") {
+            wrong.push(format!(
+                "{state}: the owner is served private-member-without-capture"
+            ));
+        }
     }
     if !no_runtime["owner"].contains("private-member") {
         wrong.push("no runtime: the owner is not served the private member's frame".to_string());
     }
     if !no_runtime["other"].contains("shared-member") {
         wrong.push("no runtime: a shared member's frame is not served".to_string());
+    }
+    // "To an administrator only": somebody is still served that frame.
+    if !no_runtime["administrator"].contains("private-member-without-capture") {
+        wrong.push(
+            "no runtime: an administrator is not served private-member-without-capture".to_string(),
+        );
     }
     assert!(
         wrong.is_empty(),

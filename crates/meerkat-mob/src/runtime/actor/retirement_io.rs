@@ -128,6 +128,18 @@ enum ScopedRootIncarnation {
     Refused(MobError),
 }
 
+/// What an exact retire meets in its command's own step
+/// (`MobActor::admit_exact_retire`).
+pub(super) enum ExactRetire {
+    /// The named incarnation is the identity's: its retirement starts, or
+    /// the one durably started is joined (`start_retirement` resumes it from
+    /// its anchor, or answers it stuck).
+    Retire,
+    /// The named incarnation's retirement completed: MobMachine answers the
+    /// retire as the retire of an absent identity (`RetireAbsent`).
+    Retired,
+}
+
 /// A retirement that durably started and then stopped at a stage. The mob
 /// actor keeps it until a typed re-drive or a Shutdown accounts for it.
 pub(in crate::runtime) struct StuckRetirement {
@@ -4344,8 +4356,8 @@ impl MobActor {
                 }
             }
         };
-        match self.validate_retire_member_incarnation(&expected).await {
-            Ok(()) => {
+        match self.admit_exact_retire(&expected).await {
+            Ok(ExactRetire::Retire) => {
                 self.start_retirement(
                     agent_identity,
                     deadline,
@@ -4354,6 +4366,11 @@ impl MobActor {
                     false,
                 )
                 .await;
+            }
+            Ok(ExactRetire::Retired) => {
+                let _ = reply.send(
+                    self.retire_absent_admission(&agent_identity, "retire_scoped_step_retired"),
+                );
             }
             Err(error) => {
                 let _ = reply.send(Err(error));

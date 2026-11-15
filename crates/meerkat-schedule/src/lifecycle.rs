@@ -612,6 +612,32 @@ pub enum OccurrenceLifecycleInput {
     ClassifyStaleCompletionArrival {
         trigger: StaleCompletionArrivalTrigger,
     },
+    // Variants added after the published ones are declared here, last, so
+    // every earlier variant keeps its implicit discriminant.
+    /// The driver stops handling a claimed occurrence before its dispatch
+    /// start is recorded and gives the claim back, so the next scan can
+    /// claim it again while its misfire window is open instead of waiting
+    /// out a lease that outlasts the window. Legal from `Claimed` only, and
+    /// a benign no-op once the occurrence was superseded. The occurrence
+    /// returns to `Pending` with its attempt count unchanged and a
+    /// `lease_expired` receipt (failure class `lease_lost`) whose detail is
+    /// "claim released because dispatch could not start". A release past the
+    /// misfire deadline widens nothing: the occurrence then misfires.
+    ///
+    /// `admission_evidence` is what the occurrence's receipt history proves
+    /// about its earlier attempts ([`AdmissionEvidence::from_receipt_stages`]).
+    /// Only a claim with no recorded dispatch is given back: with
+    /// [`AdmissionEvidence::Started`] or [`AdmissionEvidence::Accepted`] the
+    /// release is refused and the claim lapses with its lease, so the
+    /// attempts such an occurrence has past its deadline
+    /// ([`ADMITTED_RECLAIM_ATTEMPT_CAP`]) are spent one per claim lease.
+    /// Every claim counts an attempt, a claim that follows a release too:
+    /// an occurrence given back four times inside its window is claimed a
+    /// fifth time with all of those attempts used.
+    ReleaseClaimBeforeDispatch {
+        admission_evidence: AdmissionEvidence,
+        at_utc: DateTime<Utc>,
+    },
 }
 
 /// Completion-shaped input variants a stale (claim-evidence-mismatched)
@@ -1076,6 +1102,10 @@ pub enum OccurrenceLifecycleError {
     NotPendingForClaim,
     #[error("generated occurrence authority rejected claim")]
     ClaimRejected,
+    /// Also the class of a refused `ReleaseClaimBeforeDispatch`: the class is
+    /// keyed by the input, so it is imprecise for a release refused on an
+    /// occurrence that is claimed but whose earlier attempt recorded its
+    /// dispatch.
     #[error("occurrence must be claimed before dispatching")]
     NotClaimed,
     #[error("occurrence must be dispatching before awaiting completion")]
@@ -1749,6 +1779,13 @@ fn convert_occurrence_input(
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
             }
         }
+        OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+            admission_evidence,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+            admission_evidence: to_dsl_admission_evidence(*admission_evidence),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
         OccurrenceLifecycleInput::ClassifyStaleCompletionArrival { trigger } => {
             occ_dsl::OccurrenceLifecycleInput::ClassifyStaleCompletionArrival {
                 trigger: stale_completion_arrival_trigger_to_dsl(*trigger),
@@ -5190,6 +5227,297 @@ mod tests {
             updated.machine_state.receipt_stage,
             Some(occ_dsl::DeliveryReceiptStage::Superseded),
             "release on a superseded occurrence must not mint lease-expired receipt authority"
+        );
+    }
+
+    /// A claim given back before its dispatch start: the occurrence is
+    /// pending again with its attempt count as it is, every claim field
+    /// cleared, and its receipt says why under the lease-expired stage.
+    #[test]
+    fn release_claim_before_dispatch_returns_a_claimed_occurrence_to_pending() {
+        let claimed = sample_claimed_occurrence();
+        let attempt = claimed.attempt_count;
+        assert_eq!(attempt, 1);
+        assert!(claimed.claimed_at_utc.is_some());
+
+        let mutator = claimed
+            .apply(OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                admission_evidence: AdmissionEvidence::None,
+                at_utc: Utc::now(),
+            })
+            .expect("a claimed occurrence with no recorded dispatch can be given back");
+        assert_eq!(
+            mutator.effects,
+            vec![OccurrenceLifecycleEffect::LeaseExpired]
+        );
+        let released = mutator.into_occurrence();
+        assert_eq!(released.phase, OccurrencePhase::Pending);
+        assert_eq!(
+            released.attempt_count, attempt,
+            "the release counts no attempt"
+        );
+        assert_eq!(released.claim_token(), None);
+        assert_eq!(released.claimed_by, None);
+        assert_eq!(released.lease_expires_at_utc, None);
+        assert_eq!(released.claimed_at_utc, None);
+        assert_eq!(released.dispatched_at_utc, None);
+        assert_eq!(released.machine_state.delivery_correlation_id, None);
+
+        let receipt = released
+            .delivery_receipt_from_authority(None)
+            .expect("generated receipt authority should project the release receipt");
+        assert_eq!(receipt.stage, DeliveryReceiptStage::LeaseExpired);
+        assert_eq!(
+            receipt.failure_class,
+            Some(OccurrenceFailureClass::LeaseLost)
+        );
+        assert_eq!(
+            receipt.detail.as_deref(),
+            Some("claim released because dispatch could not start")
+        );
+    }
+
+    /// The release is legal from Claimed only. Once the dispatch start is
+    /// recorded the expiry and reclaim rules own the occurrence, and an
+    /// occurrence that is not claimed has nothing to give back: the machine
+    /// refuses, and classes the refusal as not claimed.
+    #[test]
+    fn release_claim_before_dispatch_is_refused_unless_the_occurrence_is_claimed() {
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("corr-release".into()),
+                at_utc: Utc::now(),
+            })
+            .expect("dispatch should pass generated authority")
+            .into_occurrence();
+        let awaiting = dispatching
+            .clone()
+            .apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() })
+            .expect("await should pass generated authority")
+            .into_occurrence();
+        let cases = [
+            ("pending", sample_occurrence()),
+            ("dispatching", dispatching),
+            ("awaiting completion", awaiting),
+            ("completed", sample_completed_occurrence()),
+        ];
+        let release = || OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+            admission_evidence: AdmissionEvidence::None,
+            at_utc: Utc::now(),
+        };
+        for (name, occurrence) in cases {
+            let refused = occurrence.clone().apply(release());
+            assert!(
+                refused.is_err(),
+                "{name}: the release must be refused, got {:?}",
+                refused.map(OccurrenceLifecycleMutator::into_occurrence)
+            );
+            assert_eq!(
+                classify_rejected_occurrence_input(&occurrence, release()),
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotClaimed,
+                "{name}"
+            );
+        }
+    }
+
+    /// Only a claim with no recorded dispatch is given back. A claim of an
+    /// occurrence whose earlier attempt recorded its dispatch start or its
+    /// admission is refused and stays as it is: it lapses with its lease, so
+    /// the attempts it has past its deadline are spent at lease pace.
+    #[test]
+    fn release_claim_before_dispatch_is_refused_for_a_recorded_dispatch() {
+        let claimed = sample_claimed_occurrence();
+        for evidence in [AdmissionEvidence::Started, AdmissionEvidence::Accepted] {
+            let release = || OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                admission_evidence: evidence,
+                at_utc: Utc::now(),
+            };
+            let refused = claimed.clone().apply(release());
+            assert!(
+                refused.is_err(),
+                "{evidence:?}: the release must be refused, got {:?}",
+                refused.map(OccurrenceLifecycleMutator::into_occurrence)
+            );
+            assert_eq!(
+                classify_rejected_occurrence_input(&claimed, release()),
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotClaimed,
+                "{evidence:?}"
+            );
+        }
+        // The same claim with nothing recorded is given back.
+        assert!(
+            claimed
+                .apply(OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                    admission_evidence: AdmissionEvidence::None,
+                    at_utc: Utc::now(),
+                })
+                .is_ok()
+        );
+    }
+
+    /// A supersession that lands between the claim and the release already
+    /// revoked the claim: the release is a benign no-op and mints no receipt,
+    /// whatever the receipt history proves.
+    #[test]
+    fn release_claim_before_dispatch_after_supersession_is_a_noop() {
+        for evidence in [
+            AdmissionEvidence::None,
+            AdmissionEvidence::Started,
+            AdmissionEvidence::Accepted,
+        ] {
+            let superseded = sample_superseded_in_flight_occurrence();
+            let token_before = superseded.claim_token();
+
+            let mutator = superseded
+                .apply(OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                    admission_evidence: evidence,
+                    at_utc: Utc::now(),
+                })
+                .expect("ReleaseClaimBeforeDispatch after supersession must be a benign no-op");
+            assert!(mutator.effects.is_empty(), "{evidence:?}");
+            let updated = mutator.into_occurrence();
+            assert_eq!(updated.phase, OccurrencePhase::Superseded);
+            assert_eq!(updated.claim_token(), token_before);
+            assert_eq!(
+                updated.machine_state.receipt_stage,
+                Some(occ_dsl::DeliveryReceiptStage::Superseded),
+                "release on a superseded occurrence must not mint lease-expired receipt authority"
+            );
+        }
+    }
+
+    /// A released claim widens nothing. With explicit times (Skip, a 30 s
+    /// grace): an occurrence claimed and given back inside its window is
+    /// claimed again up to its misfire deadline, as attempt 2, and one
+    /// millisecond past the deadline the claim is refused and the due
+    /// classification requires its misfire.
+    #[test]
+    fn a_released_claim_is_claimed_again_up_to_its_misfire_deadline_and_misfires_past_it() {
+        let due = DateTime::<Utc>::from_timestamp_millis(
+            (Utc::now() - Duration::seconds(60)).timestamp_millis(),
+        )
+        .expect("a due time in whole milliseconds");
+        let deadline = due + Duration::seconds(30);
+        let past = deadline + Duration::milliseconds(1);
+        let released =
+            Occurrence::planned_from_schedule(&sample_schedule(), crate::OccurrenceOrdinal(0), due)
+                .expect("planning should pass generated authority")
+                .apply(OccurrenceLifecycleInput::Claim {
+                    owner_id: "owner".into(),
+                    at_utc: due + Duration::seconds(1),
+                    lease_expires_at_utc: due + Duration::seconds(61),
+                    claim_token: Uuid::now_v7(),
+                    admission_evidence: AdmissionEvidence::None,
+                })
+                .expect("a claim inside the window should pass")
+                .into_occurrence()
+                .apply(OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                    admission_evidence: AdmissionEvidence::None,
+                    at_utc: due + Duration::seconds(2),
+                })
+                .expect("the release should pass")
+                .into_occurrence();
+        assert_eq!(released.phase, OccurrencePhase::Pending);
+        assert_eq!(released.attempt_count, 1);
+
+        let classify = |at| {
+            released
+                .classify_due_action(at, AdmissionEvidence::None)
+                .expect("due classification should pass")
+        };
+        assert_eq!(classify(deadline), Some(OccurrenceDueAction::ClaimEligible));
+        assert_eq!(classify(past), Some(OccurrenceDueAction::MisfireRequired));
+
+        let reclaimed = reclaim(&released, deadline, AdmissionEvidence::None)
+            .expect("a released claim is claimed again at its misfire deadline")
+            .into_occurrence();
+        assert_eq!(reclaimed.phase, OccurrencePhase::Claimed);
+        assert_eq!(reclaimed.attempt_count, 2);
+        assert!(
+            reclaim(&released, past, AdmissionEvidence::None).is_err(),
+            "one millisecond past the deadline a released claim is not claimed again"
+        );
+    }
+
+    /// Every claim counts an attempt, a claim that follows a release too, and
+    /// the reclaim cap past the deadline counts them all. The numbers: an
+    /// occurrence given back four times inside its window is claimed a fifth
+    /// time as attempt 5 (the cap). If that attempt is admitted and then
+    /// loses its executor past the deadline, the occurrence is exhausted at
+    /// once; an occurrence admitted on its first attempt has four reclaims
+    /// left in the same place.
+    #[test]
+    fn claims_given_back_inside_the_window_count_toward_the_reclaim_cap() {
+        assert_eq!(ADMITTED_RECLAIM_ATTEMPT_CAP, 5);
+        let due = Utc::now() - Duration::seconds(60);
+        let inside = due + Duration::seconds(10);
+        let past = due + Duration::seconds(45);
+        let admitted_then_lapsed = |give_backs: u32| {
+            let mut occurrence = Occurrence::planned_from_schedule(
+                &sample_schedule(),
+                crate::OccurrenceOrdinal(0),
+                due,
+            )
+            .expect("planning should pass generated authority");
+            let claim = |occurrence: Occurrence| {
+                occurrence
+                    .apply(OccurrenceLifecycleInput::Claim {
+                        owner_id: "owner".into(),
+                        at_utc: inside,
+                        lease_expires_at_utc: inside + Duration::seconds(60),
+                        claim_token: Uuid::now_v7(),
+                        admission_evidence: AdmissionEvidence::None,
+                    })
+                    .expect("a claim inside the window should pass")
+                    .into_occurrence()
+            };
+            for _ in 0..give_backs {
+                occurrence = claim(occurrence)
+                    .apply(OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                        admission_evidence: AdmissionEvidence::None,
+                        at_utc: inside,
+                    })
+                    .expect("the release should pass")
+                    .into_occurrence();
+            }
+            assert_eq!(occurrence.attempt_count, give_backs);
+            // The next claim dispatches, is admitted, and loses its executor.
+            claim(occurrence)
+                .apply(OccurrenceLifecycleInput::DispatchStarted {
+                    correlation_id: Some("corr-budget".into()),
+                    at_utc: inside,
+                })
+                .expect("dispatch should pass generated authority")
+                .into_occurrence()
+                .apply(OccurrenceLifecycleInput::DispatchAccepted {
+                    admission_outcome: DeliveryAdmissionOutcome::Accepted,
+                    at_utc: inside,
+                })
+                .expect("admission should pass generated authority")
+                .into_occurrence()
+                .apply(OccurrenceLifecycleInput::LeaseExpired { at_utc: past })
+                .expect("the lease expiry should pass")
+                .into_occurrence()
+        };
+
+        let after_four_give_backs = admitted_then_lapsed(4);
+        assert_eq!(after_four_give_backs.attempt_count, 5);
+        assert_eq!(
+            after_four_give_backs
+                .classify_due_action(past, AdmissionEvidence::Accepted)
+                .expect("due classification should pass"),
+            Some(OccurrenceDueAction::ReclaimExhausted),
+            "four give-backs used the attempts the admitted run had past its deadline"
+        );
+
+        let never_given_back = admitted_then_lapsed(0);
+        assert_eq!(never_given_back.attempt_count, 1);
+        assert_eq!(
+            never_given_back
+                .classify_due_action(past, AdmissionEvidence::Accepted)
+                .expect("due classification should pass"),
+            Some(OccurrenceDueAction::ClaimEligible),
+            "an occurrence admitted on its first attempt is reclaimed past its deadline"
         );
     }
 

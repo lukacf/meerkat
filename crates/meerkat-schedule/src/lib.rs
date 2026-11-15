@@ -25,8 +25,9 @@ mod types;
 pub use driver::{
     DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, ExistingDelivery,
     ExistingDeliveryAnswer, IdentityTargetDeliverability, ScheduleDeliveryIdentity, ScheduleDriver,
-    ScheduleDriverConfig, ScheduleIdentityTargetProbe, ScheduleRefillFault, ScheduleTargetDelivery,
-    ScheduleTargetProbe, ScheduleTickReport, TargetProbeOutcome,
+    ScheduleDriverConfig, ScheduleExecutorLockout, ScheduleIdentityTargetProbe,
+    ScheduleRefillFault, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport,
+    TargetProbeOutcome,
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
 pub use lifecycle::{

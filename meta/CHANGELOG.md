@@ -322,6 +322,28 @@ Security, Upgrade and Changed.
   such a member asks for is refused with `'<id>' is private to a person;
   a member private to another person may not take it over`.
 
+- Agents' mob tools: every mob of a Meta host has a member tool audience,
+  with or without private members, so every agent of a Meta host now
+  reads a refused mob tool (`mob_spawn_member`, `fork_off`,
+  `council`, `conclude_objective`, `mob_check_member`,
+  `mob_retire_member`, `mob_list_members`, `mob_wire`, `mob_unwire`) this
+  way. What it still sees: a refusal with a type of its own (a member or a
+  profile not found, a member that already exists, a scope denial), a
+  provider authentication failure with its kind, provider, realm and
+  binding, `retryable: true` for a retirement still in progress, and for
+  any other refusal the text `the mob refused the call. The host's log has
+  the cause.` with `Refusal class: <class>.` (`wiring_error`,
+  `session_error`, `storage_error` and the like) when the refusal has such
+  a class. What it no longer sees: the refusal's free text (why a wire, a
+  spawn or a retire was refused in words), the outcome text of a failed
+  `fork_off` run and the error of a `council` that could not run. A
+  refusal for a reserved runtime-plane member name is answered like any
+  other refusal of the mob, with its class: the agent is not told that the
+  name is reserved. A
+  `council` that started and then failed still answers its outcome with
+  the mob's own text. The host reads the whole refusal in its log, at
+  `warn`, with the mob's id and the tool's name.
+
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an
   agent created at run time can be built: an identity bootstrap
@@ -431,6 +453,13 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+- The `meta/init` result can carry a new optional member, `broken_members`
+  (see Added). It is additive: an SDK of an earlier release ignores it (the
+  Python and TypeScript SDKs read `http_base_url` and
+  `http_public_base_url` from the init result by name and nothing else),
+  and a start that left no member broken writes the result it wrote
+  before.
+
 - A reasoning effort level in a mob definition is a one-way step with
   respect to 0.9.14. A Meta gateway on 0.9.14 does not start on the state
   directory of a mob whose stored definition holds a level
@@ -446,6 +475,35 @@ Security, Upgrade and Changed.
   notes) for sessions, Core hosts and realm profiles.
 
 ### Added
+
+- The gateway's ready report names the members its start left broken. The
+  `meta/init` result (the legacy response and the `ready`
+  `meta/init_settled` notification) carries `broken_members` when Core
+  holds members Broken at the moment the gateway becomes ready: the
+  entries `meta/status` already answers with (`member_id`, `error`), for
+  the same reader, the process that launched the gateway. A start that
+  builds more members than `runtime_options.max_sessions` admits (16 by
+  default, so an eager restore of a larger mob) was ready with the members
+  past the limit broken and said so only in `meta/status` and in
+  `identity_bootstrap`; it now lists them, each with
+  `Max sessions reached` in `error`. The field is absent when no member is
+  broken, so a start that left none broken writes the result it wrote
+  before. The Python and TypeScript SDKs ignore the key, as they ignore
+  `broken_members` of `meta/status`: a host that speaks the protocol
+  itself reads it. The list
+  is a snapshot of that moment: a member that breaks later is named by
+  `meta/status` only, and a member `member_restore` leaves dormant is never
+  in it. The gateway also logs one warning at ready with the count and the
+  names of up to 8 of them. The list is Core's, in the init result and in
+  `meta/status`: it can name a member the member list leaves out, an
+  earlier incarnation of an identity that list shows under its current one.
+
+- A `broken_members` entry, in the init result and in `meta/status`, gains
+  `code`: Core's stable refusal code, present only when the failure was a
+  refusal that named one (a refused runtime binding, or the host's refusal
+  of the member's registration), at a restore or at a wake. Advisory: most
+  causes have none (the session limit is read from `error`), and the
+  vocabulary may grow.
 
 - `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
   true` on an agent the host's roster lists while it is served from its
@@ -1115,6 +1173,30 @@ Security, Upgrade and Changed.
   locally hosted mob members signed TCP comms endpoints
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
+- Python `MetaRuntime.compact_member(identity, *, floor_tokens=None,
+  timeout=None)` and TypeScript `MetaRuntime.compactMember(identity,
+  { floorTokens, timeoutMs })` call `meta/compact_member`, which neither SDK
+  could call. A host can compact a member's conversation now: the older
+  turns are summarized and the most recent ones are kept, at the cost of one
+  model turn and two in-place rebuilds of the member.
+  A `meta/compact_member` call that is admitted rebuilds the identity,
+  whether it then compacts, compacts nothing or fails; for an identity that
+  created mobs with its own
+  tools that costs it the listing and management of those mobs (see the
+  `meta/compact_member` section of the RPC reference). Have such an identity
+  destroy a mob it created before the call if it must not be left running
+  unmanaged.
+  A changed instruction that waits for a compaction (an update answered
+  `applies_after_compaction`, on a model that takes a system instruction
+  only ahead of the conversation) takes effect with it. The call waits for
+  the reply for the verb's timeout plus 30 seconds, whatever the
+  transport's request timeout is, because the gateway holds the call past
+  that timeout. The result is the gateway's: check its `compaction_applied`,
+  which is `false` when the conversation holds no fewer messages than
+  before the call (one shorter than `floor_tokens`, 1024 tokens by default,
+  is left as it is). A failure is the RPC error with `data.kind`, for
+  example `compact_member_busy` or `compact_member_timeout`. The Console's
+  RPC route does not forward the verb.
 
 - Mob members get the stock tool `ask_user`: an agent asks a person a set of
   multiple-choice questions (1 to 10 questions with 2 to 8 choices each, a

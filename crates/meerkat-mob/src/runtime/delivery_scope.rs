@@ -1252,7 +1252,7 @@ impl MemberBindingFold {
 }
 
 /// Whether a journal event read now is the event a fold read before.
-fn same_journal_event(read: &MobEvent, folded: &MobEvent) -> bool {
+pub(super) fn same_journal_event(read: &MobEvent, folded: &MobEvent) -> bool {
     read.cursor == folded.cursor
         && read.timestamp == folded.timestamp
         && read.mob_id == folded.mob_id
@@ -1268,6 +1268,16 @@ pub(crate) struct MemberBindingFoldCache {
 }
 
 impl MemberBindingFoldCache {
+    /// A cache that starts from the fold of `journal`, the whole journal in
+    /// cursor order as a start already decoded it: its first read then
+    /// reads only the events from the journal's last one on, as a later
+    /// read does, and falls back to a whole read by the same rule.
+    pub(crate) fn seeded(journal: &[MobEvent], mob_id: &MobId) -> Self {
+        Self {
+            fold: std::sync::Mutex::new(MemberBindingFold::of_journal(journal, mob_id)),
+        }
+    }
+
     /// `mob_id`'s member binding history over `store`'s journal: the kept
     /// fold advanced over the journal events from its cursor on, read with
     /// the intent rows in one store transaction. A journal that no longer

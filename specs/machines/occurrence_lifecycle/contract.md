@@ -76,6 +76,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyStaleCompletionArrival`(trigger: OccurrenceLifecycleInputVariant)
 - `ResolveReclaimExhausted`(admission_evidence: AdmissionEvidence, detail: Option<String>, at_utc_ms: u64)
 - `ResolveUnprovenLateNotAdmitted`(admission_evidence: AdmissionEvidence, detail: Option<String>, at_utc_ms: u64)
+- `ReleaseClaimBeforeDispatch`(admission_evidence: AdmissionEvidence, at_utc_ms: u64)
 
 ## Signals
 
@@ -1765,6 +1766,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ReleaseLeaseForPausedScheduleAfterSupersession`
 - From: `Superseded`
 - On: `ReleaseLeaseForPausedSchedule`(at_utc_ms)
+- To: `Superseded`
+
+### `ReleaseClaimBeforeDispatchFromClaimed`
+- From: `Claimed`
+- On: `ReleaseClaimBeforeDispatch`(admission_evidence, at_utc_ms)
+- Guards:
+  - ``
+- Emits: `LeaseExpired`
+- To: `Pending`
+
+### `ReleaseClaimBeforeDispatchAfterSupersession`
+- From: `Superseded`
+- On: `ReleaseClaimBeforeDispatch`(admission_evidence, at_utc_ms)
 - To: `Superseded`
 
 ## Coverage

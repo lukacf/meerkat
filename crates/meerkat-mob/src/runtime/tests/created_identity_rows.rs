@@ -433,6 +433,25 @@ impl CreatedMob {
         }
     }
 
+    /// Wait, within one step, until `name`'s archive has ended: no member
+    /// holds the name and its entry reads unseated, archived. A retirement
+    /// that has not settled by then fails the row, naming where it stands.
+    async fn archive_ended(&self, name: &str) {
+        let archived = Some(EntryStanding::Unseated(UnseatedEntryCause::Archived));
+        let deadline = tokio::time::Instant::now() + STEP;
+        while self.is_member(name).await || self.standing(name) != archived {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the archive of {name} did not end within {STEP:?}: standing {:?}, retirement {:?}",
+                self.standing(name),
+                self.handle
+                    .retirement_settlement(&id(name))
+                    .map(|retirement| retirement.current())
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn journal_len(&self) -> usize {
         self.storage
             .events
@@ -1613,17 +1632,32 @@ async fn unarchiving_seats_it_dormant_on_its_archived_session_with_its_history()
         .expect("the wake answers")
         .expect("the wake builds the identity's session");
     let session = mob.session("keeper").await.expect("the keeper's session");
-    let archived = mob
-        .handle
-        .archive_identity(
+    let archive = || {
+        mob.handle.archive_identity(
             IdentityArchiveChange::new(operation("archive-keeper"), host(), "keeper"),
             allow,
         )
-        .await;
+    };
+    // The archive answers Committed once its member's retirement ended. When
+    // the caller's retirement budget (2 s in a test build) runs out first, it
+    // answers the typed in-progress error instead: the change is committed
+    // and the mob owns the retirement, which ends on its own. The row then
+    // waits for that ending within its step (a retirement that never settles
+    // fails it there), and the same operation again replays the change.
+    let archived = archive().await;
+    let still_retiring = matches!(&archived, Err(error) if error.is_retirement_in_progress());
     assert!(
-        matches!(archived, Ok(IdentityChangeOutcome::Committed { .. })),
+        still_retiring || matches!(archived, Ok(IdentityChangeOutcome::Committed { .. })),
         "{archived:?}"
     );
+    if still_retiring {
+        mob.archive_ended("keeper").await;
+        let replayed = archive().await;
+        assert!(
+            matches!(replayed, Ok(IdentityChangeOutcome::Replayed { .. })),
+            "{replayed:?}"
+        );
+    }
     mob.left("keeper").await;
     assert_eq!(
         mob.standing("keeper"),

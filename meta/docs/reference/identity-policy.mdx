@@ -163,7 +163,7 @@ A rule is `{change, requester, target, outcome}`.
 | `peers` | Peers added or removed |
 | `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
 | `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |
-| `archive` | An archive, and an unarchive. An archive ends the agent's management of the mobs it created, and an unarchive does not give it back: the mobs are removed with their stores at the next start, unless the agent was unarchived and has run again before it; then they stay running with no agent managing them. Have the agent destroy them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive%2C-meta%2Fidentity%2Funarchive%2C-meta%2Fidentity%2Fremove%2C-meta%2Fidentity%2Fadopt)) |
+| `archive` | An archive, and an unarchive. An archive ends the agent's management of the mobs it created, and an unarchive does not give it back: the mobs are removed with their stores at the next start, unless the agent was unarchived and has run again before it; then they stay running with no agent managing them. Have the agent destroy them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)) |
 | `remove` | A removal: permanent, the name is never available again |
 | `adopt` | The release of a configured agent from configuration (see [Adopting configured agents](#adopting-configured-agents)) |
 

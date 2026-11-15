@@ -2499,3 +2499,35 @@ fn no_generated_kernel_constructs_a_transition_id() {
         );
     }
 }
+
+/// OccurrenceLifecycleMachine's arms of a claim given back before its
+/// dispatch start are declared beside the lease arms in the catalog and
+/// emitted on the machine's late tail: they directly follow
+/// `UnprovenLateNotAdmittedFromDispatching`, the last `TransitionId` variant
+/// 0.9.14 published, so no published variant's discriminant moves (the
+/// tail's first arm stays at index 207 and the 215 published variants are a
+/// prefix of this enum).
+#[test]
+fn occurrence_claim_release_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&occurrence_lifecycle());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("ReleaseLeaseForPausedScheduleAfterSupersession"), 206);
+    assert_eq!(index("ClassifyDuePendingReclaimExhausted"), 207);
+    // The last TransitionId variant 0.9.14 published.
+    let published_last = index("UnprovenLateNotAdmittedFromDispatching");
+    assert_eq!(published_last, 214);
+    assert_eq!(
+        variants[published_last + 1..].to_vec(),
+        vec![
+            "ReleaseClaimBeforeDispatchFromClaimed".to_string(),
+            "ReleaseClaimBeforeDispatchAfterSupersession".to_string(),
+        ],
+        "the claim release's arms directly follow the last variant 0.9.14 published"
+    );
+}

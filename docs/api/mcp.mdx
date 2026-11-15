@@ -1144,6 +1144,13 @@ extraction calls.
   After a call created its session, the data also names the session
   (`session_id`, `session_ref`, `session_created`, `resumable`). Read the
   data, never the message.
+  One case is not recognisable by its data kind: a `meerkat_resume` of, or a
+  `meerkat_comms_send` to, the session of a mob member that is not live,
+  when that member's own build is refused for the level in its profile,
+  answers the generic agent error (`-32013`) with a message that contains
+  the refusal's sentence and no `reasoning_effort_refused` data; a level the
+  resume itself carries is judged after the wake and is answered by the
+  typed refusal as everywhere else.
 
   A `meerkat_resume` that names the level (this field, set or clear, or the
   `reasoning_effort` key inside `provider_params`) rebuilds the session, and

@@ -2681,6 +2681,7 @@ Security, Upgrade and Changed.
   schedules of an ended member cannot be deleted, the gateway logs `the
   schedules that target an ended member private to a person could not all be
   deleted` and they stay. (By tests and by ten runs on this release's code;
+  the deferred Console send by a test of the deleting step, not end to end;
   0.9.11 through 0.9.14 read from the source.)
 
 ### Known limitations

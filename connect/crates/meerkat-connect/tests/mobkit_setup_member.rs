@@ -554,7 +554,9 @@ impl LlmClient for Probe {
                         "reply_to_peer",
                         "send_request",
                         "send_response",
-                        "peers"
+                        "peers",
+                        // Meta's stock tool, offered to the members of a Meta runtime.
+                        "ask_user"
                     ]
                     .contains(name),
                 "unexpected helper, provider or tool family: {name}"
@@ -737,6 +739,8 @@ impl LlmClient for RecipeProbe {
                         "send_request",
                         "send_response",
                         "peers",
+                        // Meta's stock tool, offered to the members of a Meta runtime.
+                        "ask_user",
                     ]
                     .contains(name),
                 "unexpected recipe-member tool: {name}"

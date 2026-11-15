@@ -2412,6 +2412,9 @@ pub(super) struct ScriptedNative {
     checks: Mutex<BTreeMap<String, u64>>,
     /// Members whose check panics, as a native read whose task fails.
     panicking: Mutex<BTreeSet<String>>,
+    /// Identities of this mob whose check answers, from now on, that the
+    /// runtime does not know them, whatever `known` holds.
+    unseated: Mutex<BTreeSet<String>>,
 }
 
 /// A member's role and labels, as a scripted roster records them.
@@ -2449,6 +2452,7 @@ impl ScriptedNative {
             wedged: tokio::sync::watch::Sender::new(BTreeSet::new()),
             checks: Mutex::new(BTreeMap::new()),
             panicking: Mutex::new(BTreeSet::new()),
+            unseated: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -2694,6 +2698,10 @@ impl NativeDelivery for ScriptedNative {
         self.own.clone()
     }
 
+    fn files_peer(&self, mob_id: &MobId) -> bool {
+        self.peers.contains(mob_id.as_str())
+    }
+
     async fn mob_origin(
         &self,
         mob_id: &MobId,
@@ -2740,6 +2748,9 @@ impl NativeDelivery for ScriptedNative {
                 .await;
         }
         match route {
+            MemberRoute::Local if self.unseated.lock().unwrap().contains(identity) => {
+                Err(MemberProblem::Unknown)
+            }
             MemberRoute::Local if self.unusable.contains(identity) => Err(MemberProblem::Unusable(
                 format!("{identity} is placed on a host"),
             )),
@@ -3089,6 +3100,220 @@ impl Harness {
             .unwrap();
         assert_eq!(batches.len(), 1, "exactly one batch: {batches:?}");
         batches.remove(0)
+    }
+}
+
+/// The owner a row of another surface runs over: a [`Harness`] whose native
+/// owner serves `members` of [`OWN_MOB`], with the clock the row steps.
+pub(crate) struct SurfaceOwner {
+    harness: Harness,
+}
+
+impl SurfaceOwner {
+    /// The mob the owner's members are local to.
+    pub(crate) const MOB: &'static str = OWN_MOB;
+    /// A mob on a peer gateway the owner can reach.
+    pub(crate) const PEER_MOB: &'static str = "mob-b";
+    /// A mob a member created, which this gateway holds.
+    pub(crate) const HOSTED_MOB: &'static str = "builds";
+
+    pub(crate) fn serving(members: &[&str]) -> Self {
+        let mut native = ScriptedNative::new();
+        native.known = members.iter().map(|member| (*member).to_string()).collect();
+        Self {
+            harness: harness_with(native),
+        }
+    }
+
+    /// The owner, as a surface is handed it.
+    pub(crate) fn service(&self) -> AnnouncementService {
+        self.harness.service.clone()
+    }
+
+    /// [`Self::MOB`], as the owner's host names its own mob.
+    pub(crate) fn mob(&self) -> MobId {
+        mob(OWN_MOB)
+    }
+
+    /// One dispatcher round at `at_ms`.
+    pub(crate) async fn round_at(&self, at_ms: u64) {
+        self.harness.clock.store(at_ms, Ordering::SeqCst);
+        self.harness.service.run_round().await.unwrap();
+    }
+
+    /// `identity` announces `body` on the topic "news" under `key`, as its
+    /// own tool announces.
+    pub(crate) async fn announce_as(&self, identity: &str, key: &str, body: &str) {
+        self.harness
+            .service
+            .announce(AnnounceRequest {
+                mob_id: mob(OWN_MOB),
+                announced_by: Announcer::Member {
+                    identity: MemberIdentity::new(identity).unwrap(),
+                },
+                source_key: SourceKey::new(key).unwrap(),
+                topics: topics(&["news"]),
+                body: body.to_string(),
+                correlation_id: None,
+                causes: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// From now on `identity` takes no delivery: its runtime does not know
+    /// it.
+    pub(crate) fn suspend(&self, identity: &str) {
+        self.harness
+            .native
+            .waiting
+            .lock()
+            .unwrap()
+            .insert(identity.to_string(), SuspendCause::MemberUnknown);
+    }
+
+    /// The roster records `identity` with `role`.
+    pub(crate) fn give_role(&self, identity: &str, role: &str) {
+        self.harness.native.set_roster_facts(identity, role, &[]);
+    }
+
+    /// From now on the check of `identity` answers that the runtime does not
+    /// know it: a put of its subscription, and a role template's child for
+    /// it, is refused.
+    pub(crate) fn unseat(&self, identity: &str) {
+        self.harness
+            .native
+            .unseated
+            .lock()
+            .unwrap()
+            .insert(identity.to_string());
+    }
+
+    /// The check of `identity` answers again as it did before
+    /// [`Self::unseat`].
+    pub(crate) fn seat(&self, identity: &str) {
+        self.harness
+            .native
+            .unseated
+            .lock()
+            .unwrap()
+            .remove(identity);
+    }
+
+    /// A retention pass at `at_ms` with no window: every cancelled or ended
+    /// subscription that holds nothing unsettled is removed, as the
+    /// retention loop removes one past its window.
+    pub(crate) async fn retention_pass_at(&self, at_ms: u64) {
+        self.harness.clock.store(at_ms, Ordering::SeqCst);
+        self.harness.store.prune(at_ms, 0, 1_000).await.unwrap();
+    }
+
+    /// `identity` is on the roster of [`Self::HOSTED_MOB`].
+    pub(crate) fn seat_in_hosted_mob(&self, identity: &str) {
+        self.harness
+            .native
+            .add_child_member(Self::HOSTED_MOB, identity);
+    }
+
+    /// [`Self::HOSTED_MOB`] has completed: it is held here and runs no more.
+    pub(crate) fn complete_hosted_mob(&self) {
+        self.harness
+            .native
+            .completed
+            .lock()
+            .unwrap()
+            .insert(Self::HOSTED_MOB.to_string());
+    }
+
+    /// [`Self::HOSTED_MOB`] is destroyed: this gateway holds it no more.
+    pub(crate) fn destroy_hosted_mob(&self) {
+        self.harness
+            .native
+            .destroyed
+            .lock()
+            .unwrap()
+            .insert(Self::HOSTED_MOB.to_string());
+    }
+
+    /// [`Self::HOSTED_MOB`] is held until its owner resolves: it is hosted
+    /// here and does not run.
+    pub(crate) fn hold_hosted_mob(&self) {
+        self.harness
+            .native
+            .held
+            .lock()
+            .unwrap()
+            .insert(Self::HOSTED_MOB.to_string());
+    }
+}
+
+/// A start counts the live subscriptions that deliver into members private
+/// to a person, and of those the ones whose id is not of the form the
+/// member's own tool gives. Its line carries the two counts and no name,
+/// and there is no line while the first count is zero.
+#[tokio::test]
+async fn a_start_counts_the_live_subscriptions_on_private_members() {
+    let mut native = ScriptedNative::new();
+    native.known = ["agent:a".to_string(), "agent:p".to_string()].into();
+    let harness = harness_with(native);
+    harness.native.set_roster_facts("agent:a", "personal", &[]);
+    harness.native.set_roster_facts(
+        "agent:p",
+        "personal",
+        &[(crate::access::PRIVATE_TO_LABEL, "owner-key")],
+    );
+    harness.subscribe("shared").await;
+    let none = harness
+        .service
+        .private_member_subscriptions()
+        .await
+        .unwrap();
+    assert_eq!((none.live, none.not_by_member_tool), (0, 0));
+    assert_eq!(none.warning(), None);
+
+    // Of the private member: one its host made, one under the id its own
+    // tool gives, one paused, and one cancelled, which is not live.
+    let by_tool = format!("{}-watch", super::tools::member_prefix(&member("agent:p")));
+    for id in ["host-made", by_tool.as_str(), "host-paused", "host-ended"] {
+        harness
+            .service
+            .put_subscription(&op(id), put(id, "agent:p", &["ios"], StartFrontier::Now))
+            .await
+            .unwrap();
+    }
+    for (id, change) in [
+        ("host-paused", SubscriptionChange::Pause),
+        ("host-ended", SubscriptionChange::Cancel),
+    ] {
+        harness
+            .service
+            .change_subscription(&op(&format!("change-{id}")), &sid(id), 1, change)
+            .await
+            .unwrap();
+    }
+    let counts = harness
+        .service
+        .private_member_subscriptions()
+        .await
+        .unwrap();
+    assert_eq!((counts.live, counts.not_by_member_tool), (3, 2));
+    let line = counts.warning().unwrap();
+    assert_eq!(
+        line,
+        "3 live mob announcement subscriptions deliver into agents private to a person; 2 of \
+         them do not have the id form the agent's own tool gives. The first number includes \
+         subscriptions this host made for a private agent itself, so on some hosts it never \
+         reaches zero. A subscription keeps delivering until the host cancels it: the upgrade \
+         note of Meerkat Meta 0.9.15 says how to list and review them."
+    );
+    for name in [
+        "agent:p",
+        "host-made",
+        by_tool.as_str(),
+        "host-paused",
+        "owner-key",
+    ] {
+        assert!(!line.contains(name), "the line names {name}: {line}");
     }
 }
 

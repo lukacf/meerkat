@@ -51,6 +51,47 @@ mod declarations_engine;
 
 use declarations_engine::{RunningCalls, Waited, bounded, bounded_native, holder_stopped};
 
+/// The judge of the members the caller a request is answered for may not
+/// see: true for a member whose records are its own audience's alone. The
+/// host's own surface has none.
+pub(crate) type HiddenMember<'a> = &'a (dyn Fn(&Member) -> bool + Send + Sync);
+
+/// The log target of the line a start writes about the live subscriptions
+/// that deliver into members private to a person.
+pub(crate) const PRIVATE_MEMBER_SUBSCRIPTIONS_LOG: &str =
+    "meerkat_meta::mob_announcements::private_member_subscriptions";
+
+/// The live subscriptions (active or paused) that deliver into members
+/// private to a person ([`crate::access::PRIVATE_TO_LABEL`]), as a start
+/// counts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PrivateMemberSubscriptions {
+    /// Every live subscription of such a member, the ones its host made for
+    /// it included.
+    pub(crate) live: u64,
+    /// Of those, the ones whose id is not of the form the member's own tool
+    /// gives its subscriptions ([`super::tools::member_prefix`]).
+    pub(crate) not_by_member_tool: u64,
+}
+
+impl PrivateMemberSubscriptions {
+    /// The line a start logs at WARN while `live` is not zero: the two
+    /// counts and where to read on, and no name.
+    pub(crate) fn warning(&self) -> Option<String> {
+        (self.live > 0).then(|| {
+            format!(
+                "{} live mob announcement subscriptions deliver into agents private to a \
+                 person; {} of them do not have the id form the agent's own tool gives. The \
+                 first number includes subscriptions this host made for a private agent itself, \
+                 so on some hosts it never reaches zero. A subscription keeps delivering until \
+                 the host cancels it: the upgrade note of Meerkat Meta 0.9.15 says how to list \
+                 and review them.",
+                self.live, self.not_by_member_tool
+            )
+        })
+    }
+}
+
 /// The owner's error for a member a put cannot subscribe.
 fn member_problem(member: &Member, problem: MemberProblem) -> AnnouncementError {
     match problem {
@@ -745,6 +786,33 @@ impl AnnouncementService {
         &self.inner.config
     }
 
+    /// The mobs whose members this gateway's runtime holds: its own mob and
+    /// the mobs hosted here. `None` while that cannot be said (the mobs
+    /// hosted across a restart are still being restored, the read fails, or
+    /// the gateway names no mob of its own): a caller then treats every mob
+    /// as one of them.
+    pub(crate) async fn mobs_held_here(&self) -> Option<BTreeSet<MobId>> {
+        if !self.inner.native.mobs_restored() {
+            return None;
+        }
+        let own = self.inner.native.own_mob()?;
+        let native = Arc::clone(&self.inner.native);
+        let mut here = bounded_native(
+            "hosted_mob_ids",
+            async move { native.hosted_mob_ids().await },
+        )
+        .await
+        .ok()?;
+        here.insert(own);
+        Some(here)
+    }
+
+    /// Whether `mob_id` is positively a mob on another gateway: one the
+    /// contact directory files a peer under.
+    pub(crate) fn files_peer(&self, mob_id: &MobId) -> bool {
+        self.inner.native.files_peer(mob_id)
+    }
+
     /// Send every escalation event to `sink` as it is written.
     pub fn set_error_sink(&self, sink: ErrorSink) {
         *self
@@ -764,8 +832,23 @@ impl AnnouncementService {
         &self,
         declarations: Option<super::declarations::Declarations>,
     ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
+        self.apply_declarations_seen_by(declarations, None).await
+    }
+
+    /// [`Self::apply_declarations`] for a caller who is not the host, with
+    /// `hidden` the judge of the members that caller may not see: the
+    /// declarations it carries are admitted against the applied ones first
+    /// (a subscription the applied ones do not hold is refused for a member
+    /// the caller may not see and for one the runtime does not know, alike;
+    /// the applied subscriptions of members the caller may not see stay as
+    /// they are), and the answer lists no record of such a member.
+    pub(crate) async fn apply_declarations_seen_by(
+        &self,
+        declarations: Option<super::declarations::Declarations>,
+        hidden: Option<HiddenMember<'_>>,
+    ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
         self.ensure_authoritative()?;
-        self.apply_declared(declarations).await
+        self.apply_declared(declarations, hidden).await
     }
 
     /// What the declarations manage now (contract 4.6), once a reconcile in
@@ -774,7 +857,16 @@ impl AnnouncementService {
     pub async fn declarations(
         &self,
     ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
-        self.declared_view().await
+        self.declared_view(None).await
+    }
+
+    /// [`Self::declarations`] without the records of the members `hidden`
+    /// judges its reader may not see.
+    pub(crate) async fn declarations_seen_by(
+        &self,
+        hidden: Option<HiddenMember<'_>>,
+    ) -> Result<super::declarations::DeclarationsView, AnnouncementError> {
+        self.declared_view(hidden).await
     }
 
     /// Reconcile the applied declarations again: at compose, before the
@@ -1992,6 +2084,87 @@ impl AnnouncementService {
 
     pub async fn deliveries(&self, query: &BatchQuery) -> Result<Vec<Batch>, AnnouncementError> {
         Ok(self.inner.store.batches(query).await?)
+    }
+
+    /// Count the live subscriptions that deliver into members private to a
+    /// person, as each member's roster facts read now. A member whose
+    /// roster facts cannot be read now is not counted.
+    pub(crate) async fn private_member_subscriptions(
+        &self,
+    ) -> Result<PrivateMemberSubscriptions, AnnouncementError> {
+        let mut counts = PrivateMemberSubscriptions::default();
+        let mut private: BTreeMap<Member, bool> = BTreeMap::new();
+        let mut after: Option<SubscriptionId> = None;
+        loop {
+            let page = self
+                .inner
+                .store
+                .subscriptions(None, after.as_ref(), MAX_PAGE)
+                .await?;
+            let ended = page.len() < MAX_PAGE;
+            after = page.last().map(|subscription| subscription.id.clone());
+            for subscription in page {
+                if !matches!(
+                    subscription.state,
+                    SubscriptionState::Active | SubscriptionState::Paused
+                ) {
+                    continue;
+                }
+                let of_private_member =
+                    match private.get(&subscription.member) {
+                        Some(known) => *known,
+                        None => {
+                            let read = self.member_facts(&subscription.member).await.is_some_and(
+                                |facts| crate::access::private_owner(&facts.labels).is_some(),
+                            );
+                            private.insert(subscription.member.clone(), read);
+                            read
+                        }
+                    };
+                if !of_private_member {
+                    continue;
+                }
+                counts.live += 1;
+                let by_member_tool =
+                    format!("{}-", super::tools::member_prefix(&subscription.member));
+                if !subscription.id.as_str().starts_with(&by_member_tool) {
+                    counts.not_by_member_tool += 1;
+                }
+            }
+            if ended || after.is_none() {
+                break;
+            }
+        }
+        Ok(counts)
+    }
+
+    /// At a start: log the count of the live subscriptions that deliver
+    /// into members private to a person, while it is not zero
+    /// ([`PrivateMemberSubscriptions::warning`]).
+    pub(crate) async fn warn_of_private_member_subscriptions(&self) {
+        match self.private_member_subscriptions().await {
+            Ok(counts) => {
+                if let Some(line) = counts.warning() {
+                    tracing::warn!(
+                        target: PRIVATE_MEMBER_SUBSCRIPTIONS_LOG,
+                        live = counts.live,
+                        not_by_member_tool = counts.not_by_member_tool,
+                        "{line}"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                target: PRIVATE_MEMBER_SUBSCRIPTIONS_LOG,
+                %error,
+                "the mob announcement subscriptions on agents private to a person could not be \
+                 counted at this start"
+            ),
+        }
+    }
+
+    /// The delivery's batch as the store holds it, by its id.
+    pub(crate) async fn delivery(&self, id: &BatchId) -> Result<Option<Batch>, AnnouncementError> {
+        Ok(self.inner.store.batch(id).await?)
     }
 
     /// [`Self::deliveries`], each batch with its handling once it was

@@ -217,6 +217,51 @@ describe("Workbench nav (B14)", () => {
     navAttention: { workgraph: { count: 2, tone: "warn" as const, description: "2 blocked work items" } },
   };
 
+  it("counts the open question sets with the approvals, in Needs you and on the Approvals view's badge", () => {
+    const view = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} questionSetCount={1} />);
+    expect(view.getByTestId("nav-badge:gating").textContent).toBe("3");
+    expect(describedBy(view.getByTestId("nav:gating"))).toBe("2 pending approvals, 1 question set");
+    expect(view.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("3");
+    expect(within(view.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label"))
+      .toBe("Needs you, 2 pending approvals, 1 question set");
+    cleanup();
+    // Question sets alone: no approvals are shown on this connection.
+    const alone = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} approvals={undefined} questionSetCount={2} />);
+    expect(alone.getByTestId("nav-badge:gating").textContent).toBe("2");
+    expect(describedBy(alone.getByTestId("nav:gating"))).toBe("2 question sets");
+    expect(within(alone.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label")).toBe("Needs you, 2 question sets");
+    cleanup();
+    // A list of question sets that may be out of date is not counted on the
+    // badge (as approvals that are not read are not). Needs you keeps the
+    // count of what was read, and its words say what was not.
+    const stale = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} questionSetCount={1} questionSetStatus="stale" />);
+    expect(stale.getByTestId("nav-badge:gating").textContent).toBe("2");
+    expect(describedBy(stale.getByTestId("nav:gating"))).toBe("2 pending approvals");
+    expect(stale.getByTestId("approval-attention").querySelector(".cc-approval-attention__count")?.textContent).toBe("2");
+    expect(within(stale.getByTestId("approval-attention")).getByRole("button").getAttribute("aria-label"))
+      .toBe("Needs you, 2 pending approvals, Questions may be out of date");
+  });
+
+  it("shows Needs you for a question read that failed or may be out of date where nothing else is shown, and no row for any other state", () => {
+    const row = (view: ReturnType<typeof render>) => view.queryByTestId("approval-attention");
+    const name = (view: ReturnType<typeof render>) => row(view)?.querySelector("button")?.getAttribute("aria-label");
+    const shown = (view: ReturnType<typeof render>) => row(view)?.querySelector(".cc-approval-attention__count")?.textContent;
+    // No approvals on this connection, no host item, no reply, no open set.
+    const failed = render(<Sidebar {...props} questionSetStatus="unavailable" />);
+    expect(name(failed)).toBe("Needs you, Questions unavailable");
+    expect(shown(failed)).toBe("!");
+    cleanup();
+    const stale = render(<Sidebar {...props} questionSetStatus="stale" />);
+    expect(name(stale)).toBe("Needs you, Questions may be out of date");
+    expect(shown(stale)).toBe("!");
+    cleanup();
+    for (const status of ["loading", "ready", "forbidden", "unsupported", undefined] as const) {
+      const view = render(<Sidebar {...props} questionSetStatus={status} />);
+      expect(row(view) === null).toBe(true);
+      cleanup();
+    }
+  });
+
   it("lists views with exact names, describes their attention badges and marks the focused pane's view", () => {
     const view = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} />);
     const nav = view.getByRole("navigation", { name: "Workbench" });

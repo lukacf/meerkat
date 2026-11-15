@@ -461,7 +461,6 @@ export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HO
 const COLD_RESTORE = "cold-restore-refusals";
 const STALE = "stale-expectations";
 const INTERMITTENT = "intermittent-races";
-const REFUSAL_AFTER_PREPARED = "refusal-after-prepared";
 const SLOW_RUNNER = "slow-runner-timeouts";
 export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission", COLD_RESTORE],
@@ -487,7 +486,6 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
-  ["private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::fresh_host_restores_governed_peer_binding_and_replays_it_exactly", REFUSAL_AFTER_PREPARED, { intermittent: true }],
   ["private_originals::setup_workflow::launch::context_transfer::metadata::worker_stdio::actual_stdio_ready_runs_retained_metadata_page_and_joins_shutdown", SLOW_RUNNER, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
 

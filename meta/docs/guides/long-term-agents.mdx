@@ -439,9 +439,10 @@ is already in the agent's record.
   change moves the agent
   to that profile's model and tools on the same conversation. The move
   seats the agent again, and so does a change of `runtime_mode_override`:
-  an agent that created mobs with its own tools then no longer lists or
-  manages them (see
-  [Moving a profile](/guides/agents-create-agents#moving-a-profile)).
+  an agent that created mobs with its own tools goes on listing and
+  managing them (see
+  [Moving a profile](/guides/agents-create-agents#moving-a-profile) for
+  what still ends that).
   `addressability` and `runtime_mode_override` take the values they take on
   a create and are the change class `capability` of your policy; an update
   sets a runtime mode and cannot return the agent to its profile's.
@@ -462,7 +463,7 @@ is already in the agent's record.
   recorded and not yet followed; `{"state": "effective"}` is followed. Right
   after the update the reason is `delivery_owed` for a moment: the change is
   not in the agent's conversation yet (the other values are on the
-  [roster page](/concepts/roster#changing-an-agents-instructions)). A reset
+  [roster page](/concepts/roster#changing-an-agent%E2%80%99s-instructions)). A reset
   (`runtime.reset("editor")`; in the Console, the roster's reset action where
   the console configuration shows it, `show_reset`, and the viewer may reset
   the agent) starts a new conversation led by the current instructions, and
@@ -471,6 +472,14 @@ is already in the agent's record.
   also takes effect at the agent's next compaction at the start of a run. A
   respawn does not bring the change into effect, and neither does an archive
   followed by an unarchive.
+  The SDKs can also compact the agent's conversation, which brings a waiting
+  instruction into effect on the same conversation:
+  `runtime.compact_member("editor")` in Python,
+  `runtime.compactMember("editor")` in TypeScript; before you use it on an
+  agent that created mobs, read the SDK reference
+  ([Python](/sdks/python#compacting-a-member%E2%80%99s-conversation),
+  [TypeScript](/sdks/typescript#compacting-a-member%E2%80%99s-conversation)):
+  against a gateway before 0.9.15 the call costs the agent those mobs.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last

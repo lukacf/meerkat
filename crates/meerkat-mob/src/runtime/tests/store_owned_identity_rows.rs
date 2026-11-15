@@ -3639,6 +3639,91 @@ async fn a_broken_store_owned_member_is_built_again_after_a_label_update_or_a_re
     builds_with_labels(&mob, "closed", &session, &moved_team("closed")).await;
 }
 
+/// Row: the seat a label update gives a Broken store-owned member is its
+/// same-session successor's. The member's journal shows the step whole: the
+/// next incarnation holds the session the Broken one held, and the chain of
+/// same-session successors of that session goes on across the seat, from the
+/// generation the Broken member had. So what follows a member through its
+/// same-session successors (its session's management of the mobs its agent
+/// created is one such thing) follows it through this seat too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_broken_members_restamp_goes_on_with_its_same_session_chain() {
+    use crate::runtime::{LineageSteps, MemberBuildPreparationRefusal};
+    let preparer = ScriptedPreparer::new();
+    let mob = seat_composing_mob("broken-member-chain", &preparer).await;
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    preparer.compose_seats(SeatScript::Refuse(MemberBuildPreparationRefusal::Final {
+        reason: "the host refuses this seat".to_string(),
+    }));
+    assert!(wake(&mob, "quiet").await.is_err(), "the build is refused");
+    assert!(
+        matches!(
+            mob.read("quiet"),
+            IdentityEntryRead::Entry(view) if view.broken.is_some()
+        ),
+        "the member is Broken"
+    );
+    let session = mob.session("quiet").await;
+    let generation = mob.generation("quiet").await.expect("a member");
+    // The live binding of the member's session: its generation, and where
+    // the chain of same-session successors that seated it begins.
+    let chain = |mob: &StoreOwnedMob| {
+        let handle = mob.handle.clone();
+        let session = session.clone();
+        async move {
+            let history = handle
+                .member_binding_history()
+                .await
+                .expect("the member history reads");
+            let binding = history
+                .binding_for_session(&session)
+                .expect("the journal binds the member's session");
+            assert!(binding.is_live(), "the session's binding is live");
+            (
+                binding.generation(),
+                binding.same_session_lineage_start(LineageSteps::same_session_successors()),
+            )
+        }
+    };
+    assert_eq!(
+        chain(&mob).await,
+        (generation, Some(generation)),
+        "the Broken member's own seat starts its chain"
+    );
+
+    preparer.compose_seats(host_answers_moved_team(&["quiet"]));
+    let before = spec("quiet", "worker");
+    let updated = mob
+        .update(
+            "relabel-quiet",
+            before.clone().with_labels(moved_team("quiet")),
+            &spec_digest(&before),
+        )
+        .await
+        .expect("the label update commits");
+    assert_eq!(
+        answer_kind(updated.applied.as_ref().expect("the update's answer")),
+        "restamped",
+        "{updated:?}"
+    );
+    assert_eq!(
+        mob.session("quiet").await,
+        session,
+        "the next incarnation holds the session the Broken one held"
+    );
+    assert_eq!(
+        chain(&mob).await,
+        (
+            generation.next().expect("a next generation"),
+            Some(generation)
+        ),
+        "the chain goes on from the Broken member's generation"
+    );
+}
+
 /// Row (guard, passes before and after): a release gets no Broken member
 /// out. `quiet`'s first build is refused for good, so the member is Broken.
 /// It holds no live build: a release of it releases nothing, and it is
@@ -3689,6 +3774,370 @@ async fn a_release_alone_leaves_a_broken_member_broken() {
         asked,
         "the host is not asked again about a Broken member"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The approval branch's reserved label on a store-owned record
+// ---------------------------------------------------------------------------
+
+/// The approval branch's authority label, from its owner.
+const BRANCH_LABEL: &str = meerkat_core::approval::decision::APPROVAL_BRANCH_LABEL;
+
+/// `spec` with the approval branch's label added to its labels.
+fn with_branch_label(spec: &CreatedIdentitySpec) -> CreatedIdentitySpec {
+    let mut labels = spec.labels.clone();
+    labels.insert(BRANCH_LABEL.to_string(), "decision:made-up".to_string());
+    spec.clone().with_labels(labels)
+}
+
+/// Assert that `result` is the approval branch's reservation refusing
+/// `name`.
+fn assert_branch_reserved<T: std::fmt::Debug>(result: Result<T, MobError>, name: &str, case: &str) {
+    match result {
+        Err(MobError::ApprovalBranchReserved { identity }) => {
+            assert_eq!(identity, id(name), "{case}");
+        }
+        other => panic!("{case}: expected the approval branch's reservation, got {other:?}"),
+    }
+}
+
+/// `name`'s row in its stored form.
+async fn stored_row(mob: &StoreOwnedMob, name: &str) -> serde_json::Value {
+    serde_json::to_value(mob.row(name).await).expect("the row's stored form")
+}
+
+/// Write `name`'s row as an update that added the approval branch's label
+/// left it, on a build that did not refuse one: the row at its next
+/// revision with the label and the restamp its seat is owed (no seat row
+/// can carry the label, so the row keeps owing it), in the store alone.
+/// Answers the row's spec.
+async fn record_carrying_branch_label(mob: &StoreOwnedMob, name: &str) -> CreatedIdentitySpec {
+    let before = mob.row(name).await;
+    let spec = with_branch_label(before.spec.as_ref().expect("the row's spec"));
+    let after = before
+        .clone()
+        .updated(spec.clone(), None, true)
+        .expect("the updated row");
+    let operation_id = format!("earlier-label-{name}");
+    let receipt = crate::IdentityChangeReceipt::sealed(
+        mob.mob_id(),
+        operation_id.as_str(),
+        digest(&operation_id),
+        IdentityChangeKind::Update,
+        vec![
+            crate::identity::IdentityChangeReceiptEntry::new(
+                id(name),
+                IdentityChangeEntryOutcome::Committed,
+            )
+            .with_spec(spec_digest(&spec), Some(after.revision)),
+        ],
+        1,
+    )
+    .expect("the earlier update's receipt");
+    let store = mob
+        .storage
+        .identity_member
+        .clone()
+        .expect("the built-in identity store");
+    let written = crate::store::MobIdentityMemberStore::commit_identity_change(
+        store.as_ref(),
+        &crate::store::IdentityChangeWrite {
+            receipt,
+            rows: vec![crate::store::CreatedIdentityRowWrite {
+                record: after,
+                expected: crate::store::CreatedIdentityRowExpectation::Current {
+                    authority_digest: before.authority_digest.clone(),
+                },
+            }],
+            events: Vec::new(),
+        },
+    )
+    .await
+    .expect("the earlier update's transaction");
+    assert!(matches!(
+        written,
+        crate::store::IdentityChangeCommit::Committed { .. }
+    ));
+    spec
+}
+
+/// Row (RED): an update whose labels add the approval branch's label to a
+/// record that does not carry it is refused with the reservation's own
+/// refusal, and nothing changes: the row is byte for byte what it was (its
+/// spec, its revision, no owed restamp), the roster entry keeps its labels,
+/// the member keeps its incarnation, and a live idle member is not
+/// released. `quiet` is seated Dormant and `built` is live and idle. An
+/// update of the same record without the label still commits.
+///
+/// RED before the update refused the label: the update commits, the row
+/// carries the label and owes its seat a restamp no seat row can carry (a
+/// respawn, a profile move and a runtime-mode change of the member are
+/// refused from then on), and the idle member is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_that_adds_the_approval_branch_label_is_refused_and_changes_nothing() {
+    let preparer = ScriptedPreparer::new();
+    let mob = seat_composing_mob("update-adds-branch-label", &preparer).await;
+    let names = ["quiet", "built"];
+    committed(mob.create(host_create("create-desks", &names), ALLOW).await);
+    wake(&mob, "built")
+        .await
+        .expect("the first wake builds the member");
+    for name in names {
+        let before = spec(name, "worker");
+        let row = stored_row(&mob, name).await;
+        let seated = seat(&mob, name).await;
+        let live = !mob.handle.member_unmaterialized(&id(name));
+        assert_eq!(live, name == "built", "{name}: live exactly when built");
+        assert_branch_reserved(
+            mob.update(
+                &format!("label-{name}"),
+                with_branch_label(&before),
+                &spec_digest(&before),
+            )
+            .await,
+            name,
+            name,
+        );
+        assert_eq!(
+            stored_row(&mob, name).await,
+            row,
+            "{name}: the row is what it was"
+        );
+        let now = seat(&mob, name).await;
+        assert_eq!(
+            (now.generation, now.fence_token, &now.labels),
+            (seated.generation, seated.fence_token, &before.labels),
+            "{name}: the same incarnation, and the roster entry keeps its labels"
+        );
+        assert_eq!(
+            !mob.handle.member_unmaterialized(&id(name)),
+            live,
+            "{name}: the refused update releases nothing"
+        );
+        // The record is not stuck: an update without the label commits.
+        let renamed = before.clone().with_display_name("Renamed");
+        mob.update(
+            &format!("rename-{name}"),
+            renamed.clone(),
+            &spec_digest(&before),
+        )
+        .await
+        .expect("an update without the label commits");
+        assert_eq!(mob.row(name).await.spec, Some(renamed), "{name}");
+    }
+}
+
+/// Row (guard): an update of a record that ALREADY carries the approval
+/// branch's label and keeps it is admitted. This is deliberate: the
+/// reservation refuses an update that introduces the label, and a record
+/// that carries it from a build that did not refuse one must stay
+/// changeable (its display name here), or nothing but its removal could
+/// touch it. The label stays on the row with its value, the row moves one
+/// revision, and nothing is seated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_that_keeps_the_approval_branch_label_of_a_record_that_carries_it_is_admitted() {
+    let preparer = ScriptedPreparer::new();
+    let mob = seat_composing_mob("update-keeps-branch-label", &preparer).await;
+    committed(
+        mob.create(host_create("create-built", &["built"]), ALLOW)
+            .await,
+    );
+    let seated = seat(&mob, "built").await;
+    let carrying = record_carrying_branch_label(&mob, "built").await;
+    let revision = mob.row("built").await.revision;
+    let renamed = carrying.clone().with_display_name("Renamed");
+    let updated = mob
+        .update("rename-built", renamed.clone(), &spec_digest(&carrying))
+        .await
+        .expect("an update that keeps the label is admitted");
+    assert!(
+        matches!(updated.change, IdentityChangeOutcome::Committed { .. }),
+        "{updated:?}"
+    );
+    let row = mob.row("built").await;
+    assert_eq!(row.spec, Some(renamed), "the row holds the update's spec");
+    assert_eq!(row.revision, revision + 1, "one revision");
+    assert_eq!(
+        row.spec
+            .as_ref()
+            .and_then(|spec| spec.labels.get(BRANCH_LABEL)),
+        carrying.labels.get(BRANCH_LABEL),
+        "the label stays, with its value"
+    );
+    let now = seat(&mob, "built").await;
+    assert_eq!(
+        (now.generation, now.fence_token),
+        (seated.generation, seated.fence_token),
+        "nothing is seated"
+    );
+}
+
+/// Row (guard): an update that removes the approval branch's label from a
+/// record that carries it commits, and is the way out for such a record:
+/// the row no longer carries the label, the live idle member is released
+/// (the same incarnation), the row lets its owed restamp go (its seat row
+/// carries the row's labels again), and the member's next wake is a build
+/// whose seat the host is handed without the label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_that_removes_the_approval_branch_label_commits_and_releases_the_member() {
+    let preparer = ScriptedPreparer::new();
+    let mob = seat_composing_mob("update-removes-branch-label", &preparer).await;
+    committed(
+        mob.create(host_create("create-built", &["built"]), ALLOW)
+            .await,
+    );
+    wake(&mob, "built")
+        .await
+        .expect("the first wake builds the member");
+    let session = mob.session("built").await;
+    let seated = seat(&mob, "built").await;
+    let carrying = record_carrying_branch_label(&mob, "built").await;
+    assert!(label_restamp_owed(&mob, "built").await);
+    assert!(
+        !mob.handle.member_unmaterialized(&id("built")),
+        "the member is live and idle before the update"
+    );
+    let without = spec("built", "worker");
+    let updated = mob
+        .update("unlabel-built", without.clone(), &spec_digest(&carrying))
+        .await
+        .expect("an update that removes the label commits");
+    assert_eq!(
+        answer_kind(updated.applied.as_ref().expect("the update's answer")),
+        "kept",
+        "{updated:?}"
+    );
+    assert_eq!(mob.row("built").await.spec, Some(without.clone()));
+    assert!(
+        mob.handle.member_unmaterialized(&id("built")),
+        "the update releases the idle member"
+    );
+    let now = seat(&mob, "built").await;
+    assert_eq!(
+        (now.generation, now.fence_token, &now.labels),
+        (seated.generation, seated.fence_token, &without.labels),
+        "nothing is seated, and the roster reads the row's labels"
+    );
+    assert!(
+        !label_restamp_owed(&mob, "built").await,
+        "the released member's seat row carries the row's labels: nothing is owed"
+    );
+    let built = builds_on(&mob, &session).await.len();
+    wake(&mob, "built")
+        .await
+        .expect("the member's next wake builds it");
+    assert_eq!(builds_on(&mob, &session).await.len(), built + 1);
+    assert_eq!(
+        preparer.handed("built"),
+        Some(without.labels),
+        "the host is handed the build's seat without the label"
+    );
+}
+
+/// Row (RED): a create whose seat is not planned at its commit (its host
+/// prepares the identity first) is refused the approval branch's label,
+/// and its reserved identity prefix, with the reservation's own refusal
+/// and before any row is written: no record holds the name afterwards, the
+/// name is no entry, and a create of the same name without the label
+/// commits.
+///
+/// RED before a create refused the reservation up front: such a create
+/// commits a record pending its preparation, which no settle can seat (the
+/// seat plan refuses the label and the prefix), so an unseated record is
+/// left holding the name.
+#[tokio::test]
+async fn a_create_under_host_preparation_is_refused_the_approval_branch_reservation_with_no_record()
+{
+    let prefixed = "approval-branch-made-up";
+    let cases = [
+        (
+            "required",
+            with_branch_label(&spec("alpha", "worker")),
+            IdentityPreparationMode::Required,
+        ),
+        (
+            "constructed",
+            with_branch_label(&spec("alpha", "worker")),
+            IdentityPreparationMode::Constructed,
+        ),
+        (
+            "prefix",
+            spec(prefixed, "worker"),
+            IdentityPreparationMode::Required,
+        ),
+    ];
+    for (case, reserved, preparation) in cases {
+        let mob = StoreOwnedMob::new(&format!("prepared-create-branch-{case}")).await;
+        let name = reserved.identity.as_str().to_string();
+        assert_branch_reserved(
+            mob.create(
+                prepared_create("create-reserved", reserved, preparation),
+                ALLOW,
+            )
+            .await,
+            &name,
+            case,
+        );
+        assert!(
+            mob.rows().await.is_empty(),
+            "{case}: no row is written: {:?}",
+            mob.rows().await
+        );
+        assert!(
+            matches!(
+                mob.read(&name),
+                IdentityEntryRead::NotAnEntry { worker: None }
+            ),
+            "{case}: the name is no entry: {:?}",
+            mob.read(&name)
+        );
+        if case != "prefix" {
+            let receipt = committed(
+                mob.create(
+                    prepared_create("create-plain", spec(&name, "worker"), preparation),
+                    ALLOW,
+                )
+                .await,
+            );
+            assert_eq!(
+                receipt.identities[0].outcome,
+                IdentityChangeEntryOutcome::PendingPreparation,
+                "{case}: the name is free for a create without the label"
+            );
+        }
+    }
+}
+
+/// Row (pin, green before and after the update and the prepared create
+/// refused the reservation): a create whose seat is planned at its commit
+/// is refused the approval branch's label by that plan, with the
+/// reservation's own refusal and with nothing written. The create's
+/// up-front refusal answers the same for it.
+#[tokio::test]
+async fn a_create_that_takes_the_approval_branch_label_is_refused_with_no_record() {
+    let mob = StoreOwnedMob::new("plain-create-branch-label").await;
+    let create = StoreOwnedIdentityCreate::new(
+        operation("create-reserved"),
+        IdentityChangeRequesterInput::host("console"),
+        vec![CreatedIdentityRequest::new(with_branch_label(&spec(
+            "alpha", "worker",
+        )))],
+    );
+    assert_branch_reserved(mob.create(create, ALLOW).await, "alpha", "plain");
+    assert!(mob.rows().await.is_empty(), "{:?}", mob.rows().await);
+    assert!(
+        matches!(
+            mob.read("alpha"),
+            IdentityEntryRead::NotAnEntry { worker: None }
+        ),
+        "{:?}",
+        mob.read("alpha")
+    );
+    committed(
+        mob.create(host_create("create-alpha", &["alpha"]), ALLOW)
+            .await,
+    );
+    assert!(mob.seated_dormant("alpha"), "{:?}", mob.read("alpha"));
 }
 
 /// Whether `name`'s row records that its seat is owed a label restamp, read

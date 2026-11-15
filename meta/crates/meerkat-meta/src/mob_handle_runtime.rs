@@ -313,6 +313,44 @@ pub(crate) async fn broken_members_of(
         .collect()
 }
 
+/// A member Core holds Broken, as the gateway's init result and
+/// `meta/status` name it: Core's reason, and MobMachine's stable refusal
+/// code when the failure was a refusal that named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrokenMember {
+    pub(crate) member: meerkat_mob::AgentIdentity,
+    pub(crate) reason: String,
+    pub(crate) code: Option<String>,
+}
+
+/// [`broken_members_of`], each member with the refusal code MobMachine
+/// recorded for it, if any. The code is read from the machine state the
+/// mob's actor last published (`MobHandle::identity_entry`), so the read
+/// wakes no member and never waits on the mob actor. The code is advisory:
+/// a member whose entry this read cannot answer is named without one.
+pub(crate) async fn broken_member_facts_of(handle: &MobHandle) -> Vec<BrokenMember> {
+    broken_members_of(handle)
+        .await
+        .into_iter()
+        .map(|(member, reason)| {
+            let code = match handle.identity_entry(&member) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => {
+                    entry.broken.and_then(|fact| fact.code)
+                }
+                Ok(meerkat_mob::IdentityEntryRead::NotAnEntry {
+                    worker: Some(worker),
+                }) => worker.broken.and_then(|fact| fact.code),
+                _ => None,
+            };
+            BrokenMember {
+                member,
+                reason,
+                code,
+            }
+        })
+        .collect()
+}
+
 /// The boot answer of a root mob whose stored state could not be restored.
 ///
 /// A failure of the mob's store (a read the store could not serve now, or
@@ -5579,6 +5617,42 @@ macro_rules! delegate_mob_session_service {
             ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
                 self.inner.fork_source_tools(session_id).await
             }
+            // The member rewind fork seam (four methods). The trait defaults
+            // refuse as a service without durable fork authority does:
+            // unforwarded, every member rewind through this decorator is
+            // refused. Forwarded as they are: the child is the same member,
+            // so no other member's place is claimed and no runtime-plane
+            // identity is taken.
+            async fn preflight_member_rewind_fork(
+                &self,
+                fork: &meerkat_mob::MemberRewindFork,
+            ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+                self.inner.preflight_member_rewind_fork(fork).await
+            }
+            async fn fork_member_rewind_child(
+                &self,
+                fork: &meerkat_mob::MemberRewindFork,
+            ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+                self.inner.fork_member_rewind_child(fork).await
+            }
+            async fn observe_member_rewind_child(
+                &self,
+                planned_child_session_id: &meerkat_core::types::SessionId,
+            ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError>
+            {
+                self.inner
+                    .observe_member_rewind_child(planned_child_session_id)
+                    .await
+            }
+            async fn read_member_rewind_lineage_session(
+                &self,
+                witness: meerkat_mob::MemberRewindLineageWitness,
+                prefix_message_count: usize,
+            ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+                self.inner
+                    .read_member_rewind_lineage_session(witness, prefix_message_count)
+                    .await
+            }
             async fn authorize_revivable_retired_session(
                 &self,
                 session_id: &meerkat_core::types::SessionId,
@@ -7010,6 +7084,37 @@ impl MobSessionService for AfterCreateMobSessionService {
     ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
         self.inner.fork_source_tools(session_id).await
     }
+    // Forwarded, as in `delegate_mob_session_service!`: the four methods of
+    // the member rewind fork seam, whose trait defaults refuse.
+    async fn preflight_member_rewind_fork(
+        &self,
+        fork: &meerkat_mob::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        self.inner.preflight_member_rewind_fork(fork).await
+    }
+    async fn fork_member_rewind_child(
+        &self,
+        fork: &meerkat_mob::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        self.inner.fork_member_rewind_child(fork).await
+    }
+    async fn observe_member_rewind_child(
+        &self,
+        planned_child_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        self.inner
+            .observe_member_rewind_child(planned_child_session_id)
+            .await
+    }
+    async fn read_member_rewind_lineage_session(
+        &self,
+        witness: meerkat_mob::MemberRewindLineageWitness,
+        prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        self.inner
+            .read_member_rewind_lineage_session(witness, prefix_message_count)
+            .await
+    }
     async fn authorize_revivable_retired_session(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -7683,6 +7788,11 @@ pub struct MobBootstrapSpec {
     /// private member's owner to the members it asks for
     /// ([`crate::private_owners::PrivateOwners`]).
     pub(crate) private_owners: crate::private_owners::PrivateOwners,
+    /// The late-bound surface every member's `ask_user` tool reads (see
+    /// [`crate::ask_user`]): each member build of this spec mounts the tool
+    /// over it, and the runtime fills it once it can show a person a
+    /// question; unfilled, every call answers that no person can be asked.
+    pub(crate) ask_user_slot: crate::ask_user::AskUserSlot,
     /// The registry of the agent schedule tools a stock constructor attached
     /// over an injected schedule store, which the runtime adopts once its
     /// mobs exist, as a gateway composition adopts its own
@@ -7783,10 +7893,15 @@ impl MobBootstrapSpec {
         let personal_accounts_slot =
             crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
+        // The `ask_user` tool is mounted last, over the tools every other
+        // hook left on the build.
+        let ask_user_slot = crate::ask_user::AskUserSlot::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook: personal_accounts_slot
-                .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
+            hook: ask_user_slot.after_hook(
+                personal_accounts_slot
+                    .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
+            ),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7867,6 +7982,7 @@ impl MobBootstrapSpec {
             side_chat_memory_slot,
             personal_accounts_slot,
             private_owners,
+            ask_user_slot,
             schedule_target_registry: None,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
@@ -10903,6 +11019,9 @@ pub struct MobRuntime {
     /// Who each member of this runtime's mob is private to, shared by every
     /// clone (see [`crate::private_owners::PrivateOwners`]).
     private_owners: crate::private_owners::PrivateOwners,
+    /// The surface the members' `ask_user` tool reads, shared by every clone
+    /// (see [`crate::ask_user::AskUserSlot`]).
+    ask_user_slot: crate::ask_user::AskUserSlot,
     /// The schedule service the Console's schedule editor writes, once the
     /// gateway's schedule host attached it, shared by every clone (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
@@ -11912,6 +12031,7 @@ impl MobRuntime {
             side_chat_lineages: Arc::default(),
             run_members: Arc::default(),
             private_owners: spec.private_owners,
+            ask_user_slot: spec.ask_user_slot,
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: spec.personal_accounts_slot,
         };
@@ -11981,6 +12101,7 @@ impl MobRuntime {
             side_chat_lineages: Arc::default(),
             run_members: Arc::default(),
             private_owners: crate::private_owners::PrivateOwners::default(),
+            ask_user_slot: crate::ask_user::AskUserSlot::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
         }
@@ -12028,6 +12149,13 @@ impl MobRuntime {
     /// the runtime's start, and no caller waits for it.
     pub(crate) fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
         &self.private_owners
+    }
+
+    /// The surface the `ask_user` tool of this runtime's members reads, and
+    /// the durable decisions their question sets are held in once the
+    /// runtime filled it (see [`crate::ask_user::AskUserSlot`]).
+    pub(crate) fn ask_user_slot(&self) -> &crate::ask_user::AskUserSlot {
+        &self.ask_user_slot
     }
 
     /// The Steward's source of the members of this runtime's mob private to

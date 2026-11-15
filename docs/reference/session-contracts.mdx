@@ -95,12 +95,12 @@ Committed create failure must not be silently rewritten to “cancelled” or cl
 - A turn the runtime queue does not dispatch (a direct turn, such as a
   create's first turn) also returns `SESSION_BUSY` while the session's
   runtime holds a run that waits to resume: one a store fence gap suspended
-  (see [Durable runs](/guides/durable-runs#one-writer%2C-fenced)), or one a
+  (see [Durable runs](/guides/durable-runs#one-writer-fenced)), or one a
   restart left open. It goes through once the runtime has resumed or
   settled that run.
 - Committed success must not be rewritten to cancellation.
 - Runtime-backed surfaces may hot-swap supported live settings on an existing session where the surface contract says that is allowed.
-- Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs.
+- Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs. From 0.9.15 one kind of JSON-RPC turn is the exception: a turn that would change the session's model settings beside a provider-neutral reasoning effort level is answered `SESSION_BUSY` at once while the session has unfinished work (see [Reasoning effort](/concepts/providers#reasoning-effort)).
 
 <Warning>
 The runtime may coalesce multiple queued `Steer` inputs into one agent turn.
@@ -645,7 +645,16 @@ cleanup outstanding.
 that state creates. Before anything of a new mob exists, its `MobBeforeCreate`
 hook gets a `MobCreateRequest` that the create path builds itself: the mob
 id, the owner bridge session (absent only for a host's own create) and
-whether the mob is that session's implicit delegation mob. Every create path
+whether the mob is that session's implicit delegation mob. From 0.9.15 the
+request also carries `council`, which is set only for the mob a temporary
+council creates for itself. `council` names
+the council id and, in `convener_session_id`, the session whose `council` tool
+call convened it: the session that tool's surface is bound to, as the council
+recorded it at its first admission. A council a host runs directly through
+the Rust API has no convener. A council's owner bridge session is a session
+of the council's own, so the convener is the one field that says who asked
+for the mob. No tool argument and no request on any surface sets `council`
+or its convener. Every create path
 asks it; restoring a persisted mob creates nothing and does not, and neither
 does a handle a host registers itself with `mob_insert_handle`. The hook
 fails closed: a refusal or a panic refuses the create with an error
@@ -1076,7 +1085,7 @@ dispatch, at a commit or while a suspended run waits), the live session is
 torn down, the store keeps the session's inputs as last committed for that
 owner, and every waiter in this process of an input the store keeps gets
 `RequeuedAcrossStop` too (see
-[Durable runs](/guides/durable-runs#one-writer%2C-fenced)).
+[Durable runs](/guides/durable-runs#one-writer-fenced)).
 
 A run the gap suspended before its first round commit starts again from its
 inputs under the same run id, and publishes `run_started` again with no

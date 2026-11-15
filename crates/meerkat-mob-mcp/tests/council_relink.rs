@@ -15,6 +15,8 @@ use std::time::Duration;
 use meerkat_mob::AgentIdentity;
 use meerkat_mob::ProfileName;
 use meerkat_mob::temporary_council::{TemporaryCouncilDurability, TemporaryCouncilJobBinding};
+use meerkat_mob::{MobError, MobId};
+use meerkat_mob_mcp::MobMcpState;
 use meerkat_mob_mcp::council_relink::CouncilRelinkAction;
 use meerkat_mob_mcp::temporary_council::{
     MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilParticipantSpec,
@@ -201,6 +203,117 @@ async fn relink_delivers_a_council_sealed_before_the_restart_exactly_once() {
     fixture.teardown().await;
 }
 
+/// A detached council that seated nobody because the host could not create
+/// its temporary mob, for a mob the council did not name, says why and not
+/// which mob that is: in the outcome it answers, in the durable record a
+/// later delivery reads, and in the outcome delivered after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_delivers_no_id_of_a_mob_the_council_did_not_name() {
+    const WHY: &str = "the creator of this mob cannot be recorded";
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text("UNUSED-POSITION".to_string()));
+    // The host holds one mob it cannot restore, which no call names.
+    let unnamed = format!("kept-elsewhere-{}", fixture.scope);
+    let mob_root =
+        MobMcpState::persistent_forked_participant_store_path(&fixture.root.join("state"))
+            .parent()
+            .expect("the per-mob database directory")
+            .to_path_buf();
+    tokio::fs::create_dir_all(&mob_root)
+        .await
+        .expect("create the mob store root");
+    tokio::fs::write(
+        mob_root.join(format!("mob--{unnamed}.db")),
+        b"not a sqlite database",
+    )
+    .await
+    .expect("write an undecodable mob store");
+    fixture.seed_source_mob(&["convener", "researcher"]).await;
+    assert!(
+        matches!(
+            fixture
+                .state
+                .mob_status(&MobId::from(unnamed.as_str()))
+                .await,
+            Err(MobError::MobQuarantined { .. })
+        ),
+        "the host holds the mob as quarantined"
+    );
+    let owner = member_session(&fixture, "convener").await;
+    let job_id = "council-job-unnamed-mob";
+
+    let outcome = fixture
+        .state
+        .temporary_council()
+        .run_detached(
+            one_participant_request(&fixture, "relink-unnamed"),
+            TemporaryCouncilJobBinding::new(job_id, owner.clone()),
+        )
+        .await
+        .expect("a council that seats nobody answers its outcome");
+    let answered = serde_json::to_string(&outcome.result).expect("the result as JSON");
+    assert!(
+        answered.contains("participant_seating_failed") && answered.contains(WHY),
+        "the outcome says why nobody was seated: {answered}"
+    );
+    let mut told = Vec::new();
+    if answered.contains(&unnamed) {
+        told.push(format!("the outcome the council answers: {answered}"));
+    }
+
+    // The durable record, which every later delivery reads.
+    let store = fixture.state.temporary_council_store_for_tests();
+    let record = store
+        .load(&fixture.council_id("relink-unnamed"))
+        .await
+        .unwrap()
+        .unwrap();
+    let recorded = serde_json::to_string(&record).expect("the record as JSON");
+    assert!(recorded.contains(WHY), "the record says why: {recorded}");
+    if recorded.contains(&unnamed) {
+        told.push(format!("the durable record: {recorded}"));
+    }
+
+    // The process dies before the outcome reached the convener; the
+    // re-link delivers the recorded outcome.
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = fixture.restart_state();
+    let reports = restarted.relink_detached_councils().await;
+    let report = reports
+        .iter()
+        .find(|report| report.council_id == fixture.council_id("relink-unnamed"))
+        .expect("the council is visited");
+    assert_eq!(report.action, CouncilRelinkAction::Delivered);
+    let delivered = await_completion_records(&fixture, &owner, job_id).await;
+    assert_eq!(delivered.len(), 1, "the re-link delivers exactly once");
+    assert!(
+        delivered[0].contains("participant_seating_failed") && delivered[0].contains(WHY),
+        "the delivered outcome says why nobody was seated: {}",
+        delivered[0]
+    );
+    if delivered[0].contains(&unnamed) {
+        told.push(format!(
+            "the outcome delivered after the restart: {}",
+            delivered[0]
+        ));
+    }
+    let record = store
+        .load(&fixture.council_id("relink-unnamed"))
+        .await
+        .unwrap()
+        .unwrap();
+    let recorded = serde_json::to_string(&record).expect("the record as JSON");
+    if recorded.contains(&unnamed) {
+        told.push(format!("the durable record after the delivery: {recorded}"));
+    }
+    assert!(
+        told.is_empty(),
+        "a council's outcome names no mob the council did not name:\n{}",
+        told.join("\n")
+    );
+    fixture.teardown().await;
+}
+
 /// Write the record of a council whose coordinator died before sealing:
 /// created by the previous process, bound to the convener's detached job,
 /// with the dead coordinator's claim lease running for another ten minutes.
@@ -240,6 +353,9 @@ async fn write_interrupted_council(
             council_id: council_id.clone(),
             request_fingerprint: fingerprint,
             temporary_mob_id: council_id.temporary_mob_id(),
+            temporary_mob_custody: Some(
+                meerkat_mob::temporary_council::TemporaryCouncilMobCustody::NotCreated,
+            ),
             deadline: created + chrono::Duration::seconds(600),
             machine_state: authority.state().clone(),
             durability: TemporaryCouncilDurability::Durable,
@@ -249,6 +365,7 @@ async fn write_interrupted_council(
             result: None,
             cleanup: None,
             detached_job: Some(TemporaryCouncilJobBinding::new(job_id, owner.clone())),
+            convener: None,
             revision: 0,
             created_at: created,
             updated_at: created,

@@ -35,6 +35,8 @@ use crate::decision::{
     DecisionWithdrawer,
 };
 
+mod subject_key;
+
 /// When the rows' calls are made.
 const ASKED_AT: u64 = 1_800_000_000_000;
 /// How long the rows' calls wait: ten minutes.

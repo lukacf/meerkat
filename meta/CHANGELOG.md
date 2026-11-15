@@ -247,15 +247,24 @@ Security, Upgrade and Changed.
 
 - An adopt declaration made on the Console before this upgrade may have
   recorded a wiring edge to an agent its caller could not see (see
-  Security). The upgrade deletes nothing: such an edge stays in the
-  adopting agent's declaration and in the other agent's stored plan, and no
-  method removes such an edge yet: a second adopt of either agent is
-  refused, and a new declaration of the other agent does not drop it. Read
-  from the source: no edge is wired and no trust is added by it. Not
-  determined: whether it shows the other agent as diverged, or holds its
-  owner's next change. To find such edges, list the adopted declarations
-  that own wiring. The query is read-only; run it against a copy of the mob
-  store:
+  Security). The upgrade deletes nothing. Such an edge stays in the
+  adopting agent's declaration and in the other agent's stored plan. No
+  method removes it yet: a second adopt of either agent is refused, and a
+  new declaration of the other agent does not drop it (read from the
+  source). Measured on a store that holds such an edge: the edge wires
+  nothing and adds no trust. When the other agent is under the default
+  wiring custody (`external_managed`) it converges as before, and its
+  owner's next change is committed and becomes active. When the other
+  agent is under `identity_owned` wiring custody, it reads `repair_blocked`
+  instead of converged from its next reconcile pass on, and a change its
+  owner makes after that is committed but does not become active
+  (measured). This is so for every edge another agent's declaration owns
+  toward such an agent, also one adopted with permission, in 0.8.26 through
+  0.9.14 (see Fixed; read from the source). To find such edges, list the
+  adopted declarations that own wiring. The query is read-only; run it
+  against a copy of the mob store (in a gateway's state directory, the
+  database `event_log.sqlite3`). It was run on a store that holds such an
+  edge:
 
   ```sql
   SELECT mob_id, agent_identity,
@@ -266,10 +275,12 @@ Security, Upgrade and Changed.
                           '$.intent.owned_wiring') > 0;
   ```
 
-  Each row is an adopting agent with the edges it owns (`a` and `b`). An
-  edge whose other end is an agent private to another person than the one
-  the adopting agent belongs to (the roster label `console.private_to`) is
-  one such edge.
+  It lists each adopting agent's row with the edges it owns (`a` is the
+  adopting agent, `b` the other agent); the other agent's own row shows the
+  edge under its stored plan. For each row, the agents to look at are those
+  named as `b`: read each one's wiring custody and its status. The query
+  cannot tell an edge recorded without permission from one recorded with
+  it: review each against who may view the other agent.
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an

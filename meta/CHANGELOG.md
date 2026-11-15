@@ -2694,10 +2694,11 @@ Security, Upgrade and Changed.
   the taint of at most 4,096 sessions per process; once more sessions than
   that have been tainted since its start, the session tainted earliest reads
   as untainted again. In each of these cases the session's later
-  LLM-authored memory writes land `active`, not `quarantined`. Where that
-  matters, set `agent_memory.llm_writes` to `"quarantined"`, which
-  quarantines every LLM-authored write pending review. Read from the source,
-  not run; the memory module is unchanged from 0.9.14.
+  LLM-authored memory writes, and a distillation over the session, land
+  `active`, not `quarantined`. Where that matters, set
+  `agent_memory.llm_writes` to `"quarantined"`, which quarantines every
+  LLM-authored write pending review. Read from the source, not run; the
+  memory module is unchanged from 0.9.14.
 
 ## [0.9.14] - 2026-11-11
 

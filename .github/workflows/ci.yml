@@ -2212,8 +2212,8 @@ jobs:
       # 12 GiB of swap the way release.yml's "Make room for the wasm build"
       # does for the same signature: on /mnt when that is a separate disk
       # with 20 GiB free, else on / when 40 GiB are free there (the swap file
-      # and the about 17 GiB this build wrote to the target directory when
-      # measured), else none, with a warning. Swap turns an OOM kill into a
+      # and the about 17 GiB such a row's step wrote to disk when measured),
+      # else none, with a warning. Swap turns an OOM kill into a
       # slower tail; it lowers no peak. vmstat logs every 30 seconds for the
       # step after the tests. Nothing here can fail a lane.
       - name: Show the runner's size and add swap (meerkat-meta rows)

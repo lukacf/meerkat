@@ -57,8 +57,6 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 
 ## Upgrading to 0.9.15
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 This section is for systems running 0.9.14 or 0.9.13. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
@@ -310,8 +308,9 @@ and `OccurrenceLifecycleInputVariant` in `meerkat-machine-schema`
 (`generated::occurrence_lifecycle`). Every new variant is appended last, so
 no existing variant's implicit discriminant moves. No stored occurrence or
 receipt changes shape, so there is nothing to migrate and an earlier release
-reads the same rows: a claim given back is recorded as a `lease_expired`
-receipt with the detail `claim released because dispatch could not start`.
+reads the same rows (read from the source): a claim given back is recorded
+as a `lease_expired` receipt with the detail `claim released because
+dispatch could not start`.
 
 ### Store-owned agents: seats an earlier release recorded
 
@@ -495,8 +494,6 @@ store:
 
 ### Reasoning effort is one setting for every provider
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 0.9.15 adds the provider-neutral `reasoning_effort` option (see
 [Reasoning effort](/concepts/providers#reasoning-effort)). A caller who
 sets no level gets 0.9.14's behavior on every route: the same requests,
@@ -527,8 +524,9 @@ route (the four differences are listed under Changed in the changelog).
   that holds a provider-neutral level, anything that changes the model
   identity (the
   model, the provider, the self-hosted server, the provider params, the
-  auth binding, or the level itself: set, change, clear) needs an idle
-  session: sent while another turn of the session runs or is queued, such
+  auth binding, or the level itself: set, change, clear)
+  needs a session with no unfinished work:
+  sent while another turn of the session runs or is queued, such
   a `turn/start` or `mob/turn_start` is not queued, it is answered
   `-32002` (`SESSION_BUSY`) with the data
   `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
@@ -542,9 +540,20 @@ route (the four differences are listed under Changed in the changelog).
   one. A mob member built from a profile
   whose `provider_params` carry a level holds that level. A session that
   holds no provider-neutral level queues everything as on 0.9.14, except
-  a turn that sets a level. The table is in the
-  [JSON-RPC reference](/api/rpc#model-settings-on-a-busy-session). A
-  later release is planned to queue these turns.
+  a turn that sets a level. On an autonomous mob member (the default
+  runtime mode) the unfinished work can be the member's own: a turn it
+  started for its kickoff or on what its peers sent it, or a peer input
+  queued on it. The caller cannot know when such a member is idle, and
+  neither waiting for your own turn's answer nor a plain turn first helps
+  against the member's own turns: send the request again (in two runs it
+  was taken after 5 s and after 21 s; a member whose peers keep sending
+  may stay busy for longer), or set the level in the member's profile or
+  at its spawn, which does not depend on the member's traffic.
+  `is_active: false` from `session/read` does not promise the change is
+  taken. The request there is `turn/start` with the member's session id:
+  `mob/turn_start` is only valid for `turn_driven` members. The table is
+  in the [JSON-RPC reference](/api/rpc#model-settings-on-a-busy-session).
+  A later release is planned to queue these turns.
 - **Older servers.** A server before 0.9.15 refuses the `reasoning_effort`
   field on `turn/start` and `mob/turn_start` and ignores it on
   `session/create` and in REST bodies. The nested key
@@ -639,8 +648,6 @@ route (the four differences are listed under Changed in the changelog).
   [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
 
 ### A catalog model you had defined yourself: `gemini-4-hydrogen`
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 Model IDs are unique across the catalog, `[models.<id>]` entries and
 self-hosted models, and 0.9.15 adds `gemini-4-hydrogen` to the catalog. A
@@ -831,6 +838,36 @@ under `## [0.9.15]`.
   The methods for agents created at run time (meta/identity) need a 0.9.15
   gateway: upgrade the gateway before the SDKs that call them. **Do:**
   upgrade the SDKs with the gateway.
+- Console: `meta/mob_announcements/declarations/apply` and
+  `meta/mob_announcements/sources/put` refuse a declared subscription of
+  one member, and a source, that names a member that is not seated or is
+  private to another person (`-32047` `unknown_member`, nothing applied or
+  written), and refuse for now while the member's check cannot be read
+  (`-32047` `native_unavailable`; the same request can be made again
+  later). 0.9.14 accepted a member that was not seated. What the applied
+  declarations already hold unchanged is carried as it is, and the stdio
+  gateway keeps such a subscription pending and stores such a source, as
+  before. **Do:** a client that applies announcement declarations or puts
+  an announcement source through the Console seats the member first, or
+  applies them over the stdio gateway.
+- **Required host step.** After upgrading, on every gateway that serves mob
+  announcements, review every live mob announcement subscription the host
+  cannot account for from its own records, as the Upgrade section of
+  `meta/CHANGELOG.md` says. At each start such a gateway logs one WARN line
+  (target `meerkat_meta::mob_announcements::private_member_subscriptions`)
+  while live subscriptions deliver into agents private to a person; the line
+  is an aid, not the condition: a gateway that logs none does the review
+  too.
+- Console: for a short time after a gateway start, `meta/schedule/list`
+  answers an empty list, and `update`, `pause`, `resume` and `delete` answer
+  `schedule_not_found`, for a member that ended before the start, to every
+  caller who is not an access administrator. **Do:** a client that reads
+  schedules at start asks again before it treats the list as empty.
+- `meta/attach_existing_session` and `meta/ensure_member` with
+  `resume_session_id`: from 0.9.15 a member seated on the stored session of
+  a private side chat is private to the side chat's owner (see Security and
+  Changed). **Do:** retire every member that 0.9.11 through 0.9.14 seated on
+  such a session, and do not build on a shared member coming back from one.
 - `meta/compact_member`: a call whose maintenance turn ended for good
   without completing (`completion_type` `abandoned`,
   `abandoned_with_error`, `cancelled` or `completed_without_result`) now
@@ -964,11 +1001,12 @@ file or `MobStorage::identity_record_rows` for a storage). While
 - a member no same-session successor can serve (a placed member, a member
   wired to a placed member, a member on a session service that keeps no
   durable sessions) is settled by none of these: rotate it
-  (`MobHandle::rotate_member`), or archive or remove its agent. None of the
-  three keeps the mobs the agent created with its own tools: a rotation
-  takes a fresh session, so the agent no longer manages them, and the mobs
-  of a session its mob archived are removed at the host's next start. Have
-  the agent destroy them first.
+  (`MobHandle::rotate_member`), or archive or remove its agent. A rotation
+  does not keep the mobs the agent created with its own tools: it takes a
+  fresh session, so the agent no longer manages them, and the mobs of a
+  session its mob archived are removed at the host's next start. An archive
+  or a removal through Meta is refused `owns_mobs` while the agent still
+  owns mobs it created. Either way, have the agent destroy them first.
 
 `rkat storage doctor` and Meta's storage doctor do not report this count,
 and a host that uses only the SDKs has no read for it in 0.9.15: the Rust
@@ -1351,7 +1389,7 @@ whether it was used (the note beside the change is under
 [Reasoning effort is one setting for every provider](#reasoning-effort-is-one-setting-for-every-provider)).
 Unless a sentence says otherwise, the runs this item names were made with
 the released 0.9.14 `rkat-rpc` binary over SQLite stores that a
-development build of this change wrote; "read from the source" marks
+development build of 0.9.15 wrote; "read from the source" marks
 what no run covers.
 
 Before rolling back, on 0.9.15:
@@ -1526,7 +1564,7 @@ On 0.9.14 after the rollback:
   0.9.14, also after the level is cleared (confirmed by a run); the
   session's other calls answer. For every other finished turn the stored
   record verifies on a release that does not know the level's report
-  (confirmed by a run and by a test of this change).
+  (confirmed by a run and by a test).
 - **A turn that carries a level and has not finished** is neither run nor
   refused by 0.9.14: its status call fails there, and the input waits
   unchanged and runs again at the session's next turn on 0.9.15
@@ -1617,7 +1655,7 @@ What no step removes (beside the event replay above):
   which the run goes on; a mob flow, whose failed step is recorded as
   text only; and a model fallback, where a target that does not take the
   level is skipped and the skip's reason is stored in the event log only
-  (the last: confirmed by a test of this change and by a run with the
+  (the last: confirmed by a test and by a run with the
   released 0.9.14 binary). The stored input of that turn is finished
   (`consumed`) and keeps the typed failure, and 0.9.14 does not know the
   reason, so the row does not decode there. On 0.9.14
@@ -2774,9 +2812,11 @@ compiling. A Meta probe that must keep the earlier rule checks
   mobs' stores stay. A completed `compact_member` has the same cost on
   those releases (see the `meta/compact_member` section of Meta's RPC
   reference). From 0.9.15 a respawn of a member the same-session step
-  serves keeps the identity's management of the mobs it created (confirmed
-  by tests and by a run), and a completed `compact_member` of a member the
-  same-session step serves keeps it too (one run); a call that times out,
+  serves (every member but a placed one, one wired to a placed member, and
+  one on a session service that keeps no durable sessions) keeps the
+  identity's management of the mobs it created (confirmed by tests and by a
+  run), and a completed `compact_member` of a member the same-session step
+  serves keeps it too (one run); a call that times out,
   and one that completes without compacting, rebuild the member by the
   same step (read from the source; not run). A management lost on 0.9.9
   through 0.9.14 is not brought back.
@@ -3213,8 +3253,6 @@ without them no longer compiles:
   `live_session_own_operator_instruction_entry_placement`, which says where
   the operator-instruction entry rows a live session wrote itself stand.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Forward these new methods too. They have defaults, so a wrapper without them
 compiles, but the default disables what they carry:
 
@@ -3555,8 +3593,6 @@ different: 0.9.8 decodes a mob's identity intents as a whole and does not
 open the mob's storage while one of them is a created entry's row. Before a
 downgrade, a mob on a host store must hold no created identity entry.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 A removal writes a row of the same schema for either custody (a removed
 roster-owned identity's tombstone included), and so do an archive and a
 store-owned identity's pending preparation, so the paragraph above applies to
@@ -3595,8 +3631,6 @@ The count names the seat rows a downgrade would read: step 3 of the
 downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store

@@ -476,8 +476,6 @@ The turn options also carry `maxTokens`, `outputSchema`, and
 `INVALID_PARAMS`: they are build settings, so set them on `createSession(...)`
 or `createDeferredSession(...)`.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 `reasoningEffort` sets the session's provider-neutral
 [reasoning effort](/concepts/providers#reasoning-effort) level. On
 `createSession(...)` (and the streaming and deferred variants) it is a level.
@@ -516,9 +514,13 @@ try {
 know is not parsed, and `error.details` keeps the data as sent. The route's
 names and `facts` are advisory and kept as strings. `route`, `supported` and
 `facts` are always present in the refusal data: `null` when they have no
-value, never left out. `reasoningEffortReport(result)`
-reads the `reasoning_effort` block of a run result (the level requested and
-one `sent` row per distinct resolution), and
+value, never left out. One case is not recognisable by its data kind: a
+`meerkat_resume` of, or a `meerkat_comms_send` to, the session of a mob
+member that is not live, whose own build is refused for the level in its
+profile, is answered the generic agent error (`-32013`) with a message and
+no `reasoning_effort_refused` data. `reasoningEffortReport(result)` reads
+the `reasoning_effort` block of a run result (the level requested and one
+`sent` row per distinct resolution), and
 `parseReasoningEffortResolution(...)` the resolution `run_started`,
 `run_resumed` and `request_reasoning_effort_resolved` carry.
 

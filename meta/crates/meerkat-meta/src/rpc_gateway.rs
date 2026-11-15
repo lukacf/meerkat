@@ -10568,8 +10568,8 @@ fn gateway_event_log_slot(
         crate::storage_health::StorageSlotSummary::declared_ephemeral(
             "event_log",
             "in-process store",
-            "declared via runtime_options.event_log ('memory' retains a bounded queryable \
-             buffer; 'null' drops events explicitly)",
+            "declared via runtime_options.event_log ('memory' retains a queryable \
+             buffer with no size limit; 'null' drops events explicitly)",
         )
     } else {
         crate::storage_health::StorageSlotSummary::declared_ephemeral(

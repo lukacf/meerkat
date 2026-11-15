@@ -39,6 +39,7 @@
 //!   ([`RetainedSpawnActivationCleanup`]) until an owner settles it. It is
 //!   never folded into a success.
 
+use super::member_wake::MemberWiringEdge;
 use super::*;
 
 /// Monotonic per-actor identifier for one spawn activation.
@@ -2489,10 +2490,48 @@ impl MobActor {
                 "the spawn's owned edges were not planned: MobMachine decided no realization"
             ),
         }
+        // A member the identity reconcile rebuilds comes back on the edges
+        // MobMachine kept for it: the retirement before the rebuild is the
+        // respawn's, which keeps the member's edges and takes the retired
+        // incarnation's trust off its peers. Its restore plan is those
+        // edges, read from MobMachine here, and the repair loop of
+        // `realize_spawn_wiring` realizes each on both ends, as a respawn's
+        // does. A repair writes no structure (MobMachine answers
+        // `WireMembers` on an edge it holds with a trust repair), so the
+        // restore adds no structural write to the member obligation. An owned
+        // pair planned above that MobMachine already holds is in this plan
+        // too and leaves the fail-fast fan-out for the repair loop, below. A
+        // first materialization holds no edge and restores none.
+        if state.identity_fenced_member {
+            state.restore_wiring = Some(self.identity_rebuild_restore_plan(&agent_identity));
+        }
         if let Some(plan) = state.restore_wiring.as_ref() {
             state
                 .planned_wiring_targets
                 .retain(|target| !plan.local_peers.contains(target));
+        }
+    }
+
+    /// The restore plan of a member the identity reconcile rebuilds: every
+    /// edge MobMachine holds for it. An external edge whose recorded endpoint
+    /// cannot be read leaves the external edges out, as an error; the member
+    /// edges are restored all the same.
+    fn identity_rebuild_restore_plan(&self, agent_identity: &AgentIdentity) -> RestoreWiringPlan {
+        match self.machine_restore_wiring_plan(agent_identity) {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    %error,
+                    "a rebuilt member's external edges could not be read from MobMachine; \
+                     its member edges are restored without them"
+                );
+                RestoreWiringPlan {
+                    local_peers: self.machine_wired_local_peers(agent_identity),
+                    external_peers: Vec::new(),
+                }
+            }
         }
     }
 
@@ -2538,6 +2577,12 @@ impl MobActor {
         let Some(plan) = state.restore_wiring.take() else {
             return Ok(());
         };
+        // A rebuild by the identity reconcile has no caller to hand a failed
+        // peer to: MobMachine takes each edge's outcome
+        // (`ResolveWiringEdgeRealization`, `ResolveExternalEdgeRealization`),
+        // owes a failed edge a repair, which its repair timer retries, and
+        // clears the repair a realized edge was owed.
+        let rebuilt_by_reconcile = state.identity_fenced_member;
         for peer_identity in plan.local_peers {
             if peer_identity == agent_identity {
                 continue;
@@ -2557,11 +2602,20 @@ impl MobActor {
                 continue;
             }
             let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
-            if let Err(error) = boxed_arm_future(|| {
+            let restored = boxed_arm_future(|| {
                 self.repair_machine_owned_respawn_wire(agent_identity.clone(), peer_agent_identity)
             })
-            .await
-            {
+            .await;
+            if rebuilt_by_reconcile {
+                self.resolve_member_edge_realization(
+                    &MemberWiringEdge::Member(mob_dsl::WiringEdge::new(
+                        mob_dsl::AgentIdentity::from_domain(&agent_identity),
+                        mob_dsl::AgentIdentity::from_domain(&peer_identity),
+                    )),
+                    restored.is_ok(),
+                );
+            }
+            if let Err(error) = restored {
                 tracing::warn!(
                     agent_identity = %agent_identity,
                     peer = %peer_identity,
@@ -2589,12 +2643,18 @@ impl MobActor {
                 continue;
             }
             let peer_id = RespawnTopologyPeerId::from(peer_spec.peer_id.as_str());
-            if let Err(error) = Box::pin(self.handle_wire(
+            let restored = Box::pin(self.handle_wire(
                 agent_identity.clone(),
                 super::handle::PeerTarget::External(peer_spec.clone()),
             ))
-            .await
-            {
+            .await;
+            if rebuilt_by_reconcile {
+                self.resolve_member_edge_realization(
+                    &MemberWiringEdge::External(desired_edge),
+                    restored.is_ok(),
+                );
+            }
+            if let Err(error) = restored {
                 tracing::warn!(
                     agent_identity = %agent_identity,
                     peer = %peer_spec.name,

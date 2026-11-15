@@ -759,7 +759,7 @@ describe("identity family: typed answers", () => {
 describe("identity family: one refusal error, a closed vocabulary", () => {
   it("every refusal kind rejects with the one typed error", async () => {
     assert.equal(IDENTITY_REFUSED_CODE, -32058);
-    assert.equal(IDENTITY_REFUSAL_KINDS.size, 57);
+    assert.equal(IDENTITY_REFUSAL_KINDS.size, 58);
     const kinds = [...IDENTITY_REFUSAL_KINDS].sort();
     const { identities } = await scripted(
       kinds.map((kind) =>
@@ -897,7 +897,7 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
     assert.equal(error.code, -32603);
     assert.deepEqual(error.data, data);
     assert.ok(!IDENTITY_REFUSAL_KINDS.has("identity_archived"));
-    assert.equal(IDENTITY_REFUSAL_KINDS.size, 57);
+    assert.equal(IDENTITY_REFUSAL_KINDS.size, 58);
   });
 
   it("a kind newer than this SDK is still the typed error", async () => {
@@ -915,6 +915,30 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
     assert.equal(error.field, "agents");
     assert.equal(error.retryable, true);
     assert.deepEqual(error.details, { quota: 3 });
+  });
+
+  // An archive of an agent whose session still owns mobs is refused
+  // `owns_mobs`, a kind of the family: the details carry how many mobs
+  // there are and, for the host and an administrator, which.
+  it("an archive refused while the agent owns mobs names them in its details", async () => {
+    const detail = "The agent still owns mobs: have it destroy them first. Nothing was changed.";
+    for (const members of [{ count: 2, mobs: ["team-a", "team-b"] }, { count: 2 }]) {
+      const { identities } = await scripted([
+        refusal("owns_mobs", { field: "name", retryable: false, detail, ...members }),
+      ]);
+      const error = await rejection(
+        identities.archive("scout", { expectedSpecDigest: "sha256:" + "0".repeat(64), requestId: "r" }),
+      );
+      assert.ok(error instanceof IdentityRefusedError);
+      assert.equal(error.kind, "owns_mobs");
+      assert.ok(IDENTITY_REFUSAL_KINDS.has(error.kind));
+      assert.equal(error.knownKind, true);
+      assert.ok(isIdentityRefusalKind(error.kind));
+      assert.equal(error.field, "name");
+      assert.equal(error.retryable, false);
+      assert.equal(error.detail, detail);
+      assert.deepEqual(error.details, members);
+    }
   });
 
   it("a refused change rejects with the typed error however it is carried", async () => {
@@ -984,8 +1008,8 @@ function closedTokens(source: string, typeName: string): string[] {
 describe("identity family: the closed vocabularies are the gateway's", () => {
   it("the refusal kinds are the gateway's closed vocabulary", () => {
     const tokens = closedTokens(rust("refusal.rs"), "IdentityRefusalKind");
-    assert.equal(tokens.length, 57);
-    assert.equal(new Set(tokens).size, 57);
+    assert.equal(tokens.length, 58);
+    assert.equal(new Set(tokens).size, 58);
     assert.ok(tokens.includes("owner_read_only"));
     assert.deepEqual(
       [...IDENTITY_REFUSAL_KINDS].sort(),

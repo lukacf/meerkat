@@ -1040,7 +1040,23 @@ pub(super) async fn handle_ensure_member(
                 spec = spec.with_labels(labels);
             }
             if let Some(sid) = resume_session_id {
-                spec = spec.with_resume_bridge_session_id(sid);
+                spec = match crate::http_console::seat_on_stored_session(
+                    runtime.mob_runtime(),
+                    &sid,
+                    spec.with_resume_bridge_session_id(sid.clone()),
+                )
+                .await
+                {
+                    Ok(spec) => spec,
+                    Err(error) => {
+                        return JsonRpcResponse {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: response_id,
+                            result: None,
+                            error: Some(error),
+                        };
+                    }
+                };
             }
             if let Some(instructions) = additional_instructions {
                 spec = spec.with_additional_instructions(instructions);
@@ -3235,8 +3251,25 @@ pub(super) async fn handle_attach_existing_session(
                 .with_launch_mode(MemberLaunchMode::Resume {
                     // 0.8.25: no migration authority on this path.
                     resume_from_role: None,
-                    bridge_session_id,
+                    bridge_session_id: bridge_session_id.clone(),
                 });
+            let spec = match crate::http_console::seat_on_stored_session(
+                runtime.mob_runtime(),
+                &bridge_session_id,
+                spec,
+            )
+            .await
+            {
+                Ok(spec) => spec,
+                Err(error) => {
+                    return JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: response_id,
+                        result: None,
+                        error: Some(error),
+                    };
+                }
+            };
             let handle = runtime.mob_handle();
             let spawn_result = Box::pin(handle.spawn_spec(spec)).await;
             drop(raw_reservation);

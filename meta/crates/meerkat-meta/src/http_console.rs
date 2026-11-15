@@ -4102,6 +4102,10 @@ mod console_side_chat_tests;
 mod console_private_side_chat_tests;
 
 #[cfg(test)]
+#[path = "console_private_member_schedule_end_tests.rs"]
+mod console_private_member_schedule_end_tests;
+
+#[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
 
@@ -4116,6 +4120,10 @@ mod console_frame_witness_tests;
 #[cfg(test)]
 #[path = "console_kept_apart_tests.rs"]
 mod console_kept_apart_tests;
+
+#[cfg(test)]
+#[path = "console_stored_session_seat_tests.rs"]
+mod console_stored_session_seat_tests;
 
 #[cfg(test)]
 #[path = "console_schedule_tests.rs"]
@@ -11623,15 +11631,7 @@ async fn attached_session_decision(
             return SessionAttachDecision::Allowed;
         }
         if view.enforced() {
-            return SessionAttachDecision::Denied(JsonRpcError {
-                code: ACCESS_DENIED_RPC_CODE,
-                message: "access denied: the session has no established owner".to_string(),
-                data: Some(json!({
-                    "kind": "access_denied",
-                    "reason": "session_owner_unknown",
-                    "session_id": session_id.to_string(),
-                })),
-            });
+            return SessionAttachDecision::Denied(session_owner_unknown(session_id));
         }
         // A console that can identify a person keeps what it cannot
         // attribute from every caller who is not an admin, signed in or not.
@@ -11692,56 +11692,190 @@ impl StoredPrivateOwner {
     /// and has no private owner. One whose metadata is missing or does not
     /// decode, or that names a member binding without peer labels, cannot
     /// be decided.
+    #[cfg(test)]
     fn of_stored_session(session: &meerkat_core::Session) -> Self {
-        let Ok(view) = meerkat_core::PersistedSessionMetadataView::try_from_session(session) else {
-            return Self::Unreadable;
-        };
-        match view.session_metadata {
-            Some(metadata) => match (&metadata.peer_meta, &metadata.mob_member_binding) {
-                (Some(peer), _) => Self::of_labels(&peer.labels),
-                (None, None) => Self::NoOwner,
-                (None, Some(_)) => Self::Unreadable,
-            },
-            None => Self::Unreadable,
-        }
+        stored_document_member_labels(session)
+            .map_or(Self::Unreadable, |labels| Self::of_labels(&labels))
+    }
+}
+
+/// The member labels the stored document of a session carries, as
+/// [`StoredPrivateOwner::of_stored_session`] reads them: its peer labels,
+/// or none for a document built for no mob member. `None` for a document
+/// that cannot be decided.
+fn stored_document_member_labels(
+    session: &meerkat_core::Session,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let view = meerkat_core::PersistedSessionMetadataView::try_from_session(session).ok()?;
+    let metadata = view.session_metadata?;
+    match (metadata.peer_meta, metadata.mob_member_binding) {
+        (Some(peer), _) => Some(peer.labels),
+        (None, None) => Some(std::collections::BTreeMap::new()),
+        (None, Some(_)) => None,
+    }
+}
+
+/// The refusal of a session nothing attributes.
+fn session_owner_unknown(session_id: &meerkat_core::types::SessionId) -> JsonRpcError {
+    JsonRpcError {
+        code: ACCESS_DENIED_RPC_CODE,
+        message: "access denied: the session has no established owner".to_string(),
+        data: Some(json!({
+            "kind": "access_denied",
+            "reason": "session_owner_unknown",
+            "session_id": session_id.to_string(),
+        })),
     }
 }
 
 /// The private owner the labels of session `session_id` name: a private
-/// member's session keeps its owner after the member ended. A session Core
-/// serves is read through the runtime's session service. Core answers the
-/// read of an archived session as a session it does not hold, and a member
-/// that ended leaves its session archived, so such a session is read
-/// through the same service's resume read
-/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]): the read
-/// an attach loads the session through, so whatever an attach can load is
-/// decided by the labels it was created with, on every composition. The
-/// read builds, seats and wakes nothing. A session that read does not hold
-/// has no owner. A failed read, an archived session the read does not hand
-/// out, and a runtime with no session service (one taken from a bare
-/// handle) answer [`StoredPrivateOwner::Unreadable`].
+/// member's session keeps its owner after the member ended. The labels are
+/// the ones the session's own stores hold of the member it was built for
+/// ([`session_stored_member_labels`]): a served session's label map when it
+/// names an owner, else the stored document's member labels, read through
+/// the resume read an attach loads the session through
+/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]), which
+/// builds, seats and wakes nothing. A session Core neither serves nor holds
+/// a document of has no owner. A failed read, a document the read does not
+/// hand out or that cannot be decided, and a runtime with no session
+/// service (one taken from a bare handle) answer
+/// [`StoredPrivateOwner::Unreadable`].
 async fn session_stored_private_owner(
     runtime: &MobRuntime,
     session_id: &meerkat_core::types::SessionId,
 ) -> StoredPrivateOwner {
-    let Some(service) = runtime.session_service() else {
-        return StoredPrivateOwner::Unreadable;
-    };
-    match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
-        Ok(view) => return StoredPrivateOwner::of_labels(&view.state.labels),
-        Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
-        Err(_) => return StoredPrivateOwner::Unreadable,
-    }
+    session_stored_member_labels(runtime, session_id)
+        .await
+        .map_or(StoredPrivateOwner::Unreadable, |labels| {
+            StoredPrivateOwner::of_labels(&labels)
+        })
+}
+
+/// What the label map of a session Core serves says of the member the
+/// session was built for. That map can read empty while the session's
+/// labels are intact (the committed view, between a turn's commit and the
+/// live session's next publication, and a stored session no live actor
+/// holds), so it answers only when it names a private owner.
+fn served_session_member_labels(
+    labels: std::collections::BTreeMap<String, String>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    crate::access::private_owner(&labels)
+        .is_some()
+        .then_some(labels)
+}
+
+/// The labels session `session_id`'s own stores hold of the member it was
+/// built for: a served session's label map when it names an owner
+/// ([`served_session_member_labels`]), else its stored document's member
+/// labels, through the resume read [`session_stored_private_owner`] makes
+/// for a session Core does not serve. The document is asked for a served
+/// session too: a stored session no live actor holds is served with an
+/// empty label map while its document keeps the member's labels. A session
+/// Core neither serves nor holds a document of has no member labels; a
+/// served session whose document is not handed out cannot be decided.
+/// `None` when nothing could be read or decided.
+async fn session_stored_member_labels(
+    runtime: &MobRuntime,
+    session_id: &meerkat_core::types::SessionId,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let service = runtime.session_service()?;
+    let served =
+        match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
+            Ok(view) => match served_session_member_labels(view.state.labels) {
+                Some(labels) => return Some(labels),
+                None => true,
+            },
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => false,
+            Err(_) => return None,
+        };
     match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), session_id)
         .await
     {
         Ok(
             meerkat_mob::ResumeSessionLoad::Active(session)
             | meerkat_mob::ResumeSessionLoad::Revivable(session),
-        ) => StoredPrivateOwner::of_stored_session(&session),
-        Ok(meerkat_mob::ResumeSessionLoad::Absent) => StoredPrivateOwner::NoOwner,
-        Ok(_) | Err(_) => StoredPrivateOwner::Unreadable,
+        ) => stored_document_member_labels(&session),
+        Ok(meerkat_mob::ResumeSessionLoad::Absent) if !served => {
+            Some(std::collections::BTreeMap::new())
+        }
+        Ok(_) | Err(_) => None,
     }
+}
+
+/// The labels only Meta writes
+/// ([`crate::member_comms_id::RESERVED_AUTHORITY_LABELS`]) that a member
+/// seated on a stored session carries, decided from what each source holds
+/// of the member the session was built for (`None` for a source that could
+/// not answer: a member history that cannot be read or holds no binding of
+/// the session, stores that cannot be read or decided), Core's member
+/// history first:
+/// - no source answered, or two sources name different private owners:
+///   `None`, and nothing is seated;
+/// - a source names a private owner: that source's labels of those keys
+///   (the owner and, for a side chat, its source and creator);
+/// - a source answered and none names an owner: no label, a shared member.
+fn stored_member_labels(
+    sources: [Option<std::collections::BTreeMap<String, String>>; 2],
+) -> Option<std::collections::BTreeMap<String, String>> {
+    if sources.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut named = sources
+        .iter()
+        .flatten()
+        .filter(|labels| crate::access::private_owner(labels).is_some());
+    let Some(source) = named.next() else {
+        return Some(std::collections::BTreeMap::new());
+    };
+    let owner = crate::access::private_owner(source);
+    if named.any(|other| crate::access::private_owner(other) != owner) {
+        return None;
+    }
+    Some(
+        source
+            .iter()
+            .filter(|(key, _)| {
+                crate::member_comms_id::RESERVED_AUTHORITY_LABELS.contains(&key.as_str())
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+/// `spec`, which seats a member on the existing session `session_id`, as
+/// the member that session was built for: a session private to a person
+/// seats a member private to that person, whoever asks and on either method
+/// plane, exempt from the definition's wiring rules as its first seat was,
+/// and a session private to no one seats `spec` unchanged. The owner comes
+/// from Core's member history of the session
+/// ([`meerkat_mob::MobHandle::member_binding_for_session`]: the labels its
+/// member was spawned with) and from the session's own stores
+/// ([`session_stored_member_labels`]), never from the caller
+/// ([`stored_member_labels`]). A session neither source answers for, or
+/// whose sources name different owners, is refused: nothing says whose it
+/// was.
+pub(crate) async fn seat_on_stored_session(
+    runtime: &MobRuntime,
+    session_id: &meerkat_core::types::SessionId,
+    mut spec: SpawnMemberSpec,
+) -> Result<SpawnMemberSpec, JsonRpcError> {
+    let bound = runtime
+        .handle()
+        .member_binding_for_session(session_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|binding| binding.labels().clone());
+    let stored = session_stored_member_labels(runtime, session_id).await;
+    let carried =
+        stored_member_labels([bound, stored]).ok_or_else(|| session_owner_unknown(session_id))?;
+    if !carried.is_empty() {
+        spec.definition_wiring = meerkat_mob::DefinitionWiring::Exempt;
+        spec.labels
+            .get_or_insert_with(Default::default)
+            .extend(carried);
+    }
+    Ok(spec)
 }
 
 /// The session a console attach goes on with, and, for a session the caller
@@ -16586,7 +16720,16 @@ async fn handle_console_runtime_rpc_with_visibility(
                 spec = spec.with_context(ctx);
             }
             if let Some(sid) = resume_session_id {
-                spec = spec.with_resume_bridge_session_id(sid);
+                spec = spec.with_resume_bridge_session_id(sid.clone());
+                // A session the caller may not know of goes on as a fresh id
+                // no store holds: nothing can be seated on it, and it is
+                // answered as a session that does not exist.
+                if absent_session.is_none() {
+                    spec = match seat_on_stored_session(runtime, &sid, spec).await {
+                        Ok(spec) => spec,
+                        Err(error) => return response_value(response_id, None, Some(error)),
+                    };
+                }
             }
             if let Some(instructions) = additional_instructions {
                 spec = spec.with_additional_instructions(instructions);
@@ -18241,9 +18384,20 @@ async fn handle_console_runtime_rpc_with_visibility(
                 MemberLaunchMode::Resume {
                     // 0.8.25: no migration authority on this path.
                     resume_from_role: None,
-                    bridge_session_id,
+                    bridge_session_id: bridge_session_id.clone(),
                 },
             );
+            // A session the caller may not know of goes on as a fresh id no
+            // store holds: nothing can be seated on it, and it is answered as
+            // a session that does not exist.
+            let spec = if absent_session.is_some() {
+                spec
+            } else {
+                match seat_on_stored_session(runtime, &bridge_session_id, spec).await {
+                    Ok(spec) => spec,
+                    Err(error) => return response_value(response_id, None, Some(error)),
+                }
+            };
             let handle = runtime.handle();
             let spawn_result = Box::pin(handle.spawn_spec(spec)).await;
             drop(raw_reservation);

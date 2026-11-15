@@ -23,24 +23,24 @@ use crate::identity::{
 
 /// Bound for one step (a convergence, a settled decision); it only turns a
 /// hang into a failure.
-const STEP: Duration = Duration::from_secs(20);
+pub(super) const STEP: Duration = Duration::from_secs(20);
 
 /// Bound for the first settled decision after a start: longer than an
 /// identity lease, which a start may have to wait out.
-const AFTER_START: Duration = Duration::from_mins(1);
+pub(super) const AFTER_START: Duration = Duration::from_mins(1);
 
 /// A mob over in-memory mob stores and a persistent session service, whose
 /// members are turn-driven workers. The stores outlive the handle.
-struct WiringFixture {
-    handle: MobHandle,
-    mob_id: MobId,
-    events: Arc<dyn MobEventStore>,
+pub(super) struct WiringFixture {
+    pub(super) handle: MobHandle,
+    pub(super) mob_id: MobId,
+    pub(super) events: Arc<dyn MobEventStore>,
     runs: Arc<InMemoryMobRunStore>,
     specs: Arc<InMemoryMobSpecStore>,
     runtime_metadata: Arc<InMemoryMobRuntimeMetadataStore>,
     identity: Arc<InMemoryMobIdentityStore>,
-    identity_status: Arc<InMemoryMobIdentityStatusStore>,
-    service: Arc<meerkat_session::PersistentSessionService<PersistentMockBuilder>>,
+    pub(super) identity_status: Arc<InMemoryMobIdentityStatusStore>,
+    pub(super) service: Arc<meerkat_session::PersistentSessionService<PersistentMockBuilder>>,
 }
 
 fn base_prompt() -> Arc<crate::StaticSpawnBasePromptSource> {
@@ -50,7 +50,7 @@ fn base_prompt() -> Arc<crate::StaticSpawnBasePromptSource> {
 }
 
 impl WiringFixture {
-    async fn create(label: &str) -> Self {
+    pub(super) async fn create(label: &str) -> Self {
         let mut definition = with_unique_mob_id(sample_definition(), label);
         // The rows hand members messages the way an operator does.
         definition
@@ -115,14 +115,14 @@ impl WiringFixture {
     }
 
     /// Stop the mob and start its next incarnation over the same stores.
-    async fn restart(&mut self) {
+    pub(super) async fn restart(&mut self) {
         self.handle.shutdown().await.expect("shutdown the mob");
         self.start_again().await;
     }
 
     /// Start the next incarnation over the stores of a mob that was shut
     /// down.
-    async fn start_again(&mut self) {
+    pub(super) async fn start_again(&mut self) {
         let storage = MobStorage {
             events: self.events.clone(),
             runs: self.runs.clone(),
@@ -158,7 +158,7 @@ impl WiringFixture {
     /// [`Self::seat`] on a session that is built with a comms runtime on a
     /// key of its own: the wiring calls wire members over their comms
     /// runtimes.
-    async fn seat_with_comms(&self, name: &str) -> (AgentIdentity, SessionId) {
+    pub(super) async fn seat_with_comms(&self, name: &str) -> (AgentIdentity, SessionId) {
         let session_id = SessionId::new();
         set_persistent_mock_comms_seed(&session_id, &format!("{}-{name}", self.mob_id));
         self.seat_on(name, Some(session_id)).await
@@ -182,7 +182,7 @@ impl WiringFixture {
     }
 
     /// Adopt `member`'s existing session under `custody`, owning `owned`.
-    async fn adopt(
+    pub(super) async fn adopt(
         &self,
         member: &AgentIdentity,
         session_id: &SessionId,
@@ -226,13 +226,17 @@ impl WiringFixture {
     /// Wait until `member`'s latest reconcile decision at `revision` is one
     /// that no further pass changes by itself (converged or repair-blocked),
     /// and return that status.
-    async fn settled(&self, member: &AgentIdentity, revision: u64) -> IdentityConvergenceStatus {
+    pub(super) async fn settled(
+        &self,
+        member: &AgentIdentity,
+        revision: u64,
+    ) -> IdentityConvergenceStatus {
         self.settled_within(member, revision, 0, STEP).await
     }
 
     /// [`Self::settled`] within `bound`, for a status under a lease epoch
     /// above `after_epoch` (a status of an earlier incarnation is not it).
-    async fn settled_within(
+    pub(super) async fn settled_within(
         &self,
         member: &AgentIdentity,
         revision: u64,
@@ -281,7 +285,7 @@ impl WiringFixture {
     }
 
     /// The stored intent's owned edges and the stored plan's incident edges.
-    async fn stored_wiring(
+    pub(super) async fn stored_wiring(
         &self,
         member: &AgentIdentity,
     ) -> (BTreeSet<DesiredIdentityEdge>, BTreeSet<DesiredIdentityEdge>) {
@@ -343,7 +347,7 @@ impl WiringFixture {
     }
 
     /// Whether the member's session was rebuilt with its shell tools on.
-    async fn shell_is_on(&self, session_id: &SessionId) -> bool {
+    pub(super) async fn shell_is_on(&self, session_id: &SessionId) -> bool {
         MobSessionService::load_persisted_session(self.service.as_ref(), session_id)
             .await
             .expect("read the member's session")
@@ -370,7 +374,7 @@ impl WiringFixture {
 
     /// Commit the change that turns `member`'s shell tools on, on the running
     /// mob, as desired revision 2.
-    async fn change(&self, member: &AgentIdentity) {
+    pub(super) async fn change(&self, member: &AgentIdentity) {
         let update = self
             .handle
             .apply_member_tool_declaration(self.shell_change(member, 1).await)
@@ -390,7 +394,7 @@ impl WiringFixture {
 
     /// Commit the same change in the store of a mob that is shut down: the
     /// stored state of a change that committed and did not become active.
-    async fn change_in_the_store(&self, member: &AgentIdentity) {
+    pub(super) async fn change_in_the_store(&self, member: &AgentIdentity) {
         let change = self.shell_change(member, 1).await;
         let commit = self
             .identity
@@ -419,11 +423,11 @@ impl WiringFixture {
     }
 }
 
-fn edge(left: &AgentIdentity, right: &AgentIdentity) -> DesiredIdentityEdge {
+pub(super) fn edge(left: &AgentIdentity, right: &AgentIdentity) -> DesiredIdentityEdge {
     DesiredIdentityEdge::new(left.clone(), right.clone()).expect("a canonical edge")
 }
 
-fn assert_converged(member: &AgentIdentity, status: &IdentityConvergenceStatus) {
+pub(super) fn assert_converged(member: &AgentIdentity, status: &IdentityConvergenceStatus) {
     assert_eq!(
         status.decision,
         Some(IdentityReconcileDecision::Converged),
@@ -701,12 +705,13 @@ async fn an_adopter_whose_owned_edge_is_not_realized_stays_blocked() {
     fixture.handle.shutdown().await.expect("shutdown the mob");
 }
 
-/// The same when the host wired the edge first: two members joined by a
-/// wiring call, then the smaller-named one adopted owning exactly that edge.
-/// The adopter is repair-blocked for its wiring all the same, and the edge
-/// stays recorded.
+/// When the host wired the edge first, the adopter converges: two members
+/// joined by a wiring call, then the smaller-named one adopted owning exactly
+/// that edge. The pass rebuilds the adopter with the trust of the edge the
+/// mob holds, so it finds the edge it holds the adopter to realized. The
+/// edge stays recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_adopter_whose_owned_edge_was_wired_first_stays_blocked() {
+async fn an_adopter_whose_owned_edge_was_wired_first_converges() {
     let fixture = WiringFixture::create("owned-wiring-adopter-wired-first").await;
     let (owner, owner_session) = fixture.seat_with_comms("worker-a").await;
     let (far_end, _far_end_session) = fixture.seat_with_comms("worker-b").await;
@@ -725,7 +730,7 @@ async fn an_adopter_whose_owned_edge_was_wired_first_stays_blocked() {
             std::slice::from_ref(&owned_edge),
         )
         .await;
-    assert_blocked_for_its_wiring(&owner, &fixture.settled(&owner, 1).await);
+    assert_converged(&owner, &fixture.settled(&owner, 1).await);
     let (owner_owned, _) = fixture.stored_wiring(&owner).await;
     assert_eq!(owner_owned, BTreeSet::from([owned_edge]));
 

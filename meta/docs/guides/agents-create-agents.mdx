@@ -4,8 +4,6 @@ description: "Let an agent create, change, archive and remove long-term agents u
 icon: "user-plus"
 ---
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Available from Meerkat Meta 0.9.15.
 
 An agent can create a long-term agent at run time. A long-term agent is an
@@ -117,9 +115,9 @@ first message. A call that reaches the tools anyway is refused
 | --- | --- | --- |
 | `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
 | `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. A label change keeps the agent's member (see [Changing labels](#changing-labels)); a profile move seats the agent again (see [Moving a profile](#moving-a-profile)). |
-| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. An archive ends the agent's management of the mobs it created, and an unarchive does not give it back: the mobs are removed with their stores at the next start, unless the agent was unarchived and has run again before it; then they stay running with no agent managing them. Have the agent destroy them first (see [Archive, remove, and a fresh life](#archive-remove-and-a-fresh-life)). |
+| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. Its schedules are paused with it. Refused `owns_mobs` while the agent still owns mobs it created: have it destroy them first (see [Archive, remove, and a fresh life](#archive-remove-and-a-fresh-life)). |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. The schedules its archive paused are resumed. |
-| `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. |
+| `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. Its schedules are ended. Refused `owns_mobs` while the agent still owns mobs it created. |
 | `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the mob's long-term agents that are not private to a person, of any profile. Read only. |
 | `identity_get` | `name` | Reads one agent's record: what the list says of it, and its instructions, context, labels and peers. Read only. |
 | `identity_directory` | `query?`, `after?` | Lists the profiles the caller may create agents of and the agents it may name as peers, each `allowed`, `needs_decision` or `not_allowed`. Read only. |
@@ -325,14 +323,13 @@ An agent seated again this way goes on listing and managing the mobs it
 created with its own tools, as after a respawn: its successor runs on the
 same conversation. Its new profile's tools decide what it can call, so move
 an agent that must go on managing its mobs to a profile that has the mob
-tools. What still ends that management: a reset or a delete of the agent
-(a fresh conversation), an archive followed by an unarchive, and anything
-that retires the agent's member and seats it again later. The mobs and
-their members then stay as they are, unlisted for the agent. After an
-archive whose agent is still archived when the gateway next starts, they
-are removed at that start; after a reset or a delete they are removed at
-the gateway's next start as well (read from the source).
-Have the agent destroy such a mob first.
+tools. What still ends that management: a reset or a delete of the agent (a
+fresh conversation), and anything that retires the agent's member and seats
+it again later. The mobs and their members then stay as they are, unlisted
+for the agent, and after a reset or a delete they are removed at the
+gateway's next start (read from the source). An archive of an agent that
+still owns mobs it created is refused `owns_mobs`; the RPC reference lists
+what the refusal does not count. Have the agent destroy such a mob first.
 
 Who can do this to an agent: another agent of the mob that the host's rules
 let change it, through `identity_update` (a profile move), and a host,
@@ -375,14 +372,26 @@ interchangeable:
 - **Archive** (`identity_archive`, `meta/identity/archive`) stops the agent
   and keeps its name, record, conversation and memory. Messages to it are
   refused until it is unarchived, and it comes back on the same conversation
-  with its current instructions. Archiving an agent removes the mobs it
-  created. They stay until the gateway next starts; then each of those mobs
-  is removed with its store, and unarchiving the agent does not bring them
-  back. Have the agent destroy its mobs before you archive it. Do not
-  archive an agent whose mobs must stay.
+  with its current instructions. An archive of an agent that still owns
+  mobs it created is refused `owns_mobs`, and nothing is changed: the
+  refusal says how many mobs there are, and names them to the host and to
+  an administrator. Have the agent destroy its mobs (`mob_destroy`) and
+  archive it then, or keep the agent. When the agent can no longer manage
+  a mob its session owns, no Meta host method destroys that mob, and the
+  agent's archive and its removal are refused through Meta while its
+  session owns it; on a gateway the way out is a reset of the agent, which
+  costs its conversation and, by the gateway's next start, those mobs (the
+  RPC reference lists the cases and the refusal's limits, under
+  `meta/identity/archive`). The
+  refusal is Meta's: a Rust host that calls Core's `archive_identity` or
+  `remove_identity` itself is not refused, and there the mobs the agent
+  created are removed with their stores when the host next starts, and
+  unarchiving the agent does not bring them back.
 - **Remove** (`identity_remove`, `meta/identity/remove`) retires the name for
   good. The name is never an agent again, for anyone. The removed agent's
-  conversation and memory are kept, and nothing can reach them.
+  conversation and memory are kept, and nothing can reach them. A removal
+  of an agent that still owns mobs it created is refused `owns_mobs`, as
+  its archive is: have the agent destroy its mobs first.
 - **`meta/delete_identity`** gives an agent a fresh life and keeps it: a new
   conversation under the same name. It removes nothing from the mob.
 

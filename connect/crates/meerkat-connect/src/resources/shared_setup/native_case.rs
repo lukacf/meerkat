@@ -188,6 +188,9 @@ struct Script {
     // A control's own condition for cancelling A. Never set in the case
     // itself, so the case's timing is unchanged.
     cancel_gate: std::sync::OnceLock<CancelGate>,
+    // A control's own condition for B's Find. Never set in the case itself,
+    // so the case's two Finds are issued side by side as before.
+    find_gate: std::sync::OnceLock<FindGate>,
 }
 
 /// A control's condition for the case's cancel of A: once both helpers have
@@ -197,6 +200,31 @@ struct CancelGate {
     name: &'static str,
     open: Box<dyn Fn() -> bool + Send + Sync>,
     opened: AtomicBool,
+}
+/// A control's condition for B's Find: the controlled model answers B's
+/// original, and so emits its Find, only once the condition is met. B's
+/// original is launched and admitted beside A's as before. A gate not met
+/// by the case's Find deadline fails the case with its name.
+struct FindGate {
+    name: &'static str,
+    open: Box<dyn Fn() -> bool + Send + Sync>,
+    opened: AtomicBool,
+}
+impl FindGate {
+    async fn passed(&self, deadline: tokio::time::Instant) {
+        while !self.opened.load(Ordering::SeqCst) {
+            if (self.open)() {
+                self.opened.store(true, Ordering::SeqCst);
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the control's Find gate was never met: {}",
+                self.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 /// The input and the run a model request was made in, as Core's binding
 /// names them.
@@ -366,6 +394,18 @@ impl Script {
 
     fn response(&self, request: &LlmRequest) -> Vec<LlmEvent> {
         self.response_in_run(request, None)
+    }
+
+    /// Whether `request` is B's original's own (not its helper's), by the
+    /// rule `response_in_run` reads a request's child and member with.
+    fn serves_b_original(request: &LlmRequest) -> bool {
+        let body = serde_json::to_string(&request.messages).unwrap();
+        !body.contains("sdk-child-a")
+            && body.contains("sdk-child-b")
+            && !request
+                .tools
+                .iter()
+                .any(|tool| tool.name == meerkat_toolkit::setup::SETUP_REPORT)
     }
 
     /// The controlled answer to `request`, made in `served` when Core's
@@ -756,27 +796,46 @@ impl LlmClient for Script {
             }),
             _ => None,
         };
-        let events = self.response_in_run(request.request(), served.as_ref());
-        for event in &events {
-            if let LlmEvent::ToolCallComplete { id, name, .. } = event
-                && name == "setup_selected_check"
-            {
-                assert!(
-                    self.check_inputs
-                        .lock()
-                        .unwrap()
-                        .insert(
-                            id.clone(),
-                            (
-                                check_input.0.clone(),
-                                check_input.1.clone().expect("actual helper run")
+        let respond = move || {
+            let events = self.response_in_run(request.request(), served.as_ref());
+            for event in &events {
+                if let LlmEvent::ToolCallComplete { id, name, .. } = event
+                    && name == "setup_selected_check"
+                {
+                    assert!(
+                        self.check_inputs
+                            .lock()
+                            .unwrap()
+                            .insert(
+                                id.clone(),
+                                (
+                                    check_input.0.clone(),
+                                    check_input.1.clone().expect("actual helper run")
+                                )
                             )
-                        )
-                        .is_none()
-                );
+                            .is_none()
+                    );
+                }
             }
+            events
+        };
+        if let Some(gate) = self.find_gate.get()
+            && Self::serves_b_original(request.request())
+        {
+            use futures_util::StreamExt;
+            let deadline = *self
+                .find_deadline
+                .get()
+                .expect("the existing scenario deadline is retained before launch");
+            return Box::pin(
+                futures_util::stream::once(async move {
+                    gate.passed(deadline).await;
+                    respond()
+                })
+                .flat_map(|events| futures_util::stream::iter(events.into_iter().map(Ok))),
+            );
         }
-        Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)))
+        Box::pin(futures_util::stream::iter(respond().into_iter().map(Ok)))
     }
     fn provider(&self) -> Provider {
         Provider::Anthropic

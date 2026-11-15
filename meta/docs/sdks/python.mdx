@@ -525,8 +525,6 @@ retired identity); both are advisory. Every refusal raises
 
 ### Long-term agents
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 `runtime.identities` reads and changes the mob's long-term agents, one call
 per `meta/identity/*` host method. Every agent is read and changed the same
 way, whoever asked for it and by whatever route it came to exist. The
@@ -566,11 +564,9 @@ state = await identities.operation(request_id="adopt-scout-1")
 | `directory(*, query=None, after=None)` | | `AgentDirectoryPage` |
 | `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
 
-An `archive` ends the agent's management of the mobs it created, and an
-`unarchive` does not give it back: the mobs are removed with their stores at
-the next start, unless the agent was unarchived and has run again before it;
-then they stay running with no agent managing them. Have the agent destroy
-them first (see [`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)).
+An `archive` or a `remove` of an agent that still owns mobs it created is
+refused `owns_mobs`: have the agent destroy them first (see
+[`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)).
 
 A change needs your `request_id`: the same id and request return the same
 state and commit at most once. `expected_spec_digest` is the agent's
@@ -634,7 +630,12 @@ out, and is empty when nothing is open.
 Every refusal of every call raises `IdentityRefusedError` (`-32058`); its
 kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`. A kind newer than
 the SDK is the same error with `known_kind` false. Only `operation` answers a
-refusal as a value. A candidate launch refuses a change with the gateway-wide
+refusal as a value. An `archive` or a `remove` of an agent that still owns
+mobs it created is refused `owns_mobs`, and nothing is changed: `details`
+holds `count` (how many mobs) and `mobs` (their ids, given to this host),
+and the remedy is to have the agent destroy its mobs first, or to keep the
+agent. A candidate
+launch refuses a change with the gateway-wide
 `AnnouncementRefusedError` (`kind` `candidate_launch`). Advisory values
 (`readiness`, a change's `state`, provenance, directory verdicts) are kept as
 the gateway sent them.
@@ -725,8 +726,6 @@ deprecated since 0.9.11). See
 [Operator instructions](/api/rpc#operator-instructions).
 
 ### Compacting a member's conversation
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 From 0.9.15. `compact_member` compacts a member's conversation now: the
 member runs one maintenance turn in which the older turns are summarized and
@@ -947,8 +946,6 @@ status enum is non-exhaustive, so consumers should tolerate future state
 strings.
 
 ### Cross-mob peering (two gateways)
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 From 0.9.15. Through 0.9.14 `wire_cross_mob` wired nothing, and the Python builder had no `member_comms_tcp`.
 
@@ -1178,7 +1175,7 @@ runtime = await (
     .persistent_state("state/meta")
     # Declare an in-memory runtime store (sessions do not survive restart).
     .runtime_store(runtime_store.memory())
-    # Declare a bounded queryable in-process event log — or event_log.null().
+    # Declare a queryable in-process event log (it has no size limit) — or event_log.null().
     .event_log(event_log.memory(batch_size=64))
     .gateway("/path/to/rpc_gateway")
     .build()

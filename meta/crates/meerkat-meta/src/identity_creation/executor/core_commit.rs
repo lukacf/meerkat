@@ -281,7 +281,19 @@ pub(super) async fn requester_input(
     operation: &IdentityOperation,
     grant: Option<IdentityGrantRequest>,
 ) -> Step<IdentityChangeRequesterInput> {
-    match commit.requester {
+    requester_input_in(commit.mob, commit.requester, operation, grant).await
+}
+
+/// [`requester_input`], of `requester` in `mob`: what a commit is given, and
+/// what the family asks before a commit exists
+/// ([`whole_change_grant_refusal`]).
+async fn requester_input_in(
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+    operation: &IdentityOperation,
+    grant: Option<IdentityGrantRequest>,
+) -> Step<IdentityChangeRequesterInput> {
+    match requester {
         ChangeRequester::Host { surface, operator } => Ok(Ok(if *operator {
             IdentityChangeRequesterInput::host_operator(surface.as_str())
         } else {
@@ -303,22 +315,17 @@ pub(super) async fn requester_input(
             };
             let admitted = match admission {
                 AgentAdmission::Session(session) => {
-                    if let Some(refusal) = commit.requester.refused_by_its_session(commit.mob).await
-                    {
+                    if let Some(refusal) = requester.refused_by_its_session(mob).await {
                         return Ok(Err(refusal));
                     }
-                    commit
-                        .mob
-                        .admit_identity_change_grant(session, operation, &grant)
+                    mob.admit_identity_change_grant(session, operation, &grant)
                         .await
                 }
                 AgentAdmission::Recorded => {
                     let Some(member) = core_member_name(identity) else {
                         return Ok(Err(IdentityRefusal::new(IdentityRefusalKind::InvalidName)));
                     };
-                    commit
-                        .mob
-                        .identity_change_grant_for(&member, operation, &grant)
+                    mob.identity_change_grant_for(&member, operation, &grant)
                         .await
                 }
             };
@@ -328,6 +335,29 @@ pub(super) async fn requester_input(
             }
         }
     }
+}
+
+/// The refusal an agent requester's grant answers a change of `member` as a
+/// whole (its archive, its unarchive, its removal), asked as `operation`:
+/// what [`entry_change`] answers before it asks anything else of the
+/// change. `None` when the grant admits it, and for the host and a person,
+/// who ask under no grant.
+pub(super) async fn whole_change_grant_refusal(
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+    operation: &IdentityOperation,
+    member: &meerkat_mob::AgentIdentity,
+) -> Result<Option<IdentityRefusal>, ExecutorError> {
+    if !matches!(requester, ChangeRequester::Agent { .. }) {
+        return Ok(None);
+    }
+    let grant = match target_grant_in(mob, member).await? {
+        Ok(grant) => grant,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    Ok(requester_input_in(mob, requester, operation, Some(grant))
+        .await?
+        .err())
 }
 
 /// One agent of a create as Core's commit takes it: its spec, field for
@@ -464,8 +494,15 @@ async fn target_grant(
     commit: &ChangeCommit<'_>,
     member: &meerkat_mob::AgentIdentity,
 ) -> Step<IdentityGrantRequest> {
-    let record = commit
-        .mob
+    target_grant_in(commit.mob, member).await
+}
+
+/// [`target_grant`], of the agent `member` of `mob`.
+async fn target_grant_in(
+    mob: &meerkat_mob::MobHandle,
+    member: &meerkat_mob::AgentIdentity,
+) -> Step<IdentityGrantRequest> {
+    let record = mob
         .identity_record(member)
         .await
         .map_err(|error| ExecutorError::Core(Box::new(error)))?;
@@ -481,8 +518,11 @@ async fn target_grant(
 
 /// Commit a change of one agent as a whole, decided against the spec whose
 /// digest the requester read: Core refuses it `stale_spec` when the
-/// agent's spec moved since. After a committed removal, and after its
-/// replay, the executor's instruction step is told the agent was removed.
+/// agent's spec moved since. An archive and a removal of an agent whose
+/// session still owns mobs are refused `owns_mobs` before Core is called
+/// ([`CoreChangeExecutor::refused_while_owning_mobs`]). After a committed
+/// removal, and after its replay, the executor's instruction step is told
+/// the agent was removed.
 pub(super) async fn entry_change(
     executor: &CoreChangeExecutor,
     commit: &ChangeCommit<'_>,
@@ -507,6 +547,16 @@ pub(super) async fn entry_change(
         Ok(requester) => requester,
         Err(refusal) => return Ok(ChangeCommitted::refused(refusal)),
     };
+    // The last thing before Core's archive or removal: the agent's session
+    // owns no mob that would end with its member's retirement. The grant
+    // was judged above, here as where the family asks before a commit
+    // exists: a requester whose grant does not admit the change is answered
+    // by its grant, and is told nothing of the mobs.
+    if matches!(change_kind, EntryChange::Archive | EntryChange::Remove)
+        && let Some(refusal) = executor.refused_while_owning_mobs(commit, &member).await?
+    {
+        return Ok(ChangeCommitted::refused(refusal));
+    }
     let expected = expected_spec_digest.as_str();
     let answered = match change_kind {
         EntryChange::Archive => {

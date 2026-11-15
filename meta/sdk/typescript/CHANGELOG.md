@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.15
+
 - `MetaRuntime.compactMember(identity, { floorTokens, timeoutMs })` calls
   `meta/compact_member`: the member's conversation is compacted now (the
   older turns summarized, the most recent ones kept) in one maintenance
@@ -43,8 +45,11 @@
   refusal error of those calls: `kind`, `field`, `detail`, `retryable`,
   `details`, `knownKind`, and the `IdentityRefusal` as `refusal`.
   `IdentityRefusalKind`, `IDENTITY_REFUSAL_KINDS` and `isIdentityRefusalKind`
-  are the closed vocabulary (57 kinds); the suite fails when it differs from
-  the gateway's. `IDENTITY_OUTCOMES`, `INSTRUCTION_OUTCOME_KINDS`,
+  are the closed vocabulary (58 kinds); the suite fails when it differs from
+  the gateway's. One of them is `owns_mobs`: an `archive` or a `remove` of an
+  agent that still owns mobs it created is refused, with `details.count`
+  (how many)
+  and, for the host, `details.mobs` (their ids). `IDENTITY_OUTCOMES`, `INSTRUCTION_OUTCOME_KINDS`,
   `INSTRUCTION_NEXT_SESSION_REASONS` and `AGENT_SEATS` are closed too. A
   value newer than the SDK reaches the caller as its token; an outcome token
   the SDK cannot read throws `ContractMismatchError`.
@@ -118,6 +123,9 @@
   is a `GatingQuestionAnswer` (a choice, or free text where the question
   allows it); `gatingAnswer` throws without at least one. `gatingPending()`
   does not list question sets.
+- The example in the `MetaBuilder` header comment calls
+  `.rosterProvider(myRoster)`; it called `.roster(myRoster)`, which the
+  TypeScript builder does not have.
 
 ## 0.9.14
 

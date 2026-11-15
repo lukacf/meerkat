@@ -4128,9 +4128,15 @@ next reconcile retries it. Every call that completes leaves two rows in the
 member's conversation, whether or not it compacted: the maintenance turn's
 input and the member's acknowledgement.
 
-For an identity that created mobs, a completed call has a cost of its own.
-After the call has completed, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in runs on 0.9.14 and on 0.9.15's code).
-A call that fails after its first rebuild has the same cost (read from the source, not run).
+For an identity that created mobs, a completed call has a cost of its own on
+0.9.9 through 0.9.14.
+After the call has completed there, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in a run on 0.9.14, and in a run on 0.9.15's code before a same-session successor kept that management).
+A call that fails after its first rebuild has the same cost on those releases (read from the source, not run).
+From 0.9.15 each rebuild takes the same-session step a respawn takes (read
+from the source; not run for this call), and an identity whose member is
+replaced by that step keeps its management of the mobs it created (confirmed
+for `meta/respawn` by tests and by a run). A member the same-session step
+does not serve still pays the cost.
 Before the call, have the identity retire the members of, or destroy, a mob
 it created whose members act on their own (not run).
 
@@ -4254,22 +4260,26 @@ For an identity that created mobs each clearing step has a cost of its own:
   the identity's provider is available, and do not stop or restart the
   gateway again until the respawn has answered without an error and the
   identity has then answered one message;
-- a respawn on every release, 0.9.15 included: after it has completed, the
+- a respawn on 0.9.9 through 0.9.14: after it has completed, the
   identity no longer lists a mob it created, and the calls tried that name
   the mob were refused, while the mob's members can go on running; the mobs'
-  stores stay. A completed `meta/compact_member` has the same cost (see the
-  top of this section);
+  stores stay. A completed `meta/compact_member` has the same cost on those
+  releases (see the top of this section). From 0.9.15 a respawn of a member
+  the same-session step serves keeps that management (confirmed by tests and
+  by a run), and each rebuild of `meta/compact_member` takes the same step
+  (read from the source; not run);
 - a reset: it ends the identity's session, and the mobs that session owns end
   with it, no later than the gateway's next start (read from the source, not
   run).
 
 A `meta/compact_member` that failed has rebuilt the identity once before its
-maintenance turn, so the identity has probably paid that cost already (read
-from the source, not run): check whether it still lists the mobs it created.
-If it does and must go on managing them, weigh that against the failing
-messages before you respawn: none of the three steps is known to keep it; and
-before the respawn have it retire the members of, or destroy, a mob it
-created whose members act on their own (not run).
+maintenance turn, so on 0.9.9 through 0.9.14 the identity has probably paid
+that cost already (read from the source, not run): check whether it still
+lists the mobs it created. If it does and must go on managing them, weigh
+that against the failing messages before you respawn: on 0.9.9 through
+0.9.14 none of the three steps is known to keep it; and before the respawn
+have it retire the members of, or destroy, a mob it created whose members
+act on their own (not run).
 
 ### `meta/bound_member_transcript`
 

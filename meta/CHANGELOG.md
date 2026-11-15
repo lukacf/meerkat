@@ -2030,19 +2030,24 @@ Security, Upgrade and Changed.
   it and ends the conversation. For an identity that created mobs each of
   these steps has a cost: on 0.9.9 through 0.9.14 a stop or restart after a
   respawn, before the identity has woken on the same session, is followed
-  by the loss of the mobs its session owns; and on every release, this one
-  included, after a respawn has completed the identity no longer lists a
+  by the loss of the mobs its session owns; and on 0.9.9 through 0.9.14,
+  after a respawn has completed the identity no longer lists a
   mob it created, and the calls tried that name the mob were refused, while
   the mob's members can go on running; the mobs' stores stay. A completed
-  `meta/compact_member` has the same cost (the RPC reference's
-  `meta/compact_member` section). A reset: it ends the identity's session,
-  and the mobs that session owns end with it, no later than the gateway's
-  next start (read from the source, not run). A `meta/compact_member` that
-  failed has rebuilt the identity once before its maintenance turn, so the
+  `meta/compact_member` has the same cost on those releases (the RPC
+  reference's `meta/compact_member` section). From this release a respawn
+  of a served member keeps the identity's management of the mobs it created
+  (confirmed by tests and by a run; see Fixed), and each rebuild of
+  `meta/compact_member` takes the same step (read from the source; not
+  run). A reset: it ends the identity's session, and the mobs that session
+  owns end with it, no later than the gateway's next start (read from the
+  source, not run). A `meta/compact_member` that failed has rebuilt the
+  identity once before its maintenance turn, so on 0.9.9 through 0.9.14 the
   identity has probably paid that cost already (read from the source, not
   run): check whether it still lists the mobs it created. If it does and
   must go on managing them, weigh that against the failing messages before
-  you respawn: none of the three steps is known to keep it; and before the
+  you respawn: on 0.9.9 through 0.9.14 none of the three steps is known to
+  keep it; and before the
   respawn have it retire the members of, or destroy, a mob it created whose
   members act on their own (not run).
 - An update cannot hand an agent's runtime mode back to its profile: to

@@ -2444,18 +2444,24 @@ compiling. A Meta probe that must keep the earlier rule checks
   too, whether or not it compacts (a `floor_tokens` above the conversation's
   size completes without compacting), and `meta/reset` clears it and ends
   the conversation. The respawn has a cost of its own for an identity that
-  created mobs, on every release including 0.9.15: after it has completed,
+  created mobs, on 0.9.9 through 0.9.14: after it has completed,
   the identity no longer lists a mob it created, and the calls tried that
   name the mob were refused, while the mob's members can go on running; the
-  mobs' stores stay. A completed `compact_member` has the same cost (see
-  the `meta/compact_member` section of Meta's RPC reference). A reset: it
-  ends the identity's session, and the mobs that session owns end with it,
-  no later than the gateway's next start (read from the source, not run). A
+  mobs' stores stay. A completed `compact_member` has the same cost on
+  those releases (see the `meta/compact_member` section of Meta's RPC
+  reference). From 0.9.15 a respawn of a member the same-session step
+  serves keeps the identity's management of the mobs it created (confirmed
+  by tests and by a run), and each rebuild of `compact_member` takes that
+  same step (read from the source; not run); a management lost on 0.9.9
+  through 0.9.14 is not brought back. A reset: it ends the identity's
+  session, and the mobs that session owns end with it, no later than the
+  gateway's next start (read from the source, not run). A
   `meta/compact_member` that failed has rebuilt the identity once before
-  its maintenance turn, so the identity has probably paid that cost already
-  (read from the source, not run): check whether it still lists the mobs it
-  created. If it does and must go on managing them, weigh that against the
-  failing messages before you respawn: none of the three steps (a respawn,
+  its maintenance turn, so on 0.9.9 through 0.9.14 the identity has
+  probably paid that cost already (read from the source, not run): check
+  whether it still lists the mobs it created. If it does and must go on
+  managing them, weigh that against the failing messages before you
+  respawn: on 0.9.9 through 0.9.14 none of the three steps (a respawn,
   a second call that completes, a reset) is known to keep it; and before
   the respawn have it retire the members of, or destroy, a mob it created
   whose members act on their own (not run). **From 0.9.15** the call

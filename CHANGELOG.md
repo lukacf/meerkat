@@ -3109,7 +3109,7 @@ them.
   the runtime again. A turn fails at its start also when the server
   refuses, while it applies the turn, something the turn's own request
   asked for (for example a model the host cannot serve): that request is
-  answered its typed refusal, and what is queued
+  answered its typed error, and what is queued
   behind it ends in the same way. A reasoning effort level refused at a
   turn's start is not such a failed start while the session is live: that
   turn ends alone and what is queued behind it runs (see Fixed).

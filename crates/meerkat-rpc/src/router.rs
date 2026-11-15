@@ -12711,6 +12711,546 @@ mod tests {
         }
     }
 
+    /// A `session/create` whose reasoning effort level the model's route
+    /// does not take. With a first turn the create is refused and leaves no
+    /// session; a deferred create has answered its session id before the
+    /// level is judged, so its session stays and a later turn can name a
+    /// level the route takes, or clear the level.
+    mod create_with_a_refused_level {
+        use super::*;
+
+        // Bounds a failure only; the passing paths never wait for it.
+        const FAILURE_BOUND: Duration = Duration::from_secs(30);
+
+        /// The mock client on an account route whose model list states
+        /// `high` alone for the selected model: `high` is taken and every
+        /// other level is refused as unsupported.
+        struct OnlyHighLlmClient;
+
+        #[async_trait]
+        impl LlmClient for OnlyHighLlmClient {
+            fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Anthropic(
+                        meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                    ),
+                    api: meerkat_core::ModelApi::Messages,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        meerkat_core::model_profile::capabilities::EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                static MOCK: MockLlmClient = MockLlmClient {
+                    provider: meerkat_core::Provider::Anthropic,
+                };
+                MOCK.stream(request)
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        async fn only_high_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+            test_router_with_llm(Arc::new(OnlyHighLlmClient)).await
+        }
+
+        async fn call(
+            router: &MethodRouter,
+            method: &str,
+            params: serde_json::Value,
+        ) -> RpcResponse {
+            router
+                .dispatch(make_request(method, params))
+                .await
+                .expect("response")
+        }
+
+        /// The ids `session/list` shows.
+        async fn listed_sessions(router: &MethodRouter) -> Vec<String> {
+            let listed = call(router, "session/list", serde_json::json!({})).await;
+            result_value(&listed)["sessions"]
+                .as_array()
+                .expect("session/list answers its sessions")
+                .iter()
+                .map(|session| {
+                    session["session_id"]
+                        .as_str()
+                        .expect("a listed session names its id")
+                        .to_string()
+                })
+                .collect()
+        }
+
+        /// The answer is the typed refusal of `requested`, which the route
+        /// that states `high` alone does not take.
+        fn assert_refused_for_its_level(answer: &RpcResponse, requested: &str, context: &str) {
+            let refused = answer
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("{context}: expected a refusal, got {answer:?}"));
+            assert_eq!(
+                refused.code,
+                error::INVALID_PARAMS,
+                "{context}: {refused:?}"
+            );
+            let data = refused.data.as_ref().unwrap_or_else(|| {
+                panic!("{context}: the refusal carries typed data: {refused:?}")
+            });
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{context}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["requested"], requested,
+                "{context}"
+            );
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], "unsupported_level",
+                "{context}"
+            );
+            assert_eq!(
+                data["reasoning_effort_refusal"]["supported"],
+                serde_json::json!(["high"]),
+                "{context}"
+            );
+            // The refusal names no session: its data is the typed refusal
+            // and nothing else.
+            let mut members: Vec<&str> = data
+                .as_object()
+                .unwrap_or_else(|| panic!("{context}: the refusal data is an object: {data}"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            members.sort_unstable();
+            assert_eq!(
+                members,
+                ["kind", "reasoning_effort_refusal", "retryable"],
+                "{context}: {data}"
+            );
+        }
+
+        /// The two forms a create names its level in: the direct member and
+        /// the nested `provider_params` key.
+        fn level_forms(level: &str) -> [(&'static str, serde_json::Value); 2] {
+            [
+                ("direct", serde_json::json!({"reasoning_effort": level})),
+                (
+                    "nested",
+                    serde_json::json!({"provider_params": {"reasoning_effort": level}}),
+                ),
+            ]
+        }
+
+        /// `create` with the members of `level_form` added.
+        fn with_level(
+            mut create: serde_json::Value,
+            level_form: &serde_json::Value,
+        ) -> serde_json::Value {
+            for (member, value) in level_form.as_object().expect("a level form is an object") {
+                create[member.as_str()] = value.clone();
+            }
+            create
+        }
+
+        /// One refused create with a first turn: the session it staged is
+        /// read off `session/list` while its first turn waits before the
+        /// build, and after the refusal nothing of that session is left.
+        async fn refused_create_leaves_no_session(create: serde_json::Value, context: &str) {
+            let (router, _rx) = only_high_router().await;
+            assert!(listed_sessions(&router).await.is_empty(), "{context}");
+
+            let pause = router.runtime.pause_first_turns_before_promotion();
+            let creating = {
+                let router = router.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request("session/create", create))
+                        .await
+                        .expect("response")
+                })
+            };
+            tokio::time::timeout(FAILURE_BOUND, pause.reached())
+                .await
+                .expect("the first turn reaches the pause before its build");
+            let staged = listed_sessions(&router).await;
+            assert_eq!(
+                staged.len(),
+                1,
+                "{context}: the create's session while its first turn waits: {staged:?}"
+            );
+            let session_id = staged[0].clone();
+            let sid = meerkat_core::SessionId::parse(&session_id).expect("session id parses");
+            pause.release();
+
+            let answer = tokio::time::timeout(FAILURE_BOUND, creating)
+                .await
+                .expect("the refused create answers")
+                .expect("create task");
+            assert_refused_for_its_level(&answer, "low", context);
+
+            assert_eq!(
+                listed_sessions(&router).await,
+                Vec::<String>::new(),
+                "{context}: a create refused for its level leaves no session in session/list"
+            );
+            let read = call(
+                &router,
+                "session/read",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await;
+            assert_eq!(
+                read.error.as_ref().map(|error| error.code),
+                Some(error::SESSION_NOT_FOUND),
+                "{context}: session/read of the refused create's session: {read:?}"
+            );
+            assert!(
+                !router.runtime.pending_session_exists(&sid).await,
+                "{context}: no staged session is left"
+            );
+            assert!(
+                !router.runtime_adapter.contains_session(&sid).await,
+                "{context}: no runtime stays registered for the session"
+            );
+            assert!(
+                router.runtime.session_callback_route(&sid).is_none(),
+                "{context}: no callback route stays bound to the session"
+            );
+            assert_eq!(
+                router.runtime.first_build_waiter_count_for_testing(),
+                0,
+                "{context}"
+            );
+        }
+
+        /// An immediate create with a level the route does not take
+        /// answers the typed refusal and leaves no session, in either form
+        /// the level is named in.
+        #[tokio::test]
+        async fn a_create_with_a_first_turn_refused_for_its_level_leaves_no_session() {
+            for (form, level) in level_forms("low") {
+                refused_create_leaves_no_session(
+                    with_level(serde_json::json!({"prompt": "hello"}), &level),
+                    &format!("immediate, {form}"),
+                )
+                .await;
+            }
+        }
+
+        /// A `keep_alive` create: its first turn ends before a build, so the
+        /// create answers the same refusal and leaves no session either.
+        #[tokio::test]
+        async fn a_keep_alive_create_refused_for_its_level_leaves_no_session() {
+            for (form, level) in level_forms("low") {
+                refused_create_leaves_no_session(
+                    with_level(
+                        serde_json::json!({
+                            "prompt": "hello",
+                            "keep_alive": true,
+                            "comms_name": format!("refused-level-keep-alive-{form}"),
+                        }),
+                        &level,
+                    ),
+                    &format!("keep_alive, {form}"),
+                )
+                .await;
+            }
+        }
+
+        /// More refused creates than the runtime holds sessions cost it
+        /// nothing, and a create that names a level the
+        /// route takes then runs and is the only session listed.
+        #[tokio::test]
+        async fn creates_refused_for_their_level_hold_no_session_capacity() {
+            let (router, _rx) = only_high_router().await;
+            // The runtime holds ten sessions.
+            for round in 0..6 {
+                for (form, level) in level_forms("low") {
+                    let answer = call(
+                        &router,
+                        "session/create",
+                        with_level(serde_json::json!({"prompt": "hello"}), &level),
+                    )
+                    .await;
+                    assert_refused_for_its_level(&answer, "low", &format!("round {round}, {form}"));
+                }
+            }
+            assert_eq!(
+                listed_sessions(&router).await,
+                Vec::<String>::new(),
+                "refused creates leave no session"
+            );
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({"prompt": "hello", "reasoning_effort": "high"}),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session/create returns a session id")
+                .to_string();
+            assert_eq!(listed_sessions(&router).await, vec![session_id]);
+        }
+
+        /// A client whose route states `high` until its first provider
+        /// request, and no levels after it. That request asks for a tool the
+        /// session does not have, so the turn makes a second request, which
+        /// is judged against the route as it is then: the level the build
+        /// accepted is refused inside the turn.
+        struct HighUntilTheFirstRequestLlmClient {
+            states_levels: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait]
+        impl LlmClient for HighUntilTheFirstRequestLlmClient {
+            fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+                if self.states_levels.load(std::sync::atomic::Ordering::SeqCst) {
+                    OnlyHighLlmClient.reasoning_route()
+                } else {
+                    None
+                }
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                self.states_levels
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                        id: "late-refusal-call".to_string(),
+                        name: "a_tool_the_session_does_not_have".to_string(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            meerkat_core::Provider::Anthropic,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(StopReason::ToolUse),
+                    }),
+                ]))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        /// A create whose first turn is refused for the level after its
+        /// session was built keeps the session: the build accepted the
+        /// level, the turn stored its messages, and a later provider request
+        /// of the same turn is refused because the route's levels changed.
+        /// The create answers the typed refusal, and the built session is
+        /// still listed and read, with its transcript. Only a session that
+        /// was never built is removed.
+        #[tokio::test]
+        async fn a_create_refused_for_its_level_after_its_build_keeps_the_built_session() {
+            let (router, _rx) = test_router_with_llm(Arc::new(HighUntilTheFirstRequestLlmClient {
+                states_levels: std::sync::atomic::AtomicBool::new(true),
+            }))
+            .await;
+            let answer = tokio::time::timeout(
+                FAILURE_BOUND,
+                call(
+                    &router,
+                    "session/create",
+                    serde_json::json!({"prompt": "hello", "reasoning_effort": "high"}),
+                ),
+            )
+            .await
+            .expect("the create answers");
+            let refused = answer
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected the refusal, got {answer:?}"));
+            assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+            let data = refused.data.as_ref().expect("the typed refusal data");
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{data}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], "supported_levels_unknown",
+                "the level is refused by the route as it is at the later request: {data}"
+            );
+
+            let listed = listed_sessions(&router).await;
+            assert_eq!(
+                listed.len(),
+                1,
+                "the built session stays after the late refusal: {listed:?}"
+            );
+            let read = call(
+                &router,
+                "session/read",
+                serde_json::json!({ "session_id": listed[0] }),
+            )
+            .await;
+            let read = result_value(&read);
+            assert_eq!(read["session_id"], listed[0]);
+            assert!(
+                read["message_count"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0),
+                "the built session keeps the transcript of its refused turn: {read}"
+            );
+        }
+
+        /// A deferred create has answered its session id before the
+        /// level is judged, so its session stays, in either form the level
+        /// is named in. A turn that names a level the route takes runs, a
+        /// turn that clears the level runs, and plain turns run after each.
+        /// A plain first turn is refused for the session's level and costs
+        /// the session nothing: it is still listed, still read, and the
+        /// next turn that names a level the route takes runs.
+        #[tokio::test]
+        async fn a_deferred_create_with_a_refused_level_keeps_its_session() {
+            let (router, _rx) = only_high_router().await;
+            let deferred_create = |level: serde_json::Value| {
+                let router = router.clone();
+                async move {
+                    let created = call(
+                        &router,
+                        "session/create",
+                        with_level(
+                            serde_json::json!({"prompt": "seed", "initial_turn": "deferred"}),
+                            &level,
+                        ),
+                    )
+                    .await;
+                    result_value(&created)["session_id"]
+                        .as_str()
+                        .expect("a deferred create returns its session id")
+                        .to_string()
+                }
+            };
+            let turn = |session_id: String, reasoning_effort: Option<serde_json::Value>| {
+                let router = router.clone();
+                async move {
+                    let mut params =
+                        serde_json::json!({"session_id": session_id, "prompt": "next"});
+                    if let Some(reasoning_effort) = reasoning_effort {
+                        params["reasoning_effort"] = reasoning_effort;
+                    }
+                    call(&router, "turn/start", params).await
+                }
+            };
+
+            let mut expected = Vec::new();
+            for (form, level) in level_forms("low") {
+                // A turn that names a level the route takes runs, and a
+                // plain turn after it.
+                let named = deferred_create(level.clone()).await;
+                let ran = turn(named.clone(), Some(serde_json::json!("high"))).await;
+                assert!(ran.error.is_none(), "{form}: a turn naming `high`: {ran:?}");
+                let ran = turn(named.clone(), None).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a plain turn after the turn naming `high`: {ran:?}"
+                );
+
+                // A turn that clears the level runs, and a plain turn after
+                // it.
+                let cleared = deferred_create(level.clone()).await;
+                let ran = turn(
+                    cleared.clone(),
+                    Some(serde_json::json!({"action": "clear"})),
+                )
+                .await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a turn clearing the level: {ran:?}"
+                );
+                let ran = turn(cleared.clone(), None).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a plain turn after the clearing turn: {ran:?}"
+                );
+
+                // A plain first turn is refused for the session's level;
+                // the session stays, a turn naming `high` then runs on it,
+                // and a plain turn after that.
+                let plain = deferred_create(level.clone()).await;
+                let refused = turn(plain.clone(), None).await;
+                assert_refused_for_its_level(
+                    &refused,
+                    "low",
+                    &format!("{form}: a plain first turn"),
+                );
+                let listed = listed_sessions(&router).await;
+                assert!(
+                    listed.contains(&plain),
+                    "{form}: the deferred session stays listed after its refused turn: {listed:?}"
+                );
+                let read = call(
+                    &router,
+                    "session/read",
+                    serde_json::json!({ "session_id": plain }),
+                )
+                .await;
+                assert_eq!(result_value(&read)["session_id"], plain, "{form}");
+                let ran = turn(plain.clone(), Some(serde_json::json!("high"))).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a turn naming `high` after the refused plain turn: {ran:?}"
+                );
+                let ran = turn(plain.clone(), None).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a plain turn after the turn naming `high`: {ran:?}"
+                );
+                expected.extend([named, cleared, plain]);
+            }
+
+            let mut listed = listed_sessions(&router).await;
+            listed.sort();
+            expected.sort();
+            assert_eq!(listed, expected, "each deferred create kept its session");
+        }
+    }
+
     async fn pending_runtime_approval(router: &MethodRouter) -> String {
         let created = router
             .dispatch(make_request(
@@ -20855,6 +21395,486 @@ mod tests {
                 .unwrap()
                 .starts_with("[meerkat-instruction-activation-v1]")
         );
+    }
+
+    /// A client whose route states the reasoning effort level `high`, and
+    /// whose requests can be held: while `held` is set a request waits
+    /// before it answers.
+    #[cfg(feature = "mob")]
+    struct HeldRouteLlmClient {
+        calls: std::sync::atomic::AtomicUsize,
+        held: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl LlmClient for HeldRouteLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![EffortLevel::High]),
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            use std::sync::atomic::Ordering;
+            Box::pin(async_stream::stream! {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                while self.held.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Hello from the held client".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Through the JSON-RPC router, `turn/start` and `mob/turn_start` on a
+    /// session whose turn is running answer a turn that names the
+    /// provider-neutral reasoning effort level as the session runtime does:
+    /// a level the route takes is answered that the session is busy
+    /// (`-32002`, the reason in `data.kind`), a level the route refuses is
+    /// answered its typed refusal, each at once, and nothing is admitted
+    /// beside the running turn. The level is named in the field
+    /// `reasoning_effort` and inside `provider_params`; one parser serves
+    /// both methods. The running turns then complete.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_on_a_busy_session_is_answered_at_once_through_the_router() {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
+        let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = meerkat::PersistenceBundle::new(sessions, store, memory_blob_store())
+            .expect("construct runtime authority");
+        let runtime =
+            SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                .expect("compose the RPC session runtime");
+        let client = Arc::new(HeldRouteLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.set_default_llm_client(Some(client.clone() as Arc<dyn LlmClient>));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let (notif_tx, _notif_rx) = mpsc::channel(100);
+        let router = Arc::new(
+            MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority"),
+        );
+        let call = |method: &'static str, params: serde_json::Value| {
+            let router = Arc::clone(&router);
+            async move {
+                router
+                    .dispatch(make_request(method, params))
+                    .await
+                    .expect("response")
+            }
+        };
+        let ok = |response: RpcResponse, what: &str| {
+            assert!(response.error.is_none(), "{what}: {:?}", response.error);
+            result_value(&response)
+        };
+
+        // A session with one finished turn, and a mob with one member.
+        let created = ok(
+            call(
+                "session/create",
+                serde_json::json!({"prompt": "Hello", "model": "claude-sonnet-4-5"}),
+            )
+            .await,
+            "the session is created",
+        );
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("a session id")
+            .to_string();
+        ok(
+            call(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "busy-level-mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": {"comms": true},
+                            }
+                        }
+                    }
+                }),
+            )
+            .await,
+            "the mob is created",
+        );
+        ok(
+            call(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "busy-level-mob",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                }),
+            )
+            .await,
+            "the member spawns",
+        );
+        ok(
+            call(
+                "mob/turn_start",
+                serde_json::json!({
+                    "mob_id": "busy-level-mob",
+                    "agent_identity": "worker-1",
+                    "prompt": "first",
+                }),
+            )
+            .await,
+            "the member takes its first turn",
+        );
+
+        // A turn runs on the session and one on the member: both held at
+        // the model.
+        let before = client.calls.load(Ordering::SeqCst);
+        client.held.store(true, Ordering::SeqCst);
+        let session_turn = serde_json::json!({"session_id": &session_id, "prompt": "running"});
+        let member_turn = serde_json::json!({
+            "mob_id": "busy-level-mob",
+            "agent_identity": "worker-1",
+            "prompt": "running",
+        });
+        let running_session = tokio::spawn(call("turn/start", session_turn.clone()));
+        let running_member = tokio::spawn(call("mob/turn_start", member_turn.clone()));
+        tokio::time::timeout(Duration::from_mins(1), async {
+            while client.calls.load(Ordering::SeqCst) < before + 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both running turns reach the model");
+        let active_inputs = || async {
+            router
+                .runtime_adapter()
+                .list_active_inputs(
+                    &meerkat_core::SessionId::parse(&session_id).expect("session id"),
+                )
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        };
+        let active_before = active_inputs().await;
+
+        for (method, base) in [
+            ("turn/start", &session_turn),
+            ("mob/turn_start", &member_turn),
+        ] {
+            for form in ["direct", "nested"] {
+                let with_level = |level: &str| {
+                    let mut params = base.clone();
+                    params["prompt"] = serde_json::json!("names a level");
+                    if form == "direct" {
+                        params["reasoning_effort"] = serde_json::json!(level);
+                    } else {
+                        params["provider_params"] = serde_json::json!({"reasoning_effort": level});
+                    }
+                    params
+                };
+                let answer = |params: serde_json::Value| async move {
+                    tokio::time::timeout(Duration::from_secs(10), call(method, params))
+                        .await
+                        .unwrap_or_else(|_| panic!("{method} {form}: answered while the turn runs"))
+                        .error
+                        .unwrap_or_else(|| panic!("{method} {form}: the turn is not taken"))
+                };
+
+                let busy = answer(with_level("high")).await;
+                assert_eq!(
+                    (busy.code, busy.data.clone()),
+                    (
+                        error::SESSION_BUSY,
+                        Some(serde_json::json!({
+                            "kind": "reasoning_effort_change_needs_idle_session"
+                        })),
+                    ),
+                    "{method} {form}: {busy:?}"
+                );
+                let refused = answer(with_level("low")).await;
+                assert_eq!(
+                    (
+                        refused.code,
+                        refused
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("kind"))
+                            .cloned(),
+                        refused
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.pointer("/reasoning_effort_refusal/reason"))
+                            .cloned(),
+                    ),
+                    (
+                        error::INVALID_PARAMS,
+                        Some(serde_json::json!("reasoning_effort_refused")),
+                        Some(serde_json::json!("unsupported_level")),
+                    ),
+                    "{method} {form}: {refused:?}"
+                );
+            }
+        }
+        assert_eq!(
+            active_inputs().await,
+            active_before,
+            "no answered request was admitted on the session"
+        );
+
+        client.held.store(false, Ordering::SeqCst);
+        for (what, running) in [
+            ("the session's", running_session),
+            ("the member's", running_member),
+        ] {
+            let response = tokio::time::timeout(Duration::from_mins(1), running)
+                .await
+                .unwrap_or_else(|_| panic!("{what} running turn is answered"))
+                .expect("the turn task");
+            assert!(
+                response.error.is_none(),
+                "{what} running turn completes: {:?}",
+                response.error
+            );
+        }
+    }
+
+    /// A mob member built from a profile whose `provider_params` carry the
+    /// provider-neutral reasoning effort level holds that level, though no
+    /// client request named one. The profile reaches the member from the
+    /// mob's definition (`mob/create`) or from `mob/spawn`'s
+    /// `override_profile`: both seat the level. So on such a member a
+    /// `mob/turn_start` that changes the model, or only replaces the
+    /// provider params (a temperature, say), while the member has a turn
+    /// running, is answered that the session is busy, with the reason in
+    /// `data.kind`, at once. A plain `mob/turn_start` is queued behind the
+    /// running turn and runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_built_from_a_profile_with_a_level_answers_a_model_change_busy() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
+        let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = meerkat::PersistenceBundle::new(sessions, store, memory_blob_store())
+            .expect("construct runtime authority");
+        let runtime =
+            SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                .expect("compose the RPC session runtime");
+        let client = Arc::new(HeldRouteLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.set_default_llm_client(Some(client.clone() as Arc<dyn LlmClient>));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let (notif_tx, _notif_rx) = mpsc::channel(100);
+        let router = Arc::new(
+            MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority"),
+        );
+        let call = |method: &'static str, params: serde_json::Value| {
+            let router = Arc::clone(&router);
+            async move {
+                router
+                    .dispatch(make_request(method, params))
+                    .await
+                    .expect("response")
+            }
+        };
+        let ok = |response: RpcResponse, what: &str| {
+            assert!(response.error.is_none(), "{what}: {:?}", response.error);
+            result_value(&response)
+        };
+        let plain_profile = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "external_addressable": true,
+            "tools": {"comms": true},
+        });
+        let mut profile_with_the_level = plain_profile.clone();
+        profile_with_the_level["provider_params"] = serde_json::json!({"reasoning_effort": "high"});
+        // (the mob, the profile of its definition, the profile `mob/spawn`
+        // overrides it with)
+        for (mob_id, defined, overridden) in [
+            ("profile-level-mob", &profile_with_the_level, None),
+            (
+                "override-level-mob",
+                &plain_profile,
+                Some(&profile_with_the_level),
+            ),
+        ] {
+            let member_turn = |prompt: &str| {
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": "worker-1",
+                    "prompt": prompt,
+                })
+            };
+
+            // The profile carries the level; the member is built from it and
+            // takes its first turn.
+            ok(
+                call(
+                    "mob/create",
+                    serde_json::json!({
+                        "definition": {"id": mob_id, "profiles": {"worker": defined}}
+                    }),
+                )
+                .await,
+                "the mob is created",
+            );
+            let mut spawn = serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "runtime_mode": "turn_driven",
+            });
+            if let Some(overridden) = overridden {
+                spawn["override_profile"] = overridden.clone();
+            }
+            ok(call("mob/spawn", spawn).await, "the member spawns");
+            ok(
+                call("mob/turn_start", member_turn("first")).await,
+                "the member takes its first turn",
+            );
+
+            // A turn runs on the member, held at the model.
+            let before = client.calls.load(Ordering::SeqCst);
+            client.held.store(true, Ordering::SeqCst);
+            let running = tokio::spawn(call("mob/turn_start", member_turn("running")));
+            tokio::time::timeout(Duration::from_mins(1), async {
+                while client.calls.load(Ordering::SeqCst) < before + 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the running turn reaches the model");
+
+            for (what, key, value) in [
+                (
+                    "a model change",
+                    "model",
+                    serde_json::json!("claude-opus-4-8"),
+                ),
+                (
+                    "a change of the provider params",
+                    "provider_params",
+                    serde_json::json!({"temperature": 0.2}),
+                ),
+            ] {
+                let mut params = member_turn("changes the member's model settings");
+                params[key] = value;
+                let busy =
+                    tokio::time::timeout(Duration::from_secs(10), call("mob/turn_start", params))
+                        .await
+                        .unwrap_or_else(|_| panic!("{what}: answered while the turn runs"))
+                        .error
+                        .unwrap_or_else(|| panic!("{what}: the turn is not taken"));
+                assert_eq!(
+                    (busy.code, busy.data.clone()),
+                    (
+                        error::SESSION_BUSY,
+                        Some(serde_json::json!({
+                            "kind": "reasoning_effort_change_needs_idle_session"
+                        })),
+                    ),
+                    "{what}: {busy:?}"
+                );
+            }
+
+            // A plain turn is queued behind the running one, and both complete.
+            let plain = tokio::spawn(call("mob/turn_start", member_turn("plain")));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                !plain.is_finished(),
+                "a plain turn is not answered while the turn ahead runs"
+            );
+            client.held.store(false, Ordering::SeqCst);
+            for (what, turn) in [("the running turn", running), ("the plain turn", plain)] {
+                let response = tokio::time::timeout(Duration::from_mins(1), turn)
+                    .await
+                    .unwrap_or_else(|_| panic!("{what} is answered"))
+                    .expect("the turn task");
+                assert!(
+                    response.error.is_none(),
+                    "{what} completes: {:?}",
+                    response.error
+                );
+            }
+        }
     }
 
     /// A `session/create` refusal keeps its typed error data: a deferred

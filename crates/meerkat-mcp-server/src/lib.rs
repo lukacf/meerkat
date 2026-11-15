@@ -925,6 +925,38 @@ fn resume_build_provider_params(
         .map_err(|error| ToolCallError::invalid_params(error.to_string()))
 }
 
+/// Whether a `meerkat_resume` names the provider-neutral reasoning effort
+/// level: the `reasoning_effort` member (a level or a clear), or the key of
+/// that name inside `provider_params`. A provider's own effort under
+/// `provider_tag` is not the level.
+fn resume_names_reasoning_effort_level(input: &MeerkatResumeInput) -> bool {
+    input.reasoning_effort.is_some()
+        || input
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some())
+}
+
+/// Structured-data `kind` of the busy answer to a request that would change
+/// a session's reasoning effort level while the session has unfinished
+/// work: the value the JSON-RPC surface answers such a turn with.
+const REASONING_EFFORT_CHANGE_NEEDS_IDLE_SESSION_KIND: &str =
+    "reasoning_effort_change_needs_idle_session";
+
+/// The answer to a `meerkat_resume` that names the reasoning effort level
+/// while a turn is running on its session: the session-busy code with the
+/// kind as its data. Nothing was retired or stored; the caller waits for
+/// the running turn's answer and sends the resume again.
+fn reasoning_effort_change_needs_idle_session_tool_error() -> ToolCallError {
+    ToolCallError::new(
+        meerkat_contracts::ErrorCode::SessionBusy.jsonrpc_code(),
+        "session is busy: a resume that names the reasoning effort level rebuilds the session \
+         and is not taken while a turn is running on it; send it again when the running turn \
+         has answered",
+        Some(json!({ "kind": REASONING_EFFORT_CHANGE_NEEDS_IDLE_SESSION_KIND })),
+    )
+}
+
 fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
     !input.tool_results.is_empty()
         || !input.tools.is_empty()
@@ -5066,6 +5098,24 @@ async fn handle_meerkat_resume(
         return Err(help_session_not_resumable_tool_error(refusal));
     }
 
+    // A resume that names the provider-neutral reasoning effort level
+    // rebuilds the session, and the rebuild replaces the session's runtime
+    // attachment: a resume accepted behind a running turn can end with the
+    // old attachment. So such a resume is taken only when no turn is running
+    // on the session, and is otherwise answered busy at once: it does not
+    // wait, and nothing is retired, staged or stored. The level is judged by
+    // the rebuild, so a level the model refuses is answered its typed
+    // refusal when the resume is sent again once the session is idle.
+    if resume_names_reasoning_effort_level(&input)
+        && state
+            .service
+            .session_activity_watch(&session_id)
+            .await
+            .is_some_and(|activity| activity.is_active())
+    {
+        return Err(reasoning_effort_change_needs_idle_session_tool_error());
+    }
+
     // Admit callback results through the session service's exact durable
     // callback-batch authority. Direct transcript append bypasses ID-set,
     // idempotency, and replay validation.
@@ -8174,6 +8224,271 @@ mod tests {
         );
     }
 
+    /// A `meerkat_resume` that names the provider-neutral reasoning effort
+    /// level while a turn is running on its session is answered busy at
+    /// once, with the kind JSON-RPC answers such a turn with as the tool
+    /// error's data: it does not wait, and nothing is retired or stored.
+    /// The running turn and a plain resume sent after the refused one both
+    /// run (a level resume that waited ended the resume queued behind it).
+    /// Sent again once the session is idle, the resume reaches the rebuild,
+    /// which judges the level: the test client's route states no levels, so
+    /// it answers the typed refusal, and the next plain resume runs. Both
+    /// forms of the level: the member and the key inside `provider_params`.
+    #[tokio::test]
+    async fn resume_that_names_a_level_while_a_turn_runs_is_answered_busy_at_once() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: Duration = Duration::from_secs(30);
+        for (form, level) in [
+            ("direct", json!({"reasoning_effort": "high"})),
+            (
+                "nested",
+                json!({"provider_params": {"reasoning_effort": "high"}}),
+            ),
+            ("clear", json!({"reasoning_effort": {"action": "clear"}})),
+        ] {
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (state, session_id) = state_with_live_session(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }))
+            .await;
+            let state = Arc::new(state);
+            let resume = |input: Value| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    Box::pin(handle_tools_call(&state, "meerkat_resume", &input)).await
+                })
+            };
+            let mut level_input =
+                json!({ "session_id": session_id.to_string(), "prompt": "level turn" });
+            for (member, value) in level.as_object().expect("a level form is an object") {
+                level_input[member.as_str()] = value.clone();
+            }
+            let attachment_before = state
+                .runtime_adapter
+                .current_executor_attachment_witness(&session_id)
+                .await
+                .expect("the live fixture has an exact attachment");
+            let mut seen = calls.subscribe();
+
+            let running = resume(
+                json!({ "session_id": session_id.to_string(), "prompt": "first running turn" }),
+            );
+            timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the first resume reaches the provider")
+                .expect("call counter stays open");
+
+            // Answered while the first turn is still held at the provider.
+            let refused = timeout(FAILURE_BOUND, resume(level_input.clone()))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{form}: a level resume on a busy session answers at once")
+                })
+                .expect("level resume task")
+                .expect_err("a level resume while a turn runs is refused");
+            assert!(!running.is_finished(), "{form}: the first turn still runs");
+            assert_eq!(refused.code, -32002, "{form}: {}", refused.message);
+            assert_eq!(
+                refused.data,
+                Some(json!({"kind": "reasoning_effort_change_needs_idle_session"})),
+                "{form}"
+            );
+            assert_eq!(
+                state
+                    .runtime_adapter
+                    .current_executor_attachment_witness(&session_id)
+                    .await,
+                Some(attachment_before),
+                "{form}: the refused resume retired nothing"
+            );
+
+            // A plain resume sent after the refused one waits and then runs.
+            let mut plain =
+                resume(json!({ "session_id": session_id.to_string(), "prompt": "plain behind" }));
+            assert!(
+                timeout(Duration::from_millis(300), &mut plain)
+                    .await
+                    .is_err(),
+                "{form}: a plain resume waits behind the running turn"
+            );
+            release.add_permits(1);
+            let first = timeout(FAILURE_BOUND, running)
+                .await
+                .expect("the first resume finishes once released")
+                .expect("first resume task");
+            assert!(first.is_ok(), "{form}: first resume: {:?}", first.err());
+            timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 2))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the plain resume runs its turn"))
+                .expect("call counter stays open");
+            release.add_permits(1);
+            let plain = timeout(FAILURE_BOUND, plain)
+                .await
+                .expect("the plain resume finishes once released")
+                .expect("plain resume task");
+            assert!(plain.is_ok(), "{form}: the plain resume: {:?}", plain.err());
+
+            // The same resume on the idle session reaches the rebuild. A
+            // level is judged there and refused typed; a clear names no
+            // level to judge and runs.
+            release.add_permits(4);
+            let retried = timeout(FAILURE_BOUND, resume(level_input))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the resume sent again answers"))
+                .expect("retried resume task");
+            if form == "clear" {
+                assert!(
+                    retried.is_ok(),
+                    "{form}: the retried clear: {:?}",
+                    retried.err()
+                );
+            } else {
+                let retried = retried.expect_err("the rebuild judges the level");
+                assert_eq!(retried.code, -32602, "{form}: {}", retried.message);
+                let data = retried.data.expect("the typed refusal data");
+                assert_eq!(data["kind"], "reasoning_effort_refused", "{form}: {data}");
+                assert_eq!(
+                    data["reasoning_effort_refusal"]["requested"], "high",
+                    "{form}: {data}"
+                );
+            }
+            let next = timeout(
+                FAILURE_BOUND,
+                resume(json!({ "session_id": session_id.to_string(), "prompt": "next plain" })),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{form}: the next plain resume answers"))
+            .expect("next resume task");
+            assert!(
+                next.is_ok(),
+                "{form}: the next plain resume: {:?}",
+                next.err()
+            );
+        }
+    }
+
+    /// A `meerkat_resume` that rebuilds the session for another build field
+    /// (here `max_tokens`) is unchanged: sent while a turn runs, it is not
+    /// answered busy. It waits behind that turn, rebuilds the session and
+    /// runs. The rebuild replaces the session's runtime attachment, so a
+    /// plain resume queued beside it either runs or ends with the typed
+    /// `session_resume_required` answer, depending on which of the two
+    /// reaches the session first: both outcomes are pinned, and nothing
+    /// else. The session is live afterwards and takes its next resume.
+    #[tokio::test]
+    async fn resume_that_rebuilds_for_another_field_while_a_turn_runs_waits_and_runs() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: Duration = Duration::from_secs(30);
+        for plain_first in [true, false] {
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (state, session_id) = state_with_live_session(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }))
+            .await;
+            let state = Arc::new(state);
+            let resume = |input: Value| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    Box::pin(handle_tools_call(&state, "meerkat_resume", &input)).await
+                })
+            };
+            let rebuild_input = json!({
+                "session_id": session_id.to_string(),
+                "prompt": "rebuild turn",
+                "max_tokens": 2048
+            });
+            let plain_input =
+                json!({ "session_id": session_id.to_string(), "prompt": "plain turn" });
+            let mut seen = calls.subscribe();
+
+            let running = resume(
+                json!({ "session_id": session_id.to_string(), "prompt": "first running turn" }),
+            );
+            timeout(FAILURE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the first resume reaches the provider")
+                .expect("call counter stays open");
+            let (mut rebuild, mut plain) = if plain_first {
+                let plain = resume(plain_input);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                (resume(rebuild_input), plain)
+            } else {
+                let rebuild = resume(rebuild_input);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                (rebuild, resume(plain_input))
+            };
+            assert!(
+                timeout(Duration::from_millis(300), &mut rebuild)
+                    .await
+                    .is_err(),
+                "plain_first={plain_first}: the rebuilding resume waits behind the running turn"
+            );
+            assert!(
+                timeout(Duration::from_millis(300), &mut plain)
+                    .await
+                    .is_err(),
+                "plain_first={plain_first}: the plain resume waits behind the running turn"
+            );
+
+            release.add_permits(16);
+            for (name, turn) in [("first", running), ("rebuilding", rebuild)] {
+                let answer = timeout(FAILURE_BOUND, turn)
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("plain_first={plain_first}: the {name} resume answers")
+                    })
+                    .expect("resume task");
+                assert!(
+                    answer.is_ok(),
+                    "plain_first={plain_first}: the {name} resume: {:?}",
+                    answer.err()
+                );
+            }
+            match timeout(FAILURE_BOUND, plain)
+                .await
+                .unwrap_or_else(|_| panic!("plain_first={plain_first}: the plain resume answers"))
+                .expect("resume task")
+            {
+                Ok(_) => {}
+                Err(ended) => {
+                    assert_eq!(
+                        (
+                            ended.code,
+                            ended.data.as_ref().map(|data| data["kind"].clone()),
+                        ),
+                        (-32003, Some(json!("session_resume_required"))),
+                        "plain_first={plain_first}: the plain resume: {}",
+                        ended.message
+                    );
+                }
+            }
+            assert_eq!(
+                (
+                    state.service.has_live_session(&session_id).await.ok(),
+                    state.runtime_adapter.contains_session(&session_id).await,
+                ),
+                (Some(true), true),
+                "plain_first={plain_first}: the session is live and registered"
+            );
+            let next = timeout(
+                FAILURE_BOUND,
+                resume(json!({ "session_id": session_id.to_string(), "prompt": "next plain" })),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("plain_first={plain_first}: the next resume answers"))
+            .expect("next resume task");
+            assert!(
+                next.is_ok(),
+                "plain_first={plain_first}: the next plain resume: {:?}",
+                next.err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn plain_resume_resolves_foreign_attachment_before_running_a_turn() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -10608,6 +10923,75 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert_eq!(
             data.get("envelope_id").and_then(Value::as_str),
             Some(envelope_id.to_string().as_str())
+        );
+    }
+
+    /// A `meerkat_run` whose reasoning effort level the route does not
+    /// accept is refused by the session's build, before a session exists:
+    /// the typed tool error names no created session, and no session is
+    /// listed or stored afterwards. The test client reports no route, so
+    /// every level is refused as unknown.
+    #[tokio::test]
+    async fn test_meerkat_run_refused_for_its_level_leaves_no_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+        )
+        .await;
+
+        // The level in both forms a run names it in: the direct member and
+        // the nested `provider_params` key.
+        for (form, level) in [
+            ("direct", json!({"reasoning_effort": "high"})),
+            (
+                "nested",
+                json!({"provider_params": {"reasoning_effort": "high"}}),
+            ),
+        ] {
+            let mut input = json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "enable_builtins": false
+            });
+            for (member, value) in level.as_object().expect("a level form is an object") {
+                input[member.as_str()] = value.clone();
+            }
+            let refused = Box::pin(handle_tools_call(&state, "meerkat_run", &input))
+                .await
+                .expect_err("a level the route does not accept is refused");
+            assert_eq!(refused.code, -32602, "{form}: {}", refused.message);
+            let data = refused.data.expect("the typed refusal data");
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{form}: {data}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], "supported_levels_unknown",
+                "{form}: {data}"
+            );
+            assert_eq!(
+                (data.get("session_id"), data.get("session_created")),
+                (None, None),
+                "{form}: the build refused the level before a session was created: {data}"
+            );
+        }
+
+        let listed = Box::pin(handle_tools_call(&state, "meerkat_sessions", &json!({})))
+            .await
+            .expect("sessions list call should succeed");
+        assert_eq!(
+            unwrap_payload(listed)["sessions"],
+            json!([]),
+            "a run refused for its level leaves no session listed"
+        );
+        let stored = store
+            .list(meerkat::SessionFilter::default())
+            .await
+            .expect("list the stored sessions");
+        assert!(
+            stored.is_empty(),
+            "a run refused for its level stores no session: {} stored",
+            stored.len()
         );
     }
 

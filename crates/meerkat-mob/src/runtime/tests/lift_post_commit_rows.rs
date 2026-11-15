@@ -16,6 +16,12 @@ use std::sync::atomic::AtomicBool;
 /// failure.
 const STEP: Duration = Duration::from_secs(10);
 
+/// Bound for a lift's answer. A lift whose observer sees no progress answers
+/// a stall only when its inactivity window ends, so this is the window of
+/// the build and slack for a loaded run; it only turns a hang into a failure.
+const LIFT_ANSWER: Duration =
+    past_window(crate::runtime::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT);
+
 /// The lift of a stopped mob whose operation binding of one member is held
 /// (a gated step of its post-commit work): a Spawn is admitted and answered
 /// while the binding is held, and a registration reload of the member that
@@ -114,9 +120,10 @@ async fn a_held_lift_binding_admits_a_spawn_and_defers_a_reload_until_the_lift_c
     );
 
     // The lift answers once its binding is released. In a unit build its
-    // observer reports a stall after two seconds without progress while the
-    // binding is held; the operation itself stays joinable, and is joined.
-    let (lifted, answered_after_release) = tokio::time::timeout(STEP, lift)
+    // observer reports a stall after its inactivity window without progress
+    // while the binding is held; the operation itself stays joinable, and is
+    // joined.
+    let (lifted, answered_after_release) = tokio::time::timeout(LIFT_ANSWER, lift)
         .await
         .expect("the lift answers once the binding is released")
         .expect("lift task");
@@ -130,7 +137,7 @@ async fn a_held_lift_binding_admits_a_spawn_and_defers_a_reload_until_the_lift_c
                 stage, "resume_operation_bindings",
                 "the lift waited only on its held binding"
             );
-            tokio::time::timeout(STEP, mob.handle.resume())
+            tokio::time::timeout(LIFT_ANSWER, mob.handle.resume())
                 .await
                 .expect("the joined lift answers")
                 .expect("the lift succeeds");
@@ -221,12 +228,12 @@ async fn a_lift_binds_a_member_whose_session_mutation_gate_is_held() {
     .expect("w-0's session mutation gate is taken")
     .expect("w-0's session is registered");
     let _ = release.send(());
-    // The unit build's lift observer reports a stall after two seconds
-    // without progress, and the operation stays joinable. A stall report
+    // The unit build's lift observer reports a stall after its inactivity
+    // window without progress, and the operation stays joinable. A stall report
     // while the gate is held is joined once more, the gate still held: a
     // lift that binds w-0 without the gate answers then; one that waits on
     // the gate stalls again at w-0's binding.
-    let mut lifted = tokio::time::timeout(STEP, lift)
+    let mut lifted = tokio::time::timeout(LIFT_ANSWER, lift)
         .await
         .expect("the lift answers or reports a stall")
         .expect("lift task");
@@ -234,7 +241,7 @@ async fn a_lift_binds_a_member_whose_session_mutation_gate_is_held() {
         lifted,
         Err(MobError::LifecycleOperationProgressStalled { .. })
     ) {
-        lifted = tokio::time::timeout(STEP, mob.handle.resume())
+        lifted = tokio::time::timeout(LIFT_ANSWER, mob.handle.resume())
             .await
             .expect("the joined lift answers or reports a stall");
     }

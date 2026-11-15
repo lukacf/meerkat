@@ -1485,10 +1485,10 @@ async fn per_member_delivery_order_is_preserved() {
 
 /// Production boot shape: many members with slow readiness. Explicit Resume
 /// runs their readiness concurrently and off the loop, so it completes in
-/// about one readiness latency and the probe never pages. (In-crate test
-/// builds cap the resume admission deadline at 2 s, so the per-member
+/// about one readiness latency and the probe never pages. (The per-member
 /// latency is 500 ms here; the pre-#1102 serial loops held the actor for
-/// 17 x 500 ms, missed that deadline, and paged every probe.)
+/// 17 x 500 ms, far past the two seconds this row allows, and paged every
+/// probe.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_readiness_fanout_keeps_the_loop_responsive() {
     const READINESS_LATENCY: Duration = Duration::from_millis(500);

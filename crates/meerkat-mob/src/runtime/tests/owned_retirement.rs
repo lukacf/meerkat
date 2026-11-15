@@ -102,10 +102,13 @@ async fn a_retire_that_outlives_its_caller_budget_stays_owned_and_settles() {
     let gate = service.install_non_reentrant_turn_finalization_gate();
     let held = gate.lock_owned().await;
 
-    let error = tokio::time::timeout(STEP, handle.retire(identity.clone()))
-        .await
-        .expect("the caller's wait ends at its budget")
-        .expect_err("the boundary is held past the caller's budget");
+    let error = tokio::time::timeout(
+        past_window(crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        handle.retire(identity.clone()),
+    )
+    .await
+    .expect("the caller's wait ends at its budget")
+    .expect_err("the boundary is held past the caller's budget");
     match &error {
         MobError::MemberRetirementInProgress { stage, .. } => {
             assert_ne!(
@@ -210,11 +213,14 @@ async fn shutdown_interrupts_an_in_flight_retirement_and_reports_it() {
     let retire_handle = handle.clone();
     let retire_identity = identity.clone();
     let retire = tokio::spawn(async move { retire_handle.retire(retire_identity).await });
-    let error = tokio::time::timeout(STEP, retire)
-        .await
-        .expect("the caller's wait ends at its budget")
-        .expect("join")
-        .expect_err("the boundary is held");
+    let error = tokio::time::timeout(
+        past_window(crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT),
+        retire,
+    )
+    .await
+    .expect("the caller's wait ends at its budget")
+    .expect("join")
+    .expect_err("the boundary is held");
     assert!(error.is_retirement_in_progress(), "{error:?}");
 
     let report = tokio::time::timeout(

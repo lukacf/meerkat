@@ -26,8 +26,8 @@ fn deadline() -> std::time::Instant {
 const DESTROY_GUARD: Duration = Duration::from_mins(2);
 
 /// Destroy `handle`'s mob to its terminal report. A member's archive slower
-/// than the retirement budget its disposal waits for (2 s in tests, which a
-/// loaded run exceeds) leaves the destroy Incomplete while the archive keeps
+/// than the retirement budget its disposal waits for (10 s in tests, which a
+/// starved run can exceed) leaves the destroy Incomplete while the archive keeps
 /// running in its process-owned task. The destroy's contract is to be retried
 /// ([`MobHandle::destroy`]), and a retry finds the archive done. Only that
 /// Incomplete is retried, within [`DESTROY_GUARD`]; any other answer fails
@@ -1261,8 +1261,8 @@ async fn a_history_reader_recovers_a_genuine_scope_after_its_member_retired() {
     )
     .await;
     // A plain `retire` answers typed `MemberRetirementInProgress` once its
-    // 2 s test budget elapses while the saga keeps running, which a loaded
-    // in-process run reaches; join the saga to its terminal reply instead.
+    // test-build budget elapses while the saga keeps running, which a starved
+    // in-process run can reach; join the saga to its terminal reply instead.
     retire_to_terminal(fixture.handle(), &fixture.identity)
         .await
         .expect("retire the member to its terminal");

@@ -538,17 +538,21 @@ async fn eight_adopted_identities_converge_together_while_status_commits_hold_th
 }
 
 /// Eight adopted identities reconcile at once while every convergence-status
-/// commit holds mob.db's write lock for 300 ms, for 15 s; then the hold
-/// ends. Under that load a member retirement runs past the 2 s budget its
-/// reconcile pass gave it (test builds) after the retirement durably
+/// commit holds mob.db's write lock for 300 ms, for 13 s longer than the
+/// retirement budget of the build; then the hold ends. Under that load a
+/// member retirement runs past the budget its reconcile pass gave it
+/// (`MEMBER_RETIRE_TOTAL_TIMEOUT`) after the retirement durably
 /// started. Identity reconciliation owns such a retirement until it
-/// settles, so every identity converges once the load ends, within 60 s of
-/// the adoptions.
+/// settles, so every identity converges once the load ends, within 45 s of
+/// the hold's end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn identities_whose_retirement_outruns_its_budget_converge_once_the_load_ends() {
     const IDENTITIES: usize = 8;
-    const HOLD_FOR: Duration = Duration::from_secs(15);
-    const BOUND: Duration = Duration::from_mins(1);
+    // 15 s when the budget was 2 s: the hold follows the budget, so a
+    // retirement started under the load still outruns it.
+    const HOLD_FOR: Duration = Duration::from_secs(13)
+        .saturating_add(crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT);
+    const BOUND: Duration = HOLD_FOR.saturating_add(Duration::from_secs(45));
     let mob = sqlite_mob("retirement-outruns-budget").await;
     let members: Vec<AgentIdentity> = (1..=IDENTITIES)
         .map(|index| AgentIdentity::from(format!("worker-{index}")))

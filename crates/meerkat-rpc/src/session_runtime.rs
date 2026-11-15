@@ -9966,9 +9966,12 @@ impl SessionRuntime {
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         // AN ADMISSION RESTRICTION, NOT THE DESIGN. A level is judged before
-        // admission and again when the turn starts. Today a level refused
-        // at a turn's start is a failed start, and a failed start retires
-        // the session's runtime registration with every input queued on it.
+        // admission and again when the turn starts. A level refused at a
+        // turn's start ends that turn alone while the session is live, but
+        // it is then refused only after the turn was stored and queued, on
+        // an identity its sender did not see; and on a session that is not
+        // live at the refusal the runtime registration is still retired
+        // with every input queued on it.
         // So a turn whose start could be judged on another identity than
         // its admission (anything queued ahead of it can change the
         // session's model) must not be queued: on a session that holds a
@@ -9979,9 +9982,8 @@ impl SessionRuntime {
         // admitted (`TurnLevelAdmission`). The emptiness
         // is the runtime's own answer, read under this lock, under which no
         // other turn request is admitted, and the level is judged again
-        // here against the identity as it is now. This restriction goes
-        // when the machine can refuse such a turn at its start without
-        // ending the session's other inputs.
+        // here against the identity as it is now. The restriction stands
+        // until such a turn can be queued and judged where it starts.
         if overrides
             .as_ref()
             .is_some_and(Self::turn_overrides_name_llm_identity)
@@ -43358,9 +43360,9 @@ mod tests {
     /// another turn of the session runs, is not queued behind that turn: it
     /// is answered that the session is busy, while the turn runs, and admits
     /// nothing. The same request sent again when the session is idle runs.
-    /// (Until a level refused at a turn's start no longer ends the session's
-    /// other inputs, a turn that changes the level is admitted only on a
-    /// session with no unfinished input.) The level is named in the field
+    /// (A turn that changes the level is admitted only on a session with no
+    /// unfinished input, so that it is never refused at its start behind
+    /// other work.) The level is named in the field
     /// itself and inside `provider_params`: both are answered the same.
     #[tokio::test]
     async fn a_turn_that_sets_a_level_on_a_busy_session_is_answered_busy_and_runs_when_sent_again()
@@ -46703,14 +46705,18 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(
-            session.client.calls.load(AtomicOrdering::SeqCst),
-            requests,
-            "the refused turn made no model request"
-        );
-        assert_eq!(
             session.facts_after_the_failed_turn(queued).await,
             FailedStartFacts::nothing_lost(),
             "the refused turn was answered {refused:?}"
+        );
+        // Counted once the queued input and the next turn have both been
+        // answered, so nothing of the session is still running and the
+        // count is final: each of the two made one model request, and a
+        // third would be the refused turn's.
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            requests + 2,
+            "the refused turn made no model request"
         );
     }
 

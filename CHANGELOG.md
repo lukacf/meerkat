@@ -50,6 +50,15 @@ them.
   `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
   read the binding file. See Security and the Upgrade notes.
 
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::create_store_owned_identities`,
+  `MobHandle::update_store_owned_identity` and `MobHandle::adopt_identity`
+  refuse `MobError::ApprovalBranchReserved` for a record that would take
+  an approval branch's label `decision.approval_branch` or its identity
+  prefix `approval-branch-`. 0.9.11 through 0.9.14 accepted such a record
+  from these three calls (from a create, for an identity it leaves
+  unseated). See Fixed and the Upgrade notes.
+
 - Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
   `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
   field and two inputs, and its public types follow.

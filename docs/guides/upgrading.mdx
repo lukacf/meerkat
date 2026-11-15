@@ -408,6 +408,28 @@ route (the four differences are listed under Changed in the changelog).
   the model, which can be fewer than the provider's own API accepts.
 - **Spelling.** The neutral level is `xhigh` only. The Claude-specific
   effort keeps accepting `xhigh` and `x_high`.
+- **The price of holding a level (JSON-RPC).** From 0.9.15, on a session
+  that holds a provider-neutral level, anything that changes the model
+  identity (the
+  model, the provider, the self-hosted server, the provider params, the
+  auth binding, or the level itself: set, change, clear) needs an idle
+  session: sent while another turn of the session runs or is queued, such
+  a `turn/start` or `mob/turn_start` is not queued, it is answered
+  `-32002` (`SESSION_BUSY`) with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
+  stores nothing. So a client that sets a level once and then varies
+  `provider_params` per turn (a temperature, say) is answered busy
+  whenever another turn runs or is queued: wait for the running turn's
+  answer, then send the request again. Naming a field counts as changing
+  it, also with the value the session already has. Plain turns and
+  repeats of the level with the field `reasoning_effort` queue, and that
+  is the only repeat: a level named inside `provider_params` is never
+  one. A mob member built from a profile
+  whose `provider_params` carry a level holds that level. A session that
+  holds no provider-neutral level queues everything as on 0.9.14, except
+  a turn that sets a level. The table is in the
+  [JSON-RPC reference](/api/rpc#model-settings-on-a-busy-session). A
+  later release is planned to queue these turns.
 - **Older servers.** A server before 0.9.15 refuses the `reasoning_effort`
   field on `turn/start` and `mob/turn_start` and ignores it on
   `session/create` and in REST bodies. The nested key
@@ -428,11 +450,42 @@ route (the four differences are listed under Changed in the changelog).
   or TypeScript SDK older than 0.9.15 raises `UNKNOWN_EVENT_TYPE` on it,
   wherever the level was set: on a request, by another client or in a mob
   profile. A session without a level emits no such event.
-- **The flat key.** From 0.9.15, `provider_params.reasoning_effort` on the wire is
-  read as the provider-neutral level and judged. 0.9.14 ignored it in a
-  REST `POST /sessions` body, on `mob/turn_start` and in a mob profile sent
-  to `mob/create`, so a client that sent the key there by mistake can
-  be refused from 0.9.15. A schedule's session settings do not take the
+- **The flat key: check before upgrading.** From 0.9.15,
+  `provider_params.reasoning_effort` on the wire is read as the
+  provider-neutral level and judged. On 0.9.14 the key did nothing in
+  five places, where it was accepted and dropped: a mob profile sent to
+  `mob/create`, `mob/spawn`'s `override_profile`, a `mob/turn_start`
+  request, a REST `POST /sessions` body, and a profile or definition an
+  agent's mob tools write (by a run on the published 0.9.14 binaries for
+  `mob/create`, `mob/spawn`'s `override_profile`, `mob/turn_start`, REST
+  `POST /sessions` and the `mob_create` tool; the agents' other mob tools:
+  not run, by reading the source; the CLI's mob verbs: not determined). A
+  Meta 0.9.14 gateway refuses a `mob.toml` profile with the key when it
+  starts, so Meta definition files are not a sixth place. Before
+  upgrading, look for the key in those five places. Nothing a 0.9.14
+  server keeps shows the key for the first four: it was dropped when the
+  request was read, so no stored mob, session, history or log holds it.
+  Search what sends those requests: your client's code, your mob
+  definition files and the SDK calls that pass `provider_params`. For the
+  fifth, read the transcripts of agents that have mob tools: the tool call
+  and its arguments are in the calling agent's history. From 0.9.15 it
+  sets a level there:
+  either remove it, or accept the level and the busy rule for those
+  members. If it stays: a value that is no level is refused when the
+  request is read; a profile that carries the key beside a different
+  provider effort, a thinking budget, a thinking type the model does not
+  accept with the level, a raw reasoning body or reasoning turned off, or
+  for a model whose route does not take the level, fails that member's
+  build; a `mob/turn_start` that carries the key, sent to a busy member,
+  is answered `-32002` (`SESSION_BUSY`) where 0.9.14 ignored the key and
+  queued the turn; and the members built from such a profile hold a
+  level, so a change of their model identity sent while they are busy is
+  answered busy where 0.9.14 queued it (see "The price of holding a
+  level" above). A mob already stored by 0.9.14 keeps no level: only a
+  definition or request sent again sets one. A level in a profile is
+  also the stored form that the rollback passage of this page warns about
+  (the passage that begins "To keep the option of rolling back").
+  A schedule's session settings do not take the
   key in 0.9.15: a schedule whose `create` spec carries it is refused when
   it is created or updated (0.9.14 refused it there as an unknown field).
   A `reasoning_effort` written directly in a schedule's `create` spec or on
@@ -1249,9 +1302,10 @@ What no step removes (beside the event replay above):
 
 - **The record of a turn that was admitted and then refused for its
   level.** A turn that asks for a level its route refuses stores nothing
-  0.9.14 cannot read: it is refused when a session is created, or at the
-  turn's start, on a live session and on a stored one, where the stored
-  input ends as abandoned with the reason `stopped` (confirmed by a run).
+  0.9.14 cannot read: it is refused when a session is created, or before
+  the turn's input is stored, on a live session and on a stored one; a
+  turn judged only at its start is refused there, and its stored input
+  ends as abandoned with the reason `stopped` (confirmed by a run).
   The record is another case: a turn is admitted, and its request is then
   refused, before anything is sent to the model, because the session
   holds a level that its model does not support. The shape that was run:

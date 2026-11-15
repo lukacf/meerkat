@@ -441,9 +441,9 @@ async fn a_lift_whose_plan_reads_a_slow_store_answers_without_a_stall() {
         .await;
     assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
     // The obligation scan, and each member's read in the verified pass,
-    // answer after two fifths of the budget: each within the budget, the
-    // three beyond it.
-    let slow_read_ms = lift_inactivity_budget_ms() * 2 / 5;
+    // answer after three fifths of the budget: each within the budget, any
+    // two of them beyond it.
+    let slow_read_ms = lift_inactivity_budget_ms() * 3 / 5;
     crate::runtime::boot_plan::delay_next_boot_obligation_scan_for_test(
         handle.mob_id(),
         Duration::from_millis(slow_read_ms),

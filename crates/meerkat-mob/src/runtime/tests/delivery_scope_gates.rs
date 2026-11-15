@@ -26,8 +26,9 @@ fn deadline() -> std::time::Instant {
 const DESTROY_GUARD: Duration = Duration::from_mins(2);
 
 /// Destroy `handle`'s mob to its terminal report. A member's archive slower
-/// than the retirement budget its disposal waits for (10 s in tests, which a
-/// starved run can exceed) leaves the destroy Incomplete while the archive keeps
+/// than the retirement budget its disposal waits for
+/// (`MEMBER_RETIRE_TOTAL_TIMEOUT` of the test build, which a starved run can
+/// exceed) leaves the destroy Incomplete while the archive keeps
 /// running in its process-owned task. The destroy's contract is to be retried
 /// ([`MobHandle::destroy`]), and a retry finds the archive done. Only that
 /// Incomplete is retried, within [`DESTROY_GUARD`]; any other answer fails

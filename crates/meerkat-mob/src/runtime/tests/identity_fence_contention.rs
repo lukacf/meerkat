@@ -17,8 +17,9 @@ const STATUS_COMMIT_HOLD: Duration = Duration::from_millis(300);
 
 /// How long the status written right before an identity's fenced
 /// registration holds mob.db's write lock, eight identities at once. Eight
-/// such commits stay inside member retirement's owner deadline (2 s in test
-/// builds), which runs in the same passes.
+/// such commits stay inside member retirement's owner deadline
+/// (`MEMBER_RETIRE_TOTAL_TIMEOUT` of the test build), which runs in the same
+/// passes.
 const REGISTRATION_STATUS_HOLD: Duration = Duration::from_millis(200);
 
 /// A mob on SQLite mob storage whose sessions live in a whole-blob SQLite
@@ -195,6 +196,46 @@ async fn wait_converged(
         }
         if converged.iter().all(Option::is_some) || started.elapsed() >= bound {
             return converged;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Polls the members' retirement settlements until one retirement has run
+/// past `budget`, or `bound` passed since `started`. A retirement runs past
+/// its budget when the mob publishes it in progress and still publishes it
+/// in progress `budget` later: the budget it started with has ended by then.
+/// Returns that member and when, measured from `started`.
+async fn wait_for_a_retirement_past_its_budget(
+    mob: &SqliteMob,
+    members: &[AgentIdentity],
+    budget: Duration,
+    started: Instant,
+    bound: Duration,
+) -> Option<(AgentIdentity, Duration)> {
+    let mut in_progress_since: Vec<Option<Instant>> = vec![None; members.len()];
+    loop {
+        for (since, member) in in_progress_since.iter_mut().zip(members) {
+            let in_progress = mob
+                .handle
+                .retirement_settlement(member)
+                .is_some_and(|settlement| {
+                    matches!(
+                        settlement.current(),
+                        crate::runtime::RetirementSettlement::InProgress { .. }
+                    )
+                });
+            match (in_progress, *since) {
+                (true, None) => *since = Some(Instant::now()),
+                (true, Some(first_seen)) if first_seen.elapsed() > budget => {
+                    return Some((member.clone(), started.elapsed()));
+                }
+                (true, Some(_)) => {}
+                (false, _) => *since = None,
+            }
+        }
+        if started.elapsed() >= bound {
+            return None;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -538,21 +579,23 @@ async fn eight_adopted_identities_converge_together_while_status_commits_hold_th
 }
 
 /// Eight adopted identities reconcile at once while every convergence-status
-/// commit holds mob.db's write lock for 300 ms, for 13 s longer than the
-/// retirement budget of the build; then the hold ends. Under that load a
-/// member retirement runs past the budget its reconcile pass gave it
-/// (`MEMBER_RETIRE_TOTAL_TIMEOUT`) after the retirement durably
-/// started. Identity reconciliation owns such a retirement until it
+/// commit holds mob.db's write lock for three twentieths of the retirement
+/// budget of the build (`MEMBER_RETIRE_TOTAL_TIMEOUT`; 300 ms of the 2 s the
+/// row was written against). Under that load a member retirement runs past
+/// the budget its reconcile pass gave it after the retirement durably
+/// started; the row keeps the load until it has seen one do so, and asserts
+/// that it did. Identity reconciliation owns such a retirement until it
 /// settles, so every identity converges once the load ends, within 45 s of
-/// the hold's end.
+/// its end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn identities_whose_retirement_outruns_its_budget_converge_once_the_load_ends() {
     const IDENTITIES: usize = 8;
-    // 15 s when the budget was 2 s: the hold follows the budget, so a
-    // retirement started under the load still outruns it.
-    const HOLD_FOR: Duration = Duration::from_secs(13)
-        .saturating_add(crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT);
-    const BOUND: Duration = HOLD_FOR.saturating_add(Duration::from_secs(45));
+    /// How long the row waits under the load for a retirement to run past
+    /// its budget before it ends the load anyway.
+    const OVERRUN_BOUND: Duration = Duration::from_mins(2);
+    const CONVERGE_WITHIN: Duration = Duration::from_secs(45);
+    let budget = crate::runtime::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
+    let commit_hold = budget * 3 / 20;
     let mob = sqlite_mob("retirement-outruns-budget").await;
     let members: Vec<AgentIdentity> = (1..=IDENTITIES)
         .map(|index| AgentIdentity::from(format!("worker-{index}")))
@@ -561,7 +604,7 @@ async fn identities_whose_retirement_outruns_its_budget_converge_once_the_load_e
     for member in &members {
         sessions.push(spawn_member(&mob, member).await);
     }
-    hooks::hold_status_commits(&mob.mob_db, STATUS_COMMIT_HOLD, None);
+    hooks::hold_status_commits(&mob.mob_db, commit_hold, None);
 
     let started = Instant::now();
     futures::future::join_all(
@@ -571,15 +614,25 @@ async fn identities_whose_retirement_outruns_its_budget_converge_once_the_load_e
             .map(|(member, session_id)| adopt(&mob, member, session_id)),
     )
     .await;
-    tokio::time::sleep(HOLD_FOR.saturating_sub(started.elapsed())).await;
+    let outran =
+        wait_for_a_retirement_past_its_budget(&mob, &members, budget, started, OVERRUN_BOUND).await;
     hooks::release(&mob.mob_db);
-    let converged = wait_converged(&mob, &members, started, BOUND).await;
+    let load_ended = started.elapsed();
+    let converged = wait_converged(&mob, &members, started, load_ended + CONVERGE_WITHIN).await;
     let unconverged = unconverged_statuses(&mob, &members, &converged).await;
-    println!("converged after (from the adoptions): {converged:?}");
+    println!(
+        "a retirement past its budget of {budget:?}: {outran:?}; the load ended {load_ended:?} \
+         after the adoptions; converged after (from the adoptions): {converged:?}"
+    );
     assert!(
         converged.iter().all(Option::is_some),
-        "every identity converges within {BOUND:?} of the adoptions, the hold ending at \
-         {HOLD_FOR:?}:\n{unconverged}"
+        "every identity converges within {CONVERGE_WITHIN:?} of the load's end, {load_ended:?} \
+         after the adoptions:\n{unconverged}"
+    );
+    assert!(
+        outran.is_some(),
+        "the row's premise: under status commits held {commit_hold:?} each, a member retirement \
+         runs past its budget of {budget:?}; none was seen to within {OVERRUN_BOUND:?}"
     );
     mob.handle.shutdown().await.expect("shut the mob down");
 }

@@ -2908,7 +2908,8 @@ async fn a_retire_during_a_wake_answers_its_callers_member_retiring() {
     );
 
     fixture.preparer.open_gate();
-    // The retire answers within its own budget (10 s in a test build), and
+    // The retire answers within its own budget (`MEMBER_RETIRE_TOTAL_TIMEOUT`
+    // of the test build), and
     // the stages after the wake's provision rolls back can outlast it under
     // load. A retirement still running then answers that it is in progress
     // (or, not yet admitted at the budget, that its admission is pending)

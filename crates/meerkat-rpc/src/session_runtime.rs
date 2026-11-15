@@ -7818,9 +7818,9 @@ impl SessionRuntime {
                       auth binding or the level (sets, changes or clears it; a level inside \
                       provider_params counts as a change) needs an idle session; so does a \
                       turn that sets a level on a session that holds none. Send it again \
-                      when the session is idle. An event queued on an idle session counts \
-                      as unfinished work: nothing is running to wait for, so send a plain \
-                      turn first, or set the level when the session is created"
+                      when the session has no unfinished work. An event queued on an idle \
+                      session counts as unfinished work: nothing is running to wait for, so \
+                      send a plain turn first, or set the level when the session is created"
                 .to_string(),
             data: Some(serde_json::json!({
                 "kind": "reasoning_effort_change_needs_idle_session"
@@ -43712,9 +43712,9 @@ mod tests {
         );
         assert!(
             busy.message.contains(
-                "An event queued on an idle session counts as unfinished work: nothing is \
-                 running to wait for, so send a plain turn first, or set the level when the \
-                 session is created"
+                "Send it again when the session has no unfinished work. An event queued on \
+                 an idle session counts as unfinished work: nothing is running to wait for, \
+                 so send a plain turn first, or set the level when the session is created"
             ),
             "the busy text names this case and what to do: {}",
             busy.message

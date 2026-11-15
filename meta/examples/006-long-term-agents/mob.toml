@@ -1,0 +1,21 @@
+# The profiles the agents of this example run on. An agent's profile gives it
+# its model and tools; the agents themselves are declared in the roster
+# (scout) or created at run time (editor).
+[mob]
+id = "long-term-agents"
+
+[profiles.researcher]
+model = "claude-haiku-4-5"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.researcher.tools]
+comms = true
+
+[profiles.writer]
+model = "claude-haiku-4-5"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.writer.tools]
+comms = true

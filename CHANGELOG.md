@@ -3052,6 +3052,20 @@ them.
   a record still destroys a mob with no members that took the id.
   Affected: 0.8.42 through 0.9.14.
 
+- `meerkat-store`, `rkat-rpc`, `rkat`, `rkat-rest`, `rkat-mcp`: on Windows
+  the first use of a new realm failed with "IO error: Access is denied.
+  (os error 5)". The JSON-RPC server started without `--realm` uses a new
+  realm at every start, so `rkat-rpc` failed at every start; the other
+  binaries failed the same way at their first use of a realm that did not
+  exist yet. After writing a new realm's manifest the store opened the
+  realm directory as a file to sync it, which Windows refuses. That
+  directory sync now runs on Unix only, as the store's other directory
+  syncs already did. The same step after a write of a session's event-log
+  head is guarded the same way: on Windows the head was written, but the
+  write was reported as failed and logged as a warning. Linux and macOS
+  are unchanged.
+  Affected: 0.9.14 and earlier releases.
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains

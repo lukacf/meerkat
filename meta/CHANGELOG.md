@@ -330,6 +330,9 @@ Security, Upgrade and Changed.
   request whose origin the Console does not know is shown to nobody there
   and decided by nobody there. Its host decides or withdraws it, or it runs
   into its timeout.
+- In 0.9.11 through 0.9.14, on a console that does not require sign-in and
+  whose access rules are off, a caller who sent no token could read the
+  conversation of a private side chat after that side chat had ended.
 - In 0.9.11 through 0.9.14 the session of a private side chat that had ended
   could be attached again as a shared member
   (`meta/attach_existing_session`, or `meta/ensure_member` with

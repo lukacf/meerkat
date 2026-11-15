@@ -70,20 +70,17 @@ Security, Upgrade and Changed.
   `meerkat::tools::shared_name`: "more than one part of a tool surface
   lists this tool name: it is offered by none of them", with `tool`, the
   two sources in `listed_by`, and the member's session and comms name in
-  `tools_of`). **Check before upgrading:** on 0.9.14,
-  `meta/identity/resolved_tools` (Python `identity_resolved_tools`,
-  TypeScript `identityResolvedTools`) lists the tools an agent's
-  member offers its model, without waking it. An empty list is no answer
-  when no build of the member is recorded yet: the method then answers
-  `tools_source: "no_build_recorded"`, which those two SDK methods do not
-  show; read the source with Python `identity_resolved_tools_detail` or
-  TypeScript `identityResolvedToolsDetail`, build the member first with
-  `meta/identity/warm`, or read the server entries of its profile. A
-  member whose list has `ask_user` is affected when the tool comes from an
-  MCP server of its profile (`[[profiles.<name>.tools.mcp_servers]]`); it
-  keeps the tool when its host supplies it as one of the build's external
-  tools. An MCP server attached to a member's live session that offers the
-  name is in the same case as a profile's. **Do:** give
+  `tools_of`). **Check before upgrading:** the check is the
+  configuration. A member is affected when an MCP server of its profile
+  (`[[profiles.<name>.tools.mcp_servers]]`), or one attached to its live
+  session, offers a tool named `ask_user` and the server's entry maps that
+  tool to no other name (`tool_names`): ask the server for its tool list,
+  or read its documentation. The member's tool list does not answer the
+  question: on 0.9.14 `meta/identity/resolved_tools` does not list the
+  tools of a profile's server (the list then holds `tool_catalog_search`
+  and `tool_catalog_load`), so a list without the name proves nothing. A
+  member whose host supplies a tool named `ask_user` as one of its build's
+  external tools keeps it. **Do:** give
   the server's tool another name: map it in the profile
   (`tool_names = { ask_user = "ask_operator" }` on the server's entry), or
   rename it on the server. The member then has the server's tool under the
@@ -1376,9 +1373,12 @@ Security, Upgrade and Changed.
   cursor, and the request's filters choose among the decisions it may see.
   `meta/decisions/list`, `get`, `rendering` and `withdraw` on the Console
   tell only an access administrator of rows the decision store cannot
-  decode. A caller who administers decisions by a rule no longer reads them:
+  decode (a caller allowed `decisions.admin` who is a person listed under
+  `admins`, or any caller allowed it on a Console that identifies no
+  person). A caller who administers decisions by a rule no longer reads them:
   `unreadable` is empty for it, and by its id such a row is answered as an
-  id that names no decision.
+  id that names no decision; to keep reading them, list that person under
+  `admins`.
 
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is

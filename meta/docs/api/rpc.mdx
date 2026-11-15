@@ -3062,7 +3062,10 @@ control is enforced, and no access rule widens it:
   a person decide it: a person cannot approve their own request;
 - anyone else reads it as a decision that is not there
   (`data.kind = "decision_not_found"`); an anonymous caller on an open Console
-  sees no decision.
+  sees no decision;
+- from 0.9.15 a question set (kind `ask_user.questions`) is read, and
+  withdrawn, only by a caller who may view its asking agent; to anyone
+  else, an administrator included, it is a decision that is not there.
 
 While access control is enforced, the reads need `decisions.view` and the
 withdraw `decisions.admin`; a caller without them is refused `-32030`
@@ -3074,15 +3077,21 @@ console change: one made for another caller than its token
 (`expected_caller_scope`) is refused `-32056` (`data.kind = "caller_changed"`),
 one whose caller's login ended before it is made `-32056`
 (`data.kind = "caller_not_current"`), and the console audit log records it.
-A list pages over what the caller may
+From 0.9.15 a list pages over what the caller may
 see: a decision it may not see fills no place in a page and is never a
-cursor. An administrator reads every decision its filters name, and any
+cursor. An administrator reads every decision its filters name, except a
+question set whose asking agent it may not view, and any
 other caller reads the decisions of the approver ids it holds and its own
 requests, and learns of no other decision. `meta/decisions/rendering` for a
 caller that may see only the status is refused `-32030`
-(`data.kind = "content_not_visible"`). Rows the store cannot decode are
-listed only to an access administrator; to any other caller such a row reads
+(`data.kind = "content_not_visible"`). From 0.9.15 rows the store cannot
+decode are listed only to an access administrator: a caller allowed
+`decisions.admin` who is a person listed under `admins`, or any caller
+allowed `decisions.admin` on a Console that identifies no person. To any
+other caller such a row reads
 as an id that names no decision, on `get`, `rendering` and `withdraw` alike.
+On 0.9.14 an administrator's list is the store's own page and cursor, and
+those rows are listed to every caller allowed `decisions.admin`.
 While the runtime keeps decisions,
 `meta/capabilities` lists the decision methods the caller may call. The
 Approvals panel lists the open decisions on its Pending tab, read only: each

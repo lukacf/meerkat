@@ -698,23 +698,18 @@ under `## [0.9.15]`.
   tool surface lists this tool name: it is offered by none of them" and
   the fields `tool` (`ask_user`), `listed_by` (the two sources, as
   `Mcp:<server name>, Builtin:ask_user`) and `tools_of` (the member's
-  session and comms name). **Check before upgrading:** on 0.9.14,
-  `meta/identity/resolved_tools` with `{"identity": "<agent>"}` (Python
-  `identity_resolved_tools`, TypeScript `identityResolvedTools`) lists the
-  tool names an agent's member offers its model, without waking it. An
-  empty list is no answer when no build of the member is recorded yet: the
-  method then answers `tools_source: "no_build_recorded"`, which those two
-  SDK methods do not show (they return the names only). Read the source
-  with Python `identity_resolved_tools_detail` or TypeScript
-  `identityResolvedToolsDetail`, build the member first with
-  `meta/identity/warm`, or read the server entries of its profile. No
-  0.9.14 member has a stock `ask_user`, so a member whose list has the name
-  has it from its own configuration: it is affected when the tool comes
-  from an MCP server of its profile
-  (`[[profiles.<name>.tools.mcp_servers]]`), and keeps the tool when its
-  host supplies it among the build's external tools. An MCP server
-  attached to a member's live session that offers the name is in the same
-  case as a profile's. **Do:** give the
+  session and comms name). **Check before upgrading:** the check is the
+  configuration. A member is affected when an MCP server of its profile
+  (`[[profiles.<name>.tools.mcp_servers]]`), or one attached to its live
+  session, offers a tool named `ask_user` and the server's entry maps that
+  tool to no other name (`tool_names`): ask the server for its tool list,
+  or read its documentation. The member's tool list does not answer the
+  question: on 0.9.14 `meta/identity/resolved_tools` does not list the
+  tools of a profile's server (the list then holds `tool_catalog_search`
+  and `tool_catalog_load`, through which the member reaches them), so a
+  list without the name proves nothing. A member whose host supplies a
+  tool named `ask_user` among its build's external tools keeps it.
+  **Do:** give the
   server's tool another name before the upgrade: map it in the profile, on
   the server's entry (`tool_names = { ask_user = "ask_operator" }`), or
   rename it on the server. The member then has the server's tool under the
@@ -733,10 +728,16 @@ under `## [0.9.15]`.
   `ask_user.questions`. On the stdio gateway, which the SDKs call, nothing
   else changes. On the Console a page now holds only decisions its caller
   may see, up to its limit, and `unreadable` is filled for an access
-  administrator only: the same form with other rows for some callers, not a
-  new member. **Do:** nothing for a client that follows `next_after`; a
+  administrator only (a caller allowed `decisions.admin` who is a person
+  listed under `admins`, or any caller allowed it on a Console that
+  identifies no person; on 0.9.14 every caller allowed `decisions.admin`):
+  the same form with other rows for some callers, not a new member. A
+  question set is read on the Console only by a caller who may view its
+  asking agent. **Do:** nothing for a client that follows `next_after`; a
   Rust client that matches `WireDecisionEvidence::Human` field by field adds
-  `answer` or `..`.
+  `answer` or `..`; a person who is allowed `decisions.admin` by a rule and
+  is not listed under `admins` no longer sees `unreadable`: list that
+  person under `admins`.
 - Rust: `identity_creation::ChangeClass` gains the variants `Archive` (an
   archive and an unarchive) and `Adopt`. **Do:** add both arms to each
   exhaustive match on it.
@@ -1152,7 +1153,7 @@ past that member, as the wire type does, but it also checks the stored
 evidence against the digest the decision binds, and evidence read without
 the answers does not match it: it reports
 that one decision unreadable (on the stdio gateway, and on the Console to
-an access administrator, it is listed as unreadable; nothing
+a caller allowed `decisions.admin`, it is listed as unreadable; nothing
 executes it) and reads every other decision as before; it does not change
 the row, which reads again after the return to 0.9.15. A set that was
 dismissed, withdrawn or timed out carries no answers and is read as any

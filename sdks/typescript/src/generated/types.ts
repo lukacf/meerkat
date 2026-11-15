@@ -1215,8 +1215,13 @@ export interface WireAskUserAnswerUnknown {
 
 export type WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown;
 
+export interface WireAskUserQuestionAnswer {
+  answer: WireAskUserAnswer;
+  question_id: string;
+}
+
 export interface WireDecisionAnswerAskUser {
-  answers: Record<string, unknown>[];
+  answers: WireAskUserQuestionAnswer[];
   kind: "ask_user";
 }
 
@@ -2207,11 +2212,6 @@ export interface WirePresentationRecord {
   message_ref: string;
   parts_shown: WireCanonicalPart[];
   subject_digest: string;
-}
-
-export interface WireAskUserQuestionAnswer {
-  answer: WireAskUserAnswer;
-  question_id: string;
 }
 
 export interface WireDecisionOutcome {

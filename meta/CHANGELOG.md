@@ -3070,6 +3070,20 @@ Security, Upgrade and Changed.
   events. Where the events are not queried, declare `event_log` with
   `storage = "null"`. Read from the source, not run.
 
+- A profile that lists `ask_user` in `tools.deny` cannot be used for a member
+  whose host decides the member's tool surface itself (a host that installs
+  a member registration hook, as Connect's native host does). Meta mounts no
+  `ask_user` on such a build, so the deny names a tool that is in none of
+  the profile's tool vocabularies, and the member's build is refused:
+  `profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`
+  (by a run on this release's code). Leave `ask_user` out of `tools.deny` in
+  a profile used for such members; they are not offered the tool. By a
+  reading of the source, not by a run: the same refusal meets a member whose
+  host supplies its own tool named `ask_user` among the build's external
+  tools. Where these notes and the upgrade guide advise the deny, they speak
+  of members of a Meta gateway and of a host's own Meta runtime, where it
+  works as described. A fix is planned for the next release.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

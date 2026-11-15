@@ -720,7 +720,9 @@ under `## [0.9.15]`.
   tool list gains one tool at the upgrade, also on a runtime where no
   person can be asked (no Console, or one nobody can decide on): a call
   there answers `no_human_surface`. A profile that lists the tool in
-  `tools.deny` (`deny = ["ask_user"]`) keeps it from its members: their
+  `tools.deny` (`deny = ["ask_user"]`) keeps it from its members (not in a
+  profile used for members whose host decides their tool surface: see Known
+  limitations): their
   model is not offered it, and a call it makes anyway is refused as not
   allowed by policy; a spawn's deny policy does the same for one member. A
   member whose host already supplies a tool named `ask_user` among its
@@ -750,7 +752,9 @@ under `## [0.9.15]`.
   name. The member builds and runs, and its other
   tools are offered. On 0.9.15 no setting keeps a profile server's tool
   under the name `ask_user` on a Meta member, and
-  `tools.deny = ["ask_user"]` is no way out: it hides the name whatever
+  `tools.deny = ["ask_user"]` (not in a profile used for members whose host
+  decides their tool surface: see Known limitations) is no way out: it
+  hides the name whatever
   offers it, and does not bring the server's tool back. It is not silent:
   once the server has connected, each build of such a member logs one
   warning on the gateway's stderr, at the default log filter, with the

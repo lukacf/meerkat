@@ -4,8 +4,9 @@
 //!
 //! - [`hold_ask_user`] holds the decision of one `ask_user` call: its body
 //!   `ask_user.questions.v1` ([`AskUserBody`]: the asking agent and the
-//!   typed question set), its subject key `{asker}/{run id}/{call id}` (so
-//!   a replayed call answers the decision it held), the fixed approver id
+//!   typed question set), its subject key ([`ask_user_subject_key`]: the
+//!   asker, the run id and the call id, so a replayed call answers the
+//!   decision it held), the fixed approver id
 //!   [`ASK_USER_APPROVER_ID`], the requester the host names, a plain-text
 //!   rendering of the questions, and the deadline the call's timeout gives.
 //! - A person answers by approving the decision with typed answers
@@ -82,6 +83,56 @@ pub const ASK_USER_APPROVER_ID: &str = "ask_user";
 /// Never in practice: the kind is a valid token.
 pub fn ask_user_questions_kind() -> Result<DecisionKind, DecisionContractError> {
     DecisionKind::new(ASK_USER_QUESTIONS_KIND)
+}
+
+/// What begins the bounded form of a question set's subject key
+/// ([`ask_user_subject_key`]).
+pub const ASK_USER_BOUNDED_SUBJECT_PREFIX: &str = "ask_user.call:";
+
+/// The subject key of the decision that holds the `ask_user` call `call_id`
+/// of the run `run_id`, asked by the agent `asker`: one call, one key, so a
+/// replayed call answers the decision it held. The key has two forms, and
+/// which one a call gets depends on the call alone:
+///
+/// - `{asker}/{run id}/{call id}`, whenever that text is a valid subject
+///   key (at most 1,024 bytes, no control character). It is the only form
+///   0.9.15 wrote, and it is kept byte for byte: the decision id derives
+///   from the key.
+/// - Otherwise the bounded form, 122 bytes for any call:
+///   `ask_user.call:{run id}:sha256:{digest}`. The digest is the SHA-256,
+///   in lowercase hex, of the asker, the run id's text and the call id, in
+///   that order, each preceded by its length in bytes as an 8-byte
+///   big-endian unsigned integer.
+///
+/// No key of one form equals a key of the other: the first form always
+/// holds its two `/`, the bounded form holds none. Two calls share a
+/// bounded key only when their three parts are equal, since each part is
+/// hashed with its length. The first form joins its parts as they are: two
+/// calls whose asker or call id holds `/{a run id}/` can share a key, and
+/// the second such hold is refused as a hold conflict, because its body
+/// names another asker.
+///
+/// # Errors
+/// Never in practice: the bounded form is a valid subject key for any call.
+pub fn ask_user_subject_key(
+    asker: &str,
+    run_id: &RunId,
+    call_id: &str,
+) -> Result<DecisionSubjectKey, DecisionContractError> {
+    if let Ok(verbatim) = DecisionSubjectKey::new(format!("{asker}/{run_id}/{call_id}")) {
+        return Ok(verbatim);
+    }
+    let run = run_id.to_string();
+    let mut parts = Vec::with_capacity(asker.len() + run.len() + call_id.len() + 24);
+    for part in [asker, run.as_str(), call_id] {
+        // A length always fits 64 bits on the targets this builds for.
+        parts.extend_from_slice(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        parts.extend_from_slice(part.as_bytes());
+    }
+    DecisionSubjectKey::new(format!(
+        "{ASK_USER_BOUNDED_SUBJECT_PREFIX}{run}:{}",
+        Sha256Digest::of(&parts)
+    ))
 }
 
 /// A question set could not be held, or a held one could not be read.
@@ -207,11 +258,14 @@ fn rendering_text(questions: &AskUserQuestionSet) -> String {
 /// and call id, with the same questions) answers the decision it held, as
 /// it stands, whatever the clock reads now: the deadline sealed at the
 /// first hold stays. The same call with other questions is refused as a
-/// hold conflict by the decision's machine.
+/// hold conflict by the decision's machine. A call is held whatever the
+/// length of its asker's key and of its call id: its subject key is bounded
+/// ([`ask_user_subject_key`]).
 ///
 /// # Errors
 /// [`AskUserError::Invalid`] for an empty asker, a timeout outside 60 to
-/// 604800 seconds, or a key, body or rendering a decision does not take;
+/// 604800 seconds, or a body or rendering a decision does not take (an
+/// asker's key so long that the body passes a decision's 256 KiB);
 /// the decision owner's refusals and failures ([`AskUserError::Decision`]).
 pub fn hold_ask_user(
     decisions: &DurableDecisionService,
@@ -235,8 +289,7 @@ pub fn hold_ask_user(
         ));
     }
     let kind = ask_user_questions_kind()?;
-    let subject_key =
-        DecisionSubjectKey::new(format!("{}/{}/{}", hold.asker, hold.run_id, hold.call_id))?;
+    let subject_key = ask_user_subject_key(&hold.asker, &hold.run_id, &hold.call_id)?;
     let decision_id = DecisionId::derive(&kind, &subject_key);
     let body = AskUserBody {
         body: ASK_USER_QUESTIONS_BODY.to_owned(),

@@ -35,6 +35,43 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-runtime`: `ask_user::ask_user_subject_key(asker, run_id,
+  call_id)` is the subject key of the decision that holds an `ask_user`
+  call, and `ask_user::ASK_USER_BOUNDED_SUBJECT_PREFIX` is what begins its
+  bounded form (see Fixed). A Rust caller that built
+  `{asker}/{run id}/{call id}` itself to find a call's decision, as the
+  module documentation of 0.9.15 described the key, calls the function
+  instead: for every call 0.9.15 held it returns the same key.
+
+### Fixed
+
+- `meerkat-runtime`: an `ask_user` call is held whatever the length of its
+  tool-call id and of the asking agent's key. In 0.9.15 a call whose asking
+  agent's key and tool-call id were together longer than 986 bytes (a model
+  provider that issues very long tool-call ids, or a long agent key), or
+  held a control character, was refused before its questions were held,
+  although its arguments were valid: the agent read an invalid-arguments
+  error (`invalid subject key`), nothing was held and no person was asked.
+  The cause: the decision that holds a question set is keyed by
+  `{asker}/{run id}/{call id}`, and a decision's subject key is at most
+  1,024 bytes without control characters. Such a call is now held under a
+  bounded key, `ask_user.call:{run id}:sha256:{digest}` (122 bytes; the
+  digest is the SHA-256 of the asker, the run id and the call id, each
+  preceded by its length in bytes as an 8-byte big-endian integer), and is
+  listed, answered, replayed and told its result as any other. Every call
+  0.9.15 held keeps its key and its decision id byte for byte, so the
+  question sets of a 0.9.15 store are found, listed, answered and settled as
+  before, and nothing is migrated. What a reader of decisions sees: for such
+  a call `subject_key` (`decision/list`, `decision/get`) reads the bounded
+  form, which names the run and not the asker or the call id; the asker
+  stays in the held request. The limit of a subject key is unchanged. A
+  0.9.15 host that opens a store with such a set reads it, lists it and
+  takes its answer; only a replay of that call is refused there, as in
+  0.9.15. Affected: 0.9.15 (the tool is new in 0.9.15). Measured by tests of
+  this change, with a 2,000-byte tool-call id and a 2,000-byte agent key.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

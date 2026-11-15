@@ -64,6 +64,36 @@ fn assert_bounded(decision: &StoredDecision, asker: &str, run_id: &RunId, call_i
     );
 }
 
+/// The key of a call is what its hold seals, in both forms: the verbatim
+/// text whenever a decision takes it as a subject key, the bounded form
+/// otherwise.
+#[test]
+fn the_key_of_a_call_is_what_its_hold_seals() {
+    let (_clock, service) = fixture();
+    let run_id = run();
+    let long = "c".repeat(2_000);
+    for (asker, call_id) in [
+        (ASKER, "call-1"),
+        (ASKER, long.as_str()),
+        (long.as_str(), "call-1"),
+        (ASKER, "call\n1"),
+        ("member:\u{7}planner", "call-1"),
+    ] {
+        let key = ask_user_subject_key(asker, &run_id, call_id).expect("the key");
+        let held =
+            hold_ask_user(&service, ASKED_AT, hold_for(asker, &run_id, call_id)).expect("the hold");
+        assert_eq!(held.descriptor.subject_key, key);
+        let verbatim = format!("{asker}/{RUN}/{call_id}");
+        if DecisionSubjectKey::new(verbatim.clone()).is_ok() {
+            assert_eq!(key.as_str(), verbatim);
+        } else {
+            assert!(key.as_str().starts_with(ASK_USER_BOUNDED_SUBJECT_PREFIX));
+            assert_eq!(key.as_str(), bounded_key(asker, &run_id, call_id));
+        }
+    }
+    assert_eq!(ASK_USER_BOUNDED_SUBJECT_PREFIX, "ask_user.call:");
+}
+
 /// The hold of a call exactly as 0.9.15 builds it: the verbatim key, the
 /// operation id named after the decision id it derives, the body, its
 /// digest, the rendering and the renderer.

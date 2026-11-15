@@ -5394,16 +5394,17 @@ async fn prepare_turn_state_for_primitive(
 /// Decide what becomes of a failed run's staged contributors, from the typed
 /// apply failure alone.
 ///
-/// Two failure classes refuse the release. One is a run whose consumer never
-/// began executing: there the loop dropped an `apply` whose in-flight fate it
-/// cannot observe, so returning a contributor to its work lane could have the
-/// instruction carried out twice. The other is a request the executor refused
-/// with nothing applied (the machine's cause `RequestRefused`, decided by the
-/// one mapping the failed run's machine input uses): the answer is the
-/// request's own, so a replay would be refused the same way up to the retry
-/// cap, and the contributors end once instead. Every other failure -
-/// including every other teardown reason - is an answer the executor gave,
-/// with nothing in flight, so replay repeats nothing.
+/// Exactly one failure class refuses the release here: a run whose consumer
+/// never began executing. There the loop dropped an `apply` whose in-flight
+/// fate it cannot observe, so returning a contributor to its work lane could
+/// have the instruction carried out twice. Every other failure - including
+/// every other teardown reason - is an answer the executor gave, with nothing
+/// in flight, so replay repeats nothing.
+///
+/// A request the executor refused with nothing applied is not decided here:
+/// the loop hands it over as replayable like every answered failure, and the
+/// failed-run realization ends its contributors when the cause the machine
+/// recorded with `RunFailed` is `RequestRefused`.
 ///
 /// `CoreExecutorTeardownReason` is `#[non_exhaustive]`, so this stays a
 /// `matches!` on the one reason rather than a `match` that would silently
@@ -5420,11 +5421,6 @@ fn failed_run_contributor_disposition(
         }
     ) {
         crate::meerkat_machine::FailedRunContributorDisposition::Terminalized
-    } else if let CoreExecutorError::ApplyFailed { cause } = error
-        && crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from(cause)
-            == crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RequestRefused
-    {
-        crate::meerkat_machine::FailedRunContributorDisposition::Refused
     } else {
         crate::meerkat_machine::FailedRunContributorDisposition::Replayed
     }

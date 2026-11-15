@@ -1434,8 +1434,55 @@ struct RefusingExecutor {
     failure: StartFailure,
 }
 
+/// Publisher of the terminals of directed inputs: it answers a receipt for
+/// each, so a session served by [`RefusingExecutor`] can take a directed
+/// input.
+struct TerminalPublisher;
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorPublicationHandle for TerminalPublisher {
+    async fn publish_interaction_terminals(
+        &self,
+        events: &[meerkat_core::event::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                    event,
+                    index as u64 + 1,
+                )
+            })
+            .collect()
+    }
+}
+
 #[async_trait::async_trait]
 impl CoreExecutor for RefusingExecutor {
+    fn publication_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>> {
+        Some(Arc::new(TerminalPublisher))
+    }
+
+    async fn publish_interaction_terminals(
+        &mut self,
+        events: &[meerkat_core::event::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        meerkat_core::lifecycle::CoreExecutorPublicationHandle::publish_interaction_terminals(
+            &TerminalPublisher,
+            events,
+        )
+        .await
+    }
+
     async fn apply(
         &mut self,
         run_id: RunId,
@@ -1619,6 +1666,14 @@ async fn a_turn_failing_at_its_start(
         )
         .await
         .expect("register the refusing executor");
+    if directed {
+        // A directed input is accepted only on a session whose runtime
+        // placement is bound.
+        machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("the session's bindings");
+    }
     let authority = session_authority(&machine, &session_id).await;
     let registration = machine
         .current_session_registration_witness(&session_id)

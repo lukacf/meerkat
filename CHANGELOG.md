@@ -157,7 +157,7 @@ them.
   copy `generated::meerkat::RuntimeApplyFailureCause`), gains
   `RequestRefused`, appended last: the request was refused and nothing was
   applied (see Fixed). The kernel `generated::meerkat::TransitionId` gains
-  twelve variants, appended last:
+  seventeen variants, appended last:
   `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`,
   `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`,
   `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`,
@@ -168,8 +168,13 @@ them.
   `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`,
   `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`,
   `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`,
-  `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired` and
-  `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`. The result
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`,
+  `DeferInputBehindBacklogEndedWithRefusedRunIdle`,
+  `DeferInputBehindBacklogEndedWithRefusedRunAttached`,
+  `DeferInputBehindBacklogEndedWithRefusedRunRunning`,
+  `DeferInputBehindBacklogEndedWithRefusedRunRetired` and
+  `DeferInputBehindBacklogEndedWithRefusedRunStopped`. The result
   of a run whose apply failed is now answered by two arms, split on that
   cause, both for the run and for the inputs the run abandoned: the arms
   `ResolveRuntimeCompletionResultRuntimeApplyFailed` and
@@ -177,7 +182,15 @@ them.
   cause as before, and the new arms
   `ResolveRuntimeCompletionResultRuntimeApplyRefused` and
   `ResolveAbandonedCompletionResultRuntimeApplyRefused` answer a refused
-  request with the existing outcome `Abandoned`. No input, effect, state
+  request with the existing outcome `Abandoned`. The new arm
+  `DeferInputBehindBacklogEndedWithRefusedRun` (Idle, Attached, Running,
+  Retired, Stopped) lets the sweep that puts a failed run's inputs behind
+  the queued work pass over an input the machine no longer tracks, only
+  while the machine's run terminal is a refused request; an untracked input
+  of any other failed run is refused as before.
+  `RecoverRuntimeCompletionResultCorrelation` now also clears the stored
+  cause and its message when it adopts a run's result while the machine
+  holds none. No input, effect, state
   field or outcome value of the machine changes, the machine's version
   stays `1`, and no existing variant's implicit discriminant moves. Every
   enum named here is exhaustive, so a downstream exhaustive match needs the
@@ -1779,14 +1792,20 @@ them.
   session's runtime registration was retired as after a start that failed:
   every other request queued on the session ended without a run. Now the
   refused turn ends alone. It is answered the typed
-  `reasoning_effort_refused` refusal, its input ends once as never executed
-  and is not started again, the requests queued behind it run in their
-  order, and the session keeps its runtime registration and what is
-  attached to it while its live session is present. When no live session
-  is present at the refusal, the registration is cleaned up as before. The
+  `reasoning_effort_refused` refusal, every input of the refused run ends
+  once as never executed and is not started again, the requests queued
+  behind it run in their order, and the session keeps its runtime
+  registration and what is attached to it while its live session is
+  present. When no live session is present at the refusal, the
+  registration is cleaned up as before; so is a refused turn whose answer
+  is resolved after a restart, or while another run's result is the one
+  the session's runtime holds open. Every reason of the refusal ends the
+  turn once, the transient one (`supported_levels_unavailable`) included:
+  before, an input that no request waited on was started again up to its
+  retry cap. The
   machine now answers such a turn as an abandoned turn, not as a failed
   apply (see Breaking for the cause value and the kernel's transition
-  names); what is stored for the refused input is the existing
+  names); what is stored for a refused input is the existing
   never-executed record and the turn's typed error. The reasoning effort
   controls are new in this release, so no released version had this.
 

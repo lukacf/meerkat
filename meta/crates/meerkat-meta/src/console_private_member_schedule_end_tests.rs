@@ -1895,7 +1895,6 @@ struct KeptAndFollowed {
 #[async_trait::async_trait]
 impl crate::private_owners::PrivateMemberEndFollower for KeptAndFollowed {
     async fn member_ended(&self, ended: &crate::private_owners::EndedPrivateMember) {
-        use crate::private_owners::PrivateMemberEndFollower as _;
         self.kept.member_ended(ended).await;
         self.schedules.member_ended(ended).await;
     }
@@ -2245,7 +2244,6 @@ async fn stored_cursor(
     cursors: &Arc<dyn crate::PersistentMetadataStore>,
     mob_id: &str,
 ) -> Option<u64> {
-    use crate::PersistentMetadataStore as _;
     cursors
         .get_subscription_cursor(mob_id)
         .await

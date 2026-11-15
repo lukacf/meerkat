@@ -589,6 +589,93 @@ under `## [0.9.15]`.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves. **Do:** a host of that kind calls one of them after its
   bootstrap.
+- Question sets (`ask_user`): mob members get the stock tool `ask_user`, and
+  `meta/gating/questions` lists what they asked a person. Every member of a
+  Meta runtime is offered the tool from this release on, with the three
+  exceptions named in this item and the next (a member that is denied it,
+  one whose host supplies its own, one whose MCP server offers the name),
+  so each other member's
+  tool list gains one tool at the upgrade, also on a runtime where no
+  person can be asked (no Console, or one nobody can decide on): a call
+  there answers `no_human_surface`. A profile that lists the tool in
+  `tools.deny` (`deny = ["ask_user"]`) keeps it from its members: their
+  model is not offered it, and a call it makes anyway is refused as not
+  allowed by policy; a spawn's deny policy does the same for one member. A
+  member whose host already supplies a tool named `ask_user` among its
+  build's external tools keeps its own; a tool of that name from a profile
+  MCP server is lost (the next item). The tool holds a
+  durable decision of the new kind `ask_user.questions` in the decision
+  store the gateway already keeps; no store schema changes, and a decision
+  recorded without a typed answer keeps its bytes and its digest. A 0.9.14
+  gateway has no `meta/gating/questions` (it answers method not found). A
+  0.9.14 Console or SDK against a 0.9.15 gateway does not list a question
+  set as a question or as an approval (sets are not part of
+  `meta/gating/pending`): it meets the set only as a durable decision of a
+  kind it does not know. A 0.9.14 Console shows it, to a caller who may see
+  the decision, as a read-only card among the open decisions, which cannot
+  be answered there (read from the 0.9.14 source, not run). So a set nobody
+  answers on a Console that reads question sets ends `timed_out` at its
+  deadline. **Do:** upgrade the gateway before a Console
+  or an SDK that reads question sets; before a rollback see the question
+  sets item under "Rolling back to 0.9.14".
+- Breaking (behaviour): a profile MCP server that offers a tool named
+  `ask_user`. A member whose profile configures such a server loses that
+  tool at the upgrade: the server's tool and the stock tool share the name,
+  a tool name two parts of a member's build list is offered by neither, and
+  the member's model is offered no tool named `ask_user`, neither the
+  server's nor the stock one. Such a member also has no stock `ask_user`:
+  it cannot put a question to a person until its server's tool has another
+  name. The member builds and runs, and its other
+  tools are offered. On 0.9.15 no setting keeps a profile server's tool
+  under the name `ask_user` on a Meta member, and
+  `tools.deny = ["ask_user"]` is no way out: it hides the name whatever
+  offers it, and does not bring the server's tool back. It is not silent:
+  once the server has connected, each build of such a member logs one
+  warning on the gateway's stderr, at the default log filter, with the
+  target `meerkat::tools::shared_name`, the text "more than one part of a
+  tool surface lists this tool name: it is offered by none of them" and
+  the fields `tool` (`ask_user`), `listed_by` (the two sources, as
+  `Mcp:<server name>, Builtin:ask_user`) and `tools_of` (the member's
+  session and comms name). **Check before upgrading:** the check is the
+  configuration. A member is affected when an MCP server of its profile
+  (`[[profiles.<name>.tools.mcp_servers]]`), or one attached to its live
+  session, offers a tool named `ask_user` and the server's entry maps that
+  tool to no other name (`tool_names`): ask the server for its tool list,
+  or read its documentation. The member's tool list does not answer the
+  question: on 0.9.14 `meta/identity/resolved_tools` does not list the
+  tools of a profile's server (the list then holds `tool_catalog_search`
+  and `tool_catalog_load`, through which the member reaches them), so a
+  list without the name proves nothing. A member whose host supplies a
+  tool named `ask_user` among its build's external tools keeps it.
+  **Do:** give the
+  server's tool another name before the upgrade: map it in the profile, on
+  the server's entry (`tool_names = { ask_user = "ask_operator" }`), or
+  rename it on the server. The member then has the server's tool under the
+  new name and, after the upgrade, the stock `ask_user`. The price: the
+  member's prompts and instructions that name the tool must name the new
+  one.
+- Decision reads with question sets. Core gains three wire types,
+  `WireDecisionAnswer`, `WireAskUserQuestionAnswer` and `WireAskUserAnswer`,
+  and the human evidence of a decision (`WireDecisionEvidence`) gains the
+  optional member `answer`, which carries them and is written only for an
+  answered question set. That is additive: the 0.9.14 Python and TypeScript
+  SDKs return a decision as the gateway wrote it, and the 0.9.14 Rust wire
+  type ignores a member it does not know. `meta/decisions/list` keeps its
+  form (`decisions`, `statuses`, `unreadable`, `next_after`) and is followed
+  with `next_after` as before; it now also lists decisions of the kind
+  `ask_user.questions`. On the stdio gateway, which the SDKs call, nothing
+  else changes. On the Console a page now holds only decisions its caller
+  may see, up to its limit, and `unreadable` is filled for an access
+  administrator only (a caller allowed `decisions.admin` who is a person
+  listed under `admins`, or any caller allowed it on a Console that
+  identifies no person; on 0.9.14 every caller allowed `decisions.admin`):
+  the same form with other rows for some callers, not a new member. A
+  question set is read on the Console only by a caller who may view its
+  asking agent. **Do:** nothing for a client that follows `next_after`; a
+  Rust client that matches `WireDecisionEvidence::Human` field by field adds
+  `answer` or `..`; a person who is allowed `decisions.admin` by a rule and
+  is not listed under `admins` no longer sees `unreadable`: list that
+  person under `admins`.
 - Rust: `identity_creation::ChangeClass` gains the variants `Archive` (an
   archive and an unarchive) and `Adopt`. **Do:** add both arms to each
   exhaustive match on it.
@@ -920,6 +1007,35 @@ of these kinds that are `open` or `approved` (`meta/decisions/list` with
 `executed`, or withdraw it (`meta/identity/withdraw`, or
 `meta/decisions/withdraw` as the host). While rolled back, decide none of
 them.
+
+**Question sets agents asked (`ask_user`).** A question set is a decision of
+kind `ask_user.questions` in the gateway's decision store
+(`approval_decisions.sqlite3` in its state directory), in the row form every
+decision has. A 0.9.14 gateway does not know the kind and neither refuses
+nor skips it: a decision's kind is a string, the row is read and listed like
+any other (`meta/decisions/list`), and no executor claims it. It has no
+`ask_user` tool and no `meta/gating/questions`, so an open set cannot be
+answered there, and its asking agent is told nothing while rolled back. An
+open set stays as it is until its deadline; a 0.9.14 gateway records a
+decision of any kind as expired when that decision is read by itself
+(`meta/decisions/get`) after its deadline, so a set whose deadline passes
+while rolled back can end there. A
+set that was answered on 0.9.15 keeps the person's answers in the
+decision's evidence, a member 0.9.14 does not know. A 0.9.14 gateway reads
+past that member, as the wire type does, but it also checks the stored
+evidence against the digest the decision binds, and evidence read without
+the answers does not match it: it reports
+that one decision unreadable (on the stdio gateway, and on the Console to
+a caller allowed `decisions.admin`, it is listed as unreadable; nothing
+executes it) and reads every other decision as before; it does not change
+the row, which reads again after the return to 0.9.15. A set that was
+dismissed, withdrawn or timed out carries no answers and is read as any
+ended decision. All of this was read from the 0.9.14 source, not run.
+**Do:** before a rollback, have each open set answered or dismissed
+(`meta/gating/questions` lists them), or withdraw it
+(`meta/decisions/withdraw` as the host), so that no agent waits for an
+answer while rolled back; a set left open needs a deadline beyond the time
+spent rolled back.
 
 **Access rules for changes of agents.** 0.9.15 adds the actions
 `agent.identity.create`, `agent.identity.manage` and `agent.identity.remove`.

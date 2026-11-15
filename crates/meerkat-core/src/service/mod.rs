@@ -1384,6 +1384,44 @@ pub struct SessionBuildOptions {
     pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Host-issued namespace authority required whenever WorkGraph resolves on.
     pub workgraph_namespace_grant: Option<WorkGraphNamespaceGrant>,
+    /// Tools of the embedding host's own, composed beside the build's tools.
+    ///
+    /// The agent factory composes this dispatcher as one more part of the
+    /// build's tool surface, beside whatever the build's base is (its
+    /// builtin composite, its `external_tools`, its own MCP adapter, or the
+    /// empty dispatcher) and after the comms, scheduler and WorkGraph
+    /// surfaces, before the mob surface. A host uses it for tools every
+    /// agent it builds gets, without wrapping the build's `external_tools`
+    /// and without knowing which base the factory builds.
+    ///
+    /// - Its tools join the build's tool list. A name it lists that another
+    ///   part of the build lists too is offered by neither, and a call of
+    ///   it is refused: the host keeps its names apart from the build's.
+    ///   The build logs one warning for such a name, when both parts first
+    ///   list it (`SHARED_TOOL_NAME_LOG_TARGET`), with the build's session.
+    /// - Its catalog joins the composed surface's as any composed part's
+    ///   does. The surface is exact only when every part is, so a
+    ///   dispatcher that declares an exact catalog of inline entries leaves
+    ///   the build's catalog mode and the catalog's control tools as they
+    ///   are without it, and one that does not declare an exact catalog
+    ///   makes the whole surface not exact. Its deferred entries and its
+    ///   pending catalog sources are the surface's too.
+    /// - The ops lifecycle binding, which the factory makes on the final
+    ///   composed surface, reaches it when it declares that capability; it
+    ///   must then be held by this build alone, or the build fails. The
+    ///   session's mob operator authority, the external tool surface handle
+    ///   and the MCP server lifecycle handle are bound to the build's
+    ///   `external_tools` and base only, never to this dispatcher.
+    /// - Whether the build's `external_tools` only observe bindings
+    ///   ([`AgentToolDispatcher::observes_bindings_only`]) is asked of
+    ///   `external_tools` alone, as without this option.
+    /// - A declared deny list may name its tools: they are tools the build
+    ///   composes, not external tools.
+    ///
+    /// It is a dispatcher of the host's process: no session record carries
+    /// it, and a resumed or recovered build has none until its host sets it
+    /// again. `None`, the default, composes nothing.
+    pub host_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
@@ -2508,6 +2546,7 @@ impl Default for SessionBuildOptions {
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             preload_skills: None,
             realm_id: None,
             instance_id: None,
@@ -2599,6 +2638,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("schedule_tools", &self.schedule_tools.is_some())
             .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field("workgraph_namespace_grant", &self.workgraph_namespace_grant)
+            .field("host_tools", &self.host_tools.is_some())
             .field("preload_skills", &self.preload_skills)
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)

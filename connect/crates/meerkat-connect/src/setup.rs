@@ -164,7 +164,10 @@ impl PreparedSetupConnection {
         mut options: SessionOptions,
         paired_host: Option<&PairedHostFrontend>,
     ) -> Result<SessionOptions, ConnectError> {
-        if !options.build.mcp_servers.is_empty() || options.build.external_tools.is_some() {
+        if !options.build.mcp_servers.is_empty()
+            || options.build.external_tools.is_some()
+            || options.build.host_tools.is_some()
+        {
             return Err(ConnectError::InvalidInput(
                 "The packaged setup session accepts only its selected setup server".into(),
             ));
@@ -229,6 +232,7 @@ pub(crate) fn compose_paired_host_session<S: Into<String>>(
         || options.build.mob_tools.is_some()
         || options.build.schedule_tools.is_some()
         || options.build.workgraph_tools.is_some()
+        || options.build.host_tools.is_some()
         || options.build.session_comms_runtime_override.is_some()
         || options.build.comms_name.is_some()
         || options.build.keep_alive
@@ -289,6 +293,7 @@ fn has_closed_paired_host_execution(options: &SessionOptions) -> bool {
         && b.mob_tools.is_none()
         && b.schedule_tools.is_none()
         && b.workgraph_tools.is_none()
+        && b.host_tools.is_none()
         && b.session_comms_runtime_override.is_none()
         && b.comms_name.is_none()
         && !b.keep_alive
@@ -449,5 +454,48 @@ mod tests {
             Default::default(),
         ));
         assert!(connection().preparation_session(options).is_err());
+    }
+
+    /// A build that carries tools of a host's own (`host_tools`) is a tool
+    /// source these compositions did not select: the packaged setup session
+    /// and the direct paired host session refuse it, as they refuse a
+    /// build's external tools, and a paired host session that had some put
+    /// on it afterwards no longer reads as a closed paired host composition.
+    /// The same sessions without host tools compose.
+    #[test]
+    fn host_tools_are_not_silently_adopted() {
+        let (paired_host, _presenter) = PairedHostFrontend::deferred();
+        let with_host_tools = || {
+            let mut options = SessionOptions::default();
+            options.build.host_tools = Some(paired_host.dispatcher());
+            options
+        };
+
+        assert!(
+            connection()
+                .preparation_session(SessionOptions::default())
+                .is_ok()
+        );
+        assert!(connection().preparation_session(with_host_tools()).is_err());
+        assert!(
+            connection()
+                .preparation_session_with_paired_host(with_host_tools(), &paired_host)
+                .is_err()
+        );
+
+        let composed = paired_host_frontend_session(SessionOptions::default(), &paired_host)
+            .expect("a fresh local session composes");
+        assert!(composed.build.host_tools.is_none());
+        assert!(is_direct_paired_host_composition(&composed));
+        assert!(paired_host_frontend_session(with_host_tools(), &paired_host).is_err());
+        assert!(
+            connection()
+                .interactive_session_with_paired_host(with_host_tools(), &paired_host)
+                .is_err()
+        );
+
+        let mut reopened = composed;
+        reopened.build.host_tools = Some(paired_host.dispatcher());
+        assert!(!is_direct_paired_host_composition(&reopened));
     }
 }

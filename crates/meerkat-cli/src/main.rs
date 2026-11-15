@@ -16217,6 +16217,7 @@ async fn run_agent(
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
             realm_id: Some(storage_scope.locator.realm.clone()),

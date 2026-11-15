@@ -1230,7 +1230,9 @@ impl EndedPrivateMemberSchedules {
 
     /// Delete every schedule that targets `ended`, is not deleted and was
     /// created before its end. Each delete is logged with the schedule's id
-    /// and the form of its target, never with what the schedule sends.
+    /// and the form of its target, never with what the schedule sends. A
+    /// delete that fails does not end the pass: the schedules after it are
+    /// visited all the same, and the pass answers its first failure.
     async fn delete_targeting(
         &self,
         ended: &crate::private_owners::EndedPrivateMember,
@@ -1246,6 +1248,7 @@ impl EndedPrivateMemberSchedules {
                  private to a person stays as it is"
             );
         }
+        let mut first_failure = None;
         for schedule in schedules {
             if schedule.config.created_at_utc > ended.ended_at {
                 continue;
@@ -1253,16 +1256,31 @@ impl EndedPrivateMemberSchedules {
             let Some(names_it_as) = Self::targets(&schedule.target, ended) else {
                 continue;
             };
-            self.schedules.delete(&schedule.schedule_id).await?;
-            tracing::info!(
-                mob_id = %ended.mob_id,
-                schedule_id = %schedule.schedule_id,
-                schedule_target = names_it_as,
-                target_member = %ended.member,
-                "a schedule was deleted: the member it targets, private to a person, ended"
-            );
+            match self.schedules.delete(&schedule.schedule_id).await {
+                Ok(()) => tracing::info!(
+                    mob_id = %ended.mob_id,
+                    schedule_id = %schedule.schedule_id,
+                    schedule_target = names_it_as,
+                    target_member = %ended.member,
+                    "a schedule was deleted: the member it targets, private to a person, ended"
+                ),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        mob_id = %ended.mob_id,
+                        schedule_id = %schedule.schedule_id,
+                        schedule_target = names_it_as,
+                        target_member = %ended.member,
+                        "a schedule that targets an ended member private to a person could not \
+                         be deleted"
+                    );
+                    if first_failure.is_none() {
+                        first_failure = Some(error);
+                    }
+                }
+            }
         }
-        Ok(())
+        first_failure.map_or(Ok(()), Err)
     }
 }
 

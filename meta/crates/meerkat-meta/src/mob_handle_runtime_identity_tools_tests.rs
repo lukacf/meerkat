@@ -832,3 +832,83 @@ async fn the_identity_tools_are_inline_entries_of_the_wrappers_catalog() {
     );
     runtime.clear_identity_runtime_authority();
 }
+
+/// A member's surface has the catalog's control tools mounted and declares
+/// on demand for them. The wrapper takes the stronger of on demand and the
+/// answer of the dispatcher it wraps, and a surface without a member answers
+/// as that dispatcher does. The declaration changes no request: Core shows
+/// the control tools in every request only for a source that asks always,
+/// and treats on demand as it treats `Never`. This row reads the wrapper's
+/// answer itself; no request can tell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_members_surface_asks_for_the_catalog_control_tools_on_demand() {
+    /// [`InnerTools`] that needs the control tools in every request.
+    struct InnerToolsThatAskAlways;
+
+    #[async_trait]
+    impl AgentToolDispatcher for InnerToolsThatAskAlways {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            InnerTools.tools()
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: true,
+            }
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("state dir");
+    let family = Arc::new(CountingFamily::default());
+    let (runtime, _identity) = runtime_with(dir.path(), Some(family)).await;
+    let session = member_session(&runtime, "shared", &[]).await;
+
+    let member = surface(&runtime, session.clone());
+    assert_eq!(
+        InnerTools.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::Never,
+        "precondition: the wrapped dispatcher asks for nothing"
+    );
+    assert!(
+        member
+            .tool_catalog_capabilities()
+            .may_require_catalog_control_plane,
+        "a member's session mounts the control tools"
+    );
+    assert_eq!(
+        member.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::OnDemand,
+        "and shows them only while a tool waits behind the catalog"
+    );
+
+    let no_member = AutoWireParentMobToolDispatcher {
+        caller: None,
+        ..surface(&runtime, session.clone())
+    };
+    assert!(
+        !no_member
+            .tool_catalog_capabilities()
+            .may_require_catalog_control_plane
+    );
+    assert_eq!(
+        no_member.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::Never,
+        "a surface without a member answers as the dispatcher it wraps"
+    );
+
+    let over_a_source_that_asks_always = AutoWireParentMobToolDispatcher {
+        inner: Arc::new(InnerToolsThatAskAlways),
+        ..surface(&runtime, session)
+    };
+    assert_eq!(
+        over_a_source_that_asks_always.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::Always,
+        "the stronger of the two answers"
+    );
+    runtime.clear_identity_runtime_authority();
+}

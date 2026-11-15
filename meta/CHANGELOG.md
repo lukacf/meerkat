@@ -1246,6 +1246,11 @@ Security, Upgrade and Changed.
   `meta/identity/resolved_tools` answers the tools its next request
   carries: the short list with the two control tools, without the tools
   that wait behind its catalog.
+- Unless one of a member's tool sources asks for them always (an MCP server
+  configured at its build does) or is still connecting, its requests carry
+  `tool_catalog_search` and `tool_catalog_load` only while a tool waits
+  behind its catalog. Meta's agent mob tool wrapper mounts the two control
+  tools for every member and asks for them on demand.
 - The member capability check verifies more members. It compares a member's
   declared tool categories with its live tool catalog and could not do so
   for a member whose catalog was not exact (it recorded such a member as

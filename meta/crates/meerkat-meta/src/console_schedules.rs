@@ -885,6 +885,11 @@ impl meerkat_core::AgentToolDispatcher for ConsoleScheduleToolGate {
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
     }
+    /// The wrapped dispatcher's answer, as for its capabilities. Without this
+    /// forward the trait default would turn an inner `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
         self.inner.tool_catalog()
@@ -1473,6 +1478,21 @@ mod tests {
         };
         assert!(!answer.contains("cannot be read"), "{answer}");
         assert!(!answer.contains("console schedule"), "{answer}");
+    }
+
+    /// The gate answers for the catalog control tools as the tools it wraps
+    /// do: an inner `OnDemand` stays `OnDemand` (the trait default would
+    /// answer `Always`).
+    #[test]
+    fn the_gate_forwards_the_inner_catalog_control_plane() {
+        let gate = ConsoleScheduleToolGate::new(
+            crate::tool_application_test_support::on_demand_catalog_probe(),
+            ScheduleService::new(Arc::new(MemoryScheduleStore::default())),
+        );
+        assert_eq!(
+            gate.tool_catalog_control_plane(),
+            meerkat_core::ToolCatalogControlPlane::OnDemand
+        );
     }
 
     fn call<'a>(name: &'a str, args: &'a RawValue) -> ToolCallView<'a> {

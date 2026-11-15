@@ -23,6 +23,8 @@ exclude = [
     "tests/host_launch_sites.rs",
     # workspace admission fence gate over every crate's sources
     "tests/admission_fence_sites.rs",
+    # workspace tool dispatcher wrapper gate over every Core crate's sources
+    "tests/tool_dispatcher_wrapper_sites.rs",
     # needs the unpublished mcp-test-server crate
     "tests/integration.rs",
     # needs the unpublished mcp-test-server crate

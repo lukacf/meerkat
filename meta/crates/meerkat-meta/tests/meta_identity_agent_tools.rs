@@ -1928,8 +1928,8 @@ fn the_identity_tools_never_wait_behind_the_deferred_catalog() {
 /// identity tools in the first request of its first run. The mob tools and
 /// memory search report exact catalogs, so this member's catalog is meant to
 /// be exact; this row does not assert that (nothing of this member waits, so
-/// an inexact catalog would offer the same request). The next row drives
-/// a member of the same profile whose host tool does wait, which
+/// an inexact catalog would offer the same request). The row after the next
+/// one drives a member of the same profile whose host tool does wait, which
 /// only an exact catalog does, and it is offered the identity tools too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_with_an_exact_catalog_is_offered_the_identity_tools_in_its_first_request() {
@@ -1943,6 +1943,35 @@ async fn a_member_with_an_exact_catalog_is_offered_the_identity_tools_in_its_fir
         "the first request offers the identity tools: {:?}",
         asked[0].tools
     );
+    rig.shutdown().await;
+}
+
+/// The same member's first request carries no catalog control tool: nothing
+/// waits behind its catalog, and none of its tool sources asks for the
+/// control tools always (the agent mob tool wrapper declares on demand), so
+/// they come only with a tool that waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_with_nothing_behind_its_catalog_is_offered_no_catalog_control_tool() {
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot_with_family(state.path(), &mob_id).await;
+
+    let asked = rig.send(LEAD, "first-run", "first-run").await;
+    assert!(
+        has_identity_tools(&asked[0]),
+        "precondition: the member is one that may create agents: {:?}",
+        asked[0].tools
+    );
+    for control_tool in [
+        meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+        meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+    ] {
+        assert!(
+            !asked[0].tools.iter().any(|offered| offered == control_tool),
+            "nothing waits behind the catalog, so {control_tool} is not offered: {:?}",
+            asked[0].tools
+        );
+    }
     rig.shutdown().await;
 }
 

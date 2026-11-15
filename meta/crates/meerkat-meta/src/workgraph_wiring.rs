@@ -518,6 +518,11 @@ impl meerkat_core::AgentToolDispatcher for ScopePinnedWorkGraphTools {
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
     }
+    /// The wrapped dispatcher's answer, as for its capabilities. Without this
+    /// forward the trait default would turn an inner `OnDemand` into `Always`.
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
         self.inner.tool_catalog()
@@ -844,6 +849,11 @@ mod tests {
             wrapped.exact_catalog,
             "both sides regressed to the default: an exact catalog is what makes \
              the deferred set reachable at all"
+        );
+        assert_eq!(
+            wrapper.tool_catalog_control_plane(),
+            inner.tool_catalog_control_plane(),
+            "wrapper must ask for the catalog control tools as the inner surface does"
         );
 
         // `ToolCatalogEntry` is not `PartialEq`, so compare an explicit

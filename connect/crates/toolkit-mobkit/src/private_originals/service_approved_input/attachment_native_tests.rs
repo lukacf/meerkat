@@ -278,6 +278,10 @@ struct PublicReadScript {
     offered: Mutex<Option<ToolIdentity>>,
     feedback: Mutex<Option<ToolResult>>,
     injected_contexts: Mutex<Vec<String>>,
+    // The step that admitted B has returned (see `after_admitting_step`).
+    admitting_step_returned: AtomicBool,
+    admitting_step: tokio::sync::Notify,
+    first_answer_overdue: AtomicBool,
 }
 impl PublicReadScript {
     fn shaped(shape: PublicShape) -> Arc<Self> {
@@ -285,6 +289,42 @@ impl PublicReadScript {
             shape,
             ..Self::default()
         })
+    }
+    /// The step that admitted B has returned, so the record writes it makes
+    /// after the admission are done.
+    fn admitting_step_returned(&self) {
+        self.admitting_step_returned.store(true, Ordering::SeqCst);
+        self.admitting_step.notify_waiters();
+    }
+    /// Wait until the step that admitted B has returned.
+    ///
+    /// The source admits B first, which starts B's run, and then writes the
+    /// admission into its source record. That write is an owner change of the
+    /// publication B's operations are prepared against, so a tool call the
+    /// model makes at once can be prepared before the write and refused
+    /// `ReprepareRequired` behind it. The rows that offer the tool directly
+    /// hold the model's first answer of B's run here, so every call of that
+    /// run is prepared after the step's writes. This orders the test; it
+    /// accepts no refusal.
+    ///
+    /// One limit stays: the source starts B's run at the admission, so the
+    /// run's first model request is still prepared before the write and
+    /// could meet it between its preparation and its entry. That has not
+    /// been seen, and only the source writing before it admits removes it.
+    async fn after_admitting_step(&self) {
+        let returned = async {
+            loop {
+                let notified = self.admitting_step.notified();
+                if self.admitting_step_returned.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        if tokio::time::timeout(WAIT, returned).await.is_err() {
+            // The row fails on this where it releases the hold.
+            self.first_answer_overdue.store(true, Ordering::SeqCst);
+        }
     }
     fn provider(self: &Arc<Self>, inner: Arc<dyn LlmClient>) -> Arc<dyn LlmClient> {
         Arc::new(PublicReadProvider {
@@ -444,6 +484,17 @@ impl LlmClient for PublicReadProvider {
         if !self.script.armed.load(Ordering::SeqCst) {
             return stream;
         }
+        // The rows that offer the tool directly take the provider's first
+        // authorized answer only after the step that admitted B has returned
+        // (`after_admitting_step`). The row that loads through the catalog is
+        // left as it is.
+        let held = self.script.shape != PublicShape::LoadedThroughCatalog;
+        let stream = stream.then(move |event| async move {
+            if held && matches!(&event, Ok(LlmEvent::TextDelta { .. })) {
+                self.script.after_admitting_step().await;
+            }
+            event
+        });
         // A refused prepared operation is not a scripted model response.
         // Advance only after the inner provider yields authorized output so
         // Core recovery cannot consume or replay the one public read.
@@ -1771,10 +1822,19 @@ async fn actual_attachment_case(cancel: bool, shape: Option<PublicShape>) {
                 source.owner.clock().now().unwrap().unix_ms, false).unwrap())
         };
         let current = fixture.store.get(&stored.key).await.unwrap().unwrap();
-        source
+        let stepped = source
             .step_service_input_with_attachment(&fixture.store, &current)
-            .await
-            .unwrap();
+            .await;
+        // B was admitted inside that step and its run is under way. The
+        // direct-offer rows held the model's first answer until here.
+        if let Some(script) = &script {
+            script.admitting_step_returned();
+            assert!(
+                !script.first_answer_overdue.load(Ordering::SeqCst),
+                "the step that admitted B must return while B's first answer is held"
+            );
+        }
+        stepped.unwrap();
         let saved = fixture.store.get(&stored.key).await.unwrap().unwrap();
         let record = source.decode_record(&saved, &b).unwrap();
         if cancel {

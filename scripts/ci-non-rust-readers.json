@@ -36,6 +36,17 @@
         ]
       },
       {
+        "package": "meerkat",
+        "target": "test:tool_dispatcher_wrapper_sites",
+        "scope": "target",
+        "tests": [
+          "every_core_dispatcher_wrapper_forwards_the_catalog_control_plane"
+        ],
+        "sources": [
+          "crates/meerkat/tests/tool_dispatcher_wrapper_sites.rs"
+        ]
+      },
+      {
         "package": "meerkat-integration-tests",
         "target": "lib",
         "scope": "package",

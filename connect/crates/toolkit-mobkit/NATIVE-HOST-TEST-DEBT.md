@@ -102,8 +102,9 @@ excludes them without requiring them to fail.
 
 ## Refusal after prepared
 
-Status: open. Kind: not yet determined, seen on the 0.9.10 tree too. The
-row excludes it without requiring it to fail.
+Status: open. Kind: not yet determined for the row listed here, seen on the
+0.9.10 tree too; one cause is named below, for two other rows. The row
+excludes the listed one without requiring it to fail.
 
 - `private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::fresh_host_restores_governed_peer_binding_and_replays_it_exactly`:
   the restored peer binding's `reply_to_peer` operation is refused
@@ -113,6 +114,43 @@ row excludes it without requiring it to fail.
   alone on the 0.9.10 tree. Next: capture the refusal's read basis, then
   decide whether a refusal after the preparation is a re-preparation the
   check should accept, or a defect.
+
+One cause is named, for two rows that are not excluded and stay in the row:
+the tool-only attachment row and the direct-offer attachment row
+(`actual_public_attachment_without_catalog_selection_offers_and_admits_only_the_reviewed_operation`
+and
+`actual_public_attachment_under_the_catalog_budget_is_offered_directly_and_admitted_like_a_loaded_one`
+in `attachment_native_tests.rs`). Each failed once in a whole run of the
+row on a loaded local host (2026-11-13), with the same numbers. In the
+first, the reviewed read was `Prepared` at policy publication sequence 46,
+entered, refused `reprepare_required`, and prepared again 9 ms later at
+sequence 48. In the second, the catalog load was `Prepared` at 46, refused,
+and prepared again 39 ms later at 48. Both calls were then admitted and the
+endpoint was called once.
+
+From a trace of the publication's owner changes in one run of the first
+row: the change from 44 to 46 is the admission of the approved service
+input (`PendingToolkitOriginal::admit`, from the source's accepted
+settlement), which starts the input's run; the run's first operations are
+prepared at 46; the change from 46 to 48 follows within milliseconds and is
+a record change of the Original owner
+(`ToolkitOriginalOwner::begin_record_change`) made by a store
+`compare_and_swap`. From reading, not from the trace (the store write runs
+on a blocking thread, whose stack does not show its caller): that write is
+`record_service_admission` storing the admission in the source record, the
+first store write of `step_service_input_with_attachment` after the
+admission. So the source admits the input, its run starts, and only then
+is the admission written, as an owner change of the publication the run's
+operations are prepared against. A tool call the model makes at once can be
+prepared before that write and is refused behind it.
+
+Both rows now hold their scripted model's first answer of the run until
+the admitting step has returned, so the run's tool calls are prepared after
+the step's writes. Their checks are unchanged and still accept that refusal
+only before the first preparation. The run's first model request is still
+prepared before the write and could meet it; that has not been seen. Open:
+the source's order (write the admission before the run can act), and
+whether the row listed above has the same cause.
 
 ## Slow runner timeouts
 

@@ -299,6 +299,41 @@ impl AgentToolDispatcher for Package {
     }
 }
 
+/// A tool source that asks for the deferred catalog's control tools on
+/// demand.
+struct OnDemandSource;
+
+#[async_trait]
+impl AgentToolDispatcher for OnDemandSource {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([])
+    }
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: true,
+        }
+    }
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    }
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(ToolError::not_found(call.name))
+    }
+}
+
+/// The checked installs answer for the catalog control tools as the
+/// dispatcher they wrap does: an inner `OnDemand` stays `OnDemand` (the
+/// trait default would answer `Always`).
+#[test]
+fn checked_installs_forward_the_inner_catalog_control_plane() {
+    let owner = CheckedInstalls::fixture(Arc::new(OnDemandSource));
+    assert_eq!(
+        owner.tool_catalog_control_plane(),
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    );
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     approvals: LocalApprovals,

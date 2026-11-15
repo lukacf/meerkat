@@ -249,3 +249,62 @@ pub(crate) fn session_mob_authority()
     .expect("a mob operator authority context");
     Arc::new(std::sync::RwLock::new(context))
 }
+
+/// A tool source that asks for the deferred catalog's control tools on
+/// demand (`ToolCatalogControlPlane::OnDemand`): an exact catalog with one
+/// small deferrable tool. A wrapper around it must give the same answer;
+/// one that forwards only the capabilities answers `Always` through the
+/// trait default.
+pub(crate) struct OnDemandCatalogProbe;
+
+impl OnDemandCatalogProbe {
+    fn tool() -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            audience: Default::default(),
+            name: "registered_lookup".into(),
+            description: "a small registered tool".into(),
+            input_schema: json!({"type": "object"}),
+            provenance: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for OnDemandCatalogProbe {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Self::tool()].into()
+    }
+
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: true,
+        }
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        meerkat_core::ToolCatalogControlPlane::OnDemand
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        vec![meerkat_core::ToolCatalogEntry::session_deferred(
+            Self::tool(),
+            true,
+            meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Callback,
+                source_id: "registered".into(),
+                artifact: None,
+            },
+        )]
+        .into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(ToolError::not_found(call.name))
+    }
+}
+
+/// An [`OnDemandCatalogProbe`] as a wrapper's inner dispatcher.
+pub(crate) fn on_demand_catalog_probe() -> Arc<dyn AgentToolDispatcher> {
+    Arc::new(OnDemandCatalogProbe)
+}

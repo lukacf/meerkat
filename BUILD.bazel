@@ -1080,6 +1080,7 @@ test_suite(
         "//crates/meerkat:stock_governed_prompt_test",
         "//crates/meerkat:stock_host_supplied_stores_test",
         "//crates/meerkat:storage_provider_seam_test",
+        "//crates/meerkat:tool_dispatcher_wrapper_sites_test",
         "//crates/meerkat:tool_process_custody_restart_test",
         "//crates/meerkat:turn_projection_cost_test",
         "//crates/xtask:buildbuddy_static_lanes_test",

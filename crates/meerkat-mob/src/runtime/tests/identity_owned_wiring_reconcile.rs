@@ -27,7 +27,7 @@ const STEP: Duration = Duration::from_secs(20);
 
 /// Bound for the first settled decision after a start: longer than an
 /// identity lease, which a start may have to wait out.
-const AFTER_START: Duration = Duration::from_secs(60);
+const AFTER_START: Duration = Duration::from_mins(1);
 
 /// A mob over in-memory mob stores and a persistent session service, whose
 /// members are turn-driven workers. The stores outlive the handle.
@@ -258,13 +258,13 @@ impl WiringFixture {
             }
         })
         .await;
-        match waited {
-            Ok(status) => status,
-            Err(_) => panic!(
-                "{member}: no settled decision at revision {revision}; latest status: {:?}",
-                self.status(member).await
-            ),
+        if let Ok(status) = waited {
+            return status;
         }
+        panic!(
+            "{member}: no settled decision at revision {revision}; latest status: {:?}",
+            self.status(member).await
+        )
     }
 
     /// The stored intent record of an adopted member.

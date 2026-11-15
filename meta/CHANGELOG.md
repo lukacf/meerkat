@@ -2770,7 +2770,9 @@ Security, Upgrade and Changed.
   to a person, whose schedules follow the agent's own lifecycle; a respawn
   of such a member that fails, which leaves its schedules aimed at a name no
   member holds; a schedule the ending member itself makes in the last
-  moments of its turn, after its end was accepted; and a host that runs Meta
+  moments of its turn, after its end was accepted; a deferred Console send
+  on a Console whose host registered the runtime under an identity namespace
+  of its own (the gateways as shipped use none); and a host that runs Meta
   on a mob event store of its own, or stops within moments of such an end
   during its start. Where the schedules of an ended member cannot be
   deleted, the gateway logs `the schedules that target an ended member

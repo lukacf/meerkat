@@ -18,6 +18,20 @@ Security, Upgrade and Changed.
   variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
   needs both arms.
 
+- Behaviour-only (not measured by the gate): on a Console that can identify
+  a person, `meta/schedule/list`, `update`, `pause`, `resume` and `delete`
+  answer a caller who is not an access administrator for an agent the
+  Console does not know as for an agent that does not exist (an empty list;
+  `schedule_not_found` for a schedule named by its id), as the memory reads
+  and the session attach do. For a short time after a gateway start, until
+  the gateway has read who its members are private to, that is every member
+  that ended before the start, the person it was private to included; a
+  Console that identifies nobody answers its one operator so for that time
+  too. Ask again: once that read has succeeded the methods answer for an
+  ended member as the access rules and its owner decide. An agent on the
+  roster and an archived agent are answered as before, and an access
+  administrator always is.
+
 - Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
   variants `Declared` and `Created` and gains `Identity`. A `name_taken`
   refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.

@@ -6964,8 +6964,10 @@ fn restore_absent_names(value: Value, suffix: &str) -> Value {
 /// [`console_method_member_fields`]; a method it does not list is read for
 /// the four subject spellings). A member hidden from the caller
 /// ([`AccessView::hides_agent`], which judges every spelling of a member as
-/// the member it names), and, for a read of an identity's memory scope, a
-/// member the console withholds from the caller because it does not know it
+/// the member it names), and, for a read of an identity's memory scope and
+/// for a read or a change of a member's console schedules
+/// ([`schedules::acts_on_member_schedules`]), a member the console withholds
+/// from the caller because it does not know it
 /// ([`AccessView::withholds_unknown_member`]), is answered as a member that
 /// does not exist: in a field naming a member the method reads or acts on,
 /// it is swapped for a name no member holds, so the method takes its own
@@ -6985,7 +6987,8 @@ pub(crate) fn console_rpc_resolve_members(
 /// the store's bare identities when `withhold_unknown_scopes` is false (a
 /// shared console): those reads leave a member the console does not know to
 /// the panel, which judges each identity under the name the console gives
-/// it.
+/// it. The schedule methods name a member as the console names it on every
+/// console.
 fn console_rpc_resolve_members_with(
     view: Option<&AccessView>,
     method: &str,
@@ -7000,6 +7003,7 @@ fn console_rpc_resolve_members_with(
             method,
             "meta/agent_memory/recall" | "meta/agent_memory/manifest" | "meta/memory/panel/records"
         );
+    let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
     let mut nonce: Option<String> = None;
     for field in console_method_member_fields_or_subject(method) {
         visit_member_field(params, field.path, &mut |slot| {
@@ -7008,7 +7012,7 @@ fn console_rpc_resolve_members_with(
             };
             let hidden = !spelling.is_empty()
                 && (view.hides_agent(spelling)
-                    || (reads_memory_scope && view.withholds_unknown_member(spelling)));
+                    || (withholds_unknown && view.withholds_unknown_member(spelling)));
             if !hidden {
                 return Ok(());
             }

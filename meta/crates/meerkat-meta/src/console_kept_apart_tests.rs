@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use serde_json::json;
 
 use super::console_private_side_chat_tests::{
-    ROOT, TestResult, alice_claims, bearer as person_bearer, enforced_console,
-    everyone_drives_every_agent, fork_on_console,
+    ALICE, ROOT, TestResult, alice_claims, bearer as person_bearer, bob_claims, enforced_console,
+    everyone_drives_every_agent, fork_on_console, root_claims,
 };
 use super::console_side_chat_tests::{persistent_gateway_runtime_in, seeded_member};
 use super::console_token_lapse_tests::console_rpc_as;
@@ -877,6 +877,212 @@ async fn an_ended_members_memory_scope_waits_for_the_first_read_of_who_members_a
         !reads_memory_scope_of(&operator, "alpha-side"),
         "and the private member's stays withheld"
     );
+    Ok(())
+}
+
+/// The console schedule methods that read or change a schedule of the member
+/// they name.
+const MEMBER_SCHEDULE_METHODS: [&str; 5] = [
+    "meta/schedule/list",
+    "meta/schedule/update",
+    "meta/schedule/resume",
+    "meta/schedule/pause",
+    "meta/schedule/delete",
+];
+
+/// What `method` answers the holder of `bearer` for the schedule
+/// `schedule_id` of `member`, with the member's name written as `MEMBER`.
+async fn schedule_answer(
+    app: &Router,
+    bearer: &str,
+    method: &str,
+    member: &str,
+    schedule_id: &str,
+) -> String {
+    let mut params = json!({ "identity": member });
+    if method != "meta/schedule/list" {
+        params["schedule_id"] = json!(schedule_id);
+    }
+    if method == "meta/schedule/update" {
+        params["content"] = json!("Changed.");
+    }
+    let answer = console_rpc_as(app, Some(bearer), method, params).await;
+    json!({ "result": answer["result"], "error": answer["error"] })
+        .to_string()
+        .replace(member, "MEMBER")
+}
+
+/// Until the first read of who members are private to has succeeded, the
+/// console schedules of a member that ended are read and changed by nobody
+/// but an administrator: the schedule methods that name the member answer
+/// every other caller as they answer for a member that does not exist. A
+/// member on the roster is withheld from nobody. Once the read has succeeded
+/// the ordinary ended member's schedules are read again, the private
+/// member's are read and changed by the person it was private to, and
+/// another person is still answered as for a member that does not exist.
+#[tokio::test]
+async fn an_ended_members_console_schedules_wait_for_the_first_read_of_who_members_are_private_to()
+-> TestResult {
+    const MOB: &str = "kept-apart-first-read-schedules";
+    const ISSUER: &str = "https://issuer.example.test";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let runtime = runtime_whose_first_read_failed(&restarted).await;
+
+    // The schedules the console's schedule store holds: one for the member
+    // on the roster and one for each member that ended, each defined while
+    // its member took the console's sends.
+    let service = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+    runtime.console_schedules().attach(
+        service.clone(),
+        crate::schedule_wiring::ScheduleFiringHostBinding::external_driver(),
+    );
+    let mut schedule_of = BTreeMap::new();
+    for member in ["alpha", "alpha-side", "beta"] {
+        let send = crate::console_schedules::ConsoleScheduledSend::new(
+            member.to_string(),
+            format!("scheduled-for-{member}"),
+            crate::console_schedules::ConsoleScheduleSender::Human {
+                principal: ALICE.to_string(),
+                provider: "google_oauth".to_string(),
+                issuer: ISSUER.to_string(),
+                subject: "oidc-sub-alice".to_string(),
+            },
+            1,
+        );
+        let schedule = service
+            .create(meerkat::CreateScheduleRequest {
+                name: None,
+                description: None,
+                trigger: serde_json::from_value(json!({
+                    "type": "interval",
+                    "start_at_utc": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                    "every_seconds": 3600,
+                }))?,
+                target: send.target()?,
+                misfire_policy: meerkat::MisfirePolicy::default(),
+                overlap_policy: meerkat::OverlapPolicy::default(),
+                missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                labels: BTreeMap::new(),
+                planning_horizon_days: None,
+                planning_horizon_occurrences: None,
+            })
+            .await?;
+        schedule_of.insert(member, schedule.schedule_id.to_string());
+    }
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "default",
+        "",
+        runtime.clone(),
+        None,
+        crate::unified_runtime::ConsoleEventStore::new(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let mut console = enforced_console(&runtime, Some(everyone_drives_every_agent()));
+    console.console_aggregator = Some(aggregator);
+    let app = console_json_router_with_state(console);
+    let alice = person_bearer(alice_claims());
+    let bob = person_bearer(bob_claims());
+    let root = person_bearer(root_claims());
+    // A listing that holds its member's schedule (the member's name is
+    // written as `MEMBER` in an answer).
+    let lists = |answer: &str| answer.contains("scheduled-for-MEMBER");
+
+    // Before the read succeeds: each ended member's schedule is answered to
+    // each person as the same call is answered for a name no member holds.
+    let mut answered = Vec::new();
+    for method in MEMBER_SCHEDULE_METHODS {
+        for (who, bearer) in [
+            ("another person", &bob),
+            ("the person it was private to", &alice),
+        ] {
+            for ended in ["alpha-side", "beta"] {
+                let schedule_id = &schedule_of[ended];
+                let answer = schedule_answer(&app, bearer, method, ended, schedule_id).await;
+                let absent = schedule_answer(&app, bearer, method, "ghost", schedule_id).await;
+                if answer != absent {
+                    answered.push(format!("{method} for {ended} as {who}: {answer}"));
+                }
+            }
+        }
+    }
+    assert!(
+        answered.is_empty(),
+        "before the first read succeeds a console schedule of a member that ended is answered \
+         to nobody but an administrator, and to everyone else as for a member that does not \
+         exist:\n{}",
+        answered.join("\n")
+    );
+    for ended in ["alpha-side", "beta"] {
+        let listed = schedule_answer(
+            &app,
+            &root,
+            "meta/schedule/list",
+            ended,
+            &schedule_of[ended],
+        )
+        .await;
+        assert!(
+            lists(&listed),
+            "an administrator is withheld nothing of {ended}: {listed}"
+        );
+    }
+    let listed = schedule_answer(
+        &app,
+        &bob,
+        "meta/schedule/list",
+        "alpha",
+        &schedule_of["alpha"],
+    )
+    .await;
+    assert!(
+        lists(&listed),
+        "a member on the roster is withheld from nobody: {listed}"
+    );
+
+    // The read succeeds.
+    let handle = runtime.handle();
+    assert!(runtime.private_owners().seeded(&handle).await.landed());
+    for method in MEMBER_SCHEDULE_METHODS {
+        let schedule_id = &schedule_of["alpha-side"];
+        assert_eq!(
+            schedule_answer(&app, &bob, method, "alpha-side", schedule_id).await,
+            schedule_answer(&app, &bob, method, "ghost", schedule_id).await,
+            "once the record is read {method} still answers another person for the private \
+             member as for a member that does not exist"
+        );
+    }
+    let listed = schedule_answer(
+        &app,
+        &bob,
+        "meta/schedule/list",
+        "beta",
+        &schedule_of["beta"],
+    )
+    .await;
+    assert!(
+        lists(&listed),
+        "once the record is read the ordinary ended member's schedules are read: {listed}"
+    );
+    let own = json!({ "identity": "alpha-side", "schedule_id": schedule_of["alpha-side"] });
+    let listed = schedule_answer(
+        &app,
+        &alice,
+        "meta/schedule/list",
+        "alpha-side",
+        &schedule_of["alpha-side"],
+    )
+    .await;
+    assert!(
+        lists(&listed),
+        "and the person the private member was private to reads its schedules: {listed}"
+    );
+    let paused = console_rpc_as(&app, Some(&alice), "meta/schedule/pause", own.clone()).await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#}");
+    let deleted = console_rpc_as(&app, Some(&alice), "meta/schedule/delete", own).await;
+    assert_eq!(deleted["result"]["deleted"], json!(true), "{deleted:#}");
     Ok(())
 }
 

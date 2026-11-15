@@ -63,10 +63,10 @@ token fails instead of silently downgrading execution.
 `rkat mob pack` archives every regular file under the mob directory, at any
 depth. Hidden files are included: an env file placed there (`.env`,
 `.env.local`) is in the pack with its contents, and so is the whole `.git`
-directory when the mob directory is a repository of its own. Through 0.9.14
+directory when the mob directory is a repository of its own. Through 0.9.15
 the command prints no warning and no list of them.
 
-From 0.9.15 it reports on standard error how many files it packed and warns,
+From 0.9.16 it reports on standard error how many files it packed and warns,
 by path, about packed files that look like secrets, repository metadata,
 local state or an earlier pack; `rkat mob web build` repeats the warnings for
 the pack it copies. The pack is the same with or without a warning, and the

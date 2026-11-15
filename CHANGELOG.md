@@ -3072,9 +3072,11 @@ them.
   session's next turn builds
   the runtime again. A turn fails at its start also when the server
   refuses, while it applies the turn, something the turn's own request
-  asked for (for example a reasoning effort level the model does not
-  accept): that request is answered its typed refusal, and what is queued
-  behind it ends in the same way.
+  asked for (for example a model the host cannot serve): that request is
+  answered its typed refusal, and what is queued
+  behind it ends in the same way. A reasoning effort level refused at a
+  turn's start is not such a failed start while the session is live: that
+  turn ends alone and what is queued behind it runs (see Fixed).
 
 - After `mob/cancel_all_work` ended a member's running run, the first turn
   a client then starts on that member's session (`turn/start`) is answered
@@ -3245,8 +3247,10 @@ them.
   list) between its admission and its start (these three read from the
   source). The
   refused start costs the session
-  that one turn and nothing it owns: its mobs and their members stay. The
-  runtime retires the session's live runtime (its registration and its
+  that one turn and nothing it owns: its mobs and their members stay. On a
+  live session the runtime registration and what is queued on it stay as
+  well. When the session is not live at the refusal, the
+  runtime retires the session's runtime registration (with its
   MCP adapter) after the refused start, and the next turn builds it again
   from the stored session; an input queued on that registration behind the
   refused turn ends with it, without a run, and its sender sends it again.

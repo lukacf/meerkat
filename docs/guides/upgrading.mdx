@@ -1306,7 +1306,7 @@ What no step removes (beside the event replay above):
   the turn's input is stored, on a live session and on a stored one; a
   turn judged only at its start is refused there, and its stored input
   ends as abandoned with the reason `never_executed`, a value 0.9.14
-  reads (confirmed by tests of the runtime, on both of its stores).
+  reads (confirmed by tests of the runtime, on both of its drivers).
   The record is another case: a turn is admitted, and its request is then
   refused, before anything is sent to the model, because the session
   holds a level that its model does not support. The shape that was run:

@@ -4870,7 +4870,9 @@ other requests queued on that session run. When the session is not live at
 the refusal (the level is refused by the session's build), the session's
 runtime registration is retired as after a failed start and the other
 requests queued on that session end without a run (see Known limitations
-in the changelog; a later release is planned to change this). What can
+in the changelog); so it is for a refused turn whose answer is resolved
+after a restart, or while another run's result is the one the session's
+runtime holds open. What can
 still be refused at its start: a
 deferred create's
 first turn; a turn on a stored session that is not live whose level cannot

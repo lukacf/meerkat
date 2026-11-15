@@ -319,8 +319,9 @@ on following its earlier instructions. To bring the change into effect,
 reset the agent, which discards its conversation; **Instructions** below has
 it.
 
-One cost to know before you archive an agent: an archive removes the mobs
-the agent created at the gateway's next start (**Archive and unarchive**
+One thing to know before you archive or remove an agent: an archive and a
+removal of an agent that still owns mobs it created are refused
+`owns_mobs`, until the agent has destroyed them (**Archive and unarchive**
 below). The agent in this block has created none.
 
 <CodeGroup>
@@ -488,18 +489,29 @@ is already in the agent's record.
   promised between them and the archive's answer. Unarchive
   brings it back on the same conversation. While it is archived the
   identity's status (`runtime.status(name)`) reads `archived` true; the
-  member is left out otherwise. Archiving an agent removes the mobs it
-  created. They stay until the gateway next starts; then each of those mobs
-  is removed with its store, and unarchiving the agent does not bring them
-  back. Have the agent destroy its mobs before you archive it. Do not
-  archive an agent whose mobs must stay.
+  member is left out otherwise. An archive of an agent that still owns
+  mobs it created is refused `owns_mobs`, and nothing is changed: the
+  refusal says how many mobs there are, and names them to the host and to
+  an administrator. Have the agent destroy its mobs (`mob_destroy`) and
+  archive it then, or keep the agent. When the agent can no longer manage
+  a mob its session owns, no Meta host method destroys that mob, and the
+  agent's archive and its removal are refused through Meta while its
+  session owns it; on a gateway the way out is a reset of the agent, which
+  costs its conversation and, by the gateway's next start, those mobs (the
+  RPC reference lists the cases and the refusal's limits, under
+  `meta/identity/archive`). The
+  refusal is Meta's: a Rust host that calls Core's `archive_identity` or
+  `remove_identity` itself is not refused, and there the mobs the agent
+  created are removed with their stores when the host next starts, and
+  unarchiving the agent does not bring them back.
 - **Remove.** Removal is permanent: the name is never available again
   (`name_taken`). The agent's conversation and memory are kept, and no
   other agent can reach them. A removal owes what an archive owes (the
   harvest, the exit interview, the retirement hook); a removal of an
-  archived agent owes nothing more. Archive an agent that may be needed
-  later, once it has destroyed the mobs it created (**Archive and
-  unarchive** above).
+  archived agent owes nothing more. A removal of an agent that still owns
+  mobs it created is refused `owns_mobs`, as its archive is. Archive an
+  agent that may be needed later, once it has destroyed the mobs it
+  created (**Archive and unarchive** above).
 - **Schedules.** The schedules that target an agent follow these three
   changes, so that none keeps firing at an agent that takes no delivery: an
   archive pauses its Active schedules, an unarchive resumes exactly the

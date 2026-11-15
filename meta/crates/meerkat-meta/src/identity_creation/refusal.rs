@@ -64,6 +64,17 @@ impl IdentityRefusal {
         self
     }
 
+    /// This refusal for a caller that is not given lists: an `owns_mobs`
+    /// says how many mobs there are and names none. Every other refusal is
+    /// as it was.
+    #[must_use]
+    pub(crate) fn without_mob_list(mut self) -> Self {
+        if let IdentityRefusalKind::OwnsMobs { mobs, .. } = &mut self.kind {
+            *mobs = None;
+        }
+        self
+    }
+
     /// The kind's stable token (`reserved_key`, ...).
     pub fn kind_token(&self) -> &'static str {
         self.kind.token()
@@ -419,6 +430,17 @@ pub enum IdentityRefusalKind {
     NotAdoptable { reason: NotAdoptableReason },
     /// The agent is not archived: there is nothing to unarchive.
     NotArchived,
+    /// An archive or a removal of an agent whose session still owns mobs
+    /// the agent created. Both retire the agent's member, and those mobs
+    /// end with the session's archive: at the host's next start each is
+    /// removed with its store, and an unarchive does not bring it back.
+    /// `count` is how many there are; `mobs` names them, in order, for a
+    /// caller that is given the list (the host and an administrator), and
+    /// is `None` for every other caller.
+    OwnsMobs {
+        count: u64,
+        mobs: Option<Vec<String>>,
+    },
     /// The host's configuration is being applied to the mob: an adoption
     /// waits for it (retryable).
     DeclaredApplyOpen,
@@ -536,6 +558,11 @@ impl IdentityRefusalKind {
                 "An adoption does not take this agent, for the reason given."
             }
             Self::NotArchived => "The agent is not archived: there is nothing to unarchive.",
+            Self::OwnsMobs { .. } => {
+                "The agent still owns mobs it created, and an archive or a removal would remove \
+                 them: have the agent destroy its mobs first, or keep the agent. Nothing was \
+                 changed."
+            }
             Self::DeclaredApplyOpen => {
                 "The host's configuration is being applied: retry the same request shortly."
             }
@@ -637,6 +664,11 @@ impl IdentityRefusalKind {
                 current: Some(current),
             } => json!({ "current": current }),
             Self::ActivationPending { attempt } => json!({ "attempt": attempt }),
+            Self::OwnsMobs {
+                count,
+                mobs: Some(mobs),
+            } => json!({ "count": count, "mobs": mobs }),
+            Self::OwnsMobs { count, mobs: None } => json!({ "count": count }),
             Self::ConsequencesUnavailable
             | Self::InvalidName
             | Self::PeerUnknown
@@ -703,6 +735,7 @@ closed_tokens!(IdentityRefusalKind {
     OwnerReadOnly => "owner_read_only",
     NotAdoptable => "not_adoptable",
     NotArchived => "not_archived",
+    OwnsMobs => "owns_mobs",
     DeclaredApplyOpen => "declared_apply_open",
     AdmissionUnsettled => "admission_unsettled",
     PredecessorMismatch => "predecessor_mismatch",

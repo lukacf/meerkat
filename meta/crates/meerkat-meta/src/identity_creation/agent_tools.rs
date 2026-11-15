@@ -264,6 +264,11 @@ fn description(name: &str) -> String {
              it has no running member, messages to it are refused, and \
              identity_unarchive brings it back on the same conversation. Use this when the \
              agent may be needed later; identity_remove is for good.\n\n\
+             An agent that still owns mobs it created is not archived: the result is \
+             `refused` with `kind` `owns_mobs` and `count`, how many mobs it owns, and nothing \
+             is changed. An archive would remove those mobs. Ask that agent to destroy its \
+             mobs (its mob_destroy tool) and call identity_archive again, or leave the agent \
+             as it is.\n\n\
              The schedules that target the agent follow it: an archive pauses its active \
              schedules (`effect` is `paused`, `count` is how many are paused for it), and \
              identity_unarchive resumes exactly those. {SCHEDULES_ANSWER}\n\n\
@@ -294,6 +299,11 @@ fn description(name: &str) -> String {
              kept, and nothing can reach them; the agent's last conversation is harvested as \
              for any agent that leaves. This cannot be undone: use identity_archive \
              when the agent may be needed later.\n\n\
+             An agent that still owns mobs it created is not removed: the result is \
+             `refused` with `kind` `owns_mobs` and `count`, how many mobs it owns, and nothing \
+             is changed. A removal would remove those mobs. Ask that agent to destroy its \
+             mobs (its mob_destroy tool) and call identity_remove again, or leave the agent \
+             as it is.\n\n\
              Every schedule that targets the agent is ended (`effect` is `ended`, `count` is \
              how many). {SCHEDULES_ANSWER}\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \

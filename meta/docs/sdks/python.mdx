@@ -634,7 +634,12 @@ out, and is empty when nothing is open.
 Every refusal of every call raises `IdentityRefusedError` (`-32058`); its
 kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`. A kind newer than
 the SDK is the same error with `known_kind` false. Only `operation` answers a
-refusal as a value. A candidate launch refuses a change with the gateway-wide
+refusal as a value. An `archive` or a `remove` of an agent that still owns
+mobs it created is refused `owns_mobs`, and nothing is changed: `details`
+holds `count` (how many mobs) and `mobs` (their ids, given to this host),
+and the remedy is to have the agent destroy its mobs first, or to keep the
+agent. A candidate
+launch refuses a change with the gateway-wide
 `AnnouncementRefusedError` (`kind` `candidate_launch`). Advisory values
 (`readiness`, a change's `state`, provenance, directory verdicts) are kept as
 the gateway sent them.

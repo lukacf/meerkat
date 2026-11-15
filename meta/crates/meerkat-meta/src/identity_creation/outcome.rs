@@ -130,13 +130,18 @@ impl IdentityOutcome {
 
     /// The outcome for a caller that is told what became of each agent's
     /// schedules and how many they are, and is not given their list
-    /// ([`SchedulesFollowed::without_list`]).
+    /// ([`SchedulesFollowed::without_list`]). A refusal that names the mobs
+    /// an agent owns is given the same way: how many, and not which
+    /// ([`IdentityRefusal::without_mob_list`]).
     #[must_use]
     pub(crate) fn without_schedule_lists(mut self) -> Self {
         if let Self::Done { agents, .. } | Self::PendingPreparation { agents, .. } = &mut self {
             for agent in agents {
                 agent.schedules = agent.schedules.take().map(SchedulesFollowed::without_list);
             }
+        }
+        if let Self::Refused(refusal) = self {
+            return Self::Refused(refusal.without_mob_list());
         }
         self
     }

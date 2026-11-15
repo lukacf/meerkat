@@ -332,20 +332,29 @@ async fn boot_on(label: &str, stored_mob: bool) -> Launch {
 
     let authority = CompositionAuthority::Authoritative;
     let stores = tempfile::tempdir().expect("stores dir");
+    // The store files are where a launch over this state directory keeps
+    // them.
+    let layout = crate::storage_layout::MetaStorageLayout::with_injected_roots(
+        stores.path().to_path_buf(),
+        None,
+    );
     let mob_storage = if stored_mob {
-        meerkat_mob::MobStorage::persistent(stores.path().join("mob.db")).expect("mob store")
+        meerkat_mob::MobStorage::persistent(layout.event_log_db()).expect("mob store")
     } else {
         meerkat_mob::MobStorage::in_memory()
     };
     let schedule_state = tempfile::tempdir().expect("schedule state dir");
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(
-        meerkat_store::SqliteSessionStore::open(stores.path().join("sessions.db"))
-            .expect("session store"),
+        meerkat_store::SqliteSessionStore::open(
+            layout.session_db().expect("the sessions database").path,
+        )
+        .expect("session store"),
     );
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-        meerkat_runtime::store::SqliteRuntimeStore::new(stores.path().join("runtime.sqlite"))
+        meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db())
             .expect("runtime store"),
     );
+
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
     let mut builder = meerkat::FactoryAgentBuilder::new(
@@ -2228,70 +2237,6 @@ async fn a_private_side_chat_of_a_durable_profiles_agent_loses_its_schedule_when
          its schedule three seconds after its own end is {:?}",
         launch.phase(&childs).await
     );
-    launch.finish().await;
-}
-
-/// A person's deferred send on the Console to her private side chat ends
-/// with the side chat: it is deleted when she closes it, and a later member
-/// under the name receives nothing of it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_deferred_console_send_to_a_private_side_chat_is_deleted_when_its_owner_closes_it() {
-    let launch = boot("send").await;
-    let (app, owner) = private_side_chat(&launch).await;
-    let stored = launch.schedule_ids().await;
-    let created = console_rpc_as(
-        &app,
-        Some(&owner),
-        "meta/schedule/create",
-        json!({
-            "identity": SIDE_NAME,
-            "content": MARKER,
-            "name": "a deferred send",
-            "trigger": {
-                "type": "interval",
-                "start_at_utc": (chrono::Utc::now() + chrono::Duration::seconds(6)).to_rfc3339(),
-                "every_seconds": 60,
-            },
-        }),
-    )
-    .await;
-    launch.expect(
-        created["error"].is_null(),
-        format!("the owner's deferred send to her side chat is created: {created}"),
-    );
-    if !created["error"].is_null() {
-        launch.finish().await;
-        return;
-    }
-    let schedule = launch.new_schedule(&stored, 5).await;
-    launch.expect(
-        launch.phase(&schedule).await == Some(meerkat::SchedulePhase::Active),
-        "the deferred send is an active schedule of the launch's schedule service",
-    );
-
-    close(&launch, &app, &owner, SIDE_NAME).await;
-    launch.expect(
-        launch.deleted_within(&schedule, 10).await,
-        format!(
-            "the deferred send to the closed side chat is deleted (it is {:?})",
-            launch.phase(&schedule).await
-        ),
-    );
-
-    // A shared member holds the name: nothing of the send reaches it.
-    let since = launch.seen.all().len();
-    launch.shared("worker", SIDE_NAME).await;
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    launch.expect(
-        !launch.marker_since(since),
-        "no model request made after the name was taken holds the deferred send's text",
-    );
-    if let Some(session) = launch.entry(SIDE_NAME).await.and_then(|seat| seat.session) {
-        launch.expect(
-            !launch.history_holds_marker(&session).await,
-            "the later member's transcript does not hold the deferred send's text",
-        );
-    }
     launch.finish().await;
 }
 

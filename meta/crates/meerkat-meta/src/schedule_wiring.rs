@@ -1143,9 +1143,10 @@ pub(crate) struct EndedPrivateMemberSchedules {
 /// schedules.
 #[async_trait]
 pub(crate) trait EndedMemberSchedules: Send + Sync {
-    /// The schedules that are not deleted, and how many stored schedule
-    /// rows could not be read (each is left out).
-    async fn listed(&self) -> Result<(Vec<Schedule>, usize), meerkat::ScheduleDomainError>;
+    /// The schedules that are not deleted, and the schedule id of each
+    /// stored schedule row that could not be read (each is left out; a row
+    /// whose id cannot be read either is named `unknown`).
+    async fn listed(&self) -> Result<(Vec<Schedule>, Vec<String>), meerkat::ScheduleDomainError>;
 
     /// Delete one schedule, through its own lifecycle.
     async fn delete(
@@ -1156,9 +1157,13 @@ pub(crate) trait EndedMemberSchedules: Send + Sync {
 
 #[async_trait]
 impl EndedMemberSchedules for ScheduleService {
-    async fn listed(&self) -> Result<(Vec<Schedule>, usize), meerkat::ScheduleDomainError> {
+    async fn listed(&self) -> Result<(Vec<Schedule>, Vec<String>), meerkat::ScheduleDomainError> {
         let (schedules, unreadable) = self.list_with_row_faults().await?;
-        Ok((schedules, unreadable.len()))
+        let unreadable = unreadable
+            .into_iter()
+            .map(|fault| fault.schedule_id.unwrap_or_else(|| "unknown".to_owned()))
+            .collect();
+        Ok((schedules, unreadable))
     }
 
     async fn delete(
@@ -1231,11 +1236,12 @@ impl EndedPrivateMemberSchedules {
         ended: &crate::private_owners::EndedPrivateMember,
     ) -> Result<(), meerkat::ScheduleDomainError> {
         let (schedules, unreadable) = self.schedules.listed().await?;
-        if unreadable > 0 {
+        if !unreadable.is_empty() {
             tracing::warn!(
                 mob_id = %ended.mob_id,
                 target_member = %ended.member,
-                unreadable,
+                unreadable = unreadable.len(),
+                schedule_ids = ?unreadable,
                 "stored schedule rows could not be read: one that targets an ended member \
                  private to a person stays as it is"
             );

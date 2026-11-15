@@ -382,8 +382,8 @@ struct RefusedDeletes {
 impl super::EndedMemberSchedules for RefusedDeletes {
     async fn listed(
         &self,
-    ) -> Result<(Vec<meerkat::Schedule>, usize), meerkat::ScheduleDomainError> {
-        Ok((self.service.list().await?, 0))
+    ) -> Result<(Vec<meerkat::Schedule>, Vec<String>), meerkat::ScheduleDomainError> {
+        Ok((self.service.list().await?, Vec::new()))
     }
 
     async fn delete(&self, _schedule_id: &ScheduleId) -> Result<(), meerkat::ScheduleDomainError> {

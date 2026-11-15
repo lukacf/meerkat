@@ -106,8 +106,61 @@ impl Default for FirstReadsSignal {
 const HELD_ENDS_MAX: usize = 1024;
 
 /// How often the member history is read for one retiring member before its
-/// end is left unfollowed.
+/// end is left unfollowed, when the read fails with an error that can pass
+/// ([`history_read_can_pass`]).
 const HISTORY_READ_ATTEMPTS: u32 = 3;
+
+/// Whether a failed read of a mob's member history can pass when it is
+/// asked again: a store error, other than the answer of a store that keeps
+/// no member history. That answer, and a refusal of the read, stay as they
+/// are however often the read is asked.
+fn history_read_can_pass(error: &meerkat_mob::MobError) -> bool {
+    match error {
+        meerkat_mob::MobError::StorageError(source) => !matches!(
+            source.downcast_ref::<meerkat_mob::MobStoreError>(),
+            Some(meerkat_mob::MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+        ),
+        _ => false,
+    }
+}
+
+/// The member history `read` answers for the retiring `member` of the mob
+/// `mob_id`. A read that fails with an error that can pass is asked again
+/// after a wait, [`HISTORY_READ_ATTEMPTS`] times in all; any other failure
+/// is answered at once. Without a history the answer is none, with one
+/// warning.
+async fn read_member_history<Read, Reading>(
+    mob_id: &str,
+    member: &str,
+    mut read: Read,
+) -> Option<meerkat_mob::MemberBindingHistory>
+where
+    Read: FnMut() -> Reading,
+    Reading: Future<Output = Result<meerkat_mob::MemberBindingHistory, meerkat_mob::MobError>>,
+{
+    let mut wait = std::time::Duration::from_millis(250);
+    let mut attempt = 1;
+    loop {
+        match read().await {
+            Ok(history) => return Some(history),
+            Err(error) if attempt < HISTORY_READ_ATTEMPTS && history_read_can_pass(&error) => {
+                tokio::time::sleep(wait).await;
+                wait *= 4;
+                attempt += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    mob_id = %mob_id,
+                    member = %member,
+                    "the member history of a retiring member could not be read: if the member \
+                     was private to a person, what follows its end is not done"
+                );
+                return None;
+            }
+        }
+    }
+}
 
 /// A member, keyed as its mob's roster names it: (mob id, roster member id).
 type MemberKey = (String, String);
@@ -907,28 +960,10 @@ impl PrivateOwners {
         session: Option<&meerkat_core::types::SessionId>,
         ended_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<EndedPrivateMember> {
-        let mut wait = std::time::Duration::from_millis(250);
-        let mut attempt = 1;
-        let history = loop {
-            match handle.member_binding_history().await {
-                Ok(history) => break history,
-                Err(error) if attempt == HISTORY_READ_ATTEMPTS => {
-                    tracing::warn!(
-                        %error,
-                        mob_id = %handle.mob_id(),
-                        member = %member,
-                        "the member history of a retiring member could not be read: if the \
-                         member was private to a person, what follows its end is not done"
-                    );
-                    return None;
-                }
-                Err(_) => {
-                    tokio::time::sleep(wait).await;
-                    wait *= 4;
-                    attempt += 1;
-                }
-            }
-        };
+        let history = read_member_history(handle.mob_id().as_str(), member.as_str(), || {
+            handle.member_binding_history()
+        })
+        .await?;
         let binding = session
             .and_then(|session| history.binding_for_session(session))
             .into_iter()
@@ -1852,6 +1887,100 @@ mod tests {
         assert_eq!(
             kept.last(),
             Some(&ended(&format!("member-{HELD_ENDS_MAX}")))
+        );
+    }
+
+    /// The log lines a row's own thread writes.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A mob store that keeps no member history answers so however often it
+    /// is asked: the history is read once, the end is left unfollowed with
+    /// one warning, and nothing waits. A store error that can pass is read
+    /// three times.
+    #[tokio::test]
+    async fn a_store_that_keeps_no_member_history_is_read_once() {
+        let log = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish();
+        // A second registered Dispatch keeps callsite interest from being
+        // cached `never` by threads without a subscriber.
+        let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let logged = tracing::subscriber::set_default(subscriber);
+
+        let mut reads = 0;
+        let history = read_member_history("mob", "side", || {
+            reads += 1;
+            async {
+                Err(meerkat_mob::MobError::from(
+                    meerkat_mob::MobStoreError::IdentityMemberAtomicPersistenceUnavailable,
+                ))
+            }
+        })
+        .await;
+        drop(logged);
+        assert!(history.is_none(), "no history, no end to follow");
+        assert_eq!(
+            reads, 1,
+            "a store that keeps no member history is read once"
+        );
+        let log = log.contents();
+        let warnings: Vec<&str> = log
+            .lines()
+            .filter(|line| {
+                line.contains("the member history of a retiring member could not be read")
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "{log}");
+        let warning = warnings.first().copied().unwrap_or_default();
+        assert!(warning.contains("WARN"), "{log}");
+        assert!(warning.contains("member=side"), "{log}");
+
+        let mut reads = 0;
+        let history = read_member_history("mob", "side", || {
+            reads += 1;
+            async {
+                Err(meerkat_mob::MobError::StorageError(Box::new(
+                    std::io::Error::other("the store is busy"),
+                )))
+            }
+        })
+        .await;
+        assert!(history.is_none(), "no history, no end to follow");
+        assert_eq!(
+            reads, HISTORY_READ_ATTEMPTS,
+            "a store error that can pass is read again"
         );
     }
 }

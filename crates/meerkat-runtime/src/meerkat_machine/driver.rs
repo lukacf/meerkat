@@ -11778,12 +11778,15 @@ pub(crate) async fn machine_resolve_runtime_terminated_completion_result(
 }
 
 /// Terminalize a failed runtime-loop run, disposing of its staged contributors
-/// as the caller's typed disposition says.
+/// as the caller's typed disposition says, with one exception the machine
+/// decides: a caller's `Replayed` is realized as `Refused` when the cause the
+/// machine recorded with `RunFailed` is a refused request (see
+/// `fail_runtime_loop_run_inner`).
 ///
-/// The disposition is the caller's because only the runtime loop knows whether
-/// the executor answered (nothing in flight, replay repeats nothing) or whether
-/// the loop concluded non-progress and dropped an `apply` whose fate it cannot
-/// observe (replay could execute the instruction twice).
+/// Apart from that the disposition is the caller's because only the runtime
+/// loop knows whether the executor answered (nothing in flight, replay repeats
+/// nothing) or whether the loop concluded non-progress and dropped an `apply`
+/// whose fate it cannot observe (replay could execute the instruction twice).
 pub(crate) async fn fail_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,

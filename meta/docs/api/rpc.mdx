@@ -1485,7 +1485,10 @@ mode and cannot return the agent to its profile's.
 
 A label change is applied at once and does not seat the agent again: the
 agent keeps its member and its conversation, and goes on listing and
-managing the mobs it created. The mob's roster reads the new labels from
+managing the mobs it created. A host changes an agent's labels through
+this method, and another agent the policy lets change it through the
+`identity_update` tool, which refuses a change of the caller itself
+(`self_change_refused`). The mob's roster reads the new labels from
 the update on, and what decides by a label decides on them at once: an
 access rule's `match_labels` at the next call (an open event stream
 within 20 seconds), the identity policy's rules on the agent's record. An
@@ -1515,12 +1518,11 @@ it again, the update that changes them included. See
 [Changing labels](/guides/agents-create-agents#changing-labels).
 
 A profile move and a runtime-mode change seat the agent again on the same
-conversation, once it is idle. An agent that is seated again no longer
-lists or manages the mobs it created with its own tools (its mob tools
-answer no such mob, and its calls that name one are refused; the mobs and
-their members stay as they are): have it destroy such a mob first, or
-leave the profile and the runtime mode of an agent that must go on
-managing its mobs as they are. A host does this through this method; an
+conversation, once it is idle. An agent seated again this way goes on
+listing and managing the mobs it created with its own tools; its new
+profile's tools decide what it can call. A broken agent that an update
+seats again keeps them in the same way. A host moves a profile and changes
+a runtime mode through this method; an
 agent the policy lets change another agent can move that agent's profile
 through the `identity_update` tool, which takes no runtime mode and
 refuses a change of the caller itself (`self_change_refused`).
@@ -4300,9 +4302,17 @@ next reconcile retries it. Every call that completes leaves two rows in the
 member's conversation, whether or not it compacted: the maintenance turn's
 input and the member's acknowledgement.
 
-For an identity that created mobs, a completed call has a cost of its own.
-After the call has completed, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in runs on 0.9.14 and on 0.9.15's code).
-A call that fails after its first rebuild has the same cost (read from the source, not run).
+For an identity that created mobs, a completed call has a cost of its own on
+0.9.9 through 0.9.14.
+After the call has completed there, the identity no longer lists a mob it created and its calls that name the mob are refused; the mobs' stores are kept (seen in a run on 0.9.14, and in a run on 0.9.15's code before a same-session successor kept that management).
+A call that fails after its first rebuild has the same cost on those releases (read from the source, not run).
+From 0.9.15 each rebuild takes the same-session step a respawn takes, and a
+completed call keeps the identity's management of the mobs it created (one
+run: after the call the identity listed its mob and its mob's members and
+checked a member, in the same process and after a gateway restart). A call
+that times out, and one that completes without compacting, rebuild the
+member by the same step (read from the source; not run). A member the
+same-session step does not serve still pays the cost.
 Before the call, have the identity retire the members of, or destroy, a mob
 it created whose members act on their own (not run).
 
@@ -4430,22 +4440,28 @@ For an identity that created mobs each clearing step has a cost of its own:
   the identity's provider is available, and do not stop or restart the
   gateway again until the respawn has answered without an error and the
   identity has then answered one message;
-- a respawn on every release, 0.9.15 included: after it has completed, the
+- a respawn on 0.9.9 through 0.9.14: after it has completed, the
   identity no longer lists a mob it created, and the calls tried that name
   the mob were refused, while the mob's members can go on running; the mobs'
-  stores stay. A completed `meta/compact_member` has the same cost (see the
-  top of this section);
+  stores stay. A completed `meta/compact_member` has the same cost on those
+  releases (see the top of this section). From 0.9.15 a respawn of a member
+  the same-session step serves keeps that management (confirmed by tests and
+  by a run), and a completed `meta/compact_member` of a member the
+  same-session step serves keeps it too (one run); a call that times out,
+  and one that completes without compacting, rebuild the member by the
+  same step (read from the source; not run);
 - a reset: it ends the identity's session, and the mobs that session owns end
   with it, no later than the gateway's next start (read from the source, not
   run).
 
 A `meta/compact_member` that failed has rebuilt the identity once before its
-maintenance turn, so the identity has probably paid that cost already (read
-from the source, not run): check whether it still lists the mobs it created.
-If it does and must go on managing them, weigh that against the failing
-messages before you respawn: none of the three steps is known to keep it; and
-before the respawn have it retire the members of, or destroy, a mob it
-created whose members act on their own (not run).
+maintenance turn, so on 0.9.9 through 0.9.14 the identity has probably paid
+that cost already (read from the source, not run): check whether it still
+lists the mobs it created. If it does and must go on managing them, weigh
+that against the failing messages before you respawn: on 0.9.9 through
+0.9.14 none of the three steps is known to keep it; and before the respawn
+have it retire the members of, or destroy, a mob it created whose members
+act on their own (not run).
 
 ### `meta/bound_member_transcript`
 

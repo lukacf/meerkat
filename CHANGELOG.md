@@ -578,6 +578,17 @@ them.
   behind the lease of its previous incarnation included, stays a plain
   standby, and the report names no other holder.
 
+- `meerkat-mob`: a member binding answers where its chain of same-session
+  successors began. `MemberBinding::same_session_lineage_start(LineageSteps)`
+  is the first generation of the unbroken chain of same-session successor
+  steps that seated the binding's incarnation on its session (its own
+  generation when no such step seated it), read from the journal rows of
+  those steps alone; `LineageSteps::same_session_successors()` follows the
+  steps that kept the member's role, and `.with_role_migrations(true)` the
+  ones that seated the successor under another role too. It answers `None`
+  once the mob's journal holds a mob reset. Like the binding it is a history
+  fact and authorizes nothing by itself.
+
 - `meerkat-runtime`, `meerkat-contracts`, `meerkat-rpc`,
   `meerkat-web-runtime` and the Python, TypeScript and Web SDKs: recall of
   one queued input. A caller withdraws exactly one queued input of a
@@ -2222,6 +2233,80 @@ them.
   claim lapses with its lease as before, and those attempts are still
   spent one per claim lease.
 
+- `meerkat-mob-mcp`: a member that created mobs with the agent mob tools
+  keeps managing them after its member is replaced by a same-session
+  successor, once or several times in a row
+  (`MobHandle::respawn_member`, a declared role migration, a runtime-mode
+  restamp, `MobHandle::respawn` of an identity entry's member). The
+  creator's manage grant was re-derived only for the member generation the
+  mob's creation record names, so a successor's session no longer listed
+  the mobs it had created and its calls on them (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`) were refused as
+  `access_denied`, in the same process and after a restart, while those mobs
+  went on running. A same-session successor now keeps that management,
+  through any number of such steps, in the same process and after a restart;
+  the steps below say which changes of a member keep it and which end it.
+  A mob created on an earlier release is covered with no call when its
+  creator was replaced there by these same steps. On 0.9.9 through 0.9.14
+  four steps write the two journal rows this release follows:
+  `MobHandle::respawn_member` (run), a declared role migration (run), a
+  runtime-mode restamp (run), and `MobHandle::respawn` of an identity
+  entry's member (run; that `mob/respawn` makes this call is read from the
+  source). Each run is of 0.9.14: a build of the 0.9.14 tag made the step,
+  and this release's reader answered the successor's chain from the
+  generation that created the mob out of the journal that build wrote. No
+  host was upgraded in those runs, and 0.9.9 through 0.9.13 are read from
+  the source. A respawn made through a Meerkat Meta gateway on 0.9.9
+  through 0.9.14 (`meta/respawn`, the Console's respawn), and a completed
+  `meta/compact_member` there, are not among these steps and are not
+  covered: see "Not brought back" below. The session's create
+  capability and its current role's tools decide each call as before.
+  - Keeps the creator's management: `MobHandle::respawn_member`, once or
+    many times; a declared role migration and a runtime-mode restamp of an
+    identity entry's member, a store-owned identity's profile move and
+    runtime-mode change among them; `MobHandle::respawn` of an identity
+    entry's member; and every other request that seats the member's
+    successor on its own session. A wake of the member, a restart of the
+    host and an adoption of the member change nothing.
+  - Still ends it, as before: a reset onto a fresh session
+    (`rotate_member`) and a worker's respawn, which takes a fresh session;
+    a member that was retired and later seated again on its kept session,
+    whatever seated it (a spawn or `ensure_member` that resumes the session,
+    an unlisted identity listed again, an archived identity unarchived); a
+    session binding recovery that moves the member to another session;
+    every later generation of a member of a mob that was ever reset.
+  - Not covered: a member whose own mob is stored in custom stores without
+    the built-in identity and member store. Its member history cannot be
+    read, so its successor keeps nothing, as before.
+  - Not brought back: a creator that was retired and seated again on its
+    session before the upgrade stays without its management of the mobs it
+    created; upgrading does not give back a management lost that way. A
+    respawn through a Meerkat Meta gateway on 0.9.9 through 0.9.14 is that
+    case: Meta respawned an agent there by retiring its member and seating
+    it again on its session (`meta/respawn`, the Console's respawn), not
+    by the same-session step (read from the source at each tag). After the
+    upgrade such an agent still lists none of the mobs it created before
+    that respawn, and its calls on them are refused (run for
+    `meta/respawn`: the published Meta 0.9.14, then this release on the
+    same state; the Console's respawn makes the same call, read from the
+    source). A further respawn of that agent on this release does not give
+    them back either (run); the mobs it created after that respawn are
+    managed and stay so (read from the source). A `meta/compact_member` on
+    0.9.9 through 0.9.14 is the same case, a completed call or one that
+    failed or timed out after its first rebuild: each rebuild retired the
+    member and seated it again as those releases' respawn did (read from
+    the source at each tag). After a completed call the agent listed none
+    of its mobs there (a run on the published Meta 0.9.14), and the
+    upgrade does not give them back after it (one run); for a call that
+    failed or timed out after its first rebuild that is read from the
+    source, not run. Those
+    mobs end as before, with the session that owns them (see the Upgrade
+    notes, and Meerkat Meta's changelog, "Not brought back", for a Meta
+    host).
+  The 0.9.4 Known limitation about a member "reset to its next generation,
+  over the same session" described this case; it no longer applies to a
+  same-session successor.
+
 - `meerkat-runtime`, `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`:
   ending one queued input of a session no longer ends the session's other
   work. A request cancelled while its turn was queued behind a running turn
@@ -3288,6 +3373,42 @@ them.
   removes it lets the agent be seated again. One adopted under a reserved
   name stays as it is until it is removed.
 
+- A member that created mobs with the agent mob tools on an earlier release
+  and was replaced there by a same-session successor manages those mobs
+  again after the upgrade, with no call: it lists them and its calls on them
+  are admitted. The steps of 0.9.9 through 0.9.14 that leave such a
+  successor are Meerkat's own: `MobHandle::respawn_member` (run), a
+  declared role migration (run), a runtime-mode restamp (run), and
+  `MobHandle::respawn` of an identity entry's member (run), the call behind
+  `mob/respawn` (read from the source). The runs are of 0.9.14; Fixed says
+  what they cover.
+  A respawn made through a Meerkat Meta gateway on 0.9.9 through 0.9.14
+  (`meta/respawn`, the Console's respawn) is NOT one of them (read from the
+  source at each tag). It leaves the agent without the mobs it created
+  before that respawn, and the upgrade does not give them back: the agent
+  lists none of them and its calls on them are refused (run for
+  `meta/respawn` on 0.9.14; see Fixed, "Not brought back", and Meerkat
+  Meta's changelog). A further respawn of that agent on 0.9.15 does not
+  give them back either (run): a mob's record names the member generation
+  that created it, and no later step reaches back past that respawn. A
+  `meta/compact_member` on 0.9.9 through 0.9.14, a completed call or one
+  that failed or timed out after its first rebuild, leaves an agent in the
+  same state, and the upgrade does not give those mobs back either (one
+  run, of a completed call on 0.9.14; for a call that failed or timed out
+  after its first rebuild, read from the source; not run). Mobs the agent
+  created after that respawn or compact call are not affected: it manages
+  them, and keeps them through its respawns on 0.9.15 (read from the
+  source). What is left for the earlier mobs is to end them: a reset or
+  a delete of the agent (`meta/reset`, `meta/delete_identity`), then the
+  gateway's next start (read from the source). That ends the agent's
+  conversation, and every mob its session owns, the ones it still manages
+  among them, is removed with its members and its store.
+  The upgrade does not bring back the management of any creator that was
+  retired and seated again on its session before it: such a mob stays
+  unlisted for its creator and goes on running until the session that owns
+  it is archived (a reset or a removal of the member) and the host starts
+  again, or until the host destroys it.
+
 - A configuration document an earlier release wrote keeps its mode until
   the engine next rewrites it. To make the existing ones owner-only now, run
   `chmod 600` on each that exists: `~/.rkat/config.toml`,
@@ -3440,17 +3561,20 @@ them.
   every seated identity whose labels were updated owes the restamp until
   its next seat row, and a retry of the update or a later update of other
   fields does not settle it. No turn, wake, build or restart settles it
-  either. The respawn seats the member again on the
-  same session and cancels a turn in flight, and an agent that created
-  mobs with its own tools then no longer lists or manages them: have it
-  destroy such a mob first, or leave that identity unsettled (it is out
-  of service while rolled back, and nothing of it is lost). Or set the
-  identity's labels back to the labels its member was seated with, and
-  apply the label change again after the return: for an idle member
-  that update lets the key go without seating the member again, so the
-  agent keeps the mobs it created; a member that holds work at that
-  update is answered `deferred` and keeps the key until the same update
-  is sent again once it is idle. A member no same-session
+  either. The respawn seats the member again on the same session and
+  cancels a turn in flight; an agent that created mobs with its own
+  tools goes on listing and managing them (see Fixed), though not while
+  an earlier release runs: 0.9.9 through 0.9.14 give that management
+  only to the member generation that created the mob, and the return
+  restores it with no call. An identity left unsettled is out of service
+  while rolled back, and nothing of it is lost. Or set the identity's
+  labels back to the labels its member was seated with, and apply the
+  label change again after the return: for an idle member that update
+  lets the key go without seating the member again, so the agent manages
+  the mobs it created on the earlier release as well; a member that
+  holds work at that update is answered `deferred` and keeps the key
+  until the same update is sent again once it is idle. A member no
+  same-session
   successor can serve (placed, wired to a placed member, or on a session
   service that keeps no durable sessions) is settled by none of these:
   rotate it (`MobHandle::rotate_member`), or archive or remove its

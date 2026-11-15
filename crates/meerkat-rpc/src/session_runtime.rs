@@ -7714,7 +7714,21 @@ impl SessionRuntime {
                 needs_idle_session: false,
             });
         }
-        let live = matches!(self.service.has_live_session(session_id).await, Ok(true));
+        // A session whose task ended with the host's runtime it ran on is
+        // not live, and the live read asks the lost actor and fails: that is
+        // asked first, without the actor, as `refuse_cold_help_session`
+        // asks it. Any other failure of the live read is the caller's
+        // answer: a session whose liveness cannot be read is not judged as
+        // one that is not live.
+        let live = !self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && self
+                .service
+                .has_live_session(session_id)
+                .await
+                .map_err(session_error_to_rpc)?;
         let staged = !live && self.staged_sessions.contains(session_id).await;
         let Some(ov) = names_the_identity else {
             return Ok(TurnLevelAdmission {
@@ -18744,6 +18758,8 @@ mod tests {
         fail_lifecycle_after_successes: AtomicUsize,
         fail_delete_ops_once: AtomicBool,
         fail_catalog_read_once: AtomicBool,
+        /// The runtime the next read of whose catalog entry is refused.
+        fail_catalog_entry_read_of: StdMutex<Option<meerkat_runtime::LogicalRuntimeId>>,
         cleanup_wire_store_calls: StdMutex<Vec<(&'static str, meerkat_runtime::LogicalRuntimeId)>>,
         /// The runtime whose next run-boundary (`Success`) commit is refused.
         fail_run_boundary_of: StdMutex<Option<meerkat_runtime::LogicalRuntimeId>>,
@@ -18761,6 +18777,7 @@ mod tests {
                 fail_lifecycle_after_successes: AtomicUsize::new(usize::MAX),
                 fail_delete_ops_once: AtomicBool::new(false),
                 fail_catalog_read_once: AtomicBool::new(false),
+                fail_catalog_entry_read_of: StdMutex::new(None),
                 cleanup_wire_store_calls: StdMutex::new(Vec::new()),
                 fail_run_boundary_of: StdMutex::new(None),
                 run_boundary_refused: Notify::new(),
@@ -18840,6 +18857,43 @@ mod tests {
         fn fail_next_catalog_read(&self) {
             self.fail_catalog_read_once
                 .store(true, AtomicOrdering::Release);
+        }
+
+        /// Refuse the next read of `runtime_id`'s catalog entry, once, as a
+        /// store read failure. A read of another runtime's entry, or of the
+        /// list, does not take the failure, so what other sessions read
+        /// meanwhile does not move it.
+        #[cfg(all(feature = "mob", feature = "mcp"))]
+        fn fail_next_catalog_entry_read_of(&self, runtime_id: meerkat_runtime::LogicalRuntimeId) {
+            *self
+                .fail_catalog_entry_read_of
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime_id);
+        }
+
+        /// Whether the read [`Self::fail_next_catalog_entry_read_of`] refuses
+        /// is still to come.
+        #[cfg(all(feature = "mob", feature = "mcp"))]
+        fn catalog_entry_read_failure_is_pending(&self) -> bool {
+            self.fail_catalog_entry_read_of
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        }
+
+        fn take_catalog_entry_read_failure(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> bool {
+            let mut armed = self
+                .fail_catalog_entry_read_of
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if armed.as_ref() != Some(runtime_id) {
+                return false;
+            }
+            *armed = None;
+            true
         }
 
         fn take_snapshot_failure(&self) -> bool {
@@ -19031,6 +19085,7 @@ mod tests {
             if self
                 .fail_catalog_read_once
                 .swap(false, AtomicOrdering::AcqRel)
+                || self.take_catalog_entry_read_failure(runtime_id)
             {
                 return Err(meerkat_runtime::RuntimeStoreError::ReadFailed(
                     "forced runtime catalog failure".to_string(),
@@ -30375,6 +30430,138 @@ mod tests {
             .enable_all()
             .build()
             .expect("the process's other runtime")
+    }
+
+    /// The same stop, and then a turn that sets a reasoning effort level,
+    /// sent to the idle session from another runtime of the process.
+    ///
+    /// The session's task ended with the stopped runtime, so the session is
+    /// not live, and the read that tells whether it is live asks the lost
+    /// actor and fails. The turn's level is judged as on a stored session
+    /// that is not live, and the turn is admitted all the same: its input
+    /// stays durably admitted and queued, never staged onto a run, no model
+    /// request is made for it in the stopped host's process, and its caller
+    /// is answered that the input stays admitted and waits for a reload. A
+    /// session runtime started again over the same stores rebuilds the
+    /// session from storage and runs the input once, at the level it sets.
+    #[test]
+    fn a_turn_that_sets_a_level_after_its_hosts_runtime_stopped_is_admitted_and_runs_after_the_next_start()
+     {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        const LEVEL_PROMPT: &str = "a turn that sets a level after the host's runtime stopped";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        // The route states `high`.
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        let host = rpc_host_runtime();
+        let (runtime, session_id) = host.block_on(async {
+            let runtime = realm.start().await;
+            runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(Arc::clone(&session_client)),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "the first turn").await;
+            (runtime, session_id)
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+
+        let process = process_runtime_outliving_the_host();
+        let observed = process.block_on(async {
+            let task_ended_with_its_runtime = runtime
+                .service
+                .session_task_ended_with_its_runtime(&session_id)
+                .await;
+            let live_read_fails = runtime.service.has_live_session(&session_id).await.is_err();
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            let turn = tokio::time::timeout(
+                Duration::from_mins(1),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    LEVEL_PROMPT.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    Some(level_overrides(TurnMetadataOverride::Set(
+                        EffortLevel::High,
+                    ))),
+                ),
+            )
+            .await;
+            // (code, the reason its data names) of the turn's answer.
+            let turn_answer = turn.ok().map(|answer| {
+                answer.map(|_| ()).map_err(|error| {
+                    (
+                        error.code,
+                        error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("reason"))
+                            .cloned(),
+                    )
+                })
+            });
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&session_id)
+                .await
+                .is_some();
+            let left_open =
+                open_inputs_carrying(&realm.runtime_store, &session_id, LEVEL_PROMPT).await;
+            let before_restart = client.sent_efforts();
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(Arc::clone(&session_client)));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let after_restart = client.sent_efforts();
+            restarted.shutdown().await;
+            (
+                (task_ended_with_its_runtime, live_read_fails),
+                turn_answer,
+                reload_required,
+                left_open,
+                before_restart,
+                after_restart,
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (
+                (true, true),
+                Some(Err((
+                    error::INTERNAL_ERROR,
+                    Some(serde_json::json!("completion_authority_unavailable"))
+                ))),
+                true,
+                vec![(meerkat_runtime::InputLifecycleState::Queued, 0, false)],
+                vec![None],
+                vec![
+                    None,
+                    Some(AnthropicEffort::High),
+                    Some(AnthropicEffort::High)
+                ],
+            ),
+            "((the session's task ended with its runtime, the live read fails), the turn's \
+             answer: its input stays admitted and no runtime of this process completes it, the \
+             session's registration waits for a reload, the turn's input: (phase, stage \
+             attempts, staged onto a run), the level of each model request before the restart, \
+             and after it: the first turn, the turn that sets the level, the turn after the \
+             restart)"
+        );
     }
 
     /// The same stop, and then an external event sent to the idle session
@@ -44390,6 +44577,12 @@ mod tests {
         async fn materialized() -> Self {
             let temp = tempfile::tempdir().unwrap();
             let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+            Self::materialized_on(temp, runtime).await
+        }
+
+        /// [`Self::materialized`] on a session runtime the row built over
+        /// `temp`.
+        async fn materialized_on(temp: tempfile::TempDir, runtime: Arc<SessionRuntime>) -> Self {
             let mob_state = rpc_mob_state_with_realm(&runtime);
             runtime.set_mob_state(Arc::clone(&mob_state));
             let client = Arc::new(FailedStartLlmClient::default());
@@ -46718,6 +46911,145 @@ mod tests {
         let next = session.spawn_turn("plain, the list is loaded", None);
         session
             .release_request(requests + 2, "the plain turn once the list is loaded")
+            .await;
+        assert_eq!(FailedStartSession::turn_answer(next).await, Ok(()));
+    }
+
+    /// A live session holds a level, the account's list is not loaded, and
+    /// the store fails the read that tells whether the session is live, for
+    /// one plain turn request. The request is answered with that read's
+    /// error before anything is admitted: no input is stored for it, no
+    /// model request is made, and the session stays live and holds what it
+    /// held. The same plain turn runs once the store and the list can be
+    /// read.
+    ///
+    /// A request whose failed read counted as "the session is not live" is
+    /// judged as a turn on a stored session is: the reason that the list is
+    /// not loaded is left to the turn's start, and the turn is admitted.
+    ///
+    /// The store refuses the next read of the session's catalog entry. The
+    /// live read makes that read for a live session (its archive check),
+    /// and the first read of the entry a plain turn request makes on a live
+    /// session that holds a level is the live read where the turn's level
+    /// is judged, before every other read of whether the session is live.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_whose_live_session_read_fails_is_answered_with_the_read_error_and_admits_nothing()
+     {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, store) = make_runtime_with_failing_runtime_store(temp_factory(&temp), 10);
+        let session = FailedStartSession::materialized_on(temp, runtime).await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "names a level the route states",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn with the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn with the stated level runs");
+
+        // The session stays live, and the account's list is not loaded.
+        session
+            .client
+            .route_states_level
+            .store(3, AtomicOrdering::SeqCst);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let stored_inputs = || async {
+            session
+                .runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .len()
+        };
+        // (live, the level the session holds).
+        let live_and_level = || async {
+            (
+                session
+                    .runtime
+                    .service
+                    .has_live_session(&session.session_id)
+                    .await
+                    .map_err(|error| error.to_string()),
+                session
+                    .runtime
+                    .current_materialized_llm_identity(&session.session_id)
+                    .await
+                    .map(|identity| {
+                        identity
+                            .provider_params
+                            .and_then(|params| params.reasoning_effort)
+                    })
+                    .map_err(|error| error.message),
+            )
+        };
+        let inputs_before = stored_inputs().await;
+        let held_before = session.holdings().await;
+        assert_eq!(
+            live_and_level().await,
+            (Ok(true), Ok(Some(EffortLevel::High))),
+            "(live, the level the session holds) before the request"
+        );
+
+        store.fail_next_catalog_entry_read_of(runtime_id.clone());
+        let mut turn = session.spawn_turn("plain, the live read fails", None);
+        let answer = match tokio::time::timeout(Duration::from_secs(10), &mut turn).await {
+            Ok(joined) => Some(joined.expect("the turn task").map(|_| ()).map_err(|error| {
+                (
+                    error.code,
+                    error.message.contains("forced runtime catalog failure"),
+                )
+            })),
+            // Not answered: the turn was admitted and its run waits at the
+            // model.
+            Err(_) => None,
+        };
+        assert_eq!(
+            (
+                answer,
+                store.catalog_entry_read_failure_is_pending(),
+                stored_inputs().await - inputs_before,
+                session.client.calls.load(AtomicOrdering::SeqCst),
+                session.holdings().await,
+                live_and_level().await,
+            ),
+            (
+                Some(Err((error::INTERNAL_ERROR, true))),
+                false,
+                0,
+                requests + 1,
+                held_before,
+                (Ok(true), Ok(Some(EffortLevel::High))),
+            ),
+            "(the answer: (code, it carries the failed read's error), the failed read is still \
+             to come, inputs stored for the turn, model requests, what the session holds, (live, \
+             the level the session holds))"
+        );
+
+        // The store and the list can be read: the same plain turn runs.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("plain, the live read answers", None);
+        session
+            .release_request(requests + 2, "the plain turn once the live read answers")
             .await;
         assert_eq!(FailedStartSession::turn_answer(next).await, Ok(()));
     }

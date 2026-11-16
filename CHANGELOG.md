@@ -3157,6 +3157,11 @@ them.
   Windows binary against a state directory. A first use of the same new
   realm by several processes at once can still fail once: see Known
   limitations. Affected: every Windows binary from 0.3.4 through 0.9.14.
+  Added 2026-11-16, after the release: runs on a Windows runner also showed
+  `rkat-mcp` failing at every start without `--realm` before the fix; with
+  the fix `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` all pass the
+  release's start check on Windows. That `rkat-rest` failed before the fix
+  remains read from the source.
 
 ### Security
 

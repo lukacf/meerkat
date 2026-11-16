@@ -907,18 +907,22 @@ entry names a run.
   - A 0.9.11 gateway refuses to start (`-32602`) on a launch that carries a
     0.9.15 identity policy whose rules name change classes it does not know
     (`archive`, `adopt`); the stores are as they were after the refusal.
-    Before going back to 0.9.11, take the identity policy out of the launch
-    options, or reduce it to the change classes 0.9.11 knows.
+    0.9.11 knows the same change classes as 0.9.14, so the step is the one
+    the item "Identity policy" below gives for 0.9.14: before going back,
+    remove the `archive` and `adopt` keys and values from
+    `runtime_options.identity_creation`; add them again after the return.
   - A 0.9.11 gateway does not serve agents created at run time, and it
     leaves them as they are. Its roster pass retires none of them, a send to
     one answers `-32001` (unknown identity), and nothing of theirs changes
     in the stores. After the return to 0.9.15 they are listed with the same
     records, sessions and peers, and a send to one that had a conversation
-    appends to that conversation. This is by a run of `rpc_gateway` built
-    from the two releases' tags, with one mob and two created agents that
-    were dormant, and 0.9.11 up for one roster pass. Not run: `meta_gateway`;
+    appends to that conversation. This is by one run of the stdio
+    `rpc_gateway`, built from the two releases' tags and not the published
+    binaries, with one mob and two created agents that were dormant, and the
+    0.9.11 gateway up for seconds (one roster pass). Not run: `meta_gateway`;
     archived, removed, adopted or held agents; schedules; memory; nested
-    mobs; a peer message to a created agent while 0.9.11 runs.
+    mobs; a peer message to a created agent while 0.9.11 runs. The run
+    says nothing of a rollback to 0.9.12 or 0.9.13.
   - A `meta_gateway` launched with `persistent_sessions: true` keeps its
     metadata and its console log in memory (see "Rolling back to 0.9.11"
     below).
@@ -1292,8 +1296,10 @@ needs no change.
 `archive` or `adopt` under `change`, is refused by a 0.9.14 gateway at init,
 enabled or not (confirmed by a run for `archive`: in a rule's `change` of an
 enabled policy and under `approval.timeouts_ms` of a disabled one; the other
-combinations and `adopt` were read from the source). **Do:** before a
-rollback, remove those keys and values from
+combinations and `adopt` were read from the source). In a run, a 0.9.11
+gateway refused a launch whose policy rules named them as well (`-32602`;
+see the entry on Meta 0.9.11 at the head of this subsection). **Do:** before
+a rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
 
 **A recalled input.** An input withdrawn with `session/recall_input` is

@@ -881,15 +881,38 @@ gateway built from the release tag, over state written by a gateway built from
 the development source for 0.9.15 (main on 13 November), with a scripted model
 in place of a provider.
 
-This subsection describes a rollback to 0.9.14. An item that names other
-releases (0.9.9 through 0.9.14, for example) says so for that item only. What
-a release older than 0.9.14 does with state that 0.9.15 wrote is not stated
-beyond those items; in particular nothing here says what a gateway older than
-0.9.14 does with agents created at run time. The rollback subsections of the
-older releases below ("Rolling back to 0.9.13", "Rolling back to 0.9.11")
-each describe a rollback from the release of their own section, not from
-0.9.15. The path that holds without such conditions is the backup of the
-state root taken before the upgrade (step 2 of "How to upgrade").
+This subsection describes a rollback to 0.9.14, and what it says of an
+earlier release was established for 0.9.14, as the paragraph above says. The
+words "an earlier release" and "0.9.14 and earlier releases" reach further
+back as follows, by a reading of the source at the release tags; no rollback
+from 0.9.15 to a release older than 0.9.14 was run.
+
+- **Core, 0.9.11 to 0.9.13.** Core reads these stored forms with the same
+  code as 0.9.14, so these items hold there too: a created agent's row that
+  records an owed label restamp; agents that created mobs and were seated
+  again on 0.9.15; operator instruction records past the earlier totals, and
+  those written with `include_forks`; temporary council records; a schedule
+  paused for its target; and, of a stored reasoning effort level, the
+  refusal. What that last item describes beyond the refusal holds at 0.9.12
+  and 0.9.13 and was not read at 0.9.11. What the items say of a respawn or
+  a `meta/compact_member` through a Meta gateway was not read for these
+  releases. The other items about Core were established for 0.9.14 only.
+- **Meta, 0.9.12 and 0.9.13.** They are Meta 0.9.14 without the fix named
+  under "Meta 0.9.14" below, so what the items say of a 0.9.14 gateway and
+  its Console holds for them.
+- **Meta, 0.9.11.** Two things differ. A 0.9.11 gateway does not serve
+  agents created at run time, and what it does with the records of agents
+  created on 0.9.15 is not stated here. A `meta_gateway` launched with
+  `persistent_sessions: true` keeps its metadata and its console log in
+  memory (see "Rolling back to 0.9.11" below).
+- **Before 0.9.11:** not read.
+
+An item that names other releases (0.9.9 through 0.9.14, for example) says
+so for that item only. The rollback subsections of the older releases below
+("Rolling back to 0.9.13", "Rolling back to 0.9.11") each describe a rollback
+from the releases their own section names, not from 0.9.15. The path that
+holds without such conditions is the backup of the state root taken before
+the upgrade (step 2 of "How to upgrade").
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
 refusal. The items below are where a rollback differs: configurations that
@@ -1991,12 +2014,25 @@ full release that is never the repository's latest. The full list is in
 This subsection covers a rollback from 0.9.12 or from 0.9.13. What it says
 was read from the source of the releases; no rollback to 0.9.11 was run.
 
-0.9.11 opens what 0.9.12 and 0.9.13 write: the store versions are the same
-(see the top of this section), so no store refuses the older binary. Roll
-back Core, Meta and Connect together, with every process that shares a
-realm, a store or a mob, and the SDKs with their servers. Two stored forms
+0.9.11 opens the stores it shares with 0.9.12 and 0.9.13: the store versions
+are the same (see the top of this section), so no store refuses the older
+binary. Roll back Core, Meta and Connect together, with every process that
+shares a realm, a store or a mob, and the SDKs with their servers. These
 differ:
 
+- Meta, `meta_gateway` launched with `persistent_sessions: true`: 0.9.12 and
+  0.9.13 keep its metadata and its console log in the state directory
+  (`meta_metadata.sqlite3` and `meta_console.sqlite3`). A 0.9.11
+  `meta_gateway` keeps both in memory and does not open the two files: it
+  starts without what they hold (the console's requests and timeline, the
+  attention list, the console audit log, the pending approvals and the
+  gating audit, the identities' tool records) and forgets its own at each
+  restart, as it did before the upgrade. Decide or withdraw the pending
+  approvals before the rollback. `rpc_gateway` kept both stores in 0.9.11
+  and opens them.
+- Meta: `meta/gating/withdraw`, new in 0.9.12, records a gating audit entry
+  of the kind `request_withdrawn`. 0.9.11 restores the gating state that
+  holds it: the kind is text, and its restore checks no list of kinds.
 - Meta: the record of a failed lifecycle side effect gains an optional
   `cause`. 0.9.12 and 0.9.13 write it only when the side effect did not run
   because the realm's agent memory background budget did not admit it
@@ -2004,9 +2040,9 @@ differ:
   side effect as failed, with the attempts and the error the record holds.
 - Connect: the downgrade item under "Connect 0.9.12" above.
 
-The comparison covers the store versions, the table definitions and the
-serialized types that changed between the releases. It is not an audit of
-every value a later release can store. The path that holds without that
+The comparison covers the store versions, the table definitions, the
+serialized types that changed between the releases and the stores each
+gateway opens. It is not an audit of every value a later release can store. The path that holds without that
 condition is the backup of the state root taken before the upgrade (step 2
 of "How to upgrade"): restoring it returns the state as it was then.
 

@@ -201,6 +201,21 @@ output = await triage.dispatch_text_and_wait(
 await personal.send_and_wait("What's happening today?", timeout=60)
 ```
 
+To make a dispatch safe to repeat, give it an `idempotency_key` and a
+`correlation_id` together. A repeat with the same pair to the same agent
+starts no second turn in that agent's session. One of the two without the
+other is refused and nothing is delivered: `invalid delivery identity
+(idempotency key without a correlation id (half-pair))`. With the origin
+`connector`, or the default `system`, the correlation id may be any text of
+your own, such as a message id:
+
+```python
+await triage.dispatch_text(
+    "New event from connector", origin="connector",
+    idempotency_key="event-42", correlation_id="msg-42",
+)
+```
+
 <Note>
 **Profiles are templates; members are declared.** The `[profiles.*]` tables in
 `MOB_TOML` produce no members on their own: the identities your roster returns

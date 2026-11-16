@@ -2230,3 +2230,141 @@ async fn an_adopted_configured_agent_is_served_after_a_restart_on_a_host_with_ag
     )
     .await;
 }
+
+/// Row: one update that sets a value the agent already has serves an
+/// adopted agent again, on a host that composes the builds of its agents.
+/// A configured agent with a display name is adopted and the gateway
+/// restarts. An update that sets its display name to the name it has
+/// commits: the answer is `done`, the agent is `committed` at its next
+/// revision, and the answer names no seat. The agent's next send is
+/// served, and its member carries the labels its record holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_update_that_sets_an_unchanged_value_serves_an_adopted_configured_agent() {
+    const NAME: &str = "The declared agent";
+    let mut configured = spec(DECLARED);
+    configured.display_name =
+        Some(meerkat_meta::identity_first::DisplayName::parse(NAME).expect("a display name"));
+    configured
+        .labels
+        .insert("team".to_owned(), "support".to_owned());
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host_kind = ComposingHost::Customizer;
+    let rig = boot_composing_host(temp.path(), &mob_id, &configured, host_kind).await;
+    assert!(rig.seated(DECLARED), "{:?}", rig.standing(DECLARED));
+
+    let facts = RequesterFacts::host(SURFACE);
+    let requester = host();
+    let row = meerkat_mob::CreatedIdentitySpec::new(
+        configured.identity.as_str(),
+        configured.profile.clone(),
+    )
+    .with_labels(configured.labels.clone())
+    .with_display_name(NAME);
+    let digest =
+        Sha256Digest::parse(&row.spec_digest().expect("the spec's digest")).expect("a digest");
+    let normalized = normalize_adopt(
+        &allow_all(),
+        &facts,
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(
+            DECLARED,
+            digest.clone(),
+            None,
+            "worker",
+            configured.labels.clone(),
+        ),
+        &AdoptIdentitySpec::new(DECLARED, digest),
+    )
+    .expect("the adoption is allowed by the rules");
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), "adopt-configured").expect("a request id");
+    let consent = consent_of_plan(&normalized.plan).expect("the policy allows the change");
+    let mob = rig.mob();
+    let adopted = CoreChangeExecutor::new()
+        .with_agent_specs(Arc::new(ConfiguredAgent(configured.clone())))
+        .commit(
+            ChangeCommit::new(
+                &mob,
+                &operation_id,
+                &requester,
+                consent,
+                &normalized.request,
+            )
+            .of_configured_target(true),
+        )
+        .await
+        .expect("the seam answers a typed outcome");
+    let IdentityOutcome::Done { agents, .. } = &adopted.outcome else {
+        panic!("the adoption is done: {:?}", adopted.outcome);
+    };
+    let adopted_digest = agents[0]
+        .spec_digest
+        .clone()
+        .expect("an adopted agent has a spec digest");
+    drop(mob);
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot_composing_host(temp.path(), &mob_id, &configured, host_kind).await;
+    let profiles = BTreeSet::from(["worker".to_owned()]);
+    let peers = BTreeMap::new();
+    let update: UpdateIdentitySpec = serde_json::from_value(json!({
+        "identity": DECLARED,
+        "expected_spec_digest": adopted_digest.as_str(),
+        "set": {"display_name": NAME},
+    }))
+    .expect("an update");
+    let update = normalize_update(
+        &allow_all(),
+        &RequestContext {
+            requester: &facts,
+            profiles: &profiles,
+            peers: &peers,
+        },
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(
+            DECLARED,
+            adopted_digest.clone(),
+            Some(1),
+            "worker",
+            configured.labels.clone(),
+        ),
+        &update,
+    )
+    .expect("the update is allowed");
+    let updated = rig.commit(&host(), "same-display-name", &update).await;
+    let IdentityOutcome::Done { agents, .. } = &updated.outcome else {
+        panic!("the update is done: {:?}", updated.outcome);
+    };
+    assert_eq!(agents[0].state.token(), "committed", "{updated:?}");
+    assert!(
+        agents[0].seat.is_none(),
+        "an update names no seat: {updated:?}"
+    );
+    assert_eq!(
+        agents[0].spec_revision,
+        Some(2),
+        "an unchanged value commits the record at its next revision: {updated:?}"
+    );
+
+    let answer = rig.send(DECLARED, "after-the-update").await;
+    assert!(
+        answer["error"].is_null(),
+        "the adopted agent's send is served after the update: {answer}"
+    );
+    assert!(
+        rig.asked("after-the-update").await,
+        "the adopted agent's member is built and runs the turn"
+    );
+    let member = rig
+        .mob()
+        .get_member(&id(DECLARED))
+        .await
+        .expect("the roster reads")
+        .expect("the agent has a member");
+    assert_eq!(
+        member.labels, configured.labels,
+        "the member carries the labels its record holds"
+    );
+    rig.shutdown().await;
+}

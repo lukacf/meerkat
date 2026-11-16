@@ -1239,3 +1239,112 @@ async fn an_adopted_roster_member_is_refused_a_label_its_row_does_not_carry_nami
     );
     assert!(!serves(&mob, "listed"), "the member is Broken");
 }
+
+/// Row: an update that sets a value the identity already has lets a member
+/// an earlier release adopted build again. `listed` was adopted from a
+/// roster spec by an earlier release (its row records no owed restamp) and
+/// has no live build after a restart. An update of the identity with the
+/// spec it has commits all the same: the row is at its next revision and
+/// records the restamp its seat is owed, the member is kept (no successor
+/// is seated: its generation and session are its own), and its next build
+/// carries the row's labels, again after a cold restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_that_sets_an_unchanged_value_lets_an_adopted_member_with_no_live_build_build_again()
+ {
+    let preparer = ScriptedPreparer::new();
+    let mut mob = seat_composing_mob("adopted-unchanged-update", &preparer).await;
+    mob.declare(&["listed"]).await;
+    let session = mob.session("listed").await;
+    let adopted = spec("listed", "worker");
+    committed(
+        mob.adopt(
+            "adopt-listed",
+            "listed",
+            AdoptionSource::roster(adopted.clone()),
+        )
+        .await,
+    );
+    leave_the_row_as_an_earlier_release_wrote_it(&mob, "listed").await;
+    preparer.compose_seats(host_answers_the_row("listed", &adopted.labels));
+    restart_with_preparer(&mut mob, &preparer).await;
+    let generation = mob.generation("listed").await.expect("a member");
+
+    let updated = mob
+        .update("same-listed", adopted.clone(), &spec_digest(&adopted))
+        .await
+        .expect("an update that sets the spec the identity has commits");
+    assert_eq!(
+        answer_kind(updated.applied.as_ref().expect("the update's answer")),
+        "kept",
+        "{updated:?}"
+    );
+    let row = mob.row("listed").await;
+    assert_eq!(
+        row.revision, 2,
+        "an unchanged value commits the row at its next revision"
+    );
+    assert!(
+        row.label_restamp_owed,
+        "the update records the restamp the member's seat is owed"
+    );
+    assert_eq!(
+        mob.generation("listed").await,
+        Some(generation),
+        "no successor is seated"
+    );
+    for _ in 0..2 {
+        builds_with_labels(&mob, "listed", &session, &adopted.labels).await;
+        restart_with_preparer(&mut mob, &preparer).await;
+    }
+    assert_eq!(mob.session("listed").await, session, "on its own session");
+}
+
+/// Row: an update that sets a value the identity already has seats a
+/// Broken adopted member again. `listed` was adopted from a roster spec;
+/// its host answered a label its row does not carry, so its build was
+/// refused for good and it is Broken. Its host answers the row's labels
+/// from then on, and an update of the identity with the spec it has
+/// commits and answers `restamped`: the next incarnation holds the session
+/// the Broken one held and is built with the row's labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_that_sets_an_unchanged_value_seats_a_broken_adopted_member_again() {
+    let preparer = ScriptedPreparer::new();
+    let mut mob = seat_composing_mob("adopted-broken-unchanged-update", &preparer).await;
+    mob.declare(&["listed"]).await;
+    let session = mob.session("listed").await;
+    let adopted = spec("listed", "worker");
+    committed(
+        mob.adopt(
+            "adopt-listed",
+            "listed",
+            AdoptionSource::roster(adopted.clone()),
+        )
+        .await,
+    );
+    let mut with_a_label_the_row_lacks = adopted.labels.clone();
+    with_a_label_the_row_lacks.insert(
+        LabelChange::ADDED.0.to_string(),
+        LabelChange::ADDED.1.to_string(),
+    );
+    preparer.compose_seats(host_answers_the_row("listed", &with_a_label_the_row_lacks));
+    restart_with_preparer(&mut mob, &preparer).await;
+    assert!(wake(&mob, "listed").await.is_err(), "the build is refused");
+    assert!(!serves(&mob, "listed"), "the member is Broken");
+
+    preparer.compose_seats(host_answers_the_row("listed", &adopted.labels));
+    let generation = mob.generation("listed").await.expect("a member");
+    let updated = mob
+        .update("same-listed", adopted.clone(), &spec_digest(&adopted))
+        .await
+        .expect("an update that sets the spec the identity has commits");
+    assert_eq!(
+        answer_kind(updated.applied.as_ref().expect("the update's answer")),
+        "restamped",
+        "{updated:?}"
+    );
+    assert_eq!(mob.row("listed").await.revision, 2);
+    assert_eq!(mob.generation("listed").await, generation.next());
+    assert!(serves(&mob, "listed"), "the next incarnation is not Broken");
+    assert_eq!(mob.session("listed").await, session, "on its own session");
+    builds_with_labels(&mob, "listed", &session, &adopted.labels).await;
+}

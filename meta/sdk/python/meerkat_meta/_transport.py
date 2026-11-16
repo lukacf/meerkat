@@ -445,6 +445,16 @@ class PersistentTransport:
                 self._init_watch = None
         watch._retire()
 
+    def init_settled_failed(self) -> None:
+        """The current child's ``meta/init`` settled ``failed``.
+
+        The gateway exits after that settlement without waiting for a
+        shutdown request, so its stop makes none: it ends the gateway's
+        input and reaps it, as for a gateway that offered no handshake.
+        """
+        with self._pending_lock:
+            self._supports_shutdown_handshake = False
+
     @property
     def request_timeout(self) -> float:
         """Default timeout, in seconds, for one outbound RPC request."""

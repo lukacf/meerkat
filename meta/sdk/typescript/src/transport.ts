@@ -559,6 +559,16 @@ export class PersistentTransport {
   }
 
   /**
+   * The current child's `meta/init` settled `failed`. The gateway exits after
+   * that settlement without waiting for a shutdown request, so its stop makes
+   * none: it ends the gateway's input and reaps it, as for a gateway that
+   * offered no handshake.
+   */
+  initSettledFailed(): void {
+    this._supportsShutdownHandshake = false;
+  }
+
+  /**
    * Start the gateway process and finish any host-owned startup before the
    * runtime sends `meta/init`. The default only spawns. A subclass that
    * passes private startup channels overrides it to complete its own trusted

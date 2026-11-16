@@ -3580,6 +3580,13 @@ Security, Upgrade and Changed.
   path is the same in 0.9.11 (read by lines), and by a search in 0.9.9,
   0.9.10 and 0.9.12 to 0.9.14; earlier TypeScript releases were not read.
 
+- Added 2026-11-16, after the release. `name_taken` when a create of several
+  agents that the rules allow is refused: the refusal's `field`
+  (`agents[i].name`) counts the agents in the order of their names, not in the
+  order of the request. For a request that does not list its agents in name
+  order it can name another agent of the request than the one whose name is
+  taken. (Seen by one row; the rest by reading.)
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

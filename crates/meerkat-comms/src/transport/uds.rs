@@ -134,6 +134,80 @@ mod tests {
         drop(listener);
     }
 
+    /// A listener bound at `path` outside this transport, as a listener of
+    /// another process is. `None` where the environment refuses a socket
+    /// bind.
+    fn outside_listener(path: &Path) -> Option<UnixListener> {
+        match UnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => None,
+            Err(error) => panic!("bind {}: {error}", path.display()),
+        }
+    }
+
+    /// `bind` does not take a socket path from a live listener: it is
+    /// refused with an error that names the path, and the listener that held
+    /// the path still answers a dial.
+    #[tokio::test]
+    async fn test_uds_bind_is_refused_on_a_path_a_live_listener_holds() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("held.sock");
+        let Some(held) = outside_listener(&path) else {
+            return;
+        };
+
+        match UdsListener::bind(&path).await {
+            Err(TransportError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse, "{error}");
+                assert!(
+                    error.to_string().contains(&path.display().to_string()),
+                    "the error names the path: {error}"
+                );
+            }
+            Err(other) => panic!("bind must be refused as an address in use: {other:?}"),
+            Ok(_) => panic!("bind must be refused while a live listener holds the path"),
+        }
+
+        let mut dial = UnixStream::connect(&path).await.expect("dial the path");
+        dial.write_all(b"x").await.expect("write to the dial");
+        let reached = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let (mut stream, _) = held.accept().await.expect("accept");
+                let mut byte = [0_u8; 1];
+                // A connection closed without a byte is not this dial.
+                if matches!(stream.read(&mut byte).await, Ok(1)) && byte == *b"x" {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the listener that held the path still answers"
+        );
+    }
+
+    /// `bind` takes over a socket file no listener holds.
+    #[tokio::test]
+    async fn test_uds_bind_takes_over_a_socket_file_no_listener_holds() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ended.sock");
+        let Some(ended) = outside_listener(&path) else {
+            return;
+        };
+        drop(ended);
+        assert!(path.exists(), "the ended listener left its socket file");
+
+        let _listener = UdsListener::bind(&path)
+            .await
+            .expect("bind over a socket file no listener holds");
+        UnixStream::connect(&path)
+            .await
+            .expect("a dial reaches the new listener");
+    }
+
     #[tokio::test]
     async fn test_uds_connect() {
         let tmp = TempDir::new().unwrap();

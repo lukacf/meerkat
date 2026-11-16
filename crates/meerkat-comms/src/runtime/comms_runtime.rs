@@ -6422,6 +6422,189 @@ mod tests {
         }
     }
 
+    /// A listener bound at `path` outside any comms runtime, as a listener
+    /// of another process is. `None` where the environment refuses a socket
+    /// bind.
+    #[cfg(unix)]
+    fn outside_listener(path: &Path) -> Option<tokio::net::UnixListener> {
+        match tokio::net::UnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => None,
+            Err(error) => panic!("bind {}: {error}", path.display()),
+        }
+    }
+
+    /// Dial `path`, send one byte, and wait for `listener` to read it.
+    #[cfg(unix)]
+    async fn assert_dial_reaches(path: &Path, listener: &tokio::net::UnixListener) {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut dial = tokio::net::UnixStream::connect(path)
+            .await
+            .expect("dial the socket path");
+        dial.write_all(b"x")
+            .await
+            .expect("write to the dialled socket");
+        let reached = timeout(Duration::from_secs(10), async {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut byte = [0_u8; 1];
+                // A connection closed without a byte is not this dial.
+                if matches!(stream.read(&mut byte).await, Ok(1)) && byte == *b"x" {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the listener that held {} still answers a dial",
+            path.display()
+        );
+    }
+
+    /// The error of a listener start refused because a live listener holds
+    /// `path`: the kind a taken TCP address gives, naming the path.
+    #[cfg(unix)]
+    fn assert_refused_for_live_listener(result: Result<(), CommsRuntimeError>, path: &Path) {
+        match result {
+            Err(CommsRuntimeError::ListenerError(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse, "{error}");
+                assert!(
+                    error.to_string().contains(&path.display().to_string()),
+                    "the error names the path: {error}"
+                );
+            }
+            other => panic!("the listener start must be refused: {other:?}"),
+        }
+    }
+
+    /// The signed listener does not take a socket path from a live listener:
+    /// its start is refused and the listener that held the path still
+    /// answers a dial.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signed_socket_listener_is_refused_on_a_path_a_live_listener_holds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("member.sock");
+        let Some(held) = outside_listener(&path) else {
+            return;
+        };
+
+        let mut config = test_runtime_config("socket-held-signed", &tmp);
+        config.listen_uds = Some(path.clone());
+        let mut runtime = CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+            .await
+            .unwrap();
+        assert_refused_for_live_listener(runtime.start_listeners().await, &path);
+        assert_dial_reaches(&path, &held).await;
+    }
+
+    /// The plain event listener does not take a socket path from a live
+    /// listener either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plain_socket_listener_is_refused_on_a_path_a_live_listener_holds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("events.sock");
+        let Some(held) = outside_listener(&path) else {
+            return;
+        };
+
+        let mut config = test_runtime_config("socket-held-plain", &tmp);
+        config.event_listen_uds = Some(path.clone());
+        let mut runtime = CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+            .await
+            .unwrap();
+        assert_refused_for_live_listener(runtime.start_listeners().await, &path);
+        assert_dial_reaches(&path, &held).await;
+    }
+
+    /// A socket file no listener holds (its listener has ended) is taken
+    /// over: the start succeeds and a dial reaches the new listener.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_listener_takes_over_a_socket_file_no_listener_holds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("member.sock");
+        let Some(ended) = outside_listener(&path) else {
+            return;
+        };
+        drop(ended);
+        assert!(path.exists(), "the ended listener left its socket file");
+
+        let mut config = test_runtime_config("socket-dead-file", &tmp);
+        config.listen_uds = Some(path.clone());
+        let mut runtime = CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+            .await
+            .unwrap();
+        runtime.start_listeners().await.unwrap();
+        tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("a dial reaches the new listener");
+    }
+
+    /// Listeners on two socket paths both bind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_listeners_on_two_paths_both_bind() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut runtimes = Vec::new();
+        for name in ["socket-path-one", "socket-path-two"] {
+            let path = tmp.path().join(format!("{name}.sock"));
+            let mut config = test_runtime_config(name, &tmp);
+            config.listen_uds = Some(path.clone());
+            let mut runtime =
+                CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+                    .await
+                    .unwrap();
+            match runtime.start_listeners().await {
+                Ok(()) => {}
+                Err(CommsRuntimeError::ListenerError(error))
+                    if error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    return;
+                }
+                Err(error) => panic!("start listeners on {}: {error}", path.display()),
+            }
+            tokio::net::UnixStream::connect(&path)
+                .await
+                .expect("a dial reaches the listener");
+            runtimes.push(runtime);
+        }
+    }
+
+    /// A listener of this process is replaced by a later listener of this
+    /// process on the same path, as before: the later start succeeds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_listener_replaces_a_listener_of_its_own_process() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("member.sock");
+        let mut runtimes = Vec::new();
+        for name in ["socket-own-earlier", "socket-own-later"] {
+            let mut config = test_runtime_config(name, &tmp);
+            config.listen_uds = Some(path.clone());
+            let mut runtime =
+                CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+                    .await
+                    .unwrap();
+            match runtime.start_listeners().await {
+                Ok(()) => {}
+                Err(CommsRuntimeError::ListenerError(error))
+                    if error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    return;
+                }
+                Err(error) => panic!("{name}: start listeners: {error}"),
+            }
+            runtimes.push(runtime);
+        }
+        tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("a dial reaches the later listener");
+    }
+
     #[tokio::test]
     async fn pairing_password_installs_trusted_peer_and_returns_binding() {
         let tmp = tempfile::TempDir::new().unwrap();

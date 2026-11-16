@@ -317,9 +317,15 @@ them.
   that goes on after a failed `realm govern` works on a realm that is not
   governed. Run again at once, the command fails the same way; after a failed
   command, wait until more than 30 seconds have passed since it was started,
-  and run it again. (The failure, its exit code, the ungoverned realm and the
-  retry by runs on the released 0.9.15 `rkat`; the cause by reading, in the
-  same lines in every release from 0.9.0, where `realm govern` first shipped.)
+  and run it again. The same cause has two other faces, each for up to 30
+  seconds: a realm's first start can fail with
+  `first-start reservation is contended` after an earlier first start that
+  failed or was cancelled, and after a server that held a lease on the realm
+  has ended, `rkat realm delete` can refuse it and `rkat realm prune` can skip
+  it without `--force`. (The failure, its exit code, the ungoverned realm and
+  the retry by runs on the released 0.9.15 `rkat`; the cause and its two other
+  faces by reading, in the same lines in every release from 0.9.0, where
+  `realm govern` first shipped.)
 
 ## [0.9.15] - 2026-11-15
 
@@ -4908,9 +4914,14 @@ them.
   goes on after a failed `realm govern` works on a realm that is not governed.
   Run again at once, the command fails the same way; after a failed command,
   wait until more than 30 seconds have passed since it was started, and run it
-  again. (The failure, its exit code, the ungoverned realm and the retry by
-  runs on the released 0.9.15 `rkat`; the cause by reading, in the same lines
-  in every release from 0.9.0, where `realm govern` first shipped.)
+  again. The same cause has two other faces, each for up to 30 seconds: a
+  realm's first start can fail with `first-start reservation is contended`
+  after an earlier first start that failed or was cancelled, and after a
+  server that held a lease on the realm has ended, `rkat realm delete` can
+  refuse it and `rkat realm prune` can skip it without `--force`. (The
+  failure, its exit code, the ungoverned realm and the retry by runs on the
+  released 0.9.15 `rkat`; the cause and its two other faces by reading, in the
+  same lines in every release from 0.9.0, where `realm govern` first shipped.)
 
 ## [0.9.14] - 2026-11-11
 

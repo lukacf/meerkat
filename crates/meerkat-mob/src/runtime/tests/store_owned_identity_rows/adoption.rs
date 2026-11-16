@@ -1348,3 +1348,66 @@ async fn an_update_that_sets_an_unchanged_value_seats_a_broken_adopted_member_ag
     assert_eq!(mob.session("listed").await, session, "on its own session");
     builds_with_labels(&mob, "listed", &session, &adopted.labels).await;
 }
+
+/// Row (RED): a member whose build was refused before a restart is built
+/// after it, with no step by its host. `listed` was adopted from a roster
+/// spec by an earlier release (its row records no owed restamp). Before
+/// the restart its build is refused for good and it is Broken (here its
+/// host answers a label its row does not carry: this release no longer
+/// refuses a host that answers the row). Nothing of that refusal is
+/// stored. After a restart, with a host that answers the row's labels, the
+/// member is not Broken, its first wake asks its host again, and it is
+/// built on its own session with the row's labels: no update, no respawn,
+/// and nothing rewritten in the identity store.
+///
+/// RED on the old tree: after the restart the build is compared with the
+/// labels the member was seated with and is refused for good again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_member_refused_before_a_restart_is_built_after_it_with_no_step_by_its_host() {
+    let preparer = ScriptedPreparer::new();
+    let mut mob = seat_composing_mob("adopted-refused-then-restart", &preparer).await;
+    mob.declare(&["listed"]).await;
+    let session = mob.session("listed").await;
+    let adopted = spec("listed", "worker");
+    committed(
+        mob.adopt(
+            "adopt-listed",
+            "listed",
+            AdoptionSource::roster(adopted.clone()),
+        )
+        .await,
+    );
+    leave_the_row_as_an_earlier_release_wrote_it(&mob, "listed").await;
+    let stored = serde_json::to_string(&mob.row("listed").await).expect("the row's stored form");
+
+    // Before the restart: the build is refused for good.
+    let mut with_a_label_the_row_lacks = adopted.labels.clone();
+    with_a_label_the_row_lacks.insert(
+        LabelChange::ADDED.0.to_string(),
+        LabelChange::ADDED.1.to_string(),
+    );
+    preparer.compose_seats(host_answers_the_row("listed", &with_a_label_the_row_lacks));
+    restart_with_preparer(&mut mob, &preparer).await;
+    assert!(wake(&mob, "listed").await.is_err(), "the build is refused");
+    assert!(!serves(&mob, "listed"), "the member is Broken");
+    let generation = mob.generation("listed").await.expect("a member");
+
+    // The restart, with a host that answers the row's labels.
+    preparer.compose_seats(host_answers_the_row("listed", &adopted.labels));
+    restart_with_preparer(&mut mob, &preparer).await;
+    assert!(
+        serves(&mob, "listed"),
+        "a restart does not keep the member Broken"
+    );
+    builds_with_labels(&mob, "listed", &session, &adopted.labels).await;
+    assert_eq!(
+        mob.generation("listed").await,
+        Some(generation),
+        "no successor was seated"
+    );
+    assert_eq!(
+        serde_json::to_string(&mob.row("listed").await).expect("the row's stored form"),
+        stored,
+        "nothing rewrote the row"
+    );
+}

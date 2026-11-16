@@ -41,7 +41,11 @@
 //!    ([`IdentityDecisions`]) and answers `pending_decision`. The same
 //!    operation asked again answers the decision as it stands; once a
 //!    person approved it, the decisions' driver commits it through the same
-//!    seam. The driver runs exactly while the launch serves changes.
+//!    seam. The driver runs exactly while the launch serves changes. A
+//!    create under a taken name that its requester is shown is refused
+//!    `name_taken` before it is held, and its plan is refused the same
+//!    way; every other taken name is Core's to refuse when the change
+//!    commits.
 //!
 //! A person's approval is evidence, never authority over the launch's
 //! policy: when a decided change is carried out, the policy the launch has
@@ -870,15 +874,98 @@ impl IdentityGate {
     fn shown_outcome(
         &self,
         requester: &ChangeRequester,
-        mut outcome: IdentityOutcome,
+        outcome: IdentityOutcome,
     ) -> IdentityOutcome {
+        match outcome {
+            IdentityOutcome::Refused(refusal) => {
+                IdentityOutcome::Refused(self.shown_refusal(requester, refusal))
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// `refusal` as `requester` reads it: the rule of
+    /// [`Self::shown_outcome`], for a refusal that is no outcome of a
+    /// change (a plan's).
+    fn shown_refusal(
+        &self,
+        requester: &ChangeRequester,
+        mut refusal: IdentityRefusal,
+    ) -> IdentityRefusal {
         if !self.shown_every_agent(requester)
-            && let IdentityOutcome::Refused(refusal) = &mut outcome
             && let IdentityRefusalKind::NameTaken { by } = &mut refusal.kind
         {
             *by = super::NameTakenBy::Identity;
         }
-        outcome
+        refusal
+    }
+
+    /// The refusal of a create under a taken name, said before the create
+    /// is held for a person and before it is planned: `name_taken` at the
+    /// agent of the request that asked for the name. Core decides every
+    /// name when a change commits and refuses a taken one there; this says
+    /// the same sooner, and only where it tells `requester` nothing it is
+    /// not shown already. The caller's view shows the name, and either an
+    /// agent holds it that `requester` is shown, or a removed agent's
+    /// name, a worker member or a record this build cannot read holds it
+    /// and the call has no view and is no agent's (the host's own call,
+    /// which is shown everything). A view decides agents, by their
+    /// records: of what else holds a name it knows nothing to decide by,
+    /// so a caller that has one is told of none of it here, whatever the
+    /// view says of every agent. Every other taken name is left to the
+    /// commit, and so is a name taken after this read: such a create is
+    /// held and planned as a create under a name no agent holds. What
+    /// holds a name is read from the state the mob last published, which
+    /// the commit decides on, and nothing is written.
+    async fn refuse_shown_taken_names(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        change: &IdentityChangeSpec,
+    ) -> Result<(), IdentityRefusal> {
+        let IdentityChangeSpec::Create(create) = change else {
+            return Ok(());
+        };
+        let shown_everything =
+            self.seen.is_none() && !matches!(requester, ChangeRequester::Agent { .. });
+        for (index, agent) in create.agents.iter().enumerate() {
+            let name = agent.name.as_str();
+            let Some(member) = core_member_name(name) else {
+                continue;
+            };
+            if !self.view_shows(name) {
+                continue;
+            }
+            // A name whose entry cannot be read is the commit's to decide,
+            // as it was.
+            let Ok(holder) = mob.identity_entry(&member) else {
+                continue;
+            };
+            let by = match holder {
+                IdentityEntryRead::Entry(_) => {
+                    if !self.sees_named(mob, requester, name).await {
+                        continue;
+                    }
+                    super::NameTakenBy::Identity
+                }
+                held => {
+                    if !shown_everything {
+                        continue;
+                    }
+                    match held {
+                        IdentityEntryRead::NotAnEntry { worker: Some(_) } => {
+                            super::NameTakenBy::Worker
+                        }
+                        IdentityEntryRead::Unreadable { .. } => super::NameTakenBy::Unreadable,
+                        IdentityEntryRead::Removed => super::NameTakenBy::Removed,
+                        _ => continue,
+                    }
+                }
+            };
+            return Err(IdentityRefusal::new(IdentityRefusalKind::NameTaken { by })
+                .at(format!("agents[{index}].name")));
+        }
+        Ok(())
     }
 
     /// Whether the caller's view of the mob shows the agent `name`: every
@@ -1731,11 +1818,17 @@ impl IdentityGate {
             .await?;
         let Some(consent) = consent_of_plan(&judged.normalized.plan) else {
             // A person decides: the change is held, and nothing is written
-            // but its decision.
+            // but its decision. A create under a taken name that its
+            // requester is shown is refused first: nobody is asked to
+            // decide it.
             return match &self.decisions {
-                Some(decisions) => Ok(decisions
-                    .hold(mob, &call.operation_id, &judged.normalized)
-                    .await),
+                Some(decisions) => {
+                    self.refuse_shown_taken_names(mob, requester, &call.change)
+                        .await?;
+                    Ok(decisions
+                        .hold(mob, &call.operation_id, &judged.normalized)
+                        .await)
+                }
                 None => Err(IdentityRefusal::new(
                     IdentityRefusalKind::ApprovalUnavailable,
                 )),
@@ -2014,6 +2107,11 @@ impl IdentityGate {
         }
         self.refuse_while_owning_mobs(mob, requester, &call.operation_id, request)
             .await?;
+        // The plan of a create under a taken name that its requester is
+        // shown is the refusal the create answers.
+        self.refuse_shown_taken_names(mob, requester, &call.change)
+            .await
+            .map_err(|refusal| self.shown_refusal(requester, refusal))?;
         let lines = |request: &IdentityRequest| match &self.hooks {
             Some(hooks) => hooks.consequences(request),
             None => Ok(Vec::new()),

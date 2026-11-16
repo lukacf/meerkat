@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from Meerkat Meta main at [be96369e50f5](https://github.com/lukacf/meerkat/commit/be96369e50f517eaf19b141f21199ed15867f483) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [fda523f1d63e](https://github.com/lukacf/meerkat/commit/fda523f1d63e529f3d0bdb6e0017e7291294dbfc) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 Meta ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -193,6 +193,8 @@ effect = "deny"
 actions = ["agent.*"]
 agents = ["identity:auditor"]
 ```
+
+An `agents` entry is an agent's exact name as the agent list shows it, compared as written (or `*`, or the agent's runtime member id): it is not a pattern, and `identity:` in these examples is part of the names, not something an entry needs. The names in these examples have the form of the [quickstart](/meta/quickstart)'s `identity:person`; for an agent named `ops-lead` the entry is `ops-lead` (in a multi-runtime Console the listed name carries its runtime's prefix, `b/ops-lead`). An entry that names no agent matches no agent: an allow rule with it grants nothing, and a deny rule with it denies no agent by name. Like every deny rule that names another agent, it still keeps back what the name alone cannot decide (see [Timeline frames of members that changed or left](#timeline-frames-of-members-that-changed-or-left)).
 
 Enabling requires at least one admin subject — the config layer refuses any state that would lock every administrator out.
 

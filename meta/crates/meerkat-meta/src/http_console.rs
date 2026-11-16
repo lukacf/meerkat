@@ -2938,19 +2938,24 @@ async fn console_send_handler(
         return console_json_error(StatusCode::BAD_REQUEST, "reserved_origin_kind", &refusal);
     }
     let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
-    match Box::pin(send_as_admitted_console_caller(
+    // A send that names a member the caller may not know of goes on as one
+    // that names a name no member holds, and its answer is spelled back
+    // with the name as sent.
+    let absent = ConsoleAbsentNames::fresh();
+    match Box::pin(send_as_admitted(
         &ConsoleSendPath::of_state(&state),
         Some(&auth_context.audience),
         &governance,
         request,
+        Some(&absent),
     ))
     .await
     {
         Ok(accepted) => (
             StatusCode::OK,
-            Json::<Value>(
+            Json::<Value>(absent.restore(
                 serde_json::to_value(accepted).unwrap_or_else(|_| json!({ "accepted": true })),
-            ),
+            )),
         )
             .into_response(),
         // A candidate launch admits no member input: 409 `candidate_launch`,
@@ -2969,7 +2974,30 @@ async fn console_send_handler(
         Err(AdmittedConsoleSendError::CallerNotCurrent) => {
             ConsoleCallerRefusal::NotCurrent.into_response()
         }
-        Err(AdmittedConsoleSendError::Send(err)) => console_send_error_response(err),
+        Err(AdmittedConsoleSendError::Send(err)) => {
+            console_rest_answer_spelled_back(&absent, console_send_error_response(err)).await
+        }
+    }
+}
+
+/// A REST answer with every name `absent` stands for spelled back as the
+/// caller spelled it ([`ConsoleAbsentNames::restore`]); an answer that is no
+/// JSON is left as it is.
+async fn console_rest_answer_spelled_back(
+    absent: &ConsoleAbsentNames,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return console_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "the console's answer could not be read",
+        );
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(answer) => (parts.status, Json::<Value>(absent.restore(answer))).into_response(),
+        Err(_) => axum::response::Response::from_parts(parts, axum::body::Body::from(bytes)),
     }
 }
 
@@ -3114,13 +3142,34 @@ pub(crate) async fn send_as_admitted_console_caller(
     governance: &ConsoleSendGovernance,
     request: ConsoleSendRequest,
 ) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, AdmittedConsoleSendError> {
+    Box::pin(send_as_admitted(
+        path,
+        access_view,
+        governance,
+        request,
+        None,
+    ))
+    .await
+}
+
+/// [`send_as_admitted_console_caller`], for a door that answers a member the
+/// caller may not know of as a name no member holds when it gives `absent`:
+/// the send then goes on under the name `absent` gives that member, and the
+/// door spells its answer back ([`ConsoleAbsentNames::restore`]).
+async fn send_as_admitted(
+    path: &ConsoleSendPath<'_>,
+    access_view: Option<&AccessView>,
+    governance: &ConsoleSendGovernance,
+    mut request: ConsoleSendRequest,
+    absent: Option<&ConsoleAbsentNames>,
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, AdmittedConsoleSendError> {
     if path
         .runtime
         .is_some_and(|runtime| !runtime.speaks_for_composition())
     {
         return Err(AdmittedConsoleSendError::CandidateLaunch);
     }
-    console_send_gate(
+    match console_send_gate(
         path.decisions,
         path.runtime,
         path.aggregator,
@@ -3129,7 +3178,20 @@ pub(crate) async fn send_as_admitted_console_caller(
         request.identity.as_str(),
     )
     .await
-    .map_err(AdmittedConsoleSendError::Gate)?;
+    {
+        Ok(()) => {}
+        // The gate answers so for a member the caller may not know of, and
+        // for no other target.
+        Err(ConsoleSendGateRefusal::UnknownIdentity(detail)) => match absent {
+            Some(absent) => request.identity = absent.absent_spelling(&request.identity),
+            None => {
+                return Err(AdmittedConsoleSendError::Gate(
+                    ConsoleSendGateRefusal::UnknownIdentity(detail),
+                ));
+            }
+        },
+        Err(refusal) => return Err(AdmittedConsoleSendError::Gate(refusal)),
+    }
     // The caller is checked after the gate's reads, and again right before
     // the send is reserved or sent.
     governance

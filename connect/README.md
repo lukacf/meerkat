@@ -1,6 +1,6 @@
 # Meerkat Connect
 
-Give your agents the tools they need. Meerkat Connect combines more than 100
+Give your agents the tools they need. Meerkat Connect combines 100
 adopted OSS integrations with agent-led discovery and installation beyond the
 catalog. Describe a task, review the proposed access and let Connect guide setup.
 
@@ -27,7 +27,7 @@ archive="meerkat-connect-0.9.15-$platform.tar.gz"
 release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
-sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
+sha256sum -c "$archive.sha256"
 tar -xpf "$archive"
 export PATH="$PWD/meerkat-connect-$platform/bin:$PATH"
 ```
@@ -87,8 +87,8 @@ qualify the published release or a deployed provider flow.
 
 ## Scope
 
-- The adopted library contains 101 integration identities on macOS and 100 on
-  Linux, which excludes Playwright. Support covers the declared operations and
+- The adopted library contains 100 integration identities in this release, which
+  has Linux products only and excludes Playwright. Support covers the declared operations and
   setup profiles; the counts do not claim live authentication with every provider.
 - Agents can research integrations outside the catalog and propose supported
   packages. Installation, credentials and access are validated before use.

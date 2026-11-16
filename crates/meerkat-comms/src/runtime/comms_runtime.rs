@@ -6649,7 +6649,8 @@ mod tests {
 
     /// A socket file this user may not dial is kept: a dial refused for
     /// permission counts as held, so the start is refused and the file is
-    /// not removed. Skipped for a user that may dial any socket (root).
+    /// not removed. A user that may dial any socket (root) connects, and the
+    /// start is refused for the listener that answers.
     #[cfg(unix)]
     #[tokio::test]
     async fn signed_socket_listener_is_refused_on_a_path_it_may_not_dial() {
@@ -6665,11 +6666,6 @@ mod tests {
                 .expect("set the socket file's mode");
         };
         set_mode(0o000);
-        match tokio::net::UnixStream::connect(&path).await {
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
-            // This user may dial the socket whatever its mode.
-            _ => return,
-        }
 
         let mut config = test_runtime_config("socket-may-not-dial", &tmp);
         config.listen_uds = Some(path.clone());

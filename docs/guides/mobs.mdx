@@ -412,7 +412,8 @@ only an inline profile of a child mob, a mob a member creates with
 `ChildToolBundleAvailability::ChildOffered`. Any other name is refused with
 `ToolBundleNotOffered`, which lists the bundles the host offers; an empty or
 repeated name is an argument error. Realm profile writes and spawn-time
-profiles given as public profile input (the agent mob tools) cannot opt in. The
+profiles given as public profile input (the agent mob tools and the MCP
+profile tools) cannot opt in. The
 offer is the host's, the same for every child mob, whatever tools the creating
 member itself mounts. A bundle the host registered as `ChildAvailable` still
 reaches every inline child profile without an opt-in.
@@ -517,7 +518,7 @@ binding wins over it. Only an operator's own definition may name it: a mob
 pack whose definition names one fails validation, and Connect refuses an
 application setup definition that names one. An owner can also write a realm
 profile that names one, through JSON-RPC `mob/profile/create` and
-`mob/profile/update` and the MCP profile tools; reading that profile back does
+`mob/profile/update`; reading that profile back does
 not show the binding. A member placed on a member host
 resolves its credentials there and does not carry the profile's binding, and
 an adaptive layer refuses a profile that names one.

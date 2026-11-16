@@ -2058,7 +2058,7 @@ async fn boot_composing_host(
     state: &Path,
     mob_id: &str,
     configured: &DurableAgentSpec,
-    host: ComposingHost<'_>,
+    composing: ComposingHost<'_>,
 ) -> Rig {
     let (asked_tx, asked) = mpsc::unbounded_channel();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2074,7 +2074,7 @@ async fn boot_composing_host(
             asked: asked_tx,
             requests: Arc::clone(&requests),
         }));
-    let builder = match host {
+    let builder = match composing {
         ComposingHost::Customizer => builder.agent_customizer(Arc::new(DeclaredLabelsCustomizer(
             configured.labels.clone(),
         ))),
@@ -2103,11 +2103,11 @@ async fn boot_composing_host(
 /// and the member carries the labels its record holds.
 async fn an_adopted_configured_agent_is_served_after_a_restart(
     configured: DurableAgentSpec,
-    host: ComposingHost<'_>,
+    composing: ComposingHost<'_>,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let mob_id = fresh_mob_id();
-    let rig = boot_composing_host(temp.path(), &mob_id, &configured, host).await;
+    let rig = boot_composing_host(temp.path(), &mob_id, &configured, composing).await;
     assert!(rig.seated(DECLARED), "{:?}", rig.standing(DECLARED));
 
     let facts = RequesterFacts::host(SURFACE);
@@ -2155,7 +2155,7 @@ async fn an_adopted_configured_agent_is_served_after_a_restart(
     drop(mob);
     rig.shutdown_for_reopen().await;
 
-    let mut rig = boot_composing_host(temp.path(), &mob_id, &configured, host).await;
+    let mut rig = boot_composing_host(temp.path(), &mob_id, &configured, composing).await;
     let answer = rig.send(DECLARED, "after-the-adoption").await;
     assert!(
         answer["error"].is_null(),

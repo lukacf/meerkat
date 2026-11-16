@@ -2021,7 +2021,7 @@ impl RosterProvider for ConfiguredRoster {
     }
 }
 
-/// A host's build customizer that answers an agent's build with the labels
+/// A host's agent customizer that answers an agent's build with the labels
 /// the host declares for it, as a host that reads them from the agent's
 /// record does. With no label declared it sets none.
 struct DeclaredLabelsCustomizer(BTreeMap<String, String>);
@@ -2044,7 +2044,7 @@ impl meerkat_meta::identity_first::contracts::AgentCustomizer for DeclaredLabels
 /// What makes a host compose the builds of its agents.
 #[derive(Clone, Copy)]
 enum ComposingHost<'a> {
-    /// It registers a build customizer, which answers each agent's
+    /// It registers a agent customizer, which answers each agent's
     /// declared labels.
     Customizer,
     /// It configures agent memory, kept under the directory, and registers
@@ -2179,7 +2179,7 @@ async fn an_adopted_configured_agent_is_served_after_a_restart(
 }
 
 /// Row (RED): a configured agent whose host declares application labels
-/// for it and answers them in its build customizer is served after its
+/// for it and answers them in its agent customizer is served after its
 /// adoption and a restart: its member is built with the labels its record
 /// holds.
 ///
@@ -2200,7 +2200,7 @@ async fn an_adopted_configured_agent_with_declared_labels_is_served_after_a_rest
 }
 
 /// Row (RED): a configured agent with no label of its own, on a host whose
-/// build customizer sets no label, is served after its adoption and a
+/// agent customizer sets no label, is served after its adoption and a
 /// restart all the same.
 ///
 /// RED on the old tree: the member's seat keeps the two labels a

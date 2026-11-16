@@ -38,7 +38,11 @@ them.
 ### Breaking
 
 - Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
-  `meerkat-machine-kernels`: the cause of a failed apply,
+  `meerkat-machine-kernels`: two enums gain variants,
+  `RuntimeApplyFailureCause` and the kernel's
+  `generated::meerkat::TransitionId`. Rust hosts only: a host that
+  matches these enums exhaustively adds arms; no wire form changes. The
+  cause of a failed apply,
   `RuntimeApplyFailureCause` (meerkat-runtime `meerkat_machine::dsl`,
   meerkat-machine-schema `catalog::dsl::meerkat_machine`, and the kernel's
   copy `generated::meerkat::RuntimeApplyFailureCause`), gains
@@ -119,6 +123,15 @@ them.
   release that brought the reasoning effort controls (its Known limitations
   and Upgrade notes describe the earlier behaviour); no earlier release
   refuses a level.
+
+### Upgrade notes
+
+- Rollback to 0.9.15: an input that 0.9.16 ended as never executed
+  because its turn was refused for its reasoning-effort level is read by
+  0.9.15 as the abandoned outcome 0.9.15 itself writes for a run that
+  never began executing. Nothing is refused. Where a Meta notice names
+  the reason, it says 'without running' where 0.9.15 would have said
+  'stopped'.
 
 ## [0.9.15] - 2026-11-15
 

@@ -4899,11 +4899,14 @@ that holds no level, are busy there, where the table below queues them);
 with no turn running it rebuilds the session (see [REST](/api/rest) and
 [MCP](/api/mcp)).
 
-A level is judged again when its turn starts. A `turn/start` refused
-there, after its input was stored, ends alone while the session is live:
-it is answered the typed refusal, its stored input ends as abandoned with
-the reason `never_executed`, the session's live runtime stays, and the
-other requests queued on that session run. When the session is not live at
+A level is judged again when its turn starts. From 0.9.16 a `turn/start`
+refused there, after its input was stored, ends alone while the session is
+live: it is answered the typed refusal, its stored input ends as abandoned
+with the reason `never_executed`, the session's live runtime stays, and the
+other requests queued on that session run. In 0.9.15 such a refused turn
+was a failed start: its stored input ended as abandoned with the reason
+`stopped`, the session's live runtime was retired, and the other requests
+queued on that session ended without a run. When the session is not live at
 the refusal (the level is refused by the session's build), the session's
 runtime registration is retired as after a failed start and the other
 requests queued on that session end without a run (see Known limitations

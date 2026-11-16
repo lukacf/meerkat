@@ -1590,7 +1590,7 @@ mod shell_family_monitor {
                 .await
                 .expect("accept prompt input");
             let outcome = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 handle.expect("completion handle").wait(),
             )
             .await
@@ -2512,7 +2512,7 @@ mod shell_family_monitor {
         let cancelled = ended(
             &lifetime.job_store,
             &job_id,
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
         )
         .await;
         assert_eq!(

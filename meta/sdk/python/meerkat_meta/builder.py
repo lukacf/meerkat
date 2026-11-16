@@ -63,6 +63,8 @@ class MetaBuilderConfig:
     auth_config: Any | None = None
     implicit_delegate_idle_retire_secs: int | None = None
     implicit_delegate_idle_retire_configured: bool = False
+    # ``runtime_options.max_sessions``; ``None`` sends nothing.
+    max_sessions: int | None = None
     gateway_bin: str | None = None
     # A host gateway transport, or a factory called once per connect that
     # returns one (``gateway_transport()``); None spawns ``gateway_bin``.
@@ -1012,6 +1014,26 @@ class MetaBuilder:
             )
         self._config.implicit_delegate_idle_retire_secs = seconds
         self._config.implicit_delegate_idle_retire_configured = True
+        return self
+
+    def max_sessions(self, max_sessions: int) -> MetaBuilder:
+        """Set the gateway's session limit.
+
+        Emitted as ``runtime_options.max_sessions``; the gateway's default
+        when unset is 16. Keep it at or above the number of agent sessions
+        (members, helpers and scheduled runs included) that can be awake on
+        the host at once, not only those with a turn running: a session past
+        the limit is not started (``Max sessions reached``). A positive
+        integer; zero, a negative number, a ``bool`` or a non-integer raises
+        ``ValueError``. Mirrors the TypeScript builder's ``maxSessions``.
+        """
+        if (
+            not isinstance(max_sessions, int)
+            or isinstance(max_sessions, bool)
+            or max_sessions <= 0
+        ):
+            raise ValueError("max_sessions must be a positive integer")
+        self._config.max_sessions = max_sessions
         return self
 
     def gateway(self, bin_path: str) -> MetaBuilder:

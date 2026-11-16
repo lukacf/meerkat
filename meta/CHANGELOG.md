@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Python SDK: `Meta.builder().max_sessions(n)` sets the gateway's session
+  limit (`runtime_options.max_sessions`, 16 by default). A Python host could
+  not set the limit before; the TypeScript builder already had
+  `maxSessions(n)`. The value is a positive integer: zero, a negative number,
+  a `bool` or a non-integer raises `ValueError`. A builder that does not call
+  it sends the same `meta/init` parameters as before, and the gateway is
+  unchanged.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

@@ -434,7 +434,10 @@ pub enum IdentityEntered {
 
 /// How, when and at whose request an identity's row entered the store, and
 /// under what consent. Written once, by the operation that wrote the row
-/// first; recorded and shown, never read for a decision.
+/// first; recorded and shown. Whether an adoption from a roster spec wrote
+/// the row is read for two decisions: by an import of the row, and for the
+/// seat labels of the member such an adoption found
+/// ([`CreatedIdentityRecord::adopted_from_roster`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]

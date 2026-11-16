@@ -277,10 +277,12 @@ pub struct Roster {
     #[serde(skip)]
     seat_row_labels: BTreeMap<AgentIdentity, (Generation, BTreeMap<String, String>)>,
     /// The identities whose member's last seat row is still the one its
-    /// adoption into store custody found: the adoption's binding row (a
-    /// `MemberSessionBindingRecovered` row with the Created origin) records
-    /// the identity, and its member's next seat row, or its retirement,
-    /// lets it go ([`Self::seat_is_as_adopted`]).
+    /// entry into store custody found: the binding row of that entry (a
+    /// `MemberSessionBindingRecovered` row with the Created origin, which
+    /// an adoption writes, and an import that binds a record in place to a
+    /// seated member) records the identity, and its member's next seat
+    /// row, or the retirement of that incarnation, lets it go
+    /// ([`Self::seat_is_as_adopted`]).
     #[serde(skip)]
     seats_as_adopted: BTreeSet<AgentIdentity>,
     /// The sessions whose member comms endpoint (and so its public key) a
@@ -427,8 +429,10 @@ impl Roster {
                     .is_some_and(|(spawned, _)| spawned == generation)
                 {
                     self.seat_row_labels.remove(agent_identity);
+                    // The seat row goes, and with it the mark that it is
+                    // the seat an entry into store custody found.
+                    self.seats_as_adopted.remove(agent_identity);
                 }
-                self.seats_as_adopted.remove(agent_identity);
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
                 // A stale abandonment marker can replay after a successor
@@ -876,7 +880,11 @@ impl Roster {
     /// adoption wrote. An adoption from a roster spec makes that row the
     /// identity's record, as an update does: the adoption's commit, a start
     /// and a build read such a member's seat labels from the row
-    /// ([`Self::set_store_owned_seat_labels`]), and write nothing.
+    /// ([`Self::set_store_owned_seat_labels`]), and write nothing. An
+    /// import that binds a record in place to a seated member writes the
+    /// same binding row, so the seat it found is marked too; its labels
+    /// are read from the record only when the record says an adoption from
+    /// a roster spec wrote it.
     pub(crate) fn seat_is_as_adopted(&self, agent_identity: &AgentIdentity) -> bool {
         self.seats_as_adopted.contains(agent_identity)
     }

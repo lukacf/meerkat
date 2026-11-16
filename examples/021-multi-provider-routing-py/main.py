@@ -7,7 +7,7 @@ OpenAI, and Gemini — you can switch between them per-session.
 What you'll learn:
 - Routing to different providers (Anthropic, OpenAI, Gemini)
 - One reasoning-effort setting for every provider, and what a refusal says
-- A provider-specific parameter (Anthropic thinking budget)
+- A provider-specific parameter (Anthropic adaptive thinking)
 - Comparing responses across providers
 - Model selection strategies
 
@@ -55,11 +55,11 @@ async def main():
         models = []
 
         if os.environ.get("ANTHROPIC_API_KEY"):
-            models.append("claude-sonnet-4-6")
+            models.append("claude-sonnet-5-5")
         if os.environ.get("OPENAI_API_KEY"):
-            models.append("gpt-5.5")
+            models.append("gpt-6-astra")
         if os.environ.get("GEMINI_API_KEY"):
-            models.append("gemini-3.5-flash")
+            models.append("gemini-4-hydrogen")
 
         if not models:
             print("Set at least one API key: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY")
@@ -127,15 +127,18 @@ async def main():
         print("=== Provider-Specific Parameter ===\n")
 
         if os.environ.get("ANTHROPIC_API_KEY"):
-            print("--- Anthropic with a thinking budget ---")
+            print("--- Anthropic with adaptive thinking ---")
             session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
-                model="claude-sonnet-4-6",
+                model="claude-sonnet-5-5",
                 provider_params={
-                    # A token budget for Anthropic extended thinking. It is a
-                    # different control from the level above: a request that
-                    # carries both is refused, so use one or the other.
-                    "thinking_budget_tokens": 5000
+                    # Provider-specific settings travel under the typed
+                    # provider_tag. This one asks Anthropic for adaptive
+                    # thinking: the model decides how much to think. Current
+                    # Claude models take a thinking type like this one, not a
+                    # token budget (a `thinking_budget_tokens` value is
+                    # refused for them).
+                    "provider_tag": {"provider": "anthropic", "thinking": {"type": "adaptive"}}
                 },
             )
             print(f"  Response: {session.text[:200]}...")
@@ -148,13 +151,13 @@ async def main():
 Model selection strategies:
 
 1. COST OPTIMIZATION
-   - Simple tasks → claude-sonnet-4-6 or gemini-3.5-flash
-   - Complex tasks → claude-opus-4-8 or gpt-5.5
+   - Simple tasks → claude-sonnet-5-5 or gemini-4-hydrogen
+   - Complex tasks → claude-opus-5-5 or gpt-6-astra
 
 2. CAPABILITY-BASED
-   - Code generation → claude-sonnet-4-6 (strong at code)
-   - Reasoning → claude-opus-4-8 or gpt-5.5 with reasoning_effort set to high
-   - Speed → gemini-3.5-flash
+   - Code generation → claude-sonnet-5-5 (strong at code)
+   - Reasoning → claude-opus-5-5 or gpt-6-astra with reasoning_effort set to high
+   - Speed → gemini-4-hydrogen
 
 3. FALLBACK CHAIN
    - Try primary provider
@@ -162,9 +165,9 @@ Model selection strategies:
    - Meerkat's retry policy handles transient failures
 
 4. PER-AGENT ROUTING (in mobs)
-   - Orchestrator: claude-opus-4-8 (complex planning)
-   - Workers: claude-sonnet-4-6 (execution)
-   - Validators: gemini-3.5-flash (fast checks)
+   - Orchestrator: claude-opus-5-5 (complex planning)
+   - Workers: claude-sonnet-5-5 (execution)
+   - Validators: gemini-4-hydrogen (fast checks)
 """)
 
     finally:

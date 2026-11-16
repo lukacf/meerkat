@@ -198,15 +198,16 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
       if (example.startsWith("021")) {
         const creates = result.requests.filter((r) => r.method === "session/create");
         assert.deepEqual(creates.map((r) => r.params.model),
-          ["claude-sonnet-4-6", "gpt-5.5", "gemini-3.5-flash",
-            "claude-sonnet-4-6", "gpt-5.5", "gemini-3.5-flash", "claude-sonnet-4-6"]);
+          ["claude-sonnet-5-5", "gpt-6-astra", "gemini-4-hydrogen",
+            "claude-sonnet-5-5", "gpt-6-astra", "gemini-4-hydrogen", "claude-sonnet-5-5"]);
         // One provider-neutral level for all three; no provider-specific effort.
         for (const create of creates.slice(3, 6)) {
           assert.equal(create.params.reasoning_effort, "high");
           assert.equal(create.params.provider_params, undefined);
         }
-        // The thinking budget is its own request and carries no level.
-        assert.deepEqual(creates[6].params.provider_params, { thinking_budget_tokens: 5000 });
+        // The provider-specific setting is its own request and carries no level.
+        assert.deepEqual(creates[6].params.provider_params,
+          { provider_tag: { provider: "anthropic", thinking: { type: "adaptive" } } });
         assert.equal(creates[6].params.reasoning_effort, undefined);
         assert.equal(result.stdout.match(/Sent to synthetic as high/g)?.length, 3);
         assert.match(result.stdout, /Comparison \(3 providers\)/);
@@ -233,7 +234,7 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
     successful(result);
     assert.equal(
       result.stdout.match(/Refused: unsupported_level; this model accepts: low, medium/g)?.length, 3);
-    assert.match(result.stdout, /Anthropic with a thinking budget/);
+    assert.match(result.stdout, /Anthropic with adaptive thinking/);
     assert.match(result.stdout, /Routing Strategies/);
   });
   for (const [mode, line] of [
@@ -263,7 +264,7 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
     assert.equal(
       result.stdout.match(/Error \(MeerkatError, code -32000\): Synthetic provider failure/g)?.length, 3);
     assert.doesNotMatch(result.stdout, /Refused:/);
-    assert.match(result.stdout, /Anthropic with a thinking budget/);
+    assert.match(result.stdout, /Anthropic with adaptive thinking/);
   });
   it("021 with no provider keys prints setup guidance without creating sessions", async () => {
     const result = await runExample("021-multi-provider-routing-py");

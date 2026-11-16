@@ -107,11 +107,6 @@
       "reason": "Each connector version's support record names the wheels its verification ran with."
     },
     {
-      "path": "connect/BUILDING.md",
-      "match": "meerkat-connect release v0\\.9\\.0|^meerkat-connect-0\\.9\\.0$|meerkat_toolkit-0\\.9\\.0|rkat-toolkit-0\\.9\\.0",
-      "reason": "The build instructions for the v0.9.0 checkout name that release's own assets."
-    },
-    {
       "path": "docs/guides/upgrading.mdx",
       "match": "^meerkat-meta==0\\.9\\.10$",
       "reason": "The upgrade notes of 0.9.10 describe the pins that release shipped with."
@@ -279,23 +274,6 @@
       "path": "connect/.github/workflows/checks.yml",
       "reason": "A copy of the standalone repository's workflow; GitHub runs only the root workflows, and ci.yml's connect-checks job runs these checks.",
       "removed_by": "the change that removes the standalone repositories' workflow copies under connect/.github and meta/.github"
-    },
-    {
-      "path": "connect/README.md",
-      "match": "v0\\.9\\.10$",
-      "reason": "Connect's README describes and installs the Connect 0.9.10 release with Core 0.9.10.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
-      "path": "connect/sdk/python/HOME_ASSISTANT.md",
-      "reason": "Installs the Connect 0.9.0 wheel from the standalone repository.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
-      "path": "connect/sdk/typescript/README.md",
-      "match": "v0\\.9\\.0$|^rkat-toolkit-0\\.9\\.0$",
-      "reason": "Installs the Connect 0.9.0 npm package from the standalone repository.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
     },
     {
       "path": "meta/docs/forge/quickstart.mdx",

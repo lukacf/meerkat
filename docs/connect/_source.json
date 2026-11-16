@@ -5,7 +5,7 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "3f406715407fadae1472e14632f5d025ac9a04af",
+  "source_docs_tree": "1540a78e353167412c5231c2bb0c9f6616e2d9f7",
   "connect_source_state": "monorepo_sync",
   "connect_source_version": "0.9.15",
   "existing_products_unchanged": true,
@@ -94,8 +94,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "e4ed1d3f6e4c1af69fb1c61c94859edc4edc0ac03d0b7829a2e381aaefe222cf",
-      "rendered_sha256": "9ccd5d1c460cf095af15731a66c09d343083d053d6249700b6d57d654f842a2c"
+      "source_sha256": "8bd96841fe4fa6cf8bd5837c5586a455c46ede585d99753e2fa7b2d38ffa7fbe",
+      "rendered_sha256": "ae3e5ae3bd710e6a0b75c0e3f3f65933b7b3fa00534f72f508ef467248b48f86"
     },
     {
       "path": "guides/manage-connections.mdx",
@@ -249,8 +249,8 @@
     },
     {
       "path": "sdks/python.mdx",
-      "source_sha256": "0c8bc372e7ed7619eb174ebd33387f2e5df11d82792ad2aec2d230abe24ee132",
-      "rendered_sha256": "b274f764133ee36bb531a9bb81a014bdb18927646eacd6627e57048eca84d428"
+      "source_sha256": "1c820dbee4dfc46cdb04237d90b993b6046e54dc2ede1c26ff3cbd9499a26820",
+      "rendered_sha256": "d08b52e7f395ccaf40ae23e4cf610601d7ddb86b1ce3206c3454307b5844e54b"
     },
     {
       "path": "sdks/rust.mdx",

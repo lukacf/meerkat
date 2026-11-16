@@ -1,9 +1,13 @@
 # Meerkat Toolkit TypeScript operations
 
-## Install the tagged 0.9.0 release
+## Install a release
+
+Set `VERSION` to the Connect release you run; the
+[TypeScript SDK page](https://docs.rkat.ai/connect/sdks/typescript) names the
+current one.
 
 ```sh
-npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/rkat-toolkit-0.9.0.tgz
+npm install "https://github.com/lukacf/meerkat/releases/download/connect-v$VERSION/rkat-toolkit-$VERSION.tgz"
 ```
 
 This is the Connect release asset, not a Toolkit npm registry selection.
@@ -19,7 +23,7 @@ distinction between package checks and installed qualification.
 
 This optional ESM package exposes Home Assistant, [Gmail REST operations](GMAIL.md),
 [Slack history/thread reads](SLACK.md) and [Google Calendar Events operations](GOOGLE-CALENDAR.md). It runs
-without Meerkat, MobKit, a tool registry, or a model. The host supplies an already
+without Meerkat, Meta, a tool registry, or a model. The host supplies an already
 selected, authenticated Fetch function and an exact instance URL. The library
 borrows that function and never closes it, obtains credentials, infers a person,
 or decides permission. Node 22.12.0 or later is the supported execution profile.

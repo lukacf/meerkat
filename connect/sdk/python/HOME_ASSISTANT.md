@@ -4,13 +4,16 @@ Before sharing a client, the host must call `prepare_httpx_client(client)` once.
 See [HTTPX client preparation](HTTPX-CLIENT.md) for the setup and ownership contract.
 All client arguments in the examples below are already prepared.
 
-Install the release wheel with the Home Assistant extra in your Python environment:
+Install the release wheel with the Home Assistant extra in your Python
+environment. Set `VERSION` to the Connect release you run; the
+[Python SDK page](https://docs.rkat.ai/connect/sdks/python) names the current
+one.
 
 ```sh
-python -m pip install 'meerkat-toolkit[home-assistant] @ https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/meerkat_toolkit-0.9.0-py3-none-any.whl'
+python -m pip install "meerkat-toolkit[home-assistant] @ https://github.com/lukacf/meerkat/releases/download/connect-v$VERSION/meerkat_toolkit-$VERSION-py3-none-any.whl"
 ```
 Import `HomeAssistantOperations` from `meerkat_toolkit.connectors.home_assistant`.
-The package does not require MobKit for these operations.
+The package does not require Meta for these operations.
 
 The application supplies an authenticated `httpx.AsyncClient` with one selected
 Home Assistant base URL. The application continues to own that client, its

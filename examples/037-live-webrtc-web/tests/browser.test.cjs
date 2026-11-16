@@ -164,6 +164,28 @@ test("Start/Start/Stop rejects duplicate starts and permits a clean restart", as
   } finally { await page.close(); }
 });
 
+test("Stop closes the channel through the host before the peer connection", async () => {
+  const page = await setup();
+  try {
+    await live(page);
+    await page.evaluate(() => {
+      const forward = window.fetch;
+      window.fetch = async (url, options) => {
+        if (String(url).endsWith("/close")) {
+          const pc = harness.peers[0];
+          harness.atClose = { peerCloses: pc.closes, dcCloses: pc.dc.closes };
+        }
+        return forward(url, options);
+      };
+    });
+    await stop(page);
+    await released(page);
+    // The runtime closes a channel itself when its peer goes away, so the
+    // close request has to leave while the peer connection is still open.
+    assert.deepEqual(await page.evaluate(() => harness.atClose), { peerCloses: 0, dcCloses: 0 });
+  } finally { await page.close(); }
+});
+
 test("Stop during startup owns a late microphone and ignores a stale attempt", async () => {
   const page = await setup({ micPending: true });
   try {

@@ -15,7 +15,7 @@ import {
 const EXAMPLE_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PUBLIC_ROOT = join(EXAMPLE_ROOT, "public");
 const DEFAULT_LIVE_MODEL = process.env.MEERKAT_LIVE_MODEL ?? "gpt-realtime-2";
-const DEFAULT_WORKER_MODEL = process.env.MEERKAT_LIVE_WORKER_MODEL ?? "gpt-5.5";
+const DEFAULT_WORKER_MODEL = process.env.MEERKAT_LIVE_WORKER_MODEL ?? "gpt-6-astra";
 
 interface ToolDefinition extends Record<string, unknown> {
   name: string;
@@ -407,6 +407,10 @@ async function answerWebrtc(body: WebrtcAnswerRequest): Promise<unknown> {
   return client.liveWebrtcAnswer(body);
 }
 
+function isChannelNotFound(error: unknown): boolean {
+  return error instanceof Error && /^channel \S+ not found$/.test(error.message);
+}
+
 async function liveControl(channelId: string, action: string, body: Record<string, unknown>): Promise<unknown> {
   const { client } = await ensureRuntime();
   const live = activeLive;
@@ -452,7 +456,14 @@ async function liveControl(channelId: string, action: string, body: Record<strin
     return { ok: true };
   }
   if (action === "close") {
-    await live.channel.close();
+    try {
+      await live.channel.close();
+    } catch (error) {
+      // The runtime closes a channel itself when its peer disconnects, and
+      // `live/close` then answers "channel <id> not found". The channel is
+      // closed either way, which is what the caller asked for.
+      if (!isChannelNotFound(error)) throw error;
+    }
     if (activeLive === live) activeLive = undefined;
     return { ok: true };
   }

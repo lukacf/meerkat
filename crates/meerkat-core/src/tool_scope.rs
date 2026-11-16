@@ -4515,6 +4515,62 @@ mod tests {
         assert_eq!(visible(&allowed_without_shell), without_shell);
     }
 
+    /// A `monitor_start` that only the closed grant gate of `shell` hides
+    /// meets the dispatch gate, like a closed gated name: its call is
+    /// refused there, with the gate's refusal. Where something else hides
+    /// it too, or the grant is open, it does not.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn a_monitor_start_hidden_only_by_the_gate_of_shell_meets_the_dispatch_gate() {
+        use crate::tool_grant::InstalledToolGrantGate;
+        let family = ["shell", "shell_jobs", "monitor_start"];
+        let gate_on_shell =
+            || InstalledToolGrantGate::names(BTreeSet::from([ToolName::from("shell")]));
+
+        let closed = scope_with_generated_visibility(tools(&family));
+        closed.replace_tool_grant_gate(gate_on_shell()).unwrap();
+        assert_eq!(
+            closed.visible_tool_names().unwrap(),
+            BTreeSet::from(["shell_jobs".into()]),
+            "the closed gate of shell hides the monitor too"
+        );
+        assert!(closed.hidden_only_by_closed_grant_gate("shell").unwrap());
+        assert!(
+            closed
+                .hidden_only_by_closed_grant_gate("monitor_start")
+                .unwrap(),
+            "only the gate of shell hides the monitor"
+        );
+        assert!(
+            !closed
+                .hidden_only_by_closed_grant_gate("shell_jobs")
+                .unwrap()
+        );
+
+        let open = scope_with_generated_visibility(tools(&family));
+        open.replace_tool_grant_gate(gate_on_shell()).unwrap();
+        open.apply_tool_grant_open_set(BTreeSet::from(["shell".into()]))
+            .unwrap();
+        assert!(
+            !open
+                .hidden_only_by_closed_grant_gate("monitor_start")
+                .unwrap(),
+            "an open grant of shell hides nothing"
+        );
+
+        let denied = scope_with_generated_visibility(tools(&family));
+        denied.replace_tool_grant_gate(gate_on_shell()).unwrap();
+        denied
+            .set_base_filter(ToolFilter::Deny(set(&["monitor_start"])))
+            .unwrap();
+        assert!(
+            !denied
+                .hidden_only_by_closed_grant_gate("monitor_start")
+                .unwrap(),
+            "a deny hides the monitor whatever the gate says"
+        );
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[test]
     fn staged_update_is_boundary_only_until_apply_staged() {

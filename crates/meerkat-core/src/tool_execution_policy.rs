@@ -3088,6 +3088,66 @@ pub(crate) mod tests {
         assert_eq!(grants.asked(), ["shell"]);
     }
 
+    /// A gate on the name `shell` adjudicates a `monitor_start` call too.
+    /// The monitor is never wider than `shell`, so it stands on the grant
+    /// that opens `shell`: where that grant ended before the call is
+    /// dispatched, the call is refused as `shell` is, and it never reaches
+    /// the tool. While the grant is live the call is handed on.
+    #[tokio::test]
+    async fn a_gate_on_shell_adjudicates_a_monitor_start_call_as_a_use_of_shell() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(5_000));
+        // Every grant is past its deadline: the grant that opened `shell` at
+        // the model request ended before the calls are dispatched.
+        let grants = Arc::new(ClockedGrants::new(&clock, 1_000));
+        let inner = Arc::new(SpyDispatcher::new(&["shell", "monitor_start", "read_file"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(tool_grant_gate(Arc::clone(&grants), &["shell"]));
+
+        let error = dispatch_named(&gated, "monitor_start")
+            .await
+            .expect_err("a monitor is refused where the grant of shell ended");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+        let error = dispatch_named_with_context(&gated, "monitor_start")
+            .await
+            .expect_err("the context entry refuses it too");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
+        assert!(
+            inner.dispatched().is_empty(),
+            "the monitor never starts under an ended grant of shell"
+        );
+        assert_eq!(
+            grants.asked(),
+            ["shell", "shell"],
+            "the call is adjudicated as a use of the grant of shell"
+        );
+
+        // A live grant of `shell` hands the monitor on.
+        clock.store(500, Ordering::SeqCst);
+        dispatch_named(&gated, "monitor_start")
+            .await
+            .expect("a monitor runs under a live grant of shell");
+        assert_eq!(inner.dispatched(), ["monitor_start"]);
+
+        // Where both names are gated, the call needs both grants: the one of
+        // `shell` it stands on, then its own.
+        let both_grants = Arc::new(ClockedGrants::new(&clock, 1_000));
+        let both = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(tool_grant_gate(
+            Arc::clone(&both_grants),
+            &["shell", "monitor_start"],
+        ));
+        dispatch_named(&both, "monitor_start")
+            .await
+            .expect("both grants are live");
+        assert_eq!(both_grants.asked(), ["shell", "monitor_start"]);
+    }
+
     /// Admits a gated call only when it comes from an MCP server the test
     /// granted, and records each call it was asked to admit with its server.
     #[derive(Default)]

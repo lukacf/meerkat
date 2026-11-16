@@ -1410,9 +1410,9 @@ error type for all of them.
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
 `name` is unique in the mob. A create under a taken name is refused
-`name_taken` at `agents[i].name`: when it is asked for, or, where a person
-decides the create and the caller is not shown what holds the name, when
-the approved create is carried out.
+`name_taken`: when it is asked for, or, where a person decides the create
+and the caller is not shown what holds the name, when the approved create
+is carried out.
 On the Console, a create under the name of an
 agent private to another person answers `-32001` (unknown identity), not
 `name_taken`, to a caller who is neither that person nor an access
@@ -1821,8 +1821,12 @@ for it: such an operation was never asked or was refused, and asking it
 commits it at most once. An operation whose decision ended without its
 change (rejected, expired, withdrawn, or refused when it was carried out)
 answers a result too: `{"outcome": "refused", "kind", "retryable",
-"detail"}` with the kind's members and no `operation_id`. Such an operation
-is closed for good: ask the change again under a new `request_id`.
+"detail"}` with the kind's members and no `operation_id`.
+Such an operation is closed for good. Where it was rejected, expired or
+was withdrawn, the change may be asked again under a new `request_id`;
+where it was refused when it was carried out, asking again is refused in
+the same way while the cause holds (for `name_taken`: choose another
+name).
 
 The entry of an agent whose create answered `pending_preparation` says what
 became of the agent since: `pending_preparation` while it waits for its

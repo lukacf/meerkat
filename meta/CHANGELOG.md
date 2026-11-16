@@ -93,11 +93,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   misspelt was loaded as an allow rule. A rule whose only selector (`agents`,
   `roles` or `match_labels`) was misspelt applied to every agent, and one
   whose only `subjects` or `groups` key was misspelt applied to every caller.
-  A misspelt `enabled` left the whole configuration unenforced. Neither the
-  log nor the Console said so. No caller without access administration could
-  bring this about; it took a slip in the operator's own file or in an
-  administrator's own save request. From this release the load and the save
-  methods refuse such a key and name it. See Breaking and the upgrade step.
+  A misspelt `enabled` left every rule unenforced; the `approvers` bindings
+  are read whatever `enabled` says. Neither the log nor the Console said so.
+  No caller without access administration could bring this about; it took a
+  slip in the operator's own file or in an administrator's own save request.
+  From this release the load and the save methods refuse such a key and name
+  it. See Breaking and the upgrade step.
 
 ### Upgrade
 
@@ -280,6 +281,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Fixed in the Meerkat changelog for its form. Affected: 0.9.15 (members
   get the tool since 0.9.15).
 
+- A create under a taken name is refused before it is held for a person, where
+  the caller is shown what holds the name. Where the identity rules hold a
+  create (`meta/identity/create`) for a person, 0.9.15 held a create under a
+  taken name as well and refused it only when the approved create was carried
+  out (`decision_closed`, state `execution_refused`). Now such a create, and
+  its plan (`meta/identity/plan`), is refused `name_taken` before anything is
+  held when an agent the caller is shown holds the name; the stdio gateway's
+  own caller is refused in the same way under a removed agent's name and under
+  a worker member's name. A create the rules allow is refused at once, as
+  before. What remains: any other taken name is still held like a name no
+  agent holds, and refused when the approved create is carried out; on the
+  Console that includes a removed agent's name and a worker member's name, for
+  every caller. The detail of a decision that was refused when it was carried
+  out no longer says to ask again: it names the refusal ("The approved change
+  was refused when it was carried out (name_taken)."). The refusal stands
+  while its cause holds; choose another name.
+
 ### Known limitations
 
 - Adopted agents on a host with an agent customizer or agent memory (added
@@ -370,6 +388,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and is not deleted.
 
   The fix is planned for 0.9.17.
+
+- `name_taken` when a create of several agents that the rules allow is
+  refused: the refusal's `field` (`agents[i].name`) counts the agents in the
+  order of their names, not in the order of the request. For a request that
+  does not list its agents in name order it can name another agent of the
+  request than the one whose name is taken. A create refused before a hold
+  (new in 0.9.16) counts the agents as the request lists them, so a host that
+  reads `agents[i]` gets name order from a create the rules allow and request
+  order from a create refused before a hold. A create refused when it is
+  carried out after approval answers no `field`.
 
 ## [0.9.15] - 2026-11-15
 

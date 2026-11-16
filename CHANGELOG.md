@@ -201,6 +201,27 @@ them.
   and Upgrade notes describe the earlier behaviour); no earlier release
   refuses a level.
 
+- `rkat-rest`: the first session no longer fails where the default context
+  directory does not exist. Started without `--context-root`, with its default
+  context directory absent (on Linux `~/.local/share/meerkat/rest`, or
+  `$XDG_DATA_HOME/meerkat/rest`), `rkat-rest` answered a `POST /sessions` that
+  carries no `system_prompt` with HTTP 500
+  (`agent error: Build error: Config error: project AGENTS.md '<path>' is not readable: No such file or directory (os error 2)`),
+  in 0.7.9 through 0.9.15. The session is now created, with no project
+  instructions. The server still does not create the directory; it looks at it
+  for each session it builds, so an `AGENTS.md` placed there later is read by
+  the next session created, without a restart. Unchanged, and still refused
+  with the same text: a `--context-root` that does not exist, an `AGENTS.md`
+  that exists and cannot be read, and a default directory whose existence
+  cannot be established. One edge changes: a default directory that is a
+  dangling symbolic link was refused and is now treated as absent. `rkat-rpc`,
+  `rkat-mcp` and the `rkat` command were not affected. Rust hosts: a
+  `project_root` that does not exist no longer fails prompt assembly: the
+  session builds without project instructions; a `context_root` that does not
+  exist is still an error. (Rows on Linux x86_64; the look at the directory
+  for each session, the symbolic link edge and that the other servers were not
+  affected are by reading; macOS and Windows were not run.)
+
 ### Security
 
 - The shell job tools answered for jobs of other sessions (0.8.8 through

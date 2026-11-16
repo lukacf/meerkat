@@ -1368,6 +1368,8 @@ mod shell_family_monitor {
         launch: Option<meerkat_core::ops::ToolAccessPolicy>,
         /// The block list of the session's turn.
         blocked: Vec<&'static str>,
+        /// The session's own tool filter, as `session/create` takes one.
+        session_filter: Option<meerkat_core::ToolFilter>,
     }
 
     impl Profile {
@@ -1408,6 +1410,30 @@ mod shell_family_monitor {
             }
             Self {
                 launch: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(deny)),
+                ..Self::default()
+            }
+        }
+
+        /// A launch whose tool access policy is an allow list of the `names`.
+        fn launch_allowing(names: &[&str]) -> Self {
+            let mut allow = meerkat_core::ToolNameSet::default();
+            for name in names {
+                allow.0.insert(meerkat_core::ToolName::new(*name));
+            }
+            Self {
+                launch: Some(meerkat_core::ops::ToolAccessPolicy::AllowList(allow)),
+                ..Self::default()
+            }
+        }
+
+        /// A session created with a tool filter that denies the `names`.
+        fn filtering_out(names: &[&str]) -> Self {
+            let mut deny = meerkat_core::ToolNameSet::default();
+            for name in names {
+                deny.0.insert(meerkat_core::ToolName::new(*name));
+            }
+            Self {
+                session_filter: Some(meerkat_core::ToolFilter::Deny(deny)),
                 ..Self::default()
             }
         }
@@ -1507,6 +1533,7 @@ mod shell_family_monitor {
                 declared_tool_restriction: profile.restriction,
                 grant_gated_tools: profile.grant_gated,
                 tool_access_policy: profile.launch,
+                initial_tool_filter: profile.session_filter,
                 ..SessionBuildOptions::default()
             };
             let request = CreateSessionRequest {
@@ -1793,6 +1820,32 @@ mod shell_family_monitor {
     async fn a_launch_deny_list_that_names_shell_closes_monitor_start_with_it() {
         let met = session_meets(true, Profile::launch_denying(&["shell"])).await;
         assert_monitor_start_closed_with_shell(&met, "the launch denies `shell`");
+    }
+
+    /// The same for the session's own tool filter, the form `session/create`
+    /// takes: a filter that denies `shell`.
+    #[tokio::test]
+    async fn a_session_tool_filter_that_denies_shell_closes_monitor_start_with_it() {
+        let met = session_meets(true, Profile::filtering_out(&["shell"])).await;
+        assert_monitor_start_closed_with_shell(&met, "the session filter denies `shell`");
+    }
+
+    /// And for an allow list that names `monitor_start` and the job tools
+    /// but not `shell`: the monitor is not wider than the `shell` the list
+    /// leaves out.
+    #[tokio::test]
+    async fn an_allow_list_that_names_monitor_start_and_not_shell_closes_it() {
+        let met = session_meets(
+            true,
+            Profile::launch_allowing(&[
+                MONITOR,
+                "shell_job_status",
+                "shell_jobs",
+                "shell_job_cancel",
+            ]),
+        )
+        .await;
+        assert_monitor_start_closed_with_shell(&met, "the allow list leaves `shell` out");
     }
 
     /// The same for a turn's block list.

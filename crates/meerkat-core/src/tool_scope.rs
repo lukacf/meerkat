@@ -4462,6 +4462,59 @@ mod tests {
         assert!(!layered.allows("monitor_start"));
     }
 
+    /// The rule holds through the scope for each layer it composes, not only
+    /// for the composed filter taken alone: the inherited base filter, the
+    /// session's own filter once a boundary applied it, and a turn's block
+    /// and allow lists each hide `monitor_start` when they hide `shell`.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn every_layer_that_hides_shell_hides_monitor_start() {
+        let family = ["shell", "shell_jobs", "monitor_start"];
+        let visible = |scope: &ToolScope| {
+            scope
+                .visible_tool_names()
+                .unwrap()
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let without_shell = vec!["shell_jobs".to_string()];
+
+        let open = scope_with_generated_visibility(tools(&family));
+        assert_eq!(visible(&open), ["monitor_start", "shell", "shell_jobs"]);
+
+        let inherited = scope_with_generated_visibility(tools(&family));
+        inherited
+            .set_base_filter(ToolFilter::Deny(set(&["shell"])))
+            .unwrap();
+        assert_eq!(visible(&inherited), without_shell);
+
+        let session_filter = scope_with_generated_visibility(tools(&family));
+        session_filter
+            .handle()
+            .stage_external_filter(ToolFilter::Deny(set(&["shell"])))
+            .unwrap();
+        session_filter.apply_staged(tools(&family)).unwrap();
+        assert_eq!(visible(&session_filter), without_shell);
+
+        let blocked = scope_with_generated_visibility(tools(&family));
+        blocked
+            .handle()
+            .set_turn_overlay(None, raw_set(&["shell"]))
+            .unwrap();
+        assert_eq!(visible(&blocked), without_shell);
+
+        let allowed_without_shell = scope_with_generated_visibility(tools(&family));
+        allowed_without_shell
+            .handle()
+            .set_turn_overlay(
+                Some(raw_set(&["monitor_start", "shell_jobs"])),
+                raw_set(&[]),
+            )
+            .unwrap();
+        assert_eq!(visible(&allowed_without_shell), without_shell);
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[test]
     fn staged_update_is_boundary_only_until_apply_staged() {

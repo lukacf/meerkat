@@ -124,7 +124,7 @@ the CLI defaults to `--tools safe`).
 | Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `blob_save_file`, `blob_load_file`, `blob_inspect` | `enable_builtins` |
 | Image generation | `generate_image` | inherited visibility when the normal runtime substrate is wired; explicit `override_image_generation` for independent minimal composition |
 | Web search | provider-native search or the Meerkat-owned `web_search` fallback | `override_web_search` (or a surface convenience flag) |
-| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`; high-trust `monitor_start` is opt-in | `enable_shell` plus tool policy |
+| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` and, where the session has a durable job store, `monitor_start` | `enable_shell` plus tool policy |
 | Memory | `memory_search` | `enable_memory` |
 | Scheduler | `meerkat_schedule_*` | `enable_schedule` |
 | WorkGraph | `workgraph_*` | `enable_workgraph` |

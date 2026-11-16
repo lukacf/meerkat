@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+<!-- DRAFT wording: the shell family entries below are to be finalised before the release. -->
+
+### Changed
+
+- A member whose profile says `shell = true` is offered the whole shell
+  family on a stock gateway, with no configuration: `monitor_start` beside
+  `shell`, `shell_jobs`, `shell_job_status` and `shell_job_cancel`. A script
+  monitor can notify its own member and, with event delivery, start its
+  turns at a rate the model chooses; see Changed in the Meerkat changelog
+  for what a monitor may do. To keep the earlier tool list:
+
+  ```toml
+  [profiles.<name>.tools]
+  shell = true
+  deny = ["monitor_start"]
+  ```
+
+  A grant-gated shell family (`grant_gated = { families = ["shell"] }`)
+  keeps `monitor_start` closed with its other tools until a grant, which
+  opens all five. A read-only member lists it, as it lists `shell`, and is
+  refused every call.
+
+### Fixed
+
+- A deny, a closed grant gate or `read_only = true` that a member's profile
+  gained after the member started a script monitor now holds for the
+  monitor's re-run after a gateway restart: the monitor is not run again and
+  its job ends as `needs_attention` (`monitor_start_not_permitted`). See
+  Fixed in the Meerkat changelog.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

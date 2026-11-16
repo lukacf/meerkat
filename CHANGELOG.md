@@ -35,6 +35,109 @@ them.
 
 ## [Unreleased]
 
+<!-- DRAFT wording: the shell family entries below are to be finalised before the release. -->
+
+### Changed
+
+- `meerkat`, `meerkat-tools`, on every surface that switches shell
+  (`enable_shell` / `.shell(bool)` / `override_shell`, the config's
+  `tools.shell_enabled`, a mob profile's `tools.shell`, the CLI's
+  `--tools workspace` and `--tools full`): `shell` now turns on the whole
+  shell family. Every agent with shell whose session has durable job and
+  blob stores is offered `monitor_start` beside `shell`, `shell_jobs`,
+  `shell_job_status` and `shell_job_cancel`, with no configuration. Before,
+  the tool needed a policy enable in a custom dispatcher build, which no
+  stock surface offered. A session without durable job and blob stores is
+  not offered it, as its `shell` offers no `background`.
+
+  To keep the earlier tool list, deny the name. In a mob profile:
+
+  ```toml
+  [profiles.<name>.tools]
+  shell = true
+  deny = ["monitor_start"]
+  ```
+
+  Outside a mob, `session/create` carries no deny list: a turn's
+  `turn_tool_overlay.blocked_tools` (CLI `--block-tool monitor_start`, for a
+  run's first turn) hides the tool for that turn, and a fork's or a mob
+  spawn's `tool_access_policy` deny list, or a Rust build's
+  `tool_access_policy`, denies it for the session. A grant-gated shell
+  family keeps `monitor_start` closed with its other tools until a grant,
+  which opens all five; a read-only profile lists it, as it lists `shell`,
+  and refuses every call.
+
+  What a monitor may do that a background `shell` command may not:
+
+  - wake its own session: with `delivery` set to `event_steer` or
+    `event_queue`, each notification of the script is an input of its own
+    that starts a turn of the session that started the monitor (never
+    another session), with no outside input, and wakes a dormant mob member.
+    The default, `notification`, appends to the session's context and starts
+    no turn;
+  - choose its own rate: the notification rate and line size are arguments
+    of the call, within hard caps (at most 1000 notifications per window, a
+    window of 1 second to 24 hours, 1 MiB per line). No host setting bounds
+    the rate below the caps;
+  - run again after a host restart: a `replayable` monitor, and a
+    `checkpoint_resumable` one with a checkpoint, is run again at the
+    session's next shell job call, where a background `shell` command ends
+    as `worker_lost`. See Fixed for what stops that.
+
+  A monitor counts against the shell family's limit of concurrent processes.
+
+- `meerkat-tools`, `meerkat-contracts`, docs: the words "high-trust" are gone
+  from `monitor_start`'s description, from the `monitors/start` line of the
+  RPC method catalog (`artifacts/schemas/rpc-methods.json`) and from the
+  docs: an agent with shell is already trusted with a shell. The tool's name
+  and the method's name are unchanged. The Shell capability's description
+  now names `monitor_start`.
+
+### Fixed
+
+- `meerkat-tools`, `meerkat`: a later deny now holds for a monitor's re-run
+  after a host restart. A recorded resumable monitor is run again only while
+  its session may still start one: `monitor_start` enabled for it, not
+  denied by name, not closed by its grant gate, and its profile not
+  read-only, as the session's current build resolves them. Otherwise the job
+  ends as `needs_attention` with the failure code
+  `monitor_start_not_permitted` and is never run again. Earlier releases ran
+  such a monitor again whatever the session's tools said. A session whose
+  shell family was turned off has no shell job call, so nothing of its own
+  runs a recorded monitor again.
+
+### Added
+
+- Rust API of `meerkat-tools`: the trait
+  `builtin::shell::MonitorRerunAdmission` and
+  `DurableShellJobRuntime::with_monitor_rerun_admission`, through which the
+  builder of a session's tools says whether the session may start a monitor
+  at the moment a recorded one would be run again. A runtime without one
+  runs every recorded resumable monitor again, as before.
+- The job failure code `monitor_start_not_permitted`, the `reason` of a
+  `needs_attention` monitor job that was not run again. Failure codes are
+  open strings.
+
+### Upgrade notes
+
+- A live session of an agent with shell is offered `monitor_start` from its
+  next build. Its stored session and its stored system prompt are not
+  rewritten; the tool list sent to the provider gains one definition.
+- A store that holds a recorded monitor: a session that may start a monitor
+  runs it again after a restart, as before. One that may not (a denied name,
+  a closed grant gate, a read-only profile) now sees the job end as
+  `needs_attention`, whoever started the monitor.
+
+### Known limitations
+
+- No host setting bounds a monitor's notification rate below the hard caps:
+  a monitor with event delivery starts turns of its own session at a rate
+  the model chooses. `deny` is the control.
+- The host's own monitor route is not bound by a member's deny: an
+  operator's `monitors/start` or job cancel for a session runs that
+  session's recorded resumable monitors again under the host's authority.
+- A deny does not stop a monitor that is already running; cancel its job.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

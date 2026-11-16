@@ -126,7 +126,7 @@ of this full catalog.
 | `jobs/health` | Jobs | — | `JobsHealthResult` | Read realm-scoped detached-job health, owed outbox deliveries, and undrained runtime deliveries |
 | `jobs/subscribe` | Jobs | `JobsSubscribeParams` | `JobsSubscribeResult` | Add a durable record, notification, or event delivery subscription |
 | `jobs/unsubscribe` | Jobs | `JobsUnsubscribeParams` | `JobsUnsubscribeResult` | Remove a durable delivery subscription |
-| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a high-trust durable script monitor with explicit restart and output contracts |
+| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a durable script monitor with explicit restart and output contracts |
 | `meta/jobs/heartbeat` | Host jobs | `MetaJobHeartbeatParams` | `MetaJobMutationResult` | Renew the exact committed attempt lease |
 | `meta/jobs/progress` | Host jobs | `MetaJobProgressParams` | `MetaJobMutationResult` | Commit progress under exact attempt/fence authority |
 | `meta/jobs/checkpoint` | Host jobs | `MetaJobCheckpointParams` | `MetaJobMutationResult` | Commit a restart checkpoint under exact attempt/fence authority |
@@ -2525,7 +2525,7 @@ cancellation request, `jobs/retry` asks the generated job machine to schedule a
 retry at `retry_due_at_ms`, and subscribe/unsubscribe manage durable
 record/notification/event delivery.
 
-`monitors/start` is the explicit high-trust script-monitor entry point. It
+`monitors/start` is the host's script-monitor entry point. It
 requires `session_id`, a caller-stable `submission_key`, `command`, positive
 `timeout_secs`, `restart_class`, and `delivery`. The default output protocol is
 `framed_jsonl`; `lines` is also supported. Agent-authored monitors cannot claim

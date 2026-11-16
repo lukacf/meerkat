@@ -88,7 +88,7 @@ Agent shell tools provide their own job-oriented commands.
 | `jobs/health` | Read operational health and delivery backlogs |
 | `jobs/subscribe` | Add a durable delivery subscription |
 | `jobs/unsubscribe` | Remove one subscription without cancelling the job |
-| `monitors/start` | Start a high-trust durable script monitor |
+| `monitors/start` | Start a durable script monitor |
 
 Read a job:
 
@@ -187,9 +187,10 @@ still gets every delivery.
 ## Script Monitors
 
 `monitors/start` is a convenience submission surface over the same durable job
-authority. It is high trust because it starts an agent-authored process. The
-host must have a persistent realm, shell capability, and an explicit project
-or working-directory context.
+authority. It starts an agent-authored process under the host's own
+authority: a session's tool policy does not bind it. The host must have a
+persistent realm, shell capability, and an explicit project or
+working-directory context.
 
 ```json
 {
@@ -224,9 +225,18 @@ Script monitors may declare `checkpoint_resumable`, `replayable`, or
 `non_resumable`. They cannot claim `adoptable`, because an ordinary script has
 no stable external runner handle that proves adoption.
 
-Inside an agent session, the shell tool set exposes the related
-`monitor_start` tool. It uses `event_steer` and `event_queue` shorthand for
-event delivery and otherwise shares the durable monitor authority.
+Inside an agent session, the shell tool family carries the related
+`monitor_start` tool, on with shell where the session has durable job and
+blob stores. It uses `event_steer` and `event_queue` shorthand for event
+delivery and otherwise shares the durable monitor authority.
+
+After a host restart a session's recorded resumable monitor is run again at
+the session's next shell job call, and only while the session may still start
+one: a profile that denies `monitor_start`, gates it without a grant, or is
+read-only ends the job as `needs_attention` with the failure code
+`monitor_start_not_permitted` instead. `monitors/start` and `jobs/cancel` for
+a session run its recorded resumable monitors again under the host's
+authority, whatever the session's profile denies.
 
 ## Health
 

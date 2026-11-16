@@ -2290,7 +2290,7 @@ mod tests {
         /// A current-thread runtime with a paused clock: a taker's bounded
         /// wait elapses virtually, and a taker that did not wait leaves the
         /// clock where it was.
-        fn paused_runtime() -> tokio::runtime::Runtime {
+        pub(super) fn paused_runtime() -> tokio::runtime::Runtime {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .start_paused(true)
@@ -2298,7 +2298,7 @@ mod tests {
                 .expect("a runtime")
         }
 
-        fn runtime() -> tokio::runtime::Runtime {
+        pub(super) fn runtime() -> tokio::runtime::Runtime {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -2528,6 +2528,7 @@ mod tests {
     }
 
     mod first_start_reservation {
+        use super::manifest_lock::{paused_runtime, runtime};
         use super::*;
 
         fn candidates(a: &Path, b: &Path) -> Vec<PathBuf> {
@@ -2800,6 +2801,133 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(pin.realm().as_str(), "a_b");
+        }
+
+        fn marker_files(roots: &[&Path], realm_id: &str) -> Vec<PathBuf> {
+            roots
+                .iter()
+                .map(|root| first_start_marker_path(root, realm_id))
+                .filter(|marker| marker.exists())
+                .collect()
+        }
+
+        /// The next command's first start, in a runtime of its own with a
+        /// paused clock: it must reserve on its first attempt (no retry
+        /// delay elapsed) and materialize the realm.
+        fn the_next_first_start_reserves_at_once(root_a: &Path, root_b: &Path) {
+            paused_runtime().block_on(async {
+                let started = Instant::now();
+                let opened = ensure_realm_manifest_pin_with_candidates(
+                    root_a,
+                    &candidates(root_a, root_b),
+                    "team",
+                    None,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                )
+                .await;
+                assert!(
+                    opened.is_ok(),
+                    "the next first start reserves and materializes: {opened:?}"
+                );
+                assert_eq!(
+                    started.elapsed(),
+                    Duration::ZERO,
+                    "the next first start did not wait for the reservation"
+                );
+            });
+            assert_eq!(
+                marker_files(&[root_a, root_b], "team"),
+                Vec::<PathBuf>::new(),
+                "no first start left a marker"
+            );
+        }
+
+        /// A first start that fails while it holds markers (here: the
+        /// second candidate root cannot be created, after the first root's
+        /// marker was written) has released them when it returns, also when
+        /// its runtime is dropped right after, as a command's is.
+        ///
+        /// RED before: the reservation removed the markers of such an early
+        /// return on tasks it spawned at drop and did not await. The dropped
+        /// runtime never polled them, the marker stayed, and the next first
+        /// start of the realm failed with `Contention` until the marker was
+        /// thirty seconds old.
+        #[cfg(unix)]
+        #[test]
+        fn a_first_start_that_failed_under_its_reservation_leaves_no_marker() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            // A dangling link in the second candidate's place: nothing is
+            // found under it, and it cannot be created as a directory.
+            std::os::unix::fs::symlink(temp.path().join("absent"), &root_b)
+                .expect("a dangling link");
+
+            let first_command = runtime();
+            let failed = first_command.block_on(ensure_realm_manifest_pin_with_candidates(
+                &root_a,
+                &candidates(&root_a, &root_b),
+                "team",
+                None,
+                Some(supported_backend()),
+                Some(RealmOrigin::Explicit),
+            ));
+            assert!(
+                matches!(failed, Err(RealmFirstStartError::Store(StoreError::Io(_)))),
+                "the first start fails on the second candidate root: {failed:?}"
+            );
+            drop(first_command);
+
+            // The operator repairs the second candidate root and runs the
+            // next command.
+            std::fs::remove_file(&root_b).expect("the dangling link is removed");
+            the_next_first_start_reserves_at_once(&root_a, &root_b);
+        }
+
+        /// A first start that is cancelled while it holds its markers (here:
+        /// a caller's timeout fires while it waits behind a manifest lock
+        /// file a killed process left) has released them, also when its
+        /// runtime is dropped right after.
+        ///
+        /// RED before, for the same reason as the row above.
+        #[test]
+        fn a_cancelled_first_start_leaves_no_marker() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let leftover_lock = realm_paths_in(&root_a, "team")
+                .root
+                .join(".realm_manifest.lock");
+            std::fs::create_dir_all(leftover_lock.parent().expect("the realm directory"))
+                .expect("the realm directory");
+            std::fs::write(&leftover_lock, b"realm-manifest-lock").expect("a leftover lock file");
+
+            let first_command = paused_runtime();
+            let cancelled = first_command.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    ensure_realm_manifest_pin_with_candidates(
+                        &root_a,
+                        &candidates(&root_a, &root_b),
+                        "team",
+                        None,
+                        Some(supported_backend()),
+                        Some(RealmOrigin::Explicit),
+                    ),
+                )
+                .await
+            });
+            assert!(
+                cancelled.is_err(),
+                "the caller's timeout cancels the first start while it holds its markers"
+            );
+            drop(first_command);
+
+            // The leftover manifest lock is gone (aged out, or removed), and
+            // the next command runs.
+            std::fs::remove_file(&leftover_lock).expect("the leftover lock file is removed");
+            the_next_first_start_reserves_at_once(&root_a, &root_b);
         }
     }
 

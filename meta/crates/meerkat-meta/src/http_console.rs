@@ -13127,7 +13127,8 @@ async fn handle_console_aggregator_rpc(
         && let Some(error) =
             console_rpc_access_violation(access_view, request.method.as_str(), &request.params)
     {
-        return response_value(response_id, None, Some(error));
+        // The refusal names the member as the caller spelled it.
+        return absent.restore(response_value(response_id, None, Some(error)));
     }
     let response = Box::pin(async {
     // Each awaiting arm runs as its own boxed future, built in
@@ -13762,7 +13763,8 @@ async fn handle_console_runtime_rpc_with_visibility(
     if let Some(error) =
         console_rpc_access_violation(access_view, request.method.as_str(), &request.params)
     {
-        return response_value(response_id, None, Some(error));
+        // The refusal names the member as the caller spelled it.
+        return absent.restore(response_value(response_id, None, Some(error)));
     }
     // The method arms answer in one boxed future, so the answer is spelled
     // back with the caller's names whichever arm answers.

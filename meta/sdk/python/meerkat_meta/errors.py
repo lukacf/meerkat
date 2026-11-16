@@ -387,7 +387,8 @@ def _type_name(failure: BaseException) -> str:
         name = type(failure).__name__
     except Exception:
         return "an unnamed type"
-    return name if isinstance(name, str) else "an unnamed type"
+    # A plain string only: a string subclass can format itself as it likes.
+    return name if type(name) is str else "an unnamed type"
 
 
 class GatewayChildPendingError(TransportError):

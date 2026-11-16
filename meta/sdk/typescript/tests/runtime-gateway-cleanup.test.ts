@@ -483,6 +483,36 @@ describe("runtime gateway cleanup ownership", () => {
     }
   });
 
+  it("the startup cleanup error reads the startup failure's name once", () => {
+    // A `name` accessor can answer differently on each read: the message is
+    // built from the one value read, so a later answer that cannot be turned
+    // into text never reaches it.
+    let reads = 0;
+    const errorWithChangingName = new Error("placeholder");
+    Object.defineProperty(errorWithChangingName, "name", {
+      get() {
+        reads += 1;
+        if (reads === 1) return "FirstAnswer";
+        return {
+          toString() {
+            throw new Error("unprintable name");
+          },
+        };
+      },
+    });
+    const failure = new GatewayStartupCleanupError(
+      errorWithChangingName,
+      new Error("private channel close failed"),
+      { shutdown: async (): Promise<void> => {}, lastTermination: () => null },
+    );
+    assert.equal(
+      failure.message,
+      "gateway startup failed (FirstAnswer) and the stop of its gateway transport was rejected " +
+        "(see startupError and cleanupError)",
+    );
+    assert.equal(reads, 1);
+  });
+
   it("a refused native shutdown after the gateway exited stays visible, and the next shutdown settles", async () => {
     const dir = mkdtempSync(join(tmpdir(), "meta-cleanup-"));
     const gateway = writeGateway(dir, "refusing", {

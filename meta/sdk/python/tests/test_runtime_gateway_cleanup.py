@@ -844,6 +844,28 @@ def test_the_startup_cleanup_error_names_the_type_of_the_startup_failure():
     )
 
 
+class _UnformattableName(str):
+    """A class name whose formatting raises."""
+
+    def __format__(self, spec: str) -> str:
+        raise RuntimeError("unprintable name")
+
+
+def test_the_startup_cleanup_error_takes_only_a_plain_string_as_the_type_name():
+    # A class can carry a name that is a string subclass of its own making:
+    # the message takes a class name only when it is a plain string, so
+    # building the error formats nothing a failure brought with it.
+    hostile = type("Hostile", (Exception,), {})
+    hostile.__name__ = _UnformattableName("Hostile")
+    failure = GatewayStartupCleanupError(
+        hostile(), OSError("private channel close failed"), _NoCleanup()
+    )
+    assert str(failure) == (
+        "gateway startup failed (an unnamed type) and the stop of its gateway "
+        "transport failed (see startup_error and cleanup_error)"
+    )
+
+
 class RefusesAttributes(BaseException):
     """A non-Exception startup failure whose attribute assignment raises."""
 

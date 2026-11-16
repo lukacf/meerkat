@@ -177,14 +177,18 @@ export class GatewayStartupCleanupError extends TransportError {
 }
 
 /**
- * The name of a failure's type, read without formatting the failure: an
- * Error's `name`, and the `typeof` of any other value or of an Error whose
- * `name` cannot be read.
+ * The name a failure carries, read without formatting the failure: an
+ * Error's `name` (its class's, or one the instance was given), and the
+ * `typeof` of any other value or of an Error whose `name` cannot be read.
  */
 function failureTypeName(failure: unknown): string {
   try {
-    if (failure instanceof Error && typeof failure.name === "string" && failure.name !== "") {
-      return failure.name;
+    if (failure instanceof Error) {
+      // Read once: an accessor may answer differently on each read.
+      const name: unknown = failure.name;
+      if (typeof name === "string" && name !== "") {
+        return name;
+      }
     }
   } catch {
     // An unreadable name: the kind of value is named instead.

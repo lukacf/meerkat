@@ -211,19 +211,26 @@ impl Gateway {
     /// (a grant opens its names at the member's next model request), or the
     /// last list read when it never does.
     fn grant_shell_family(&mut self) -> (Value, Vec<String>) {
+        self.grant(json!({"kind": "family", "family": "shell"}))
+    }
+
+    /// Grant `agent:alpha` the one tool `shell`, as
+    /// [`Self::grant_shell_family`] grants the family.
+    fn grant_the_tool_shell(&mut self) -> (Value, Vec<String>) {
+        self.grant(json!({"kind": "tool", "name": "shell"}))
+    }
+
+    fn grant(&mut self, target: Value) -> (Value, Vec<String>) {
         let granted = self.rpc(
             "grant",
             "meta/tool_grants/grant",
             json!({
                 "identity": "agent:alpha",
-                "target": {"kind": "family", "family": "shell"},
+                "target": target,
                 "duration_ms": 600_000,
             }),
         );
-        assert!(
-            granted["error"].is_null(),
-            "the family grant is issued: {granted}"
-        );
+        assert!(granted["error"].is_null(), "the grant is issued: {granted}");
         self.dispatch("dispatch-after-grant");
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut read = 0_u32;
@@ -402,4 +409,56 @@ fn a_member_without_shell_lists_no_shell_tool() {
     let state = tempfile::tempdir().expect("state dir");
     let (_gateway, names) = live_tools(state.path(), "");
     assert_lists_none(&names, &SHELL_FAMILY, "a profile without shell");
+}
+
+/// `monitor_start` is never wider than `shell`: a profile whose deny list
+/// names only `shell` lists the family's three job tools and neither `shell`
+/// nor `monitor_start`.
+#[test]
+fn a_profile_that_denies_shell_lists_no_monitor_start() {
+    let state = tempfile::tempdir().expect("state dir");
+    let (_gateway, names) = live_tools(state.path(), "shell = true\ndeny = [\"shell\"]");
+    assert_lists(&names, &SHELL_FAMILY[1..4], "the deny names `shell`");
+    assert_lists_none(&names, &["shell", MONITOR], "a denied `shell`");
+}
+
+/// A restart does not bring it back: the resumed member lists the same.
+#[test]
+fn a_resumed_member_whose_profile_denies_shell_lists_no_monitor_start() {
+    let state = tempfile::tempdir().expect("state dir");
+    let tools = "shell = true\ndeny = [\"shell\"]";
+    let (gateway, _) = live_tools(state.path(), tools);
+    gateway.shutdown();
+
+    let (_gateway, names) = live_tools(state.path(), tools);
+    assert_lists(
+        &names,
+        &SHELL_FAMILY[1..4],
+        "the deny names `shell`, resumed",
+    );
+    assert_lists_none(&names, &["shell", MONITOR], "a denied `shell`, resumed");
+}
+
+/// A grant gate on the name `shell` (not on the family) gates
+/// `monitor_start` with it: neither is listed before a grant, and the grant
+/// of the tool `shell` opens both.
+#[test]
+fn a_grant_gate_on_the_name_shell_gates_monitor_start_with_it() {
+    let state = tempfile::tempdir().expect("state dir");
+    let (mut gateway, closed) = live_tools(
+        state.path(),
+        "shell = true\ngrant_gated = { tools = [\"shell\"] }",
+    );
+    assert_lists_none(
+        &closed,
+        &["shell", MONITOR],
+        "a gate on the name `shell` before its grant",
+    );
+
+    let (granted, open) = gateway.grant_the_tool_shell();
+    assert!(
+        has(&open, "shell"),
+        "the grant of the tool opens `shell`: {open:?}; grant {granted}"
+    );
+    assert_lists(&open, &SHELL_FAMILY, "the tool `shell` granted");
 }

@@ -317,6 +317,16 @@ operation carrier: `output`, `tokens_used`, `agent_identity`, `member_ref`,
 required, while `retirement_error` reports post-result cleanup debt when
 present.
 
+`mob/profile/create` and `mob/profile/update` are a host's own caller's
+methods and accept the stored profile form: beyond the fields of
+`MobProfileInput`, which their parameter schemas describe, a profile may
+carry `auth_binding`, `tools.mcp_servers` and `tools.rust_bundles`. Members
+spawned from that realm profile build on the binding, start the servers and
+mount the named bundles the host registered for child mobs. A profile read
+back (`mob/profile/get`, `mob/profile/list`, and the answers of create and
+update) does not show these three fields. The MCP profile tools and the agent
+profile tools take `MobProfileInput` only and refuse them.
+
 <Note>
 Every `Schedule` result is one flattened public object. Configuration fields
 including `planning_horizon_days`, `planning_horizon_occurrences`, `labels`,

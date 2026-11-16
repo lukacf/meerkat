@@ -4,7 +4,7 @@ use crate::{
     McpToolError, MobMcpState, decode_public_mob_definition, workgraph_execution_binding_view,
 };
 use meerkat_contracts::{
-    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams,
+    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams, MobProfileInput,
     WireAuthBindingRef, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobRuntimeMode,
     WireRuntimeBinding, WireTrustedPeerIdentity,
 };
@@ -325,9 +325,9 @@ struct MeerkatMobWaitReadyInput {
 struct MeerkatMobProfileCreateInput {
     /// Unique profile name.
     name: String,
-    /// Profile definition (model, skills, tools, etc.).
-    #[schemars(with = "serde_json::Value")]
-    profile: meerkat_mob::Profile,
+    /// Profile definition: the public profile input (model, skills, tools,
+    /// etc.). A field outside it is an argument error.
+    profile: MobProfileInput,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -342,9 +342,9 @@ struct MeerkatMobProfileNameInput {
 struct MeerkatMobProfileUpdateInput {
     /// Profile name to update.
     name: String,
-    /// Updated profile definition.
-    #[schemars(with = "serde_json::Value")]
-    profile: meerkat_mob::Profile,
+    /// Updated profile definition: the public profile input. It replaces the
+    /// stored profile whole. A field outside it is an argument error.
+    profile: MobProfileInput,
     /// Expected current revision for CAS.
     expected_revision: u64,
 }
@@ -1278,8 +1278,9 @@ pub async fn handle_public_tools_call(
         }
         "meerkat_mob_profile_create" => {
             let input: MeerkatMobProfileCreateInput = parse_args(arguments)?;
+            let profile = decode_public_profile_input(input.profile)?;
             let stored = state
-                .realm_profile_create(&input.name, &input.profile)
+                .realm_profile_create(&input.name, &profile)
                 .await
                 .map_err(|err| McpToolError::from_mob(&err))?;
             serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
@@ -1318,8 +1319,9 @@ pub async fn handle_public_tools_call(
         }
         "meerkat_mob_profile_update" => {
             let input: MeerkatMobProfileUpdateInput = parse_args(arguments)?;
+            let profile = decode_public_profile_input(input.profile)?;
             let stored = state
-                .realm_profile_update(&input.name, &input.profile, input.expected_revision)
+                .realm_profile_update(&input.name, &profile, input.expected_revision)
                 .await
                 .map_err(|err| McpToolError::from_mob(&err))?;
             serde_json::to_value(meerkat_mob::stored_realm_profile_to_wire(&stored))
@@ -1409,6 +1411,16 @@ fn workgraph_flow_binding_view(
 fn parse_args<T: DeserializeOwned>(arguments: &Value) -> Result<T, McpToolError> {
     serde_json::from_value(arguments.clone())
         .map_err(|error| McpToolError::invalid_params(format!("invalid arguments: {error}")))
+}
+
+/// Decode the public profile input of the realm profile tools, as the agent
+/// profile tools do. The input is closed, so a field outside it has already
+/// failed the argument parse, naming the field.
+fn decode_public_profile_input(
+    input: MobProfileInput,
+) -> Result<meerkat_mob::Profile, McpToolError> {
+    crate::decode_public_profile(input)
+        .map_err(|error| McpToolError::invalid_params(format!("invalid profile: {error}")))
 }
 
 fn parse_mob_id(raw: &str) -> Result<meerkat_mob::MobId, McpToolError> {

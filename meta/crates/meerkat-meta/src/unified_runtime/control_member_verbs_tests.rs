@@ -53,7 +53,7 @@ impl Peer {
 /// seated with the label that keeps a member apart.
 async fn runtime_with_both_members() -> UnifiedRuntime {
     let definition = meerkat_mob::MobDefinition::from_toml(&format!(
-        "[mob]\nid = \"control-member-verbs-{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\n[profiles.worker.tools]\ncomms = true\n",
+        "[mob]\nid = \"control-member-verbs-{}\"\n\n[profiles.worker]\nmodel = \"gpt-5.5\"\nexternal_addressable = true\n\n[profiles.worker.tools]\ncomms = true\n",
         uuid::Uuid::new_v4().simple()
     ))
     .expect("mob definition");

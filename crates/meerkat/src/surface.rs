@@ -510,6 +510,20 @@ fn mob_agent_owner_key_parts(owner_id: &str) -> Option<(&str, &str)> {
     crate::mob_agent_owner_id_parts(owner_id)
 }
 
+/// A turn's overlay as a session built with the tools `known` takes it.
+///
+/// An overlay that carries a WorkGraph attention projection allows the
+/// tools of the binding's mode. The binding does not know what its target
+/// was built with, and a turn whose allow-list names a tool the session
+/// lacks is refused whole.
+pub(crate) fn workgraph_attention_overlay_for_session_tools(
+    overlay: meerkat_core::service::TurnToolOverlay,
+    known: &[meerkat_core::types::ToolName],
+) -> meerkat_core::service::TurnToolOverlay {
+    let _ = known;
+    overlay
+}
+
 fn compose_turn_tool_overlay(
     existing: Option<meerkat_core::service::TurnToolOverlay>,
     attention: meerkat_core::service::TurnToolOverlay,
@@ -2489,6 +2503,187 @@ mod tests {
                 None,
             ),
         }
+    }
+
+    /// The overlay the injector composes for the session the goal of
+    /// [`owner_scoped_workgraph_service`] is bound to.
+    async fn bound_attention_overlay() -> meerkat_core::service::TurnToolOverlay {
+        let labels = mob_owner_labels();
+        let session_id = meerkat_core::SessionId::new();
+        let session_service = RespawnOverlapSessionService {
+            summaries: vec![respawn_summary(
+                session_id.clone(),
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000),
+                &labels,
+            )],
+            labels: labels.clone(),
+        };
+        let workgraph_service = owner_scoped_workgraph_service().await;
+        let mut request = empty_start_turn_request();
+        inject_workgraph_attention_turn_overlay(
+            &session_service,
+            Some(&workgraph_service),
+            &session_id,
+            &mut request,
+        )
+        .await
+        .expect("inject for the bound session");
+        request
+            .runtime
+            .turn_tool_overlay
+            .expect("the bound session receives the attention overlay")
+    }
+
+    /// The tools the overlay's deferred-tool authorities name.
+    fn deferred_authority_names(overlay: &meerkat_core::service::TurnToolOverlay) -> Vec<String> {
+        overlay
+            .dispatch_context
+            .get(meerkat_core::service::TURN_DEFERRED_TOOL_AUTHORITIES_CONTEXT_KEY)
+            .map(|value| {
+                serde_json::from_value::<Vec<meerkat_core::DeferredToolLoadAuthority>>(
+                    value.clone(),
+                )
+                .expect("deferred tool authorities")
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|authority| authority.name.as_str().to_string())
+            .collect()
+    }
+
+    fn tool(name: &str) -> meerkat_core::types::ToolName {
+        meerkat_core::types::ToolName::from(name)
+    }
+
+    /// A session built with some of the binding's tools takes the overlay
+    /// narrowed to those: the allow-list and the deferred-tool authorities
+    /// name only tools the session has.
+    #[tokio::test]
+    async fn an_attention_overlay_is_narrowed_to_the_tools_the_session_has() {
+        let overlay = bound_attention_overlay().await;
+        let own = overlay
+            .allowed_tools
+            .clone()
+            .expect("the attention overlay has an allow-list");
+        let known = vec![tool("workgraph_get"), tool("send_message")];
+        assert!(
+            own.contains(&tool("workgraph_get")) && own.len() > 1,
+            "the binding's mode allows workgraph_get and more: {own:?}"
+        );
+
+        let narrowed = workgraph_attention_overlay_for_session_tools(overlay, &known);
+
+        assert_eq!(
+            narrowed.allowed_tools,
+            Some(vec![tool("workgraph_get")]),
+            "the allow-list names only the binding's tools the session has"
+        );
+        assert!(
+            deferred_authority_names(&narrowed)
+                .iter()
+                .all(|name| name == "workgraph_get" || name == "send_message"),
+            "no deferred-tool authority names a tool the session lacks: {:?}",
+            deferred_authority_names(&narrowed)
+        );
+        assert!(
+            narrowed
+                .dispatch_context
+                .contains_key("workgraph.attention_projection"),
+            "the overlay keeps its attention projection"
+        );
+    }
+
+    /// A session built with none of the binding's tools takes an ordinary
+    /// turn: the overlay, which stands alone, sets no allow-list and names
+    /// no deferred tool.
+    #[tokio::test]
+    async fn an_attention_overlay_alone_sets_no_allow_list_for_a_session_with_none_of_its_tools() {
+        let overlay = bound_attention_overlay().await;
+        let known = vec![tool("send_message")];
+
+        let narrowed = workgraph_attention_overlay_for_session_tools(overlay, &known);
+
+        assert_eq!(
+            narrowed.allowed_tools, None,
+            "a session with none of the binding's tools keeps its own tools"
+        );
+        assert!(
+            deferred_authority_names(&narrowed).is_empty(),
+            "no deferred-tool authority names a tool the session lacks: {:?}",
+            deferred_authority_names(&narrowed)
+        );
+    }
+
+    /// Another overlay of the same turn that set an allow-list of its own
+    /// stays in force: the composed allow-list is only narrowed, never
+    /// lifted, also when no tool is left in it.
+    #[tokio::test]
+    async fn an_attention_overlay_composed_with_another_allow_list_is_only_narrowed() {
+        let attention = bound_attention_overlay().await;
+        let other = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
+            allowed_tools: Some(vec![tool("workgraph_get"), tool("send_message")]),
+            blocked_tools: None,
+            dispatch_context: BTreeMap::new(),
+        };
+        let composed = compose_turn_tool_overlay(Some(other), attention).expect("compose");
+        assert_eq!(
+            composed.allowed_tools,
+            Some(vec![tool("workgraph_get")]),
+            "the two allow-lists intersect"
+        );
+
+        let with_the_tool = workgraph_attention_overlay_for_session_tools(
+            composed.clone(),
+            &[tool("workgraph_get"), tool("send_message")],
+        );
+        assert_eq!(
+            with_the_tool.allowed_tools,
+            Some(vec![tool("workgraph_get")])
+        );
+        let without_it =
+            workgraph_attention_overlay_for_session_tools(composed, &[tool("send_message")]);
+        assert_eq!(
+            without_it.allowed_tools,
+            Some(Vec::new()),
+            "the other overlay's allow-list is not lifted"
+        );
+    }
+
+    /// An overlay with no attention projection is not touched: an allow-list
+    /// that names a tool the session lacks goes on as it is, to be refused.
+    #[test]
+    fn an_overlay_without_an_attention_projection_is_left_as_it_is() {
+        let overlay = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
+            allowed_tools: Some(vec![tool("no_such_tool")]),
+            blocked_tools: Some(vec![tool("blocked_by_flow")]),
+            dispatch_context: BTreeMap::from([("turn".to_string(), serde_json::json!(true))]),
+        };
+
+        let taken =
+            workgraph_attention_overlay_for_session_tools(overlay.clone(), &[tool("send_message")]);
+
+        assert_eq!(taken.allowed_tools, overlay.allowed_tools);
+        assert_eq!(taken.blocked_tools, overlay.blocked_tools);
+        assert_eq!(taken.dispatch_context, overlay.dispatch_context);
+    }
+
+    /// A session built with every tool of the binding's mode takes the
+    /// overlay whole.
+    #[tokio::test]
+    async fn an_attention_overlay_is_whole_for_a_session_with_all_its_tools() {
+        let overlay = bound_attention_overlay().await;
+        let own = overlay
+            .allowed_tools
+            .clone()
+            .expect("the attention overlay has an allow-list");
+
+        let taken = workgraph_attention_overlay_for_session_tools(overlay.clone(), &own);
+
+        assert_eq!(taken.allowed_tools, overlay.allowed_tools);
+        assert_eq!(taken.blocked_tools, overlay.blocked_tools);
+        assert_eq!(taken.dispatch_context, overlay.dispatch_context);
     }
 
     /// Respawn-overlap arbitration on the canonical apply-time injection

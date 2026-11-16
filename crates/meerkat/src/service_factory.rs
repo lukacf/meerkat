@@ -404,6 +404,15 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError> {
+        // A WorkGraph attention overlay is taken as this agent's own tools
+        // allow (`workgraph_attention_overlay_for_session_tools`).
+        let overlay = overlay.map(|overlay| match self.agent.tool_scope_snapshot() {
+            Some(scope) => crate::surface::workgraph_attention_overlay_for_session_tools(
+                overlay,
+                &scope.known_base_names,
+            ),
+            None => overlay,
+        });
         self.agent
             .set_turn_tool_overlay(overlay)
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
@@ -3217,6 +3226,82 @@ mod tests {
             .ok_or_else(|| "missing session metadata".to_string())?;
         assert_eq!(metadata.llm_identity(), live_identity);
 
+        Ok(())
+    }
+
+    /// A session built without the WorkGraph tools can be the target of an
+    /// attention binding. Its turn then carries the binding's overlay, whose
+    /// allow-list names only WorkGraph tools. The session takes that turn,
+    /// as an ordinary turn with its own tools.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_bound_session_built_without_workgraph_tools_takes_its_turn() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, self_hosted_inline_video_config(true));
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let service = EphemeralSessionService::new(builder, 10);
+        let created = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "video-alias".to_string(),
+                prompt: "defer the first turn".to_string().into(),
+                system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let workgraph = crate::WorkGraphService::with_scope(
+            Arc::new(crate::MemoryWorkGraphStore::new()),
+            "host-realm",
+            crate::WorkNamespace::default(),
+        );
+        let goal: crate::GoalCreateRequest = serde_json::from_value(serde_json::json!({
+            "title": "bound work",
+            "target": { "kind": "session", "session_id": created.session_id.to_string() },
+        }))
+        .map_err(|err| format!("goal request: {err}"))?;
+        workgraph
+            .create_goal(goal)
+            .await
+            .map_err(|err| format!("create goal: {err}"))?;
+
+        let mut request = meerkat_core::StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: meerkat_core::ContentInput::Text("take the turn".to_string()),
+            system_prompt: None,
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+                None,
+            ),
+        };
+        crate::surface::inject_workgraph_attention_turn_overlay(
+            &service,
+            Some(&workgraph),
+            &created.session_id,
+            &mut request,
+        )
+        .await
+        .map_err(|err| format!("inject the attention overlay: {err}"))?;
+        assert!(
+            request.runtime.turn_tool_overlay.is_some(),
+            "the bound session's turn carries the attention overlay"
+        );
+
+        service
+            .start_turn(&created.session_id, request)
+            .await
+            .map_err(|err| {
+                format!("a bound session built without the WorkGraph tools takes its turn: {err}")
+            })?;
         Ok(())
     }
 

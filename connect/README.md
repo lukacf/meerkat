@@ -27,7 +27,7 @@ archive="meerkat-connect-0.9.15-$platform.tar.gz"
 release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
-sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
+sha256sum -c "$archive.sha256"
 tar -xpf "$archive"
 export PATH="$PWD/meerkat-connect-$platform/bin:$PATH"
 ```

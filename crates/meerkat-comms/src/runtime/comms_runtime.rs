@@ -6647,6 +6647,41 @@ mod tests {
         assert_dial_reaches(&path, &held).await;
     }
 
+    /// A socket file this user may not dial is kept: a dial refused for
+    /// permission counts as held, so the start is refused and the file is
+    /// not removed. Skipped for a user that may dial any socket (root).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signed_socket_listener_is_refused_on_a_path_it_may_not_dial() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("member.sock");
+        let Some(held) = outside_listener(&path) else {
+            return;
+        };
+        let set_mode = |mode: u32| {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .expect("set the socket file's mode");
+        };
+        set_mode(0o000);
+        match tokio::net::UnixStream::connect(&path).await {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            // This user may dial the socket whatever its mode.
+            _ => return,
+        }
+
+        let mut config = test_runtime_config("socket-may-not-dial", &tmp);
+        config.listen_uds = Some(path.clone());
+        let mut runtime = CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+            .await
+            .unwrap();
+        assert_refused_for_live_listener(runtime.start_listeners().await, &path);
+
+        set_mode(0o600);
+        assert_dial_reaches(&path, &held).await;
+    }
+
     #[tokio::test]
     async fn pairing_password_installs_trusted_peer_and_returns_binding() {
         let tmp = tempfile::TempDir::new().unwrap();

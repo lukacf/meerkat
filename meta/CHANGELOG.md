@@ -11,14 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Console: a page that runs another console bundle than its gateway serves
   says so. `GET /console/experience` names the bundle the gateway serves in
-  `console_bundle` (the version its page gives its app script); a page
-  opened before the gateway was upgraded, and an application that mounts
-  another console than the gateway's, show one notice: "This Console was
-  updated. Reload the page to use the new version." The console's library
-  (`console/dist/index.cjs`) carries the id of the bundle it was built
-  beside, so an application that mounts it can tell too. There is no notice
-  on a gateway of an earlier release, which names no bundle, and a console
-  of an earlier release ignores the new member.
+  `console_bundle` (the version its page gives its app script), and a page
+  of this release or later compares it with the bundle it runs. The
+  gateway's own page, when the gateway's build changed after the page was
+  opened, shows one notice: "This page is of another Console build than
+  its gateway's. Reload the page to use the gateway's version." The
+  console's library (`console/dist/index.cjs`) carries the id of the bundle
+  it was built beside, so an application that mounts the library of this
+  release or later is told too, in words of its own: "This Console is of
+  another build than its gateway's. Reload the page; if this notice stays,
+  the application needs the Console of its gateway's release." The notice
+  is in pages and libraries of this release and later only: a page that
+  was opened on 0.9.15 or 0.9.16 before the upgrade to this release has no
+  such code and shows nothing, so reload open Console pages after this
+  upgrade. There is no notice on a gateway of an earlier release, which
+  names no bundle, and a console of an earlier release ignores the new
+  member.
 
 ### Fixed
 

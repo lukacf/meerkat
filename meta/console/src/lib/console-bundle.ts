@@ -11,6 +11,11 @@
 /** Replaced by the library's build with the id of the bundle built beside it. */
 declare const __META_CONSOLE_BUNDLE__: string | undefined;
 
+// One form for the version: the build gives the app bundle a version of
+// lowercase hex digits and fails otherwise (`build.cjs`), so every reader of
+// it (this page, the gateway's `console_bundle`, the freshness check) cuts
+// the same text. A version in another form would be cut differently here
+// and by the gateway, and the notice would never go away.
 const APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 
 function builtBeside(): string | undefined {
@@ -40,4 +45,16 @@ export function servedConsoleBundle(experience: { console_bundle?: unknown } | n
 /** Whether the page runs another bundle than its gateway serves. Unknown on either side: no. */
 export function consoleBundleIsStale(running: string | undefined, served: string | undefined): boolean {
   return running !== undefined && served !== undefined && running !== served;
+}
+
+/** What the notice of another build says. The gateway's own page is cured by
+ *  a reload, whichever way the gateway's build moved (an upgrade or a
+ *  rollback). In an application that mounts the console's library (only the
+ *  library's build names its bundle) a reload helps only when the
+ *  application itself was updated meanwhile, so the notice also says what
+ *  is needed when it stays. */
+export function consoleBundleNotice(): string {
+  return builtBeside() !== undefined
+    ? "This Console is of another build than its gateway's. Reload the page; if this notice stays, the application needs the Console of its gateway's release."
+    : "This page is of another Console build than its gateway's. Reload the page to use the gateway's version.";
 }

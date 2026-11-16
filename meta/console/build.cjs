@@ -89,6 +89,14 @@ async function main() {
     fs.readFile(path.join(outDir, "console-app.css")),
   ]);
   const jsVersion = assetVersion(appBundle);
+  // One form for the app bundle's version: lowercase hex digits. The page
+  // (src/lib/console-bundle.ts), the gateway (`console_bundle` in the
+  // experience document) and the freshness check each read it out of the
+  // page; a version in another form would be cut differently by them, and
+  // a page would then call itself out of date for ever.
+  if (!/^[0-9a-f]+$/.test(jsVersion)) {
+    throw new Error(`the app bundle's version is not lowercase hex digits: ${JSON.stringify(jsVersion)}`);
+  }
   await fs.writeFile(
     htmlPath,
     renderHtml({

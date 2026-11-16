@@ -1549,6 +1549,68 @@ async fn a_fire_sends_as_its_sender_through_the_console_send_gate() -> TestResul
     Ok(())
 }
 
+/// A fire runs the Console's send gate as its sender, like a live send: a
+/// fire to a member its sender may not know of, under rules that refuse the
+/// sender a send to a name no member holds, is refused as the rules refuse
+/// it, and nothing is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fire_to_a_member_its_sender_may_not_know_is_refused_as_the_rules_refuse_it() -> TestResult
+{
+    let fixture = delivering_fixture("console-schedules-fire-hidden").await?;
+    // A member private to another person than Erin.
+    fixture
+        .runtime
+        .handle()
+        .spawn_spec(
+            SpawnMemberSpec::new("agent", AgentIdentity::from("gamma")).with_labels(
+                std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:another-person".to_string(),
+                )]),
+            ),
+        )
+        .await?;
+    // The schedule is Erin's all the same: defined through a door that
+    // holds no audience.
+    let created = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/create",
+        create_params("gamma"),
+    )
+    .await;
+    assert!(created["error"].is_null(), "{created:#?}");
+    let schedule_id = created["result"]["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string();
+    let controller = enforced(vec![grant(
+        "frank-drives-every-agent",
+        FRANK,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "*",
+    )])?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let writable = doors(
+        &fixture,
+        open_decisions(false),
+        Some(controller),
+        fences,
+        ungoverned(),
+    );
+
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    refused_because(
+        fire(&fixture, &writable, &schedule_id, &key).await,
+        "you are not allowed to send to this agent",
+    );
+    assert!(sends_under(&fixture, "gamma", &key).await.is_empty());
+    fixture.stop().await;
+    Ok(())
+}
+
 /// The requester of the agent's turn that committed the user row `content`
 /// of `identity`, once the turn committed it.
 async fn turn_requester(

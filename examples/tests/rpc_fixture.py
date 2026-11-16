@@ -65,11 +65,44 @@ for line in sys.stdin:
         }
     elif method in {"session/create", "turn/start"}:
         refuse = mode == "create-error" or (
-            mode == "comparison-error" and "provider_params" not in params
+            mode == "comparison-error"
+            and "provider_params" not in params
+            and "reasoning_effort" not in params
         )
         if method == "session/create" and refuse:
             send({"id": request["id"], "error": {
                 "code": -32000, "message": "Synthetic session refusal",
+            }})
+            continue
+        if mode == "effort-error" and "reasoning_effort" in params:
+            send({"id": request["id"], "error": {
+                "code": -32000, "message": "Synthetic provider failure",
+            }})
+            continue
+        effort_refusals = {
+            # mode: (reason, supported, facts, retryable)
+            "effort-refusal": ("unsupported_level", ["low", "medium"], "catalog", False),
+            "effort-refusal-no-level": ("unsupported_level", [], "catalog", False),
+            "effort-refusal-unknown": ("supported_levels_unknown", None, None, False),
+            "effort-refusal-unavailable": ("supported_levels_unavailable", None, None, True),
+        }
+        if mode in effort_refusals and "reasoning_effort" in params:
+            reason, supported, facts, retryable = effort_refusals[mode]
+            send({"id": request["id"], "error": {
+                "code": -32602, "message": "Synthetic reasoning effort refusal",
+                "data": {
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": {
+                        "requested": params["reasoning_effort"],
+                        "provider": "synthetic",
+                        "model": params.get("model", "synthetic"),
+                        "route": None,
+                        "reason": reason,
+                        "supported": supported,
+                        "facts": facts,
+                    },
+                },
             }})
             continue
         result = {
@@ -77,6 +110,20 @@ for line in sys.stdin:
             "turns": 1, "tool_calls": 0,
             "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
         }
+        if "reasoning_effort" in params:
+            result["reasoning_effort"] = {
+                "requested": params["reasoning_effort"],
+                "sent": [{
+                    "level": params["reasoning_effort"],
+                    "provider": "synthetic",
+                    "model": params.get("model", "synthetic"),
+                    "route": None,
+                    "fields": ["synthetic.effort"],
+                    "facts": "catalog",
+                    "decided_by": "request",
+                    "requests": 1,
+                }],
+            }
         if "output_schema" in params:
             result["structured_output"] = {
                 "sentiment": "positive", "confidence": 0.5,

@@ -64,11 +64,14 @@ the original task in the same conversation. The application supplies login and
 a persistent host. The gateway archive and Rust, JSON-RPC, Python and TypeScript
 interfaces support this composition; the gateway alone does not install an app.
 
-The [0.9.10 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10)
-includes ordinary CLI and Console setup. Connect 0.9.10 does not support
+The [0.9.15 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15)
+carries the complete CLI archive and the gateway archive, for ordinary CLI and
+Console setup. Connect 0.9.15 does not support
 in-place updates that change an application's tool policy, definition,
 instructions or runtime; Forge's Stage refuses them, so keep the existing
-installation and state. Shared multi-caller setup is an unqualified opt-in,
+installation and state. This limit is read from the 0.9.15 source, where the
+refusal and its tests are unchanged since 0.9.14; it was not run against the
+released archives. Shared multi-caller setup is an unqualified opt-in,
 available only when an application starts the gateway with
 `--private-workflow-launch`; ordinary CLI and Console setup stay single-caller.
 Do not install over an existing installation to update it.

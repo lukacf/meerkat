@@ -3,7 +3,7 @@
 //! do: invalid params with the shared metadata rule's message, and no member
 //! is spawned. Ordinary labels and context are taken and stored.
 
-#![allow(clippy::expect_used, clippy::panic)]
+#![allow(clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -85,7 +85,7 @@ impl MobMcpProcess {
         loop {
             let line = self
                 .lines
-                .recv_timeout(Duration::from_secs(120))
+                .recv_timeout(Duration::from_mins(2))
                 .unwrap_or_else(|err| panic!("no response to {method} request {id}: {err}"));
             if line.trim().is_empty() {
                 continue;
@@ -140,7 +140,7 @@ impl MobMcpProcess {
     /// a server that does not end is stopped and fails the test).
     fn finish(mut self) {
         drop(self.stdin.take());
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + Duration::from_mins(1);
         loop {
             if let Some(status) = self.child.try_wait().expect("poll rkat-mob-mcp") {
                 assert!(status.success(), "rkat-mob-mcp ended with {status}");

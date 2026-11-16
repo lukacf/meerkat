@@ -3052,19 +3052,24 @@ them.
   a record still destroys a mob with no members that took the id.
   Affected: 0.8.42 through 0.9.14.
 
-- `meerkat-store`, `rkat-rpc`, `rkat`, `rkat-rest`, `rkat-mcp`: on Windows
-  the first use of a new realm failed with "IO error: Access is denied.
-  (os error 5)". The JSON-RPC server started without `--realm` uses a new
-  realm at every start, so `rkat-rpc` failed at every start; the other
-  binaries failed the same way at their first use of a realm that did not
-  exist yet. After writing a new realm's manifest the store opened the
-  realm directory as a file to sync it, which Windows refuses. That
-  directory sync now runs on Unix only, as the store's other directory
-  syncs already did. The same step after a write of a session's event-log
-  head is guarded the same way: on Windows the head was written, but the
-  write was reported as failed and logged as a warning. Linux and macOS
-  are unchanged.
-  Affected: 0.9.14 and earlier releases.
+- Windows: `rkat-rpc`, `rkat-rest`, `rkat-mcp` and `rkat` failed with "IO
+  error: Access is denied. (os error 5)" the first time a realm was used.
+  After writing a new realm's manifest the store opened the realm directory
+  as a file to sync it, which Windows refuses. `rkat-rpc`, `rkat-rest` and
+  `rkat-mcp` started without `--realm` use a new realm at every start, so
+  they failed at every start; `rkat` failed once in each new workspace, in
+  the commands that open a realm (`run`, `resume`, sessions, mobs,
+  `realm create`), and worked from the second use on. The same step after
+  each write of a session's event-log head failed too: the head was written,
+  a warning was logged at every append, and a transcript rewrite reported an
+  error. Both directory syncs now run on Unix only, as the store's other
+  ones already did. On Windows no directory sync follows these renames:
+  after a power loss right after the write, a new realm's manifest or the
+  newest head can be missing; the realm is then created again at the next
+  start and the head is rebuilt from the event log (read from the source).
+  Linux and macOS are unchanged. Found by a check added to this release's
+  build, the first to start a Windows binary against a state directory.
+  Affected: every Windows binary from 0.3.4 through 0.9.14.
 
 ### Security
 
@@ -4524,10 +4529,10 @@ them.
   member placed on another host is such a run until that member's turn is
   settled.
 
-- `ask_user`: a call whose asking agent's key,
-  run id and tool-call id together exceed 1,024 bytes is refused as invalid
-  before the question set is held; this can meet a custom model provider
-  that issues very long tool-call ids (read from the source).
+- `ask_user`: a call whose subject key (the asking agent's key, the run id
+  and the tool-call id, joined by two slashes) exceeds 1,024 bytes is
+  refused as invalid before the question set is held; this can meet a custom
+  model provider that issues very long tool-call ids (read from the source).
 
 ## [0.9.14] - 2026-11-11
 

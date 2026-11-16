@@ -469,7 +469,7 @@ fn parse_args() -> anyhow::Result<Args> {
         advertise: value("--advertise"),
         data_dir,
         binding_out: value("--binding-out").map(PathBuf::from),
-        model: value("--model").unwrap_or_else(|| "gpt-5.5".to_string()),
+        model: value("--model").unwrap_or_else(|| "gpt-6-astra".to_string()),
         provider: value("--provider").unwrap_or_else(|| "openai".to_string()),
         site: value("--site").unwrap_or_else(|| "local".to_string()),
         platform: value("--platform").unwrap_or_else(|| std::env::consts::OS.to_string()),

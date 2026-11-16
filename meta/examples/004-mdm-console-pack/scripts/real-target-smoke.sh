@@ -62,7 +62,7 @@ for target_index in $(seq 1 "$target_count"); do
     --listen "$target_listen" \
     --data-dir "$target_data_dir" \
     --binding-out "$binding_file" \
-    --model "${MDM_TARGET_MODEL:-gpt-5.5}" \
+    --model "${MDM_TARGET_MODEL:-gpt-6-astra}" \
     --provider "${MDM_TARGET_PROVIDER:-openai}" \
     >"$target_log" 2>&1 &
   target_pids+=("$!")

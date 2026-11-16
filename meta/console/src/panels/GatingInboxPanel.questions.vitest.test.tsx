@@ -301,6 +301,44 @@ describe("GatingInboxPanel question sets", () => {
         + "It is answered in the asking agent's conversation, or here once the list holds it.");
   });
 
+  it("draws a question set's rendering without the closing note the gateway names beside it", async () => {
+    // The gateway ends the rendering of an open question set with a note for
+    // a page that cannot answer the set, and names what it added in
+    // `rendering_suffix`. This page says in its own words where the set is
+    // answered, so it draws the rendering as it is held, without the note.
+    const { decisionCardsOf, renderingOf } = await import("./decision-cards");
+    const OTHER_ID = `decision:${"d".repeat(64)}`;
+    const HELD = "Plan for the week\n\n1. Which day?\n   - Monday\n   - Friday";
+    const NOTE = "\n\nAnswer these questions in the Console, in the agent's chat or under Approvals. "
+      + "If this page offers no way to answer them, it runs an earlier Console: reload the page, or, "
+      + "in an application that builds the Console in, update its Console.";
+    const answer = {
+      decision_id: OTHER_ID, rendering: HELD + NOTE, renderer: "ask_user.v1",
+      subject_digest: `sha256:${"e".repeat(64)}`, parts: [], rendering_suffix: NOTE,
+    };
+    const page = {
+      decisions: [{ decision_id: OTHER_ID, kind: "ask_user.questions", phase: "open", approver_id: "ask_user", requester: "coordinator" }],
+      statuses: [],
+    };
+    const rendering = renderingOf(answer);
+    const cards = decisionCardsOf(page, new Map(rendering === undefined ? [] : [[OTHER_ID, rendering]]));
+    const view = render(
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals([])} decisions={cards}
+        questions={{ snapshot: sets(), onAnswer: vi.fn(), onDismiss: vi.fn() }} />,
+    );
+    const card = view.getByTestId(`decision-card:${OTHER_ID}`);
+    expect(within(card).getByTestId("decision-card-rendering").textContent).toBe(HELD);
+    expect(card.textContent).not.toContain("it runs an earlier Console");
+    expect(card.querySelector(".cc-decision__hint")?.textContent)
+      .toBe("This card has no answer form: the list of questions agents asked does not hold this set. "
+        + "It is answered in coordinator's conversation, or here once the list holds it.");
+    // An answer that names no added text is drawn whole, whatever it ends with.
+    expect(renderingOf({ rendering: HELD + NOTE })).toBe(HELD + NOTE);
+    // Only the text the answer ends with is cut.
+    expect(renderingOf({ rendering: HELD, rendering_suffix: NOTE })).toBe(HELD);
+    expect(renderingOf({ rendering: HELD, rendering_suffix: "" })).toBe(HELD);
+  });
+
   it("is unchanged without the question sets prop", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={approvals()} />);
     expect(view.queryByTestId("question-set-list")).toBeNull();

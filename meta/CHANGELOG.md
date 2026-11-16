@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   declaration did not change it; declare again with the current revision".
   It said that the definition "moved from revision <expected> to <stored>
   while the update was being declared", also when a declaration only named
-  another revision than the stored one. A host that reads the stored
-  revision out of the old sentence meets the new one, with both revisions
-  still in it as numbers. The error's type, its code (`-32014`) and its
+  another revision than the stored one. A host that read the stored revision
+  out of the old sentence must read it anew: both revisions are still in it
+  as numbers, but the stored revision now comes first and the expected one
+  second. The error's type, its code (`-32014`) and its
   fields are unchanged. What the revision is and where a host learns it:
   [One-shot mob definition update](docs/reference/configuration.mdx#one-shot-mob-definition-update).
 

@@ -1068,3 +1068,67 @@ async fn a_recovery_for_a_hidden_member_finds_no_send_under_a_key_the_caller_use
     assert_eq!(masked(&hidden, HIDDEN), masked(&absent, ABSENT));
     Ok(())
 }
+
+/// On a Console with no aggregator the REST send and its recovery answer a
+/// member hidden from the caller as a name no member holds: the Console's
+/// answer that it cannot send, or the rules' refusal.
+#[tokio::test]
+async fn the_rest_send_routes_answer_a_hidden_member_as_an_absent_one_with_no_aggregator()
+-> TestResult {
+    let console = PrivateSideChat::new("absent-answer-no-aggregator").await?;
+    let bob = bearer(bob_claims());
+    let refused = format!(
+        "{} {}",
+        StatusCode::FORBIDDEN,
+        json!({
+            "error": "access_denied",
+            "message": "you are not allowed to send to this agent",
+        })
+    );
+    let unavailable = format!(
+        "{} {}",
+        StatusCode::NOT_FOUND,
+        json!({
+            "error": "unavailable",
+            "message": "console aggregator unavailable",
+        })
+    );
+    let mut differences = Vec::new();
+    for (posture, mut state) in console.postures() {
+        state.console_aggregator = None;
+        let app = console_json_router_with_state(state);
+        let pinned = if posture == REFUSED {
+            &refused
+        } else {
+            &unavailable
+        };
+        let key = "a-key-no-send-used";
+        for (door, hidden, absent) in [
+            (
+                "POST /console/send",
+                post_rest(&app, &bob, "/console/send", send_to(HIDDEN)).await,
+                post_rest(&app, &bob, "/console/send", send_to(ABSENT)).await,
+            ),
+            (
+                "POST /console/send/recover",
+                recover_under(&app, &bob, HIDDEN, key).await,
+                recover_under(&app, &bob, ABSENT, key).await,
+            ),
+        ] {
+            if absent != *pinned {
+                differences.push(format!(
+                    "{door}, {posture}: a name no member holds is answered {absent}, pinned \
+                     {pinned}"
+                ));
+            }
+            if masked(&hidden, HIDDEN) != masked(&absent, ABSENT) {
+                differences.push(format!(
+                    "{door}, {posture}: the hidden member is answered {hidden}, a name no \
+                     member holds {absent}"
+                ));
+            }
+        }
+    }
+    assert!(differences.is_empty(), "{differences:#?}");
+    Ok(())
+}

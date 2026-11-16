@@ -193,8 +193,9 @@ the identity in one answer, as metadata only (`id`, `kind`, `title`,
 `description`, `age_days` and, for a ranked record, `rank`) and never a
 body. The default tier, `working_set`, is bounded: the ranked records up to
 `k` (32 by default, 512 at most) and the recent records that are not ranked
-or were changed since they were ranked, at most twice `k` together. None of the `meta/agent_memory/*` methods reads
-one record by its id: a host reads a body with a recall.
+or were changed since they were ranked, at most twice `k` together. None of
+the `meta/agent_memory/*` methods reads one record by its id: a host reads a
+body with a recall.
 
 `meta/agent_memory/update` (`update_agent_memory`, `updateAgentMemory`)
 replaces an active record: the new title, body and tags become a new active

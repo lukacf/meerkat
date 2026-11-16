@@ -3052,6 +3052,27 @@ them.
   a record still destroys a mob with no members that took the id.
   Affected: 0.8.42 through 0.9.14.
 
+- Windows: `rkat-rpc`, `rkat-rest`, `rkat-mcp` and `rkat` failed with "IO
+  error: Access is denied. (os error 5)" the first time a realm was used.
+  After writing a new realm's manifest the store opened the realm directory
+  as a file to sync it, which Windows refuses. `rkat-rpc` started without
+  `--realm` uses a new realm at every start, so it failed at every start
+  (by runs on a Windows runner). By the source the same holds for
+  `rkat-rest` and `rkat-mcp`, and `rkat` failed in the commands that open a
+  realm (`run`, `resume`, sessions, mobs, `realm create`) the first time in
+  a new workspace. The same step after each write of a session's event-log
+  head failed too: the head was written, a warning was logged at every
+  append, and a transcript rewrite reported an error. Both directory syncs
+  now run on Unix only, as the store's other ones already did. On Windows
+  no directory sync follows these renames: after a power loss right after
+  the write, a new realm's manifest or the newest head can be missing; the
+  realm is then created again at the next start and the head is rebuilt
+  from the event log (read from the source). Linux and macOS are unchanged.
+  Found by a check added to this release's build, the first to start a
+  Windows binary against a state directory. A first use of the same new
+  realm by several processes at once can still fail once: see Known
+  limitations. Affected: every Windows binary from 0.3.4 through 0.9.14.
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
@@ -4509,6 +4530,20 @@ them.
   run that a restart of the host recovered while its step was owed by a
   member placed on another host is such a run until that member's turn is
   settled.
+
+- `ask_user`: a call whose subject key (the asking agent's key, the run id
+  and the tool-call id, joined by two slashes) exceeds 1,024 bytes is
+  refused as invalid before the question set is held; this can meet a custom
+  model provider that issues very long tool-call ids (read from the source).
+
+- Windows: when several processes or tasks use the same new realm for the
+  first time at the same moment (for example two `rkat-rpc --realm <name>`
+  started together, or parallel `rkat` commands in a new workspace), one of
+  them can fail once with "IO error: Access is denied. (os error 5)". Start
+  it again: the realm then exists and the start works (read from the
+  source). A single start is not affected. Seen in a test on a Windows
+  runner that creates one realm from 32 tasks at once. A fix is planned for
+  the next release.
 
 ## [0.9.14] - 2026-11-11
 

@@ -3070,6 +3070,50 @@ Security, Upgrade and Changed.
   events. Where the events are not queried, declare `event_log` with
   `storage = "null"`. Read from the source, not run.
 
+- A profile that lists `ask_user` in `tools.deny` cannot be used for a member
+  whose host decides the member's tool surface itself (a host that installs
+  a member registration hook, as Connect's native host does). Meta mounts no
+  `ask_user` on such a build, so the deny names a tool that is in none of
+  the profile's tool vocabularies, and the member's build is refused:
+  `profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`
+  (by a run on this release's code). Leave `ask_user` out of `tools.deny` in
+  a profile used for such members; they are not offered the tool. By a
+  reading of the source, not by a run: the same refusal meets a member whose
+  host supplies its own tool named `ask_user` among the build's external
+  tools. Where these notes and the upgrade guide advise the deny, they speak
+  of members of a Meta gateway and of a host's own Meta runtime, where it
+  works as described. A fix is planned for the next release.
+
+- Voice (GPT Live) through the Meta SDKs over the stdio gateway: only the
+  plain open works. Three kinds of live call fail there, on every gateway,
+  one built with GPT Live included:
+  - the WebRTC answer. The gateway takes the SDKs' `live/webrtc/answer`
+    request for a call to a module named `live` and answers `-32601`,
+    "Module 'live' not loaded". So `live_webrtc_answer` and
+    `live_webrtc_answer_pending` in the Python Meta SDK and
+    `liveWebrtcAnswer` and `liveWebrtcAnswerPending` in the TypeScript Meta
+    SDK fail, and no WebRTC live channel can be completed;
+  - the strict open: `live_open_typed` / `liveOpenTyped` called with an
+    execution identity. For a member of an identity-first launch it answers
+    `-32000`, "experimental live response requires a delivery-aware outer
+    RPC writer", and the channel it had opened is closed again; for any
+    other member it is refused, because it needs the identity authority;
+  - `live_connect` / `liveConnect`, which begins with the strict open.
+
+  Every live open over stdio takes the gateway's voice path first, which
+  ends a Console voice call in progress on that gateway; a strict open that
+  then fails has ended it and opened nothing (the first by runs, the second
+  read from the source).
+
+  Not affected: `live_open` / `liveOpen`, and the typed open without an
+  execution identity, which open a channel with a WebSocket transport, also
+  for a member of an identity-first launch. A voice call started in the
+  Console does not use these calls and works. Affects Meta 0.9.0 through
+  this release (by runs on this release's code for the answer, the strict
+  open and the plain open; `live_connect` and the typed open read from the
+  source; earlier versions read from the source). A fix is planned for the
+  next release.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

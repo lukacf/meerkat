@@ -1295,15 +1295,26 @@ async fn write_manifest_payload_atomically(
     Ok(())
 }
 
+/// Fsync the directory `path` so a completed rename into it survives a crash
+/// (unix; directory handles are not fsyncable elsewhere, and Windows refuses
+/// to open a directory as a file at all).
 async fn sync_dir(path: &Path) -> Result<(), StoreError> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        let file = std::fs::File::open(path)?;
-        file.sync_all()
-    })
-    .await
-    .map_err(StoreError::Join)?
-    .map_err(StoreError::Io)
+    #[cfg(unix)]
+    {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            let file = std::fs::File::open(path)?;
+            file.sync_all()
+        })
+        .await
+        .map_err(StoreError::Join)?
+        .map_err(StoreError::Io)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError> {
@@ -1818,6 +1829,149 @@ mod tests {
         let parsed: RealmManifest = serde_json::from_str(&on_disk).unwrap();
         assert_eq!(parsed.realm.as_str(), realm_id);
         assert_eq!(parsed.backend, first_backend);
+    }
+
+    /// The first open of a realm nobody has opened before creates it: the
+    /// call succeeds, the manifest on disk is the one it returned, and no
+    /// temporary file is left. It runs on every platform; where a directory
+    /// cannot be opened as a file (Windows answers "Access is denied"), it
+    /// is the proof that writing the manifest does not try to.
+    #[tokio::test]
+    async fn the_first_open_of_a_fresh_realm_succeeds_and_writes_the_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "first-open";
+        let paths = realm_paths_in(&realms_root, realm_id);
+        assert!(!paths.root.exists(), "the realm does not exist yet");
+
+        let created = ensure_realm_manifest_in(
+            &realms_root,
+            realm_id,
+            Some(supported_backend()),
+            Some(RealmOrigin::Generated),
+        )
+        .await
+        .expect("the first open of a fresh realm succeeds");
+
+        let on_disk = tokio::fs::read(&paths.manifest_path)
+            .await
+            .expect("the manifest is written");
+        let written = parse_manifest_bytes(&on_disk).expect("the written manifest parses");
+        assert_eq!(written.realm.as_str(), realm_id);
+        assert_eq!(written.realm, created.realm);
+        assert_eq!(written.backend, created.backend);
+        assert_eq!(written.created_at, created.created_at);
+        let leftovers: Vec<String> = std::fs::read_dir(&paths.root)
+            .expect("the realm directory")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(".realm_manifest.tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "no temporary manifest: {leftovers:?}");
+
+        let reopened = ensure_realm_manifest_in(&realms_root, realm_id, None, None)
+            .await
+            .expect("the second open reads the manifest");
+        assert_eq!(reopened.created_at, created.created_at);
+    }
+
+    /// The lines that open a file inside the functions of `source` whose
+    /// first line starts with `signature`: each line's number and whether it
+    /// stands under `#[cfg(unix)]`. Rustfmt's indentation is the structure
+    /// read here: what encloses a line is the nearest line above it with
+    /// less indentation, and an attribute is the line above what it governs.
+    fn file_opens_in(source: &str, signature: &str) -> Vec<(usize, bool)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let is_code = |line: &str| {
+            let text = line.trim_start();
+            !text.is_empty() && !text.starts_with("//")
+        };
+        let mut opens = Vec::new();
+        for (start, first) in lines.iter().enumerate() {
+            // A declaration without a body (a trait's) opens nothing.
+            if !first.trim_start().starts_with(signature) || first.trim_end().ends_with(';') {
+                continue;
+            }
+            let closing = format!("{}}}", &first[..indent(first)]);
+            let end = lines[start..]
+                .iter()
+                .position(|line| *line == closing)
+                .map_or(lines.len(), |offset| start + offset);
+            for at in start..end {
+                if !is_code(lines[at]) || !lines[at].contains("File::open(") {
+                    continue;
+                }
+                let mut level = indent(lines[at]);
+                let mut under_unix = false;
+                for above in (0..=at).rev() {
+                    let line = lines[above];
+                    if !is_code(line) || (above != at && indent(line) >= level) {
+                        continue;
+                    }
+                    level = indent(line);
+                    if above > 0 && lines[above - 1].trim() == "#[cfg(unix)]" {
+                        under_unix = true;
+                        break;
+                    }
+                }
+                opens.push((at + 1, under_unix));
+            }
+        }
+        opens
+    }
+
+    /// Making a rename durable means opening the directory and syncing it,
+    /// which only Unix offers: Windows refuses to open a directory as a file
+    /// ("Access is denied"). Every helper of this crate that does it opens
+    /// the directory under `#[cfg(unix)]` only, so no other platform fails a
+    /// write it has already made. A helper added here is added to this list.
+    #[test]
+    fn directory_sync_helpers_open_a_directory_only_under_a_unix_cfg() {
+        let helpers = [
+            (
+                "realm.rs",
+                include_str!("realm.rs"),
+                "async fn sync_dir(path: &Path)",
+            ),
+            (
+                "blob.rs",
+                include_str!("blob.rs"),
+                "async fn sync_parent_dir(&self, path: &Path)",
+            ),
+            (
+                "migrate.rs",
+                include_str!("migrate.rs"),
+                "fn sync_parent_dir_reported(path: &Path",
+            ),
+            (
+                "approval_file_store.rs",
+                include_str!("approval_file_store.rs"),
+                "fn sync_dir(&self, dir: &Path)",
+            ),
+        ];
+        for (file, source, signature) in helpers {
+            let opens = file_opens_in(source, signature);
+            assert!(
+                !opens.is_empty(),
+                "{file}: `{signature}` opens no directory; has the helper moved?"
+            );
+            let unguarded: Vec<usize> = opens
+                .iter()
+                .filter(|(_, under_unix)| !under_unix)
+                .map(|(line, _)| *line)
+                .collect();
+            assert!(
+                unguarded.is_empty(),
+                "{file}: `{signature}` opens a directory outside `#[cfg(unix)]` at line(s) \
+                 {unguarded:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -68,6 +68,14 @@ guides give the conditional wording for Connect 0.9.14.
   (the preparation member and a recipe member). To keep the tool from such a
   member, list it in the profile's `tools.deny` (`deny = ["ask_user"]`).
 
+- A profile used for agents hosted by Connect's native host must not list
+  `ask_user` in `tools.deny`. Those agents are not offered the tool, and
+  with the deny their build is refused
+  (`… denies tool 'ask_user', which is in none of its tool vocabularies`;
+  by a run on this release's code). This matters for a profile shared with a
+  Meta gateway, where the deny is the documented way to keep the tool from a
+  member.
+
 ## [0.9.14] - 2026-11-11
 
 Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14

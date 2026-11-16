@@ -2062,8 +2062,20 @@ mod shell_family_monitor {
         }
         assert_eq!(runs(marker), 1, "the monitor's script ran once");
 
-        // The lost monitor: the same recorded specification under its own
-        // identity, claimed by a worker that is gone.
+        let lost = a_lost_copy_of(&lifetime, &recorded, &session_id).await;
+        lifetime.stand_down().await;
+        (session_id, lost)
+    }
+
+    /// The lost monitor: the recorded specification of `recorded`, tool
+    /// identity included, under an identity of its own, claimed by a worker
+    /// that is gone and whose lease expired long ago.
+    async fn a_lost_copy_of(
+        lifetime: &Lifetime,
+        recorded: &meerkat_jobs::StoredJob,
+        session_id: &SessionId,
+    ) -> meerkat::JobId {
+        let jobs = DetachedJobService::new(lifetime.job_store.clone());
         let mut spec = recorded.spec.clone();
         spec.execution_intent_id =
             meerkat::ExecutionIntentId::from_string("monitor-call:lost-with-the-host")
@@ -2083,8 +2095,7 @@ mod shell_family_monitor {
         )
         .await
         .expect("the lost worker's claim");
-        lifetime.stand_down().await;
-        (session_id, lost.job_id)
+        lost.job_id
     }
 
     /// What became of a lost monitor in the next host lifetime.
@@ -2207,6 +2218,22 @@ mod shell_family_monitor {
         assert_ended_not_permitted(&after, "a grant gate closes `monitor_start`");
     }
 
+    /// A monitor the session's own tool starts says so in its job: the
+    /// tool identity's version is `v2`, where the host's route and every
+    /// earlier release record `v1`. Recovery tells the two apart by it.
+    #[tokio::test]
+    async fn the_sessions_own_tool_records_that_it_started_the_monitor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (script, seen) = a_replayable_monitor_call(COMPLETES_AT_ONCE.to_string());
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let (_session_id, recorded) = a_session_starts_a_replayable_monitor(&lifetime, &seen).await;
+        assert_eq!(
+            (recorded.spec.tool.name(), recorded.spec.tool.version()),
+            (MONITOR, "v2"),
+            "the session's own tool records that it started the monitor"
+        );
+    }
+
     /// The re-run follows `shell` too: a profile that denies `shell` since
     /// (and so closes `monitor_start` with it) still lists its jobs, and
     /// the recorded monitor is not run again.
@@ -2228,6 +2255,145 @@ mod shell_family_monitor {
             the_session_lists_its_jobs_after_a_restart(true, Profile::gating(&["shell"]), SETTLE)
                 .await;
         assert_ended_not_permitted(&after, "a grant gate closes `shell`");
+    }
+
+    /// A session tool filter that hides `shell` since, and so the monitor
+    /// with it, stops the re-run too: the session can still list its jobs.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_a_session_filter_hides_shell_since() {
+        let after = the_session_lists_its_jobs_after_a_restart(
+            true,
+            Profile::filtering_out(&["shell"]),
+            SETTLE,
+        )
+        .await;
+        assert_ended_not_permitted(&after, "the session filter hides `shell`");
+    }
+
+    /// And a session tool filter that hides `monitor_start` itself.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_a_session_filter_hides_it_since() {
+        let after = the_session_lists_its_jobs_after_a_restart(
+            true,
+            Profile::filtering_out(&[MONITOR]),
+            SETTLE,
+        )
+        .await;
+        assert_ended_not_permitted(&after, "the session filter hides `monitor_start`");
+    }
+
+    /// An operator's own monitor for a session is not the session's to end.
+    /// The host's route starts a replayable monitor for a shell session and
+    /// a restart loses its worker. The session, built again under `profile`
+    /// (it may not start a monitor), lists its shell jobs: the operator's
+    /// monitor is neither run again nor ended, with no new attempt. The
+    /// host's route then runs it again. The job is recorded as every
+    /// release before this rule recorded any monitor, so the row is also
+    /// the row of a monitor recorded before an upgrade. Its level is the
+    /// pin row's: the route's own manager construction on the realm's real
+    /// stores, not the RPC handler.
+    async fn an_operators_monitor_is_left_by_a_member_that_may_not_start_one(
+        profile: Profile,
+        why: &str,
+    ) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("monitor-runs");
+        let (script, _seen) = OneCallScript::new("shell", serde_json::json!({ "command": "true" }));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        lifetime.run_session(session, Profile::open()).await;
+
+        let operator = lifetime.operator_route_manager(temp.path(), &session_id);
+        operator
+            .spawn_monitor_for_call(
+                &recording_script(&marker),
+                None,
+                30,
+                "operator-recorded",
+                MonitorStartOptions {
+                    protocol: MonitorOutputProtocol::FramedJsonl,
+                    restart_class: meerkat::RestartClass::Replayable,
+                    limits: MonitorProtocolLimits::default(),
+                    delivery: meerkat::JobDeliveryKind::Record,
+                },
+            )
+            .await
+            .expect("the operator's monitor start");
+        let recorded = lifetime.monitor_jobs(&session_id).await;
+        assert_eq!(recorded.len(), 1, "the operator's start recorded one job");
+        let recorded = recorded.into_iter().next().expect("the operator's monitor");
+        assert_eq!(
+            recorded.spec.tool.version(),
+            "v1",
+            "the host's route records a monitor as every earlier release did"
+        );
+        let first = ended(
+            &lifetime.job_store,
+            &recorded.job_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            first.terminal_result.is_some(),
+            "the operator's monitor ran once"
+        );
+        assert_eq!(runs(&marker), 1, "the monitor's script ran once");
+        let job_id = a_lost_copy_of(&lifetime, &recorded, &session_id).await;
+        lifetime.stand_down().await;
+
+        // The next lifetime: the member may not start a monitor and lists
+        // its shell jobs.
+        let (script, _seen) = OneCallScript::new("shell_jobs", serde_json::json!({}));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let before = ended(&lifetime.job_store, &job_id, std::time::Duration::ZERO).await;
+        let stored = lifetime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the stored session")
+            .expect("the session survives the restart");
+        lifetime.run_session(stored, profile).await;
+        tokio::time::sleep(QUIET).await;
+        let left = ended(&lifetime.job_store, &job_id, std::time::Duration::ZERO).await;
+        assert_eq!(runs(&marker), 1, "{why}: the member does not run it again");
+        assert_eq!(
+            (
+                left.terminal_result.clone(),
+                left.attempt_count,
+                left.current_fence
+            ),
+            (None, before.attempt_count, before.current_fence),
+            "{why}: the member does not end the operator's monitor or touch its job"
+        );
+
+        // The host's route recovers the session's jobs and runs it again.
+        let operator = lifetime.operator_route_manager(temp.path(), &session_id);
+        operator_starts_a_monitor(&operator, COMPLETES_AT_ONCE).await;
+        let after = settled(&lifetime.job_store, &job_id, &marker, SETTLE).await;
+        assert_eq!(
+            after.runs, 2,
+            "{why}: the host's route runs the operator's monitor again: terminal {:?}",
+            after.terminal
+        );
+    }
+
+    #[tokio::test]
+    async fn an_operators_monitor_on_a_denied_member_is_left_to_the_hosts_route() {
+        an_operators_monitor_is_left_by_a_member_that_may_not_start_one(
+            Profile::restricted(false, &[MONITOR]),
+            "the profile denies `monitor_start`",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_operators_monitor_on_a_read_only_member_is_left_to_the_hosts_route() {
+        an_operators_monitor_is_left_by_a_member_that_may_not_start_one(
+            Profile::restricted(true, &[]),
+            "the profile is read-only",
+        )
+        .await;
     }
 
     /// A session whose shell family was turned off has no shell job call, so

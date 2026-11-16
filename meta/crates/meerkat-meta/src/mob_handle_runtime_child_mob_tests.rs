@@ -2995,12 +2995,23 @@ async fn a_spawn_refused_at_its_build_reaches_the_caller_typed() {
 #[derive(Default)]
 struct SurfaceRecordingHook {
     prepared: Mutex<Vec<Vec<String>>>,
+    projected: Mutex<Vec<Vec<String>>>,
 }
 
 impl SurfaceRecordingHook {
     /// The tool names of each prepared surface the hook decided, in order.
     fn prepared(&self) -> Vec<Vec<String>> {
         self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Of each prepared surface the hook decided, in order, the tool names
+    /// its static visibility filters leave: the tools the member's model can
+    /// be offered.
+    fn projected(&self) -> Vec<Vec<String>> {
+        self.projected
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -3045,6 +3056,16 @@ impl meerkat_mob::MemberRuntimeRegistrationHook for SurfaceRecordingHook {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(tools);
+        self.projected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(
+                surface
+                    .projected
+                    .iter()
+                    .map(|tool| tool.name.as_str().to_string())
+                    .collect(),
+            );
         Ok(meerkat_core::ToolSurfaceSelection {
             binding: host_policy(),
             compiled_against: surface.clone(),
@@ -3829,20 +3850,25 @@ struct DenyNameBuilt {
     hosts_own_tool: bool,
     /// The tools the member's session lists for its model, sorted.
     listed: Vec<String>,
-    /// The tool names of each prepared surface the host's hook decided.
+    /// The tool names of each prepared surface the host's hook decided:
+    /// every tool the build composed.
     host_decided: Vec<Vec<String>>,
+    /// Of each of those surfaces, the tool names its static visibility
+    /// filters leave: the tools the member's model can be offered.
+    host_offered: Vec<Vec<String>>,
     /// The tool access policy the member's session records as the one its
-    /// calls are judged by; the outer `None` when the store holds no record
-    /// of the member's session.
-    recorded_policy: Option<Option<meerkat_core::ops::ToolAccessPolicy>>,
+    /// calls are judged by; none when it records none, or when the store
+    /// holds no record of the member's session.
+    recorded_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
 }
 
 /// The tool access policy the session of `member` records in the lifetime's
-/// session store, read from the session's own record.
+/// session store, read from the session's own record; none when the session
+/// records none, or when the store holds no record of it.
 async fn recorded_tool_access_policy(
     dir: &Path,
     member: &str,
-) -> Option<Option<meerkat_core::ops::ToolAccessPolicy>> {
+) -> Option<meerkat_core::ops::ToolAccessPolicy> {
     use meerkat::SessionStore as _;
     let store = meerkat_store::SqliteSessionStore::open(
         MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None).runtime_db(),
@@ -3867,7 +3893,7 @@ async fn recorded_tool_access_policy(
             .as_ref()
             .is_some_and(|binding| binding.member == member)
         {
-            return Some(metadata.tooling.tool_access_policy);
+            return metadata.tooling.tool_access_policy;
         }
     }
     None
@@ -3919,11 +3945,13 @@ async fn build_deny_name_member(case: DenyNameCase) -> Result<DenyNameBuilt, Str
         .tools;
     listed.sort();
     let host_decided = hook.prepared();
+    let host_offered = hook.projected();
     stand_down_released(runtime, 0).await;
     Ok(DenyNameBuilt {
         hosts_own_tool: case.hosts_own_tool,
         listed,
         host_decided,
+        host_offered,
         recorded_policy: recorded_tool_access_policy(dir.path(), "member").await,
     })
 }
@@ -3966,7 +3994,7 @@ fn assert_built_with_ask_user_denied(
     assert!(
         matches!(
             &built.recorded_policy,
-            Some(Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names)))
+            Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names))
                 if names.contains(ASK_USER)
         ),
         "{case}: the member's session records a policy that denies ask_user: {:?}",
@@ -3975,16 +4003,21 @@ fn assert_built_with_ask_user_denied(
     built
 }
 
-/// The surface the host decided for its member names no `ask_user`.
-fn assert_host_decided_no_ask_user(built: &DenyNameBuilt, case: &str) {
+/// Whether any of `surfaces` names `ask_user`.
+fn names_ask_user(surfaces: &[Vec<String>]) -> bool {
+    surfaces
+        .iter()
+        .any(|surface| surface.iter().any(|tool| tool == ASK_USER))
+}
+
+/// The host decided its member's surface, and the tools of that surface the
+/// member's model can be offered name no `ask_user`.
+fn assert_host_offered_no_ask_user(built: &DenyNameBuilt, case: &str) {
     assert!(
-        !built.host_decided.is_empty()
-            && built
-                .host_decided
-                .iter()
-                .all(|surface| !surface.iter().any(|tool| tool == ASK_USER)),
-        "{case}: the host decided the member's surface, which names no ask_user: {:?}",
-        built.host_decided
+        !built.host_offered.is_empty() && !names_ask_user(&built.host_offered),
+        "{case}: the host decided the member's surface, and the tools of it the member's \
+         model can be offered name no ask_user: {:?}",
+        built.host_offered
     );
 }
 
@@ -4006,7 +4039,12 @@ async fn a_member_whose_host_decides_its_surface_builds_on_a_profile_that_denies
         .await,
         case,
     );
-    assert_host_decided_no_ask_user(&built, case);
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        !names_ask_user(&built.host_decided),
+        "{case}: the build composed no tool named ask_user: {:?}",
+        built.host_decided
+    );
 }
 
 /// The same member without the deny builds as it did and is not offered the
@@ -4022,7 +4060,12 @@ async fn a_member_whose_host_decides_its_surface_is_not_offered_ask_user() {
     .await
     .expect("the member builds");
     assert_eq!(built.listed, deny_name_tools(&built, false), "{case}");
-    assert_host_decided_no_ask_user(&built, case);
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        !names_ask_user(&built.host_decided),
+        "{case}: the build composed no tool named ask_user: {:?}",
+        built.host_decided
+    );
 }
 
 /// The control of the two rows above, on the same composition without the
@@ -4061,9 +4104,10 @@ async fn a_member_whose_host_decides_no_surface_is_offered_ask_user() {
 /// A host that decides its member's surface also supplies its own tool
 /// named `ask_user` among the build's external tools. A profile that denies
 /// the name is still a profile the member builds on, and the deny does to
-/// the host's own tool what a deny does to every tool: the member's session
-/// does not list it, the surface its host decided does not name it, and the
-/// session's policy denies the name.
+/// the host's own tool what a deny does to every tool. The tool stays one
+/// the build composed, so the surface its host decides names it; the tools
+/// of that surface the member's model can be offered do not, the member's
+/// session does not list it, and the session's policy denies the name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_builds_on_a_profile_that_denies_it() {
     let case = "the host's own ask_user on a surface the host decides, denied";
@@ -4076,11 +4120,16 @@ async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_builds_on_a_profile_
         .await,
         case,
     );
-    assert_host_decided_no_ask_user(&built, case);
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        names_ask_user(&built.host_decided),
+        "{case}: the host's own tool is one the build composed: {:?}",
+        built.host_decided
+    );
 }
 
 /// The same member without the deny is offered the host's own tool under
-/// the name `ask_user`: its host decided a surface that names it.
+/// the name `ask_user`: its host decided a surface that offers it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_is_offered_without_a_deny() {
     let built = build_deny_name_member(DenyNameCase {
@@ -4092,12 +4141,9 @@ async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_is_offered_without_a
     .expect("the member builds");
     assert_eq!(built.listed, deny_name_tools(&built, true));
     assert!(
-        built
-            .host_decided
-            .iter()
-            .any(|surface| surface.iter().any(|tool| tool == ASK_USER)),
-        "the host decided a surface that names its own ask_user: {:?}",
-        built.host_decided
+        names_ask_user(&built.host_offered),
+        "the host decided a surface that offers its own ask_user: {:?}",
+        built.host_offered
     );
 }
 

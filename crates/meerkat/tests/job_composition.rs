@@ -1219,3 +1219,346 @@ mod mob_realm_shell_delivery {
         );
     }
 }
+
+/// The shell family as one session meets it: `shell` turns on the whole
+/// family, `monitor_start` included. Each row is a runtime-backed service on
+/// a persistent realm with a scripted model that reads the tool list it is
+/// sent and calls `monitor_start` once.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+mod shell_family_monitor {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use meerkat::surface::{
+        build_runtime_backed_service, default_persistent_executor, materialize_session,
+    };
+    use meerkat::{
+        AgentFactory, Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
+        Session,
+    };
+    use meerkat_client::types::LlmStream;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::{Message, SessionBuildOptions};
+    use meerkat_runtime::completion::CompletionOutcome;
+    use meerkat_runtime::{Input, PromptInput};
+    use tokio::time::Duration;
+
+    const SHELL_FAMILY: [&str; 5] = [
+        "shell",
+        "shell_job_status",
+        "shell_jobs",
+        "shell_job_cancel",
+        "monitor_start",
+    ];
+    const MONITOR: &str = "monitor_start";
+    const MONITOR_CALL_ID: &str = "toolu_monitor_start";
+
+    /// What the scripted model was sent, request by request.
+    #[derive(Default)]
+    struct Seen {
+        /// The tool names of each request.
+        tools: Vec<Vec<String>>,
+        /// The messages of each request, as JSON.
+        messages: Vec<serde_json::Value>,
+    }
+
+    /// Scripted model: the first request calls `monitor_start` with a script
+    /// that completes at once; every later request ends the turn with text.
+    struct MonitorScript {
+        seen: Arc<Mutex<Seen>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for MonitorScript {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            let first = {
+                let mut seen = self.seen.lock().expect("seen");
+                seen.tools.push(
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.as_str().to_string())
+                        .collect(),
+                );
+                seen.messages
+                    .push(serde_json::to_value(&request.messages).expect("messages as json"));
+                seen.tools.len() == 1
+            };
+            let usage = LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::OpenAI,
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            };
+            let events = if first {
+                vec![
+                    LlmEvent::ToolCallComplete {
+                        id: MONITOR_CALL_ID.to_string(),
+                        name: MONITOR.to_string(),
+                        args: serde_json::json!({
+                            "command": "printf '%s\\n' '{\"type\":\"complete\"}'",
+                            "timeout_secs": 30,
+                        }),
+                        meta: None,
+                    },
+                    usage,
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    },
+                ]
+            } else {
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    },
+                    usage,
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    },
+                ]
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// What one session met.
+    struct Met {
+        /// The tool names of the first request.
+        offered: Vec<String>,
+        /// Whether the answer to the `monitor_start` call was an error.
+        call_refused: bool,
+        /// The monitor jobs the session's realm recorded.
+        monitor_jobs: usize,
+    }
+
+    /// The restriction a mob profile's `read_only` and `deny` lower to.
+    fn restriction(read_only: bool, deny: &[&str]) -> meerkat_core::ops::DeclaredToolRestriction {
+        let mut names = meerkat_core::ToolNameSet::default();
+        for name in deny {
+            names.0.insert(meerkat_core::ToolName::new(*name));
+        }
+        meerkat_core::ops::DeclaredToolRestriction {
+            declared_by: "profile 'worker'".to_string(),
+            enabled_families: vec!["shell".to_string()],
+            read_only,
+            deny: names,
+            vocabulary: std::collections::BTreeMap::new(),
+            deferred_mcp_servers: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Whether the answer to the call `MONITOR_CALL_ID` in `messages` is an
+    /// error; `None` when the messages carry no answer to it.
+    fn call_answer_is_error(messages: &serde_json::Value) -> Option<bool> {
+        match messages {
+            serde_json::Value::Array(items) => items.iter().find_map(call_answer_is_error),
+            serde_json::Value::Object(map) => {
+                if map.get("tool_use_id").and_then(serde_json::Value::as_str)
+                    == Some(MONITOR_CALL_ID)
+                {
+                    return Some(
+                        map.get("is_error")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    );
+                }
+                map.values().find_map(call_answer_is_error)
+            }
+            _ => None,
+        }
+    }
+
+    /// Run one session with `shell` switched as given and the profile
+    /// restriction `declared`, let its model call `monitor_start` once and
+    /// answer what the session met.
+    async fn session_meets(
+        shell: bool,
+        declared: Option<meerkat_core::ops::DeclaredToolRestriction>,
+    ) -> Met {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "default",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Explicit),
+        )
+        .await
+        .expect("open realm persistence");
+        let job_store = persistence.job_store();
+
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let factory = AgentFactory::new(temp.path().join("sessions")).shell(shell);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MonitorScript {
+            seen: Arc::clone(&seen),
+        }));
+        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
+            .expect("compose the runtime-backed service");
+        let service: Arc<PersistentSessionService<FactoryAgentBuilder>> = Arc::new(service);
+
+        let mob_realm = meerkat_core::mob_realm_id("shell-family-mob").expect("mob realm id");
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let build = SessionBuildOptions {
+            realm_id: Some(mob_realm.clone()),
+            declared_tool_restriction: declared,
+            ..SessionBuildOptions::default()
+        };
+        let request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "gpt-5.4".to_string(),
+            prompt: meerkat_core::ContentInput::Text(String::new()),
+            system_prompt: meerkat::SystemPromptOverride::Set("shell family".to_string()),
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(build),
+            labels: None,
+        };
+        let service_for_executor = Arc::clone(&service);
+        let adapter_for_executor = Arc::clone(&adapter);
+        materialize_session(&service, &adapter, session, request, move |session_id| {
+            default_persistent_executor(service_for_executor, adapter_for_executor, session_id)
+        })
+        .await
+        .expect("materialize session");
+
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(
+                &session_id,
+                Input::Prompt(PromptInput::new("start a monitor", None)),
+            )
+            .await
+            .expect("accept prompt input");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(60),
+            handle.expect("completion handle").wait(),
+        )
+        .await
+        .expect("the prompt completes in time")
+        .expect("the completion waiter resolves");
+        assert!(
+            matches!(outcome, CompletionOutcome::Completed(_)),
+            "unexpected completion outcome: {outcome:?}"
+        );
+
+        let monitor_jobs = job_store
+            .list_all(16)
+            .await
+            .expect("list jobs")
+            .iter()
+            .filter(|job| {
+                job.spec.origin_session_id == session_id && job.spec.tool.name() == MONITOR
+            })
+            .count();
+        let seen = seen.lock().expect("seen");
+        let offered = seen.tools.first().cloned().expect("a first request");
+        let call_refused = seen
+            .messages
+            .iter()
+            .find_map(call_answer_is_error)
+            .expect("the model is sent an answer to its monitor_start call");
+        Met {
+            offered,
+            call_refused,
+            monitor_jobs,
+        }
+    }
+
+    fn offers(met: &Met, name: &str) -> bool {
+        met.offered.iter().any(|offered| offered == name)
+    }
+
+    /// `shell` alone, with no other configuration, offers the whole family
+    /// and a `monitor_start` call starts a durable monitor job.
+    #[tokio::test]
+    async fn a_shell_session_is_offered_the_whole_family_and_can_start_a_monitor() {
+        let met = session_meets(true, None).await;
+        for name in SHELL_FAMILY {
+            assert!(
+                offers(&met, name),
+                "a shell session is offered `{name}`: {:?}",
+                met.offered
+            );
+        }
+        assert!(
+            !met.call_refused,
+            "the session's `{MONITOR}` call is answered without an error"
+        );
+        assert_eq!(
+            met.monitor_jobs, 1,
+            "the call recorded one durable monitor job"
+        );
+    }
+
+    /// A profile that denies the name keeps the four other shell tools,
+    /// hides `monitor_start` and refuses a call by name.
+    #[tokio::test]
+    async fn a_denied_monitor_start_is_hidden_and_refused_by_name() {
+        let met = session_meets(true, Some(restriction(false, &[MONITOR]))).await;
+        for name in &SHELL_FAMILY[..4] {
+            assert!(
+                offers(&met, name),
+                "the deny leaves `{name}` offered: {:?}",
+                met.offered
+            );
+        }
+        assert!(
+            !offers(&met, MONITOR),
+            "a denied `{MONITOR}` is not offered: {:?}",
+            met.offered
+        );
+        assert!(met.call_refused, "a denied `{MONITOR}` call is refused");
+        assert_eq!(met.monitor_jobs, 0, "a refused call records no job");
+    }
+
+    /// A read-only profile meets `monitor_start` as it meets `shell`: listed
+    /// with its family, and every call refused.
+    #[tokio::test]
+    async fn a_read_only_session_is_refused_monitor_start_like_shell() {
+        let met = session_meets(true, Some(restriction(true, &[]))).await;
+        assert!(
+            offers(&met, "shell") && offers(&met, MONITOR),
+            "read-only hides no shell tool, `{MONITOR}` included: {:?}",
+            met.offered
+        );
+        assert!(
+            met.call_refused,
+            "a read-only session's `{MONITOR}` call is refused"
+        );
+        assert_eq!(met.monitor_jobs, 0, "a refused call records no job");
+    }
+
+    /// Without `shell` the session has no tool of the family.
+    #[tokio::test]
+    async fn a_session_without_shell_has_no_monitor_start() {
+        let met = session_meets(false, None).await;
+        for name in SHELL_FAMILY {
+            assert!(
+                !offers(&met, name),
+                "a session without shell is not offered `{name}`: {:?}",
+                met.offered
+            );
+        }
+        assert!(
+            met.call_refused,
+            "a `{MONITOR}` call without shell is refused"
+        );
+        assert_eq!(met.monitor_jobs, 0, "a refused call records no job");
+    }
+}

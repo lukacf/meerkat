@@ -3377,10 +3377,11 @@ tombstoned and keeps its title, description, body, tags and provenance in
 the realm's database. The Console's Memory panel still lists the record
 (`meta/memory/panel/records`, without its body) and still returns its body
 (`meta/memory/panel/record`): with access control enforced, to a caller with
-`agent.memory.read` and `agent.view` on the identity (and
-`memory.quarantine.review` for a record that was ever quarantined), and
-otherwise to any Console caller. The bundled store has no call that erases
-one record; see
+`agent.memory.read` and `agent.view` on the identity (an access file that
+names no memory action grants `agent.memory.read` wherever it grants
+`agent.view`), and `memory.quarantine.review` as well for a record that was
+ever quarantined; otherwise to any Console caller. The bundled store has no
+call that erases one record; see
 [Agent memory injection](/concepts/memory#agent-memory-injection) for what
 stays and how a realm's memory is removed.
 

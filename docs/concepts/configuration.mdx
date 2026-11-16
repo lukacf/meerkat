@@ -623,10 +623,13 @@ or the account a host declared when it registered the bundle. An operation
 whose owner states none is refused, never reviewed without it.
 
 `rkat` and `rkat-rpc`, the stock hosts that open a governed realm, each read
-the rules from the realm's effective configuration when the realm opens; a
-section that cannot be read or is malformed refuses the realm's governed work.
-`rkat-rest` and `rkat-mcp` refuse to start on a governed realm. Unknown or
-misspelled fields are refused, including inside the reviewer's identity.
+the rules from the realm's effective configuration when the realm opens. A
+section that cannot be read or is malformed refuses the governed work:
+`rkat-rpc` refuses the pipe, and `rkat` fails the command before the realm
+opens (`Error: Failed to load config: ...` or
+`Error: Invalid runtime config: ...`, exit code 1). `rkat-rest` and `rkat-mcp`
+refuse to start on a governed realm. Unknown or misspelled fields are refused,
+including inside the reviewer's identity.
 
 `[governance.decisions]` names the approver ids the operator of an `rkat-rpc`
 stdio connection acts for when the connection presents and decides

@@ -281,12 +281,6 @@
       "removed_by": "the change that removes the standalone repositories' workflow copies under connect/.github and meta/.github"
     },
     {
-      "path": "connect/README.md",
-      "match": "v0\\.9\\.10$",
-      "reason": "Connect's README describes and installs the Connect 0.9.10 release with Core 0.9.10.",
-      "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
-    },
-    {
       "path": "meta/docs/forge/quickstart.mdx",
       "match": "release forge-v0\\.3\\.0$|^meta-forge-0\\.3\\.0$",
       "reason": "Forge's install page downloads Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",

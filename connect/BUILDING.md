@@ -325,9 +325,10 @@ and prefix above.
 
 ## SDKs
 
-For the `v0.9.0` checkout, the SDK distributions are the unchanged release assets
-[`meerkat_toolkit-0.9.0-py3-none-any.whl`](https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/meerkat_toolkit-0.9.0-py3-none-any.whl)
-and [`rkat-toolkit-0.9.0.tgz`](https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/rkat-toolkit-0.9.0.tgz).
+The SDK distributions of a release are two of its release assets, the wheel
+`meerkat_toolkit-<version>-py3-none-any.whl` and the package
+`rkat-toolkit-<version>.tgz`, under the tag `connect-v<version>` among
+[this repository's releases](https://github.com/lukacf/meerkat/releases).
 See the [Python](docs/site/sdks/python.mdx) and
 [TypeScript](docs/site/sdks/typescript.mdx) pages for installation. These are
 GitHub release assets; no Toolkit registry upload is required.

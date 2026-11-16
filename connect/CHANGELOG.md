@@ -56,6 +56,13 @@ guides give the conditional wording for Connect 0.9.14.
   deny. Its agents are still not offered the tool, with the deny or
   without it. Affected: 0.9.15 only (0.9.14 has no stock `ask_user`).
 
+- Release tooling: the request that adds a file to a Connect release now
+  states the length of the file. The upload host refuses a request without
+  one ("Bad Content-Length"). The tooling of 0.9.10 through 0.9.15 sends the
+  earlier request (the release upload tool exists since 0.9.15). An empty
+  file is now refused before any request is made. The installed product is
+  unchanged.
+
 ## [0.9.15] - 2026-11-15
 
 ### Fixed

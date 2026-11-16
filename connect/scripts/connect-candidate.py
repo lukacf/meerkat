@@ -1479,7 +1479,15 @@ def publication_api(endpoint, *, upload=None):
     argv = ["gh", "api", endpoint, "--hostname", "github.com"]
     if upload is None:
         return command_json(argv, stdin=None)
-    argv += ["--method", "POST", "--header", "Content-Type: application/octet-stream", "--input", "-"]
+    # The request states the length of its body. gh has no length for a body it reads from
+    # standard input, and the upload host refuses a request without one. The length is the open
+    # file's own, from its position (what the child reads), so no pathname is involved. An empty
+    # body is refused here: gh sends no length for one in any form.
+    descriptor = upload.fileno()
+    length = os.fstat(descriptor).st_size - os.lseek(descriptor, 0, os.SEEK_CUR)
+    require(length > 0, "an empty file cannot be uploaded: its request would carry no length")
+    argv += ["--method", "POST", "--header", "Content-Type: application/octet-stream",
+             "--header", f"Content-Length: {length}", "--input", "-"]
     return command_json(argv, stdin=upload, timeout=UPLOAD_SECONDS)
 
 

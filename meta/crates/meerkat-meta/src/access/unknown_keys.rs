@@ -127,21 +127,73 @@ pub(crate) fn unknown_access_keys_text(keys: &[UnknownAccessKey]) -> String {
 /// groups' (by name), its rules' (in the order written) and its approvers'
 /// (by id), the keys of one table in alphabetical order.
 pub(crate) fn unknown_config_keys(config: &Value) -> Vec<UnknownAccessKey> {
-    let _ = config;
-    Vec::new()
+    let mut found = Vec::new();
+    let Some(root) = config.as_object() else {
+        return found;
+    };
+    stray_keys(AccessKeyPlace::Config, root, CONFIG_KEYS, &mut found);
+    for (name, group) in tables_by_name(root.get("groups")) {
+        stray_keys(
+            AccessKeyPlace::Group(name.to_string()),
+            group,
+            GROUP_KEYS,
+            &mut found,
+        );
+    }
+    for (position, rule) in tables_by_position(root.get("rules")) {
+        rule_keys(rule, Some(position), &mut found);
+    }
+    for (id, approver) in tables_by_name(root.get("approvers")) {
+        stray_keys(
+            AccessKeyPlace::Approver(id.to_string()),
+            approver,
+            APPROVER_KEYS,
+            &mut found,
+        );
+        ingress_subject_keys(id, None, approver.get("ingress_subjects"), &mut found);
+        for (position, person) in tables_by_position(approver.get("people")) {
+            stray_keys(
+                AccessKeyPlace::ApproverPerson {
+                    approver: id.to_string(),
+                    position,
+                },
+                person,
+                APPROVER_PERSON_KEYS,
+                &mut found,
+            );
+            ingress_subject_keys(
+                id,
+                Some(position),
+                person.get("ingress_subjects"),
+                &mut found,
+            );
+        }
+    }
+    found
 }
 
 /// The keys of one rule that no field reads, as [`unknown_config_keys`]
 /// finds them for a rule of a configuration.
 pub(crate) fn unknown_rule_keys(rule: &Value) -> Vec<UnknownAccessKey> {
-    let _ = rule;
-    Vec::new()
+    let mut found = Vec::new();
+    if let Some(rule) = rule.as_object() {
+        rule_keys(rule, None, &mut found);
+    }
+    found
 }
 
 /// The keys of the group `name` that no field reads.
 pub(crate) fn unknown_group_keys(name: &str, group: &Value) -> Vec<UnknownAccessKey> {
-    let _ = (name, group);
-    Vec::new()
+    let mut found = Vec::new();
+    if let Some(group) = group.as_object() {
+        stray_keys(
+            AccessKeyPlace::Group(name.to_string()),
+            group,
+            GROUP_KEYS,
+            &mut found,
+        );
+    }
+    found
 }
 
 fn rule_keys(

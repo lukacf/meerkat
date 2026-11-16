@@ -263,8 +263,50 @@ struct ManifestLockGuard {
     path: PathBuf,
 }
 
+/// What an error on a lock file's own name means to a caller that wants the
+/// lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockFileError {
+    /// Somebody else has the lock: wait and try again, inside the caller's
+    /// deadline.
+    Held,
+    /// The lock cannot be taken: the error is returned.
+    Fatal,
+}
+
+/// Classify an error from creating or probing a lock file. `windows` is the
+/// platform the answer is for (`cfg!(windows)` in the product).
+fn classify_lock_file_error(kind: std::io::ErrorKind, _windows: bool) -> LockFileError {
+    match kind {
+        std::io::ErrorKind::AlreadyExists => LockFileError::Held,
+        _ => LockFileError::Fatal,
+    }
+}
+
 impl ManifestLockGuard {
     async fn acquire(path: &Path, realm_id: &str) -> Result<Self, StoreError> {
+        Self::acquire_with(path, realm_id, cfg!(windows), || async move {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .await
+        })
+        .await
+    }
+
+    /// [`Self::acquire`] with the step that creates the lock file, and the
+    /// platform its errors are read for, passed in.
+    async fn acquire_with<F, Fut>(
+        path: &Path,
+        realm_id: &str,
+        windows: bool,
+        mut create: F,
+    ) -> Result<Self, StoreError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::io::Result<tokio::fs::File>>,
+    {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -279,12 +321,7 @@ impl ManifestLockGuard {
                 });
             }
 
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-                .await
-            {
+            match create().await {
                 Ok(file) => {
                     // A lock file whose write failed is removed again: left
                     // behind, it would hold the lock for nobody until it
@@ -296,18 +333,20 @@ impl ManifestLockGuard {
                         path: path.to_path_buf(),
                     });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Self::is_stale(path).await? {
-                        let _ = tokio::fs::remove_file(path).await;
+                Err(err) => match classify_lock_file_error(err.kind(), windows) {
+                    LockFileError::Held => {
+                        if Self::is_stale(path, windows).await? {
+                            let _ = tokio::fs::remove_file(path).await;
+                        }
+                        tokio::time::sleep(MANIFEST_LOCK_RETRY_DELAY).await;
                     }
-                    tokio::time::sleep(MANIFEST_LOCK_RETRY_DELAY).await;
-                }
-                Err(err) => return Err(StoreError::Io(err)),
+                    LockFileError::Fatal => return Err(StoreError::Io(err)),
+                },
             }
         }
     }
 
-    async fn is_stale(path: &Path) -> Result<bool, StoreError> {
+    async fn is_stale(path: &Path, windows: bool) -> Result<bool, StoreError> {
         match tokio::fs::metadata(path).await {
             Ok(metadata) => {
                 let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -317,6 +356,11 @@ impl ManifestLockGuard {
                 Ok(age > MANIFEST_LOCK_STALE_AFTER)
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            // A probe refused because somebody else has the lock found no
+            // stale lock.
+            Err(err) if classify_lock_file_error(err.kind(), windows) == LockFileError::Held => {
+                Ok(false)
+            }
             Err(err) => Err(StoreError::Io(err)),
         }
     }

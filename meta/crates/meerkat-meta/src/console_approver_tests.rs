@@ -1763,3 +1763,1347 @@ async fn release_is_bound_to_its_revision() {
         "{stale}"
     );
 }
+
+/// A member the Console of the rows below knows.
+const KNOWN_ORIGIN: &str = "carol";
+
+/// A member the Console of the rows below was never told about.
+const UNKNOWN_ORIGIN: &str = "dora";
+
+/// An access configuration under which every caller sees and decides gating
+/// requests and views every agent, with the admin [`ROOT`]. The Console
+/// knows the member [`KNOWN_ORIGIN`].
+fn origin_access() -> AccessController {
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![AccessRule {
+            id: "everyone-views-and-decides".to_string(),
+            actions: vec![
+                ACTION_GATING_VIEW.to_string(),
+                ACTION_GATING_DECIDE.to_string(),
+                ACTION_AGENT_VIEW.to_string(),
+            ],
+            ..AccessRule::default()
+        }],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: KNOWN_ORIGIN.to_string(),
+        ..Default::default()
+    });
+    access
+}
+
+/// A pending gate whose action came from the member `origin`.
+async fn pending_from(console: &ApprovalConsole, origin: &str) -> String {
+    let request = json!({
+        "action": "Publish the reviewed report",
+        "actor_id": "agent:writer",
+        "risk_tier": "r3",
+        "approval_timeout_ms": 600_000,
+    });
+    console
+        .owner
+        .lock()
+        .await
+        .evaluate_gating_action_with_origin(
+            serde_json::from_value(request).expect("gating request"),
+            Some(crate::runtime::GatingOrigin {
+                identity: origin.to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .pending_id
+        .expect("an R3 gate waits for a decision")
+}
+
+/// What one caller was answered for one pending request: whether the pending
+/// list showed it the request, the decide by the request's id, and whether
+/// the request was still pending afterwards.
+struct DecideById {
+    caller: &'static str,
+    listed: bool,
+    answer: Value,
+    still_pending: bool,
+}
+
+impl DecideById {
+    /// The decide was refused and changed nothing.
+    fn refused(&self) -> bool {
+        !self.answer["error"].is_null() && self.still_pending
+    }
+
+    /// The decide was taken: the request is decided.
+    fn taken(&self) -> bool {
+        self.answer["error"].is_null() && !self.still_pending
+    }
+
+    fn line(&self) -> String {
+        let decide = if self.answer["error"].is_null() {
+            "taken".to_string()
+        } else {
+            format!("refused ({})", self.answer["error"])
+        };
+        format!(
+            "{}: the pending list shows the request: {}; the decide by id: {decide}; still \
+             pending: {}",
+            self.caller, self.listed, self.still_pending
+        )
+    }
+}
+
+/// A fresh pending request of the member `origin`, then the pending list
+/// and a decide by the request's id as the caller of `bearer`.
+async fn decide_by_id(
+    console: &ApprovalConsole,
+    caller: &'static str,
+    bearer: Option<&str>,
+    origin: &str,
+) -> DecideById {
+    let pending_id = pending_from(console, origin).await;
+    let list = console_rpc_as(&console.app, bearer, "meta/gating/pending", json!({})).await;
+    let listed = list["result"]["pending"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry["pending_id"].as_str() == Some(pending_id.as_str()))
+    });
+    let answer = console.approve(bearer, &pending_id).await;
+    let still_pending = console.still_pending(&pending_id).await;
+    DecideById {
+        caller,
+        listed,
+        answer,
+        still_pending,
+    }
+}
+
+/// A pending request whose origin the Console was never told about is
+/// withheld from every caller the Console keeps apart from other people: the
+/// pending list shows it to an admin only. A decide by the request's id is
+/// refused to a caller the list withholds the request from, and leaves the
+/// request pending: on a Console that requires sign-in and on one where
+/// sign-in is optional, under access rules that reach the member, with the
+/// rules switched off, and with no access configuration at all.
+#[tokio::test]
+async fn a_decide_by_id_of_a_request_the_pending_list_withholds_is_refused() {
+    let person = person_token();
+    let mut answers = Vec::new();
+
+    let console = ApprovalConsole::start(
+        "origin-decide-signed-in",
+        enforced(),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    answers.push(
+        decide_by_id(
+            &console,
+            "a person who is not an admin, sign-in required",
+            Some(&person),
+            UNKNOWN_ORIGIN,
+        )
+        .await,
+    );
+    console.stop().await;
+
+    let console = ApprovalConsole::start(
+        "origin-decide-open",
+        open(),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    answers.push(
+        decide_by_id(
+            &console,
+            "a person who volunteers a token where sign-in is optional",
+            Some(&person),
+            UNKNOWN_ORIGIN,
+        )
+        .await,
+    );
+    console.stop().await;
+
+    let rules_off = AccessController::new(crate::access::AccessControlConfig {
+        enabled: false,
+        admins: vec![ROOT.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    let console = ApprovalConsole::start(
+        "origin-decide-rules-off",
+        enforced(),
+        detached(),
+        Some(rules_off),
+    )
+    .await;
+    answers.push(
+        decide_by_id(
+            &console,
+            "a person who is not an admin, access rules switched off",
+            Some(&person),
+            UNKNOWN_ORIGIN,
+        )
+        .await,
+    );
+    console.stop().await;
+
+    let console =
+        ApprovalConsole::start("origin-decide-no-access", enforced(), detached(), None).await;
+    answers.push(
+        decide_by_id(
+            &console,
+            "a person, no access configuration",
+            Some(&person),
+            UNKNOWN_ORIGIN,
+        )
+        .await,
+    );
+    console.stop().await;
+
+    let every_answer = answers
+        .iter()
+        .map(DecideById::line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!("{every_answer}");
+    for answer in &answers {
+        assert!(
+            !answer.listed,
+            "{}: the pending list withholds the request:\n{every_answer}",
+            answer.caller
+        );
+        assert!(
+            answer.refused(),
+            "{}: a decide by id of a request the pending list withholds is refused and \
+             leaves it pending:\n{every_answer}",
+            answer.caller
+        );
+    }
+}
+
+/// The callers the pending list shows a request decide it by its id, as
+/// before: an admin, for a request whose origin the Console was never told
+/// about, and a person who is not an admin, for a request of a member the
+/// Console knows and for one that names no origin.
+#[tokio::test]
+async fn a_caller_the_pending_list_shows_a_request_decides_it_by_id() {
+    let person = person_token();
+    let admin = person_token_for(ROOT);
+    let console = ApprovalConsole::start(
+        "origin-decide-shown",
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    let by_admin = decide_by_id(&console, "an admin", Some(&admin), UNKNOWN_ORIGIN).await;
+    let by_person = decide_by_id(
+        &console,
+        "a person, a member the Console knows",
+        Some(&person),
+        KNOWN_ORIGIN,
+    )
+    .await;
+    let without_origin = console.pending(None).await;
+    let no_origin = console.approve(Some(&person), &without_origin).await;
+    let no_origin_still_pending = console.still_pending(&without_origin).await;
+    console.stop().await;
+
+    for answer in [&by_admin, &by_person] {
+        assert!(
+            answer.listed && answer.taken(),
+            "the pending list shows the request and the decide is taken: {}",
+            answer.line()
+        );
+    }
+    assert!(no_origin["error"].is_null(), "{no_origin}");
+    assert!(!no_origin_still_pending, "{no_origin}");
+}
+
+/// A caller with no token decides no request by its id, as before: where
+/// sign-in is optional, a decide of a request of a member the Console knows,
+/// of one whose origin it was never told about, and of an id that is not
+/// pending is each answered `approver_unauthenticated`, and the requests
+/// stay pending.
+#[tokio::test]
+async fn a_caller_with_no_token_decides_no_request_by_id() {
+    let console = ApprovalConsole::start(
+        "origin-decide-no-token",
+        open(),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    let known = decide_by_id(&console, "no token, a known member", None, KNOWN_ORIGIN).await;
+    let unknown = decide_by_id(
+        &console,
+        "no token, an origin the Console was never told about",
+        None,
+        UNKNOWN_ORIGIN,
+    )
+    .await;
+    let not_pending = console.approve(None, "gate-pending-never-minted").await;
+    console.stop().await;
+
+    for answer in [&known, &unknown] {
+        assert_eq!(
+            refusal_kind(&answer.answer),
+            &json!("approver_unauthenticated"),
+            "{}",
+            answer.line()
+        );
+        assert!(answer.still_pending, "{}", answer.line());
+    }
+    assert_eq!(
+        refusal_kind(&not_pending),
+        &json!("approver_unauthenticated"),
+        "{not_pending}"
+    );
+}
+
+/// [`origin_access`] with two more members the Console knows: `erin`, whom
+/// an access rule keeps from every caller, and `frank`, who is private to
+/// another person.
+fn withholding_access() -> AccessController {
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            AccessRule {
+                id: "everyone-views-and-decides".to_string(),
+                actions: vec![
+                    ACTION_GATING_VIEW.to_string(),
+                    ACTION_GATING_DECIDE.to_string(),
+                    ACTION_AGENT_VIEW.to_string(),
+                ],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "erin-is-hidden".to_string(),
+                effect: crate::access::AccessEffect::Deny,
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["erin".to_string()],
+                ..AccessRule::default()
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    for identity in [KNOWN_ORIGIN, "erin"] {
+        access.record_agent_attributes(AgentResourceAttributes {
+            identity: identity.to_string(),
+            ..Default::default()
+        });
+    }
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: "frank".to_string(),
+        labels: BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "person:dana".to_string(),
+        )]),
+        ..Default::default()
+    });
+    access
+}
+
+/// A decide by id of a request the pending list withholds from its caller
+/// is answered exactly as a decide of an id that is not pending: the same
+/// response, whatever the caller sends with it, so the caller cannot tell a
+/// withheld request from an id that names none. The request is withheld
+/// because its origin is a member the Console was never told about, a
+/// member an access rule keeps from the caller, or a member private to
+/// another person. The caller is a person who is not an admin, on a Console
+/// that requires sign-in and on one where sign-in is optional, or sends no
+/// token at all; it sends a decision, an unsupported decision, none, or the
+/// id with blanks around it. Every request stays pending.
+#[tokio::test]
+async fn a_decide_of_a_withheld_request_is_answered_as_an_id_that_is_not_pending() {
+    const NOT_PENDING: &str = "gate-pending-never-minted";
+    let person = person_token();
+    let mut differing = Vec::new();
+    let mut decided = Vec::new();
+    for (console_name, decisions, callers) in [
+        (
+            "origin-withheld-signed-in",
+            enforced(),
+            vec![("a person, sign-in required", Some(person.as_str()))],
+        ),
+        (
+            "origin-withheld-open",
+            open(),
+            vec![
+                ("a person who volunteers a token", Some(person.as_str())),
+                ("a caller with no token", None),
+            ],
+        ),
+    ] {
+        let console = ApprovalConsole::start(
+            console_name,
+            decisions,
+            detached(),
+            Some(withholding_access()),
+        )
+        .await;
+        for origin in [UNKNOWN_ORIGIN, "erin", "frank"] {
+            let pending_id = pending_from(&console, origin).await;
+            for (caller, bearer) in &callers {
+                let shapes = |id: &str| {
+                    [
+                        json!({ "pending_id": id, "decision": "approve" }),
+                        json!({ "pending_id": id, "decision": "reject" }),
+                        json!({ "pending_id": id, "decision": "maybe" }),
+                        json!({ "pending_id": id }),
+                        json!({ "pending_id": format!("  {id}\t"), "decision": "approve" }),
+                    ]
+                };
+                for (withheld, absent) in shapes(&pending_id).into_iter().zip(shapes(NOT_PENDING)) {
+                    let of_withheld =
+                        console_rpc_as(&console.app, *bearer, DECIDE, withheld.clone()).await;
+                    let of_absent = console_rpc_as(&console.app, *bearer, DECIDE, absent).await;
+                    if of_withheld != of_absent || of_withheld["error"].is_null() {
+                        differing.push(format!(
+                            "{caller}, origin {origin}, {withheld}: {of_withheld} (an id that \
+                             is not pending: {of_absent})"
+                        ));
+                    }
+                }
+            }
+            if !console.still_pending(&pending_id).await {
+                decided.push(format!("{console_name}: the request of {origin}"));
+            }
+        }
+        console.stop().await;
+    }
+
+    assert!(
+        differing.is_empty(),
+        "a decide of a withheld request is answered as an id that is not pending:\n{}",
+        differing.join("\n")
+    );
+    assert!(
+        decided.is_empty(),
+        "every request stays pending: {decided:?}"
+    );
+}
+
+/// The origin is judged again at the moment the decision is applied. A
+/// person starts a decide of a request of a member the Console knows; while
+/// the decide waits, the Console stops knowing that member. The decide is
+/// answered as an id that is not pending and the request stays pending.
+#[tokio::test]
+async fn a_request_withheld_while_its_decide_waits_is_answered_as_not_pending() {
+    let access = origin_access();
+    let console = ApprovalConsole::start(
+        "origin-withheld-while-waiting",
+        enforced(),
+        detached(),
+        Some(access.clone()),
+    )
+    .await;
+    let pending_id = pending_from(&console, KNOWN_ORIGIN).await;
+    let bearer = person_token();
+    let hold = super::console_decide_holds::ConsoleDecideHold::install(&pending_id);
+    let decide = tokio::spawn({
+        let app = console.app.clone();
+        let bearer = bearer.clone();
+        let pending_id = pending_id.clone();
+        async move {
+            console_rpc_as(
+                &app,
+                Some(&bearer),
+                DECIDE,
+                json!({ "pending_id": pending_id, "decision": "approve" }),
+            )
+            .await
+        }
+    });
+    let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+    // The roster the Console reads next no longer holds the member.
+    access.replace_agent_attributes([AgentResourceAttributes {
+        identity: "another-member".to_string(),
+        ..Default::default()
+    }]);
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
+    let still_pending = console.still_pending(&pending_id).await;
+    let not_pending = console
+        .approve(Some(&bearer), "gate-pending-never-minted")
+        .await;
+    console.stop().await;
+
+    reached.expect("the decide reached the gating owner");
+    let answer = answer
+        .expect("the decide answered")
+        .expect("the decide task");
+    assert_eq!(answer, not_pending, "{answer}");
+    assert!(!not_pending["error"].is_null(), "{not_pending}");
+    assert!(still_pending, "{answer}");
+}
+
+/// The delivery record of an approval notification for the request
+/// `pending_id`, as the gating owner's send keeps it: the request's id and
+/// action text are in its payload.
+fn approval_notification_record(
+    delivery_id: &str,
+    pending_id: &str,
+) -> crate::runtime::DeliveryRecord {
+    crate::runtime::DeliveryRecord {
+        delivery_id: delivery_id.to_string(),
+        route_id: "route-approvals".to_string(),
+        recipient: "approvals-desk".to_string(),
+        sink: "email".to_string(),
+        target_module: "delivery".to_string(),
+        payload: json!({
+            "kind": "gating_approval_request",
+            "pending_id": pending_id,
+            "action_id": "gate-action-of-the-request",
+            "action": "Publish the reviewed report",
+            "actor_id": "agent:writer",
+            "risk_tier": "r3",
+            "requested_approver": null,
+            "deadline_at_ms": 0,
+        }),
+        status: "sent".to_string(),
+        attempts: Vec::new(),
+        first_attempt_ms: 0,
+        final_attempt_ms: 0,
+        idempotency_key: Some(format!("gating-approval-{pending_id}")),
+        sink_adapter: None,
+    }
+}
+
+/// The ids of the delivery records `meta/delivery/history` serves the
+/// caller of `bearer`.
+async fn delivery_ids(console: &ApprovalConsole, bearer: &str) -> BTreeSet<String> {
+    let read = console_rpc_as(
+        &console.app,
+        Some(bearer),
+        "meta/delivery/history",
+        json!({}),
+    )
+    .await;
+    read["result"]["deliveries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a delivery history: {read}"))
+        .iter()
+        .filter_map(|record| record["delivery_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The Console's delivery history follows the pending list for the record
+/// of an approval notification, whose payload carries the request's id and
+/// action text. To a person who is not an admin it shows the record of a
+/// request the list shows them (a member the Console knows, a request with
+/// no origin) and withholds the record of a request the list withholds (an
+/// origin the Console was never told about, a member private to another
+/// person) and of a request the gating owner no longer holds, which nothing
+/// attributes. Another delivery is read as before, and an admin reads every
+/// record.
+#[tokio::test]
+async fn the_delivery_history_shows_an_approval_notification_as_the_pending_list_shows_its_request()
+{
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: false,
+        admins: vec![ROOT.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: KNOWN_ORIGIN.to_string(),
+        ..Default::default()
+    });
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: "frank".to_string(),
+        labels: BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "person:dana".to_string(),
+        )]),
+        ..Default::default()
+    });
+    let console = ApprovalConsole::start(
+        "delivery-history-origin",
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(access),
+    )
+    .await;
+    let of_unknown = pending_from(&console, UNKNOWN_ORIGIN).await;
+    let of_private = pending_from(&console, "frank").await;
+    let of_known = pending_from(&console, KNOWN_ORIGIN).await;
+    let without_origin = console.pending(None).await;
+    // Two requests that are settled before the history is read: their
+    // origin is then read from the gating audit.
+    let settled_unknown = pending_from(&console, UNKNOWN_ORIGIN).await;
+    let settled_known = pending_from(&console, KNOWN_ORIGIN).await;
+    let admin = person_token_for(ROOT);
+    for pending_id in [&settled_unknown, &settled_known] {
+        let settled = console.approve(Some(&admin), pending_id).await;
+        assert!(settled["error"].is_null(), "{settled}");
+    }
+    {
+        let mut owner = console.owner.lock().await;
+        for (delivery_id, pending_id) in [
+            ("delivery-unknown-origin", of_unknown.as_str()),
+            ("delivery-private-origin", of_private.as_str()),
+            ("delivery-known-origin", of_known.as_str()),
+            ("delivery-no-origin", without_origin.as_str()),
+            ("delivery-settled-unknown-origin", settled_unknown.as_str()),
+            ("delivery-settled-known-origin", settled_known.as_str()),
+            ("delivery-request-not-held", "gate-pending-never-minted"),
+        ] {
+            owner.record_delivery_for_test(approval_notification_record(delivery_id, pending_id));
+        }
+        owner.record_delivery_for_test(crate::runtime::DeliveryRecord {
+            payload: json!({ "kind": "digest", "text": "the weekly summary" }),
+            idempotency_key: None,
+            ..approval_notification_record("delivery-of-another-kind", "unused")
+        });
+    }
+    let to_person = delivery_ids(&console, &person_token()).await;
+    let to_admin = delivery_ids(&console, &admin).await;
+    console.stop().await;
+
+    let ids = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| (*id).to_string())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        to_person,
+        ids(&[
+            "delivery-known-origin",
+            "delivery-no-origin",
+            "delivery-settled-known-origin",
+            "delivery-of-another-kind",
+        ]),
+        "a person who is not an admin"
+    );
+    assert_eq!(
+        to_admin,
+        ids(&[
+            "delivery-unknown-origin",
+            "delivery-private-origin",
+            "delivery-known-origin",
+            "delivery-no-origin",
+            "delivery-settled-unknown-origin",
+            "delivery-settled-known-origin",
+            "delivery-request-not-held",
+            "delivery-of-another-kind",
+        ]),
+        "an admin"
+    );
+}
+
+/// The id the gating owner gives the next request that waits for a
+/// decision: one evaluation takes the action's id, then the request's, from
+/// the owner's one sequence.
+async fn next_pending_id(console: &ApprovalConsole) -> String {
+    let snapshot = console.owner.lock().await.gating_state_snapshot();
+    let epoch = snapshot.owner_epoch.expect("the owner's epoch");
+    format!("gate-pending-v2-{epoch}-{:06}", snapshot.next_sequence + 1)
+}
+
+/// A member of the Console's own mob under the name `identity`: one every
+/// caller shares, or one private to another person.
+async fn seat_member(console: &ApprovalConsole, identity: &str, private_to_another_person: bool) {
+    let mut labels = BTreeMap::from([("agent_identity".to_string(), identity.to_string())]);
+    if private_to_another_person {
+        labels.insert(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "person:dana".to_string(),
+        );
+    }
+    console
+        .runtime
+        .handle()
+        .spawn_spec(
+            SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                crate::member_comms_id::mob_member_id_str(identity).into_owned(),
+                Some("A member of the Console's mob.".into()),
+                None,
+                None,
+            )
+            .with_labels(labels),
+        )
+        .await
+        .expect("a member of the Console's mob");
+}
+
+/// A member of the rows below that is private to another person.
+const PRIVATE_ORIGIN: &str = "frank";
+
+/// A request is judged when the decision is applied, whenever the call came
+/// in. A person's decide names the id the next request will get and waits
+/// before it takes the gating owner; meanwhile a request is filed under that
+/// id. A request of a member the Console was never told about, or of a
+/// member private to another person, is then answered as an id that is not
+/// pending and stays pending: on a Console that requires sign-in and has no
+/// access configuration, and under access rules that reach the member. A
+/// request of a member the Console knows is decided, on both.
+#[tokio::test]
+async fn a_request_filed_while_its_decide_is_on_its_way_is_judged_when_applied() {
+    let person = person_token();
+    let mut lines = Vec::new();
+    let mut failures = Vec::new();
+    // Per Console: its name, its access controller, the member its mob
+    // seats (and whether that member is private to another person), the
+    // origin of the request, and whether the person is shown the request.
+    for (name, access, seated, origin, shown) in [
+        (
+            "origin-filed-meanwhile-no-access",
+            None,
+            None,
+            UNKNOWN_ORIGIN,
+            false,
+        ),
+        (
+            "origin-filed-meanwhile-private-no-access",
+            None,
+            Some((PRIVATE_ORIGIN, true)),
+            PRIVATE_ORIGIN,
+            false,
+        ),
+        (
+            "origin-filed-meanwhile-known-no-access",
+            None,
+            Some((KNOWN_ORIGIN, false)),
+            KNOWN_ORIGIN,
+            true,
+        ),
+        (
+            "origin-filed-meanwhile-rules",
+            Some(origin_access()),
+            None,
+            UNKNOWN_ORIGIN,
+            false,
+        ),
+        (
+            "origin-filed-meanwhile-private-rules",
+            Some(withholding_access()),
+            None,
+            PRIVATE_ORIGIN,
+            false,
+        ),
+        (
+            "origin-filed-meanwhile-known",
+            Some(origin_access()),
+            None,
+            KNOWN_ORIGIN,
+            true,
+        ),
+    ] {
+        let console = ApprovalConsole::start(name, enforced(), detached(), access).await;
+        if let Some((identity, private_to_another_person)) = seated {
+            seat_member(&console, identity, private_to_another_person).await;
+        }
+        let expected = next_pending_id(&console).await;
+        let hold = super::console_decide_holds::ConsoleDecideHold::install(
+            &super::console_decide_holds::before_owner(&expected),
+        );
+        let decide = tokio::spawn({
+            let app = console.app.clone();
+            let person = person.clone();
+            let expected = expected.clone();
+            async move {
+                console_rpc_as(
+                    &app,
+                    Some(&person),
+                    DECIDE,
+                    json!({ "pending_id": expected, "decision": "approve" }),
+                )
+                .await
+            }
+        });
+        let reached = tokio::time::timeout(Duration::from_secs(30), hold.reached()).await;
+        let pending_id = pending_from(&console, origin).await;
+        let list = console_rpc_as(
+            &console.app,
+            Some(&person),
+            "meta/gating/pending",
+            json!({}),
+        )
+        .await;
+        let listed = list["result"]["pending"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["pending_id"].as_str() == Some(pending_id.as_str()))
+        });
+        hold.release();
+        let answer = tokio::time::timeout(Duration::from_secs(30), decide).await;
+        let still_pending = console.still_pending(&pending_id).await;
+        let not_pending = console
+            .approve(Some(&person), "gate-pending-never-minted")
+            .await;
+        console.stop().await;
+
+        reached.expect("the decide reached the point before it takes the gating owner");
+        let answer = answer
+            .expect("the decide answered")
+            .expect("the decide task");
+        assert_eq!(pending_id, expected, "{name}: the request got the next id");
+        assert!(!not_pending["error"].is_null(), "{not_pending}");
+        lines.push(format!(
+            "{name}: origin {origin}: the pending list shows the request: {listed}; answered \
+             {answer}; still pending: {still_pending}"
+        ));
+        let as_expected = if shown {
+            listed && answer["error"].is_null() && !still_pending
+        } else {
+            !listed && answer == not_pending && still_pending
+        };
+        if !as_expected {
+            failures.push(name);
+        }
+    }
+    println!("{}", lines.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "judged when the decision is applied: {failures:?}\n{}",
+        lines.join("\n")
+    );
+}
+
+/// Decides of the id the next request will get, sent by eight callers at
+/// once as one person while a request of a member the Console was never told
+/// about is filed. Returns the id the request got, the id the decides named,
+/// how many decides were sent, the first decide that was taken (if any) and
+/// whether the request is still pending.
+async fn decides_sent_while_a_request_is_filed(
+    console: &ApprovalConsole,
+    person: &str,
+) -> (String, String, u64, Option<Value>, bool) {
+    let expected = next_pending_id(console).await;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut callers = Vec::new();
+    for _ in 0..8 {
+        let app = console.app.clone();
+        let person = person.to_string();
+        let expected = expected.clone();
+        let stop = stop.clone();
+        callers.push(tokio::spawn(async move {
+            let mut sent = 0_u64;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let answer = console_rpc_as(
+                    &app,
+                    Some(&person),
+                    DECIDE,
+                    json!({ "pending_id": expected, "decision": "approve" }),
+                )
+                .await;
+                sent += 1;
+                if answer["error"].is_null() {
+                    return (sent, Some(answer));
+                }
+            }
+            (sent, None)
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let pending_id = pending_from(console, UNKNOWN_ORIGIN).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut sent = 0;
+    let mut taken = None;
+    for caller in callers {
+        let (count, answer) = caller.await.expect("a deciding caller");
+        sent += count;
+        if taken.is_none() {
+            taken = answer;
+        }
+    }
+    let still_pending = console.still_pending(&pending_id).await;
+    (pending_id, expected, sent, taken, still_pending)
+}
+
+/// On a Console that requires sign-in and has no access configuration, no
+/// decide sent while a request of a member the Console was never told about
+/// is being filed is taken, whenever it was sent: the request stays pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn decides_sent_while_a_request_is_filed_take_nothing_with_no_access_configuration() {
+    let console = ApprovalConsole::start(
+        "origin-filed-concurrently-no-access",
+        enforced(),
+        detached(),
+        None,
+    )
+    .await;
+    let person = person_token();
+    let (pending_id, expected, sent, taken, still_pending) =
+        decides_sent_while_a_request_is_filed(&console, &person).await;
+    console.stop().await;
+    println!(
+        "no access configuration: decides sent {sent}, taken {}, still pending {still_pending}",
+        taken.is_some()
+    );
+    assert_eq!(pending_id, expected, "the request got the next id");
+    assert!(
+        taken.is_none() && still_pending,
+        "nobody decides it there: taken {taken:?}, still pending {still_pending}"
+    );
+}
+
+/// The same under access rules that reach the member: only an admin decides
+/// the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn decides_sent_while_a_request_is_filed_take_nothing_under_access_rules() {
+    let console = ApprovalConsole::start(
+        "origin-filed-concurrently-rules",
+        enforced(),
+        detached(),
+        Some(origin_access()),
+    )
+    .await;
+    let person = person_token();
+    let (pending_id, expected, sent, taken, still_pending) =
+        decides_sent_while_a_request_is_filed(&console, &person).await;
+    console.stop().await;
+    println!(
+        "access rules: decides sent {sent}, taken {}, still pending {still_pending}",
+        taken.is_some()
+    );
+    assert_eq!(pending_id, expected, "the request got the next id");
+    assert!(
+        taken.is_none() && still_pending,
+        "only an admin decides it: taken {taken:?}, still pending {still_pending}"
+    );
+}
+
+/// On a Console that requires sign-in and has no access configuration, the
+/// pending list shows a person a request of a member the Console knows, and
+/// the person decides it by its id; a request of a member the Console was
+/// never told about, or of a member private to another person, is withheld
+/// from the person and its decide is answered as an id that is not pending.
+#[tokio::test]
+async fn a_request_of_a_member_the_console_knows_is_decided_with_no_access_configuration() {
+    let console =
+        ApprovalConsole::start("origin-known-no-access", enforced(), detached(), None).await;
+    seat_member(&console, KNOWN_ORIGIN, false).await;
+    seat_member(&console, PRIVATE_ORIGIN, true).await;
+    let person = person_token();
+    let known = decide_by_id(
+        &console,
+        "a person, a member the Console knows, no access configuration",
+        Some(&person),
+        KNOWN_ORIGIN,
+    )
+    .await;
+    let unknown = decide_by_id(
+        &console,
+        "a person, an origin the Console was never told about, no access configuration",
+        Some(&person),
+        UNKNOWN_ORIGIN,
+    )
+    .await;
+    let private = decide_by_id(
+        &console,
+        "a person, a member private to another person, no access configuration",
+        Some(&person),
+        PRIVATE_ORIGIN,
+    )
+    .await;
+    let not_pending = console
+        .approve(Some(&person), "gate-pending-never-minted")
+        .await;
+    console.stop().await;
+
+    println!("{}\n{}\n{}", known.line(), unknown.line(), private.line());
+    assert!(known.listed && known.taken(), "{}", known.line());
+    for withheld in [&unknown, &private] {
+        assert!(
+            !withheld.listed && withheld.refused(),
+            "{}",
+            withheld.line()
+        );
+        assert_eq!(withheld.answer, not_pending, "{}", withheld.line());
+    }
+}
+
+/// The raw answer of one Console RPC call: status, content type and the
+/// body's bytes.
+async fn raw_rpc(
+    app: &Router,
+    bearer: Option<&str>,
+    method: &str,
+    params: Value,
+) -> (u16, String, Vec<u8>) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/console/rpc")
+        .header(axum::http::header::CONTENT_TYPE, "application/json");
+    if let Some(token) = bearer {
+        request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(axum::body::Body::from(
+                    json!({ "jsonrpc": "2.0", "id": "test", "method": method, "params": params })
+                        .to_string(),
+                ))
+                .expect("console request"),
+        )
+        .await
+        .expect("console response");
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("console body")
+        .to_vec();
+    (status, content_type, body)
+}
+
+/// An access configuration with the rules switched off, the admin [`ROOT`],
+/// the known member [`KNOWN_ORIGIN`] and `frank`, private to another person.
+fn rules_off_access() -> AccessController {
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: false,
+        admins: vec![ROOT.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: KNOWN_ORIGIN.to_string(),
+        ..Default::default()
+    });
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: "frank".to_string(),
+        labels: BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "person:dana".to_string(),
+        )]),
+        ..Default::default()
+    });
+    access
+}
+
+/// One Console of the row below: its name, its decisions, its access
+/// controller, its callers (a description and a token), the origins its
+/// requests are withheld for, and whether it has an admin.
+type WithholdingConsole<'a> = (
+    &'a str,
+    RuntimeDecisionState,
+    Option<AccessController>,
+    Vec<(&'a str, Option<&'a str>)>,
+    Vec<&'a str>,
+    bool,
+);
+
+/// For every kind of caller and every kind of withheld origin, a decide of
+/// the withheld request and a decide of an id that is not pending are
+/// answered with the same status, content type and body bytes, whatever the
+/// caller sends with the id; the gating owner's state (requests, audit, ids)
+/// is the same before and after. An admin is then shown the request and
+/// decides it; where there is no admin, the host's own decide takes it.
+#[tokio::test]
+async fn a_withheld_decide_is_the_absent_id_answer_in_bytes_for_every_caller_kind() {
+    const NOT_PENDING: &str = "gate-pending-never-minted";
+    let person = person_token();
+    let admin = person_token_for(ROOT);
+    let shapes = |id: &str| -> Vec<Value> {
+        vec![
+            json!({ "pending_id": id, "decision": "approve" }),
+            json!({ "pending_id": id, "decision": "reject" }),
+            json!({ "pending_id": id, "decision": "deny" }),
+            json!({ "pending_id": id, "decision": "escalate" }),
+            json!({ "pending_id": id, "decision": "approve", "reason": "looks fine" }),
+            json!({ "pending_id": id, "decision": "maybe" }),
+            json!({ "pending_id": id, "decision": 5 }),
+            json!({ "pending_id": id }),
+            json!({ "pending_id": format!("  {id}\t"), "decision": "approve" }),
+            json!({ "pending_id": id, "decision": "approve", "approver_id": "someone" }),
+        ]
+    };
+    let mut lines = Vec::new();
+    let mut differing = Vec::new();
+    let mut changed = Vec::new();
+    let mut admin_refused = Vec::new();
+    let mut host_refused = Vec::new();
+    let consoles: Vec<WithholdingConsole<'_>> = vec![
+        (
+            "origin-bytes-rules-on",
+            enforced_admitting(&[ROOT]),
+            Some(withholding_access()),
+            vec![(
+                "a person, rules that reach the member",
+                Some(person.as_str()),
+            )],
+            vec![UNKNOWN_ORIGIN, "erin", "frank"],
+            true,
+        ),
+        (
+            "origin-bytes-rules-off",
+            enforced_admitting(&[ROOT]),
+            Some(rules_off_access()),
+            vec![("a person, rules switched off", Some(person.as_str()))],
+            vec![UNKNOWN_ORIGIN, "frank"],
+            true,
+        ),
+        (
+            "origin-bytes-no-access",
+            enforced(),
+            None,
+            vec![
+                ("a person, no access configuration", Some(person.as_str())),
+                ("no token, sign-in required", None),
+            ],
+            vec![UNKNOWN_ORIGIN],
+            false,
+        ),
+        (
+            "origin-bytes-open",
+            open(),
+            Some(withholding_access()),
+            vec![
+                ("a person who volunteers a token", Some(person.as_str())),
+                ("no token, sign-in optional", None),
+            ],
+            vec![UNKNOWN_ORIGIN, "erin", "frank"],
+            false,
+        ),
+    ];
+    for (console_name, decisions, access, callers, origins, has_admin) in consoles {
+        let console = ApprovalConsole::start(console_name, decisions, detached(), access).await;
+        for origin in origins {
+            let pending_id = pending_from(&console, origin).await;
+            let before = console.owner.lock().await.gating_state_snapshot();
+            for (caller, bearer) in &callers {
+                let mut first = None;
+                for (withheld, absent) in shapes(&pending_id).into_iter().zip(shapes(NOT_PENDING)) {
+                    let of_withheld =
+                        raw_rpc(&console.app, *bearer, DECIDE, withheld.clone()).await;
+                    let of_absent = raw_rpc(&console.app, *bearer, DECIDE, absent).await;
+                    let text = String::from_utf8_lossy(&of_withheld.2).to_string();
+                    let refused = of_withheld.0 != 200
+                        || serde_json::from_slice::<Value>(&of_withheld.2)
+                            .is_ok_and(|body| !body["error"].is_null());
+                    if of_withheld != of_absent || !refused {
+                        differing.push(format!(
+                            "{console_name}, {caller}, origin {origin}, {withheld}: {} {text} \
+                             (an id that is not pending: {} {})",
+                            of_withheld.0,
+                            of_absent.0,
+                            String::from_utf8_lossy(&of_absent.2)
+                        ));
+                    }
+                    first.get_or_insert((of_withheld.0, text));
+                }
+                let (status, text) = first.expect("ten shapes");
+                lines.push(format!(
+                    "{console_name} | {caller} | origin {origin} | approve: {status} {text}"
+                ));
+            }
+            let after = console.owner.lock().await.gating_state_snapshot();
+            if after != before {
+                changed.push(format!("{console_name}, origin {origin}"));
+            }
+            if has_admin {
+                let list =
+                    console_rpc_as(&console.app, Some(&admin), "meta/gating/pending", json!({}))
+                        .await;
+                let listed = list["result"]["pending"].as_array().is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .any(|entry| entry["pending_id"].as_str() == Some(pending_id.as_str()))
+                });
+                let taken = console.approve(Some(&admin), &pending_id).await;
+                let still_pending = console.still_pending(&pending_id).await;
+                lines.push(format!(
+                    "{console_name} | an admin | origin {origin} | listed {listed}, taken {}, \
+                     still pending {still_pending}",
+                    taken["error"].is_null()
+                ));
+                if !listed || !taken["error"].is_null() || still_pending {
+                    admin_refused.push(format!("{console_name}, origin {origin}: {taken}"));
+                }
+            } else {
+                // The host's own plane: no caller rule.
+                let taken = console
+                    .owner
+                    .lock()
+                    .await
+                    .decide_gating_action(GatingDecideRequest {
+                        pending_id: pending_id.clone(),
+                        approver_id: "host-approver".to_string(),
+                        decision: GatingDecision::Approve,
+                        reason: None,
+                    });
+                lines.push(format!(
+                    "{console_name} | the host's own decide | origin {origin} | taken {}",
+                    taken.is_ok()
+                ));
+                if taken.is_err() {
+                    host_refused.push(format!("{console_name}, origin {origin}: {taken:?}"));
+                }
+            }
+        }
+        console.stop().await;
+    }
+    println!("{}", lines.join("\n"));
+    assert!(
+        differing.is_empty(),
+        "withheld and absent answers differ:\n{}",
+        differing.join("\n")
+    );
+    assert!(changed.is_empty(), "the owner's state changed: {changed:?}");
+    assert!(admin_refused.is_empty(), "an admin: {admin_refused:?}");
+    assert!(host_refused.is_empty(), "the host: {host_refused:?}");
+}
+
+/// A request whose origin the Console learns of after it was filed is then
+/// shown to a person who may view it, and that person's decide is taken.
+#[tokio::test]
+async fn a_request_whose_origin_the_console_learns_of_later_is_then_shown_and_decided() {
+    let access = origin_access();
+    let console = ApprovalConsole::start(
+        "origin-learned-later",
+        enforced(),
+        detached(),
+        Some(access.clone()),
+    )
+    .await;
+    let person = person_token();
+    let pending_id = pending_from(&console, "gwen").await;
+    let listed = |answer: &Value| {
+        answer["result"]["pending"]
+            .as_array()
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["pending_id"].as_str() == Some(pending_id.as_str()))
+            })
+    };
+    let before = console_rpc_as(
+        &console.app,
+        Some(&person),
+        "meta/gating/pending",
+        json!({}),
+    )
+    .await;
+    let refused = console.approve(Some(&person), &pending_id).await;
+    let pending_after_refusal = console.still_pending(&pending_id).await;
+    access.record_agent_attributes(AgentResourceAttributes {
+        identity: "gwen".to_string(),
+        ..Default::default()
+    });
+    let after = console_rpc_as(
+        &console.app,
+        Some(&person),
+        "meta/gating/pending",
+        json!({}),
+    )
+    .await;
+    let taken = console.approve(Some(&person), &pending_id).await;
+    let still_pending = console.still_pending(&pending_id).await;
+    console.stop().await;
+
+    assert!(!listed(&before), "{before}");
+    assert!(!refused["error"].is_null(), "{refused}");
+    assert!(pending_after_refusal);
+    assert!(listed(&after), "{after}");
+    assert!(taken["error"].is_null(), "{taken}");
+    assert!(!still_pending);
+}
+
+/// A page of the Console's delivery history is cut to its limit after the
+/// records withheld from the caller are left out, so its size tells nothing
+/// of them: a person's page holds the newest records that person may read,
+/// as if the withheld ones had never been kept, and an admin's page holds
+/// the newest records.
+#[tokio::test]
+async fn a_delivery_history_page_is_cut_after_withheld_records_are_left_out() {
+    let console = ApprovalConsole::start(
+        "delivery-history-page",
+        enforced_admitting(&[ROOT]),
+        detached(),
+        Some(rules_off_access()),
+    )
+    .await;
+    let records = [
+        ("delivery-oldest-shown", KNOWN_ORIGIN),
+        ("delivery-older-withheld", UNKNOWN_ORIGIN),
+        ("delivery-newer-shown", KNOWN_ORIGIN),
+        ("delivery-newest-withheld", UNKNOWN_ORIGIN),
+    ];
+    for (delivery_id, origin) in records {
+        let pending_id = pending_from(&console, origin).await;
+        console
+            .owner
+            .lock()
+            .await
+            .record_delivery_for_test(approval_notification_record(delivery_id, &pending_id));
+    }
+    let person = person_token();
+    let admin = person_token_for(ROOT);
+    let mut pages = Vec::new();
+    for (bearer, limit) in [
+        (&person, 1_u64),
+        (&person, 2),
+        (&person, 3),
+        (&admin, 1),
+        (&admin, 2),
+        (&admin, 4),
+    ] {
+        let answer = console_rpc_as(
+            &console.app,
+            Some(bearer.as_str()),
+            "meta/delivery/history",
+            json!({ "limit": limit }),
+        )
+        .await;
+        let ids = answer["result"]["deliveries"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a delivery history: {answer}"))
+            .iter()
+            .filter_map(|record| record["delivery_id"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        pages.push(ids);
+    }
+    console.stop().await;
+
+    println!("{pages:?}");
+    assert_eq!(
+        pages[0],
+        ["delivery-newer-shown"],
+        "a person, a page of one"
+    );
+    assert_eq!(
+        pages[1],
+        ["delivery-oldest-shown", "delivery-newer-shown"],
+        "a person, a page of two"
+    );
+    assert_eq!(pages[2], pages[1], "a person, a page of three");
+    assert_eq!(
+        pages[3],
+        ["delivery-newest-withheld"],
+        "an admin, a page of one"
+    );
+    assert_eq!(
+        pages[4],
+        ["delivery-newer-shown", "delivery-newest-withheld"],
+        "an admin, a page of two"
+    );
+    assert_eq!(
+        pages[5],
+        [
+            "delivery-oldest-shown",
+            "delivery-older-withheld",
+            "delivery-newer-shown",
+            "delivery-newest-withheld",
+        ],
+        "an admin, a page of four"
+    );
+}

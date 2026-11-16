@@ -453,7 +453,7 @@ pub(crate) use meerkat::session_runtime::recovery::{
 
 pub(crate) use meerkat::session_runtime::runtime_state::{
     ArchiveRuntimeCleanup, ArchiveRuntimeMcpState, ArchiveRuntimeMobState,
-    PendingSessionEventStreamDrop, PendingSessionEventStreams,
+    PendingSessionEventStreamDrop, PendingSessionEventStreams, RuntimeCleanupScope,
 };
 
 /// RPC-side adapter implementing [`ArchiveRuntimeMcpState`] for the
@@ -2709,9 +2709,43 @@ fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionErro
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
         return in_progress;
     }
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))
+}
+
+/// What a turn asks of the session's LLM identity, read before the turn is
+/// admitted.
+struct TurnLevelAdmission {
+    /// The identity the turn would run with: the session's, with the turn's
+    /// overrides.
+    target: SessionLlmIdentity,
+    /// The session is live. Read only for a turn that is judged or gated:
+    /// `false` for a turn that names nothing of the identity on a session
+    /// that holds no level.
+    live: bool,
+    /// The target's level is judged before admission: a turn that asks for
+    /// another LLM identity than the session holds, and every turn on a
+    /// stored session that is not live. Never a staged session, which its
+    /// first build judges.
+    judged: bool,
+    /// The turn is admitted only when the session has no unfinished input:
+    /// it changes the session's LLM identity and its start, or the start of
+    /// a turn behind it, could be judged on another identity than at
+    /// admission. On a session that holds a level that is every turn that
+    /// changes anything of the identity: the model, the provider, the
+    /// self-hosted server, the provider params, the auth binding or the
+    /// level itself (set, changed or cleared; a level named inside the
+    /// provider params replaces them and is a change even when it equals
+    /// the held one). Only a plain turn and a repeat of the held level by
+    /// the level field queue there, so nothing queued can change the level
+    /// and a repeat is still a repeat when it starts. On a session that
+    /// holds no level it is a turn that sets one; everything else queues
+    /// (a clear there repeats "none").
+    needs_idle_session: bool,
 }
 
 pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
@@ -2738,6 +2772,11 @@ pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     // A session another runtime owner hosts keeps its typed refusal (#1813).
     if let Some(hosting) = err.hosting_session_error() {
         return session_error_to_rpc(hosting);
+    }
+    // A reconfiguration refused for its reasoning effort level answers what
+    // a refused build answers: invalid params with the typed refusal data.
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return session_error_to_rpc(refused);
     }
     match err {
         RuntimeDriverError::ValidationFailed { reason } => RpcError {
@@ -3903,6 +3942,7 @@ impl SessionRuntime {
         // K2: `TurnOverrides` carries the typed `ProviderParamsOverride`
         // tri-state end-to-end — no legacy JSON round-trip at this seam.
         let provider_params = overrides.and_then(|ov| ov.provider_params.clone());
+        let reasoning_effort = overrides.and_then(|ov| ov.reasoning_effort.clone());
         let auth_binding = overrides.and_then(|ov| ov.auth_binding.clone());
         let provider = overrides.and_then(|ov| {
             ov.provider
@@ -3931,6 +3971,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params,
+            reasoning_effort,
             render_metadata: None,
             auth_binding,
             execution_kind: None,
@@ -3984,6 +4025,7 @@ impl SessionRuntime {
         // K2: the surface seam carries the typed `ProviderParamsOverride`
         // tri-state; pass it through unchanged.
         let provider_params = metadata.provider_params.clone();
+        let reasoning_effort = metadata.reasoning_effort.clone();
         let auth_binding = metadata.auth_binding.clone();
         // Rehydrate the full tri-state from the typed directive carrier:
         // Enable -> Some(true), Disable -> Some(false), absent -> None
@@ -4002,6 +4044,7 @@ impl SessionRuntime {
                 .map(|provider| provider.as_str().to_string()),
             self_hosted_server_id: metadata.self_hosted_server_id.clone(),
             provider_params,
+            reasoning_effort,
             auth_binding,
             transient_turn_context: metadata.transient_turn_context.clone(),
             ..Default::default()
@@ -5372,15 +5415,25 @@ impl SessionRuntime {
                     // The machine-owned unregister coordinator can remove the
                     // entry before completion waiters are delivered, after
                     // the executor's external-only cleanup discarded the live
-                    // session. The
-                    // runtime-minted, session-bound RuntimeTerminated
-                    // observation plus independently observed absent live
-                    // session is the narrow proof that lets the relay finish
-                    // the remaining surface anchors without weakening
-                    // ordinary cleanup.
+                    // session. The runtime-minted, session-bound observation
+                    // that an input ended as runtime-terminated, together
+                    // with the registration gone and the independently
+                    // observed absent live session, is the narrow proof that
+                    // lets the relay finish the remaining surface anchors
+                    // without weakening ordinary cleanup (the observation
+                    // alone proves no runtime's end: an input taken back on
+                    // a serving runtime is answered the same class). No generated authority named a
+                    // cleanup here, so this is never the archive's: an
+                    // archived session whose registration is gone returned
+                    // above, and a session that is not archived keeps what
+                    // it owns.
                     return match self
                         .archive_runtime_cleanup()
-                        .run_after_runtime_termination(session_id, &runtime_termination_proof)
+                        .run_after_runtime_termination_scoped(
+                            session_id,
+                            &runtime_termination_proof,
+                            RuntimeCleanupScope::KeptSession,
+                        )
                         .await
                     {
                         Ok(()) => Ok(Some(true)),
@@ -5408,7 +5461,15 @@ impl SessionRuntime {
                 });
             }
         };
-        if cleanup_authority.requires_runtime_cleanup() {
+        // The machine names the cleanup: none, the runtime's only, or the
+        // archive's. This surface hands the action to the one exhaustive
+        // mapping every surface shares and chooses nothing. A
+        // turn start, a recovery or another apply step that failed retires
+        // the session's live runtime, which its next turn builds again, and
+        // leaves the session what it owns: its mobs are destroyed by its
+        // archive, never by a failed turn.
+        let cleanup_scope = RuntimeCleanupScope::of_completion_action(cleanup_authority.action);
+        if let Some(scope) = cleanup_scope {
             let discard_error = match self.service.discard_live_session(session_id).await {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),
@@ -5417,11 +5478,18 @@ impl SessionRuntime {
                 && !self.runtime_adapter.contains_session(session_id).await
             {
                 self.archive_runtime_cleanup()
-                    .run_after_runtime_termination(session_id, &runtime_termination_proof)
+                    .run_after_runtime_termination_scoped(
+                        session_id,
+                        &runtime_termination_proof,
+                        scope,
+                    )
                     .await
                     .err()
             } else {
-                self.archive_runtime_cleanup().run(session_id).await.err()
+                self.archive_runtime_cleanup()
+                    .run_scoped(session_id, scope)
+                    .await
+                    .err()
             };
             if discard_error.is_some() || runtime_cleanup_error.is_some() {
                 let mut causes = Vec::new();
@@ -6158,6 +6226,9 @@ impl SessionRuntime {
         }
     }
 
+    /// Take back the runtime registration a failed recovery or create
+    /// registered itself. The session was not archived: it keeps what it
+    /// owns (the runtime-only cleanup, never the archive's).
     async fn cleanup_recovered_runtime_if_new(
         &self,
         session_id: &SessionId,
@@ -6166,7 +6237,9 @@ impl SessionRuntime {
         if runtime_was_registered {
             return Ok(());
         }
-        self.archive_runtime_cleanup().run(session_id).await
+        self.archive_runtime_cleanup()
+            .run_runtime_only(session_id)
+            .await
     }
 
     async fn combine_with_recovered_runtime_cleanup(
@@ -6682,6 +6755,7 @@ impl SessionRuntime {
                 })?,
             self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
+            reasoning_effort: overrides.and_then(|ov| ov.reasoning_effort.clone()),
             auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             output_schema,
@@ -7469,6 +7543,7 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
+            reasoning_effort: ov.reasoning_effort.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
         self.llm_reconfigure_host()
@@ -7552,6 +7627,222 @@ impl SessionRuntime {
         }
     }
 
+    /// Whether a turn's overrides name a member of the session's LLM
+    /// identity (model, provider, self-hosted server, provider params,
+    /// reasoning effort level, auth binding).
+    fn turn_overrides_name_llm_identity(ov: &crate::handlers::turn::TurnOverrides) -> bool {
+        ov.model.is_some()
+            || ov.provider.is_some()
+            || ov.self_hosted_server_id.is_some()
+            || ov.provider_params.is_some()
+            || ov.reasoning_effort.is_some()
+            || ov.auth_binding.is_some()
+    }
+
+    /// Whether a turn asks for the reasoning effort level the session
+    /// already holds and for nothing else of its LLM identity: the level it
+    /// sets is the session's level, or it clears a level the session does
+    /// not hold. Such a turn changes nothing, so it is admitted without a
+    /// reconfiguration: naming the same level on every turn builds no
+    /// client and keeps the live session as it is. The session's level is
+    /// read from its own LLM identity and compared as a typed level.
+    async fn turn_repeats_the_sessions_reasoning_effort(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<bool, RpcError> {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        if ov.model.is_some()
+            || ov.provider.is_some()
+            || ov.self_hosted_server_id.is_some()
+            || ov.provider_params.is_some()
+            || ov.auth_binding.is_some()
+        {
+            return Ok(false);
+        }
+        let asked = match ov.reasoning_effort.as_ref() {
+            Some(TurnMetadataOverride::Set(level)) => Some(*level),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => return Ok(false),
+        };
+        let held = self
+            .current_materialized_llm_identity(session_id)
+            .await?
+            .provider_params
+            .and_then(|params| params.reasoning_effort);
+        Ok(asked == held)
+    }
+
+    /// Whether a turn's overrides ask for an LLM identity the session does
+    /// not already hold, so that the session is reconfigured before the
+    /// turn. A turn that only repeats the session's reasoning effort level
+    /// asks for none.
+    async fn turn_overrides_reconfigure_llm_identity(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<bool, RpcError> {
+        Ok(Self::turn_overrides_name_llm_identity(ov)
+            && !self
+                .turn_repeats_the_sessions_reasoning_effort(session_id, ov)
+                .await?)
+    }
+
+    /// Read what a turn asks of the session's LLM identity, before the
+    /// turn is admitted ([`TurnLevelAdmission`]).
+    async fn turn_level_admission(
+        &self,
+        session_id: &SessionId,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> Result<TurnLevelAdmission, RpcError> {
+        let target = self
+            .effective_llm_identity_for_turn(session_id, overrides)
+            .await?;
+        let target_carries_a_level = target
+            .provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some());
+        let names_the_identity = overrides.filter(|ov| Self::turn_overrides_name_llm_identity(ov));
+        // A turn that names nothing of the identity on a session that holds
+        // no level has nothing to judge and nothing to gate: nothing more
+        // is read for it.
+        if names_the_identity.is_none() && !target_carries_a_level {
+            return Ok(TurnLevelAdmission {
+                target,
+                live: false,
+                judged: false,
+                needs_idle_session: false,
+            });
+        }
+        // A session whose task ended with the host's runtime it ran on is
+        // not live, and the live read asks the lost actor and fails: that is
+        // asked first, without the actor, as `refuse_cold_help_session`
+        // asks it. Any other failure of the live read is the caller's
+        // answer: a session whose liveness cannot be read is not judged as
+        // one that is not live.
+        let live = !self
+            .service
+            .session_task_ended_with_its_runtime(session_id)
+            .await
+            && self
+                .service
+                .has_live_session(session_id)
+                .await
+                .map_err(session_error_to_rpc)?;
+        let staged = !live && self.staged_sessions.contains(session_id).await;
+        let Some(ov) = names_the_identity else {
+            return Ok(TurnLevelAdmission {
+                target,
+                live,
+                judged: !staged && !live,
+                needs_idle_session: false,
+            });
+        };
+        // The level the session holds now (a staged session: the level it
+        // will be built with).
+        let held_level = self
+            .effective_llm_identity_for_turn(session_id, None)
+            .await?
+            .provider_params
+            .and_then(|params| params.reasoning_effort);
+        let names_beside_the_level = ov.model.is_some()
+            || ov.provider.is_some()
+            || ov.self_hosted_server_id.is_some()
+            || ov.provider_params.is_some()
+            || ov.auth_binding.is_some();
+        // A turn that names only the level field and asks for the level the
+        // session holds changes nothing.
+        let repeats_the_level = !names_beside_the_level
+            && match ov.reasoning_effort.as_ref() {
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(level)) => {
+                    held_level == Some(*level)
+                }
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                    held_level.is_none()
+                }
+                None => false,
+            };
+        let changes_llm_identity = !repeats_the_level;
+        Ok(TurnLevelAdmission {
+            live,
+            judged: !staged && (changes_llm_identity || !live),
+            needs_idle_session: changes_llm_identity
+                && (target_carries_a_level || held_level.is_some()),
+            target,
+        })
+    }
+
+    /// Judge a turn's target for the level it carries, before the turn's
+    /// input is admitted. A level the target's route refuses is answered
+    /// with the typed refusal. One reason is left to the build of a session
+    /// that is not live: the transient one (the levels' source exists and
+    /// cannot be read now). That build reads the source again when the turn
+    /// starts, and answers as it always did.
+    async fn judge_turn_level_before_admission(
+        &self,
+        session_id: &SessionId,
+        target: &SessionLlmIdentity,
+        live: bool,
+    ) -> Result<(), RpcError> {
+        match meerkat_runtime::SessionLlmReconfigureHost::judge_requested_target_session_llm_identity(
+            &self.llm_reconfigure_host(),
+            session_id,
+            target,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(RuntimeDriverError::ReasoningEffortRefused(refusal))
+                if !live && refusal.reason.is_transient() =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(runtime_driver_error_to_rpc(error)),
+        }
+    }
+
+    /// Whether the session's runtime holds an input that has not ended (a
+    /// turn that runs, or anything queued): the runtime's own answer. A
+    /// session with no runtime registration holds none.
+    async fn session_has_unfinished_input(&self, session_id: &SessionId) -> Result<bool, RpcError> {
+        if !self.runtime_adapter.contains_session(session_id).await {
+            return Ok(false);
+        }
+        match self.runtime_adapter.list_active_inputs(session_id).await {
+            Ok(inputs) => Ok(!inputs.is_empty()),
+            // The registration ended between the two reads.
+            Err(_) if !self.runtime_adapter.contains_session(session_id).await => Ok(false),
+            Err(error) => Err(runtime_driver_error_to_rpc(error)),
+        }
+    }
+
+    /// The answer to a turn that needs an idle session
+    /// (`TurnLevelAdmission::needs_idle_session`) while the session has
+    /// an unfinished input. Its data names the reason, so a caller can tell
+    /// it from the other busy answers: wait for the running turn's answer,
+    /// then send it again. The text also names the case with nothing
+    /// running (an event queued on an idle session is an unfinished input)
+    /// and what to do there.
+    fn level_change_on_a_busy_session() -> RpcError {
+        RpcError {
+            code: error::SESSION_BUSY,
+            message: "session is busy: this turn is not queued behind unfinished work. On a \
+                      session that holds a reasoning effort level, a turn that changes the \
+                      model, the provider, the self-hosted server, the provider params, the \
+                      auth binding or the level (sets, changes or clears it; a level inside \
+                      provider_params counts as a change) needs a session with no unfinished \
+                      work; so does a turn that sets a level on a session that holds none. \
+                      Send it again when the session has no unfinished work. An event queued \
+                      on an idle session counts as unfinished work: nothing is running to \
+                      wait for, so send a plain turn first, or set the level when the session \
+                      is created"
+                .to_string(),
+            data: Some(serde_json::json!({
+                "kind": "reasoning_effort_change_needs_idle_session"
+            })),
+        }
+    }
+
     fn llm_reconfigure_host(&self) -> SessionRuntimeLlmReconfigureHost {
         SessionRuntimeLlmReconfigureHost {
             service: Arc::<PersistentSessionService<FactoryAgentBuilder>>::downgrade(&self.service),
@@ -7605,6 +7896,7 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
+            reasoning_effort: ov.reasoning_effort.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
 
@@ -9633,6 +9925,34 @@ impl SessionRuntime {
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
             .await?;
+        // A turn is judged for the level its target carries here, before
+        // its input is admitted: a level the target's route refuses is the
+        // caller's request, refused, so it admits nothing and starts no
+        // run. The judgement asks nothing of a running turn, so a request
+        // sent while a turn runs is answered as on an idle session. The
+        // reconfiguration or the build inside the turn's apply judges
+        // again, for inputs other producers admit.
+        //
+        // On a live session a turn is judged when it asks for another LLM
+        // identity (a turn that asks for none runs with the level the
+        // session holds, which its run resolves). A stored session that is
+        // not live is built by this turn's start with the target's level,
+        // whether the turn names it or the session holds it, so every such
+        // turn is judged. A staged session is judged by its first build.
+        let admission = self
+            .turn_level_admission(session_id, overrides.as_ref())
+            .await?;
+        if admission.judged {
+            self.judge_turn_level_before_admission(session_id, &admission.target, admission.live)
+                .await?;
+        }
+        // A turn that could be judged on another identity at its start is
+        // taken only on a session with no unfinished input (see the check
+        // under the registration lock below). Asked here too, so the caller
+        // is answered at once.
+        if admission.needs_idle_session && self.session_has_unfinished_input(session_id).await? {
+            return Err(Self::level_change_on_a_busy_session());
+        }
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
         let workgraph_service = self.workgraph_service().ok();
@@ -9659,6 +9979,44 @@ impl SessionRuntime {
 
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
+        // AN ADMISSION RESTRICTION, NOT THE DESIGN. A level is judged before
+        // admission and again when the turn starts. Today a level refused
+        // at a turn's start is a failed start, and a failed start retires
+        // the session's runtime registration with every input queued on it.
+        // So a turn whose start could be judged on another identity than
+        // its admission (anything queued ahead of it can change the
+        // session's model) must not be queued: on a session that holds a
+        // level every turn that changes anything of the LLM identity, and
+        // on a session that holds none a turn that sets a level, is
+        // admitted only when the session has no unfinished input, and is
+        // otherwise answered that the session is busy, with nothing
+        // admitted (`TurnLevelAdmission`). The emptiness
+        // is the runtime's own answer, read under this lock, under which no
+        // other turn request is admitted, and the level is judged again
+        // here against the identity as it is now. This restriction goes
+        // when the machine can refuse such a turn at its start without
+        // ending the session's other inputs.
+        if overrides
+            .as_ref()
+            .is_some_and(Self::turn_overrides_name_llm_identity)
+        {
+            let admission = self
+                .turn_level_admission(session_id, overrides.as_ref())
+                .await?;
+            if admission.needs_idle_session {
+                if self.session_has_unfinished_input(session_id).await? {
+                    return Err(Self::level_change_on_a_busy_session());
+                }
+                if admission.judged {
+                    self.judge_turn_level_before_admission(
+                        session_id,
+                        &admission.target,
+                        admission.live,
+                    )
+                    .await?;
+                }
+            }
+        }
         let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
         let staged_session_existed = self.staged_sessions.contains(session_id).await;
         let staged_keep_alive = if staged_session_existed {
@@ -10682,11 +11040,9 @@ impl SessionRuntime {
                 == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
             if !resumed_run
                 && let Some(ref ov) = overrides
-                && (ov.model.is_some()
-                    || ov.provider.is_some()
-                    || ov.self_hosted_server_id.is_some()
-                    || ov.provider_params.is_some()
-                    || ov.auth_binding.is_some())
+                && self
+                    .turn_overrides_reconfigure_llm_identity(session_id, ov)
+                    .await?
             {
                 match llm_reconfigure_boundary {
                     LlmReconfigureBoundaryOwnership::Acquire => {
@@ -12130,11 +12486,9 @@ impl SessionRuntime {
 
         // Hot-swap LLM client if model/provider/provider_params changed.
         if let Some(ref ov) = overrides
-            && (ov.model.is_some()
-                || ov.provider.is_some()
-                || ov.self_hosted_server_id.is_some()
-                || ov.provider_params.is_some()
-                || ov.auth_binding.is_some())
+            && self
+                .turn_overrides_reconfigure_llm_identity(session_id, ov)
+                .await?
         {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
@@ -12524,6 +12878,106 @@ impl SessionRuntime {
             .stop_run(session_id, run_id, reason)
             .await
             .map_err(runtime_driver_error_to_rpc)
+    }
+
+    /// Withdraw one input of the given session, only while it is still
+    /// queued ([`meerkat_runtime::MeerkatMachine::recall_queued_input`]).
+    /// `selector` names the input as `session/input_status` does: by its
+    /// runtime input id, or by the idempotency key its caller submitted it
+    /// under (read in the caller namespace first, then as given).
+    ///
+    /// A run that has taken the input is never interrupted: the answer says
+    /// so. An input the session does not hold (another session's input, an
+    /// unknown key) is invalid params, as a malformed input id is; an unknown
+    /// or archived session is not found. The recall never loads or wakes a
+    /// session: one with no live runtime in this process answers from its
+    /// stored row when that row is terminal, and is otherwise refused as not
+    /// running.
+    pub async fn recall_queued_input(
+        &self,
+        session_id: &SessionId,
+        selector: &meerkat_contracts::SessionInputStateSelector,
+    ) -> Result<meerkat_runtime::QueuedInputRecall, RpcError> {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        let staged = self
+            .staged_sessions
+            .info(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            })?
+            .is_some();
+        if !staged {
+            match committed_source_archived(&self.service, session_id)
+                .await
+                .map_err(session_error_to_rpc)?
+            {
+                None => return Err(Self::session_not_found_rpc(session_id)),
+                Some(true) => return Err(Self::archived_session_not_found_rpc(session_id)),
+                Some(false) => {}
+            }
+        }
+        let unknown_input = |named: String| RpcError {
+            code: error::INVALID_PARAMS,
+            message: format!("session {session_id} holds no input {named}"),
+            data: None,
+        };
+        let recall_error = |error: meerkat_runtime::RuntimeDriverError| match error {
+            // The input's phase lives in a machine that is not loaded here.
+            meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed,
+            } => RpcError {
+                code: error::SESSION_NOT_RUNNING,
+                message: format!(
+                    "session {session_id} has no live runtime in this process; a recall never \
+                     loads or wakes a session"
+                ),
+                data: None,
+            },
+            other => runtime_driver_error_to_rpc(other),
+        };
+        let input_id = match selector {
+            meerkat_contracts::SessionInputStateSelector::InputId(raw) => {
+                meerkat::surface::parse_wire_input_id(raw).map_err(|message| RpcError {
+                    code: error::INVALID_PARAMS,
+                    message,
+                    data: None,
+                })?
+            }
+            meerkat_contracts::SessionInputStateSelector::IdempotencyKey(key) => {
+                // The key resolution of `session/input_status`: a wire
+                // caller's key is stored in the caller namespace, a host's
+                // key as given. The binding of a key to its input never
+                // changes, so resolving it before the recall decides nothing.
+                let by_caller = match meerkat_runtime::IdempotencyKey::caller(key) {
+                    Ok(caller) => self
+                        .runtime_adapter
+                        .input_state_by_idempotency_key(session_id, &caller.0)
+                        .await
+                        .map_err(recall_error)?,
+                    Err(_) => None,
+                };
+                let stored = match by_caller {
+                    Some(stored) => Some(stored),
+                    None => self
+                        .runtime_adapter
+                        .input_state_by_idempotency_key(session_id, key)
+                        .await
+                        .map_err(recall_error)?,
+                };
+                stored
+                    .map(|stored| stored.state.input_id)
+                    .ok_or_else(|| unknown_input(format!("under the idempotency key '{key}'")))?
+            }
+        };
+        self.runtime_adapter
+            .recall_queued_input(session_id, &input_id)
+            .await
+            .map_err(recall_error)?
+            .ok_or_else(|| unknown_input(input_id.to_string()))
     }
 
     /// Ask the session's next compaction check to compact, without a
@@ -16445,8 +16899,12 @@ fn turn_failure_rpc_code(turn_error: &meerkat_core::TurnErrorMetadata) -> i32 {
 /// refused its scoped tool grant gate carries the typed refusal as its
 /// error's reason, and answers it exactly as the session error path does,
 /// through [`session_error_to_rpc`]: the invalid-params refusal with its typed
-/// data, never a turn failure. Any other turn answers its
-/// [`turn_failure_rpc_code`] with the typed turn error as `data.error`.
+/// data, never a turn failure. A turn that failed for a refused
+/// `reasoning_effort` level (at its build, at a reconfiguration before it, or
+/// before a provider request) carries that refusal the same way and answers
+/// the same way, so a caller sees one shape whichever checkpoint refused. Any
+/// other turn answers its [`turn_failure_rpc_code`] with the typed turn error
+/// as `data.error`.
 fn abandoned_turn_rpc_error(
     reason: String,
     turn_error: meerkat_core::TurnErrorMetadata,
@@ -16456,6 +16914,13 @@ fn abandoned_turn_rpc_error(
     {
         return session_error_to_rpc(SessionError::Agent(
             meerkat_core::AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+    }
+    if let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+        &turn_error.reason
+    {
+        return session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
         ));
     }
     RpcError {
@@ -17861,6 +18326,173 @@ mod tests {
         }
     }
 
+    /// [`MockLlmClient`] on an account route whose model list states `high`
+    /// for the selected model, so a reconfiguration that sets `high` is
+    /// accepted on it. A client that reports no route has every level
+    /// refused as unknown.
+    struct HighStatingMockLlmClient;
+
+    #[async_trait]
+    impl LlmClient for HighStatingMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![
+                    meerkat_core::model_profile::capabilities::EffortLevel::High,
+                ]),
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// [`HighStatingMockLlmClient`] that records the provider params of every
+    /// request it serves and counts how often its route is read. While
+    /// `states_levels` is off it reports no route, as [`MockLlmClient`]
+    /// does: no source states the levels it accepts.
+    struct RecordingHighStatingMockLlmClient {
+        states_levels: AtomicBool,
+        route_reads: AtomicUsize,
+        sent: StdMutex<Vec<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>,
+    }
+
+    impl RecordingHighStatingMockLlmClient {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                states_levels: AtomicBool::new(true),
+                route_reads: AtomicUsize::new(0),
+                sent: StdMutex::new(Vec::new()),
+            })
+        }
+
+        /// The route's own effort field of each request served, in order:
+        /// `None` for a request sent without one.
+        fn sent_efforts(
+            &self,
+        ) -> Vec<Option<meerkat_core::lifecycle::run_primitive::AnthropicEffort>> {
+            self.sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|params| match params {
+                    Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(tag)) => {
+                        tag.effort
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingHighStatingMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route_reads.fetch_add(1, AtomicOrdering::SeqCst);
+            if self.states_levels.load(AtomicOrdering::SeqCst) {
+                HighStatingMockLlmClient.reasoning_route()
+            } else {
+                None
+            }
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            self.sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.provider_params.clone());
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// [`MockLlmClient`] that reports no route and counts how often its
+    /// route is read and how many requests it serves.
+    struct CountingNoRouteMockLlmClient {
+        route_reads: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CountingNoRouteMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route_reads.fetch_add(1, AtomicOrdering::SeqCst);
+            None
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            self.requests.fetch_add(1, AtomicOrdering::SeqCst);
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct RecordingMessagesLlmClient {
         requests: StdMutex<Vec<Vec<meerkat_core::Message>>>,
@@ -18126,6 +18758,8 @@ mod tests {
         fail_lifecycle_after_successes: AtomicUsize,
         fail_delete_ops_once: AtomicBool,
         fail_catalog_read_once: AtomicBool,
+        /// The runtime the next read of whose catalog entry is refused.
+        fail_catalog_entry_read_of: StdMutex<Option<meerkat_runtime::LogicalRuntimeId>>,
         cleanup_wire_store_calls: StdMutex<Vec<(&'static str, meerkat_runtime::LogicalRuntimeId)>>,
         /// The runtime whose next run-boundary (`Success`) commit is refused.
         fail_run_boundary_of: StdMutex<Option<meerkat_runtime::LogicalRuntimeId>>,
@@ -18143,6 +18777,7 @@ mod tests {
                 fail_lifecycle_after_successes: AtomicUsize::new(usize::MAX),
                 fail_delete_ops_once: AtomicBool::new(false),
                 fail_catalog_read_once: AtomicBool::new(false),
+                fail_catalog_entry_read_of: StdMutex::new(None),
                 cleanup_wire_store_calls: StdMutex::new(Vec::new()),
                 fail_run_boundary_of: StdMutex::new(None),
                 run_boundary_refused: Notify::new(),
@@ -18222,6 +18857,43 @@ mod tests {
         fn fail_next_catalog_read(&self) {
             self.fail_catalog_read_once
                 .store(true, AtomicOrdering::Release);
+        }
+
+        /// Refuse the next read of `runtime_id`'s catalog entry, once, as a
+        /// store read failure. A read of another runtime's entry, or of the
+        /// list, does not take the failure, so what other sessions read
+        /// meanwhile does not move it.
+        #[cfg(all(feature = "mob", feature = "mcp"))]
+        fn fail_next_catalog_entry_read_of(&self, runtime_id: meerkat_runtime::LogicalRuntimeId) {
+            *self
+                .fail_catalog_entry_read_of
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime_id);
+        }
+
+        /// Whether the read [`Self::fail_next_catalog_entry_read_of`] refuses
+        /// is still to come.
+        #[cfg(all(feature = "mob", feature = "mcp"))]
+        fn catalog_entry_read_failure_is_pending(&self) -> bool {
+            self.fail_catalog_entry_read_of
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        }
+
+        fn take_catalog_entry_read_failure(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> bool {
+            let mut armed = self
+                .fail_catalog_entry_read_of
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if armed.as_ref() != Some(runtime_id) {
+                return false;
+            }
+            *armed = None;
+            true
         }
 
         fn take_snapshot_failure(&self) -> bool {
@@ -18413,6 +19085,7 @@ mod tests {
             if self
                 .fail_catalog_read_once
                 .swap(false, AtomicOrdering::AcqRel)
+                || self.take_catalog_entry_read_failure(runtime_id)
             {
                 return Err(meerkat_runtime::RuntimeStoreError::ReadFailed(
                     "forced runtime catalog failure".to_string(),
@@ -26448,6 +27121,144 @@ mod tests {
         }
     }
 
+    /// A reasoning effort level in a schedule's session materialization spec
+    /// is not accepted in this release: the schedule service refuses it when
+    /// the schedule is created and when an update gives a schedule such a
+    /// target, with its invalid-request error. A refused create stores
+    /// nothing, and a refused update leaves the stored schedule as it was. A
+    /// spec without a level is accepted as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_schedules_session_spec_that_names_a_level_is_refused_when_it_is_written() {
+        let (_temp, runtime) = scheduled_delivery_runtime().await;
+        let service = runtime.schedule_service();
+        let request = |provider_params: serde_json::Value| -> meerkat::CreateScheduleRequest {
+            serde_json::from_value(serde_json::json!({
+                "trigger": {"type": "once", "due_at_utc": "2100-01-01T00:00:00Z"},
+                "target": {
+                    "target_kind": "session",
+                    "type": "materialize_on_demand_session",
+                    "create": {"model": "claude-sonnet-4-5", "provider_params": provider_params},
+                    "action": {"type": "prompt", "prompt": "scheduled check"}
+                }
+            }))
+            .expect("the request parses")
+        };
+        let names_the_key = |error: &meerkat::ScheduleDomainError| {
+            matches!(
+                error,
+                meerkat::ScheduleDomainError::InvalidSchedule(text)
+                    if text.contains("reasoning_effort")
+                        && text.contains("not accepted in a schedule's session settings")
+            )
+        };
+
+        let refused = service
+            .create(request(serde_json::json!({"reasoning_effort": "high"})))
+            .await
+            .expect_err("a level in a schedule's session settings is refused at create");
+        assert!(names_the_key(&refused), "{refused:?}");
+        assert!(
+            service.list().await.expect("list").is_empty(),
+            "the refused create stored nothing"
+        );
+
+        let created = service
+            .create(request(serde_json::json!({})))
+            .await
+            .expect("a spec without a level is accepted");
+        let stored_before = service.get(&created.schedule_id).await.expect("get");
+        let refused = service
+            .update(
+                &created.schedule_id,
+                meerkat::UpdateScheduleRequest {
+                    target: Some(request(serde_json::json!({"reasoning_effort": "high"})).target),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("a level in a schedule's session settings is refused at update");
+        assert!(names_the_key(&refused), "{refused:?}");
+        let stored_after = service.get(&created.schedule_id).await.expect("get");
+        assert_eq!(
+            (&stored_after.target, stored_after.revision),
+            (&stored_before.target, stored_before.revision),
+            "the refused update left the stored schedule's target and revision as they were"
+        );
+    }
+
+    /// The judge at delivery stays: a scheduled session is built from its
+    /// spec by the host's materialization, and the level its spec carries is
+    /// judged by that session's build at its first turn, as a session create
+    /// judges it. A level the route accepts is sent with the turn, and a
+    /// level the route refuses is answered with the typed refusal and
+    /// reaches no provider. The schedule service no longer stores such a
+    /// spec, so this row drives the delivery's two steps directly: the form
+    /// a store written before the refusal existed still holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scheduled_sessions_level_is_judged_by_the_session_its_delivery_builds() {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort;
+
+        let mut observed = Vec::new();
+        for route_states_high in [true, false] {
+            let (_temp, runtime) = scheduled_delivery_runtime().await;
+            let client = RecordingHighStatingMockLlmClient::new();
+            client
+                .states_levels
+                .store(route_states_high, AtomicOrdering::SeqCst);
+            runtime.set_default_llm_client(Some(client.clone()));
+            let spec: meerkat::SessionMaterializationSpec =
+                serde_json::from_value(serde_json::json!({
+                    "model": "claude-sonnet-4-5",
+                    "provider_params": {"reasoning_effort": "high"}
+                }))
+                .expect("the spec parses");
+            let session_id = runtime
+                .materialize_scheduled_session(&SessionId::new(), &spec)
+                .await
+                .expect("the delivery's materialization stages the session");
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            let turn = runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    "scheduled check".into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    (
+                        error.code,
+                        error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.pointer("/reasoning_effort_refusal/reason"))
+                            .cloned(),
+                    )
+                });
+            observed.push((route_states_high, turn, client.sent_efforts()));
+        }
+        assert_eq!(
+            observed,
+            vec![
+                (true, Ok(()), vec![Some(AnthropicEffort::High)]),
+                (
+                    false,
+                    Err((
+                        error::INVALID_PARAMS,
+                        Some(serde_json::json!("supported_levels_unknown"))
+                    )),
+                    Vec::new()
+                ),
+            ],
+            "(the route states the level, the scheduled session's first turn, the efforts sent)"
+        );
+    }
+
     /// The fire's turn honours the materialized session's own keep-alive
     /// policy, read from its staged build config before the first turn: a
     /// keep-alive session with a comms name keeps session-owned peer ingress
@@ -26886,6 +27697,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         config
@@ -27131,6 +27943,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
 
         let err = host
@@ -27161,6 +27974,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
 
         let err = host
@@ -29616,6 +30430,138 @@ mod tests {
             .enable_all()
             .build()
             .expect("the process's other runtime")
+    }
+
+    /// The same stop, and then a turn that sets a reasoning effort level,
+    /// sent to the idle session from another runtime of the process.
+    ///
+    /// The session's task ended with the stopped runtime, so the session is
+    /// not live, and the read that tells whether it is live asks the lost
+    /// actor and fails. The turn's level is judged as on a stored session
+    /// that is not live, and the turn is admitted all the same: its input
+    /// stays durably admitted and queued, never staged onto a run, no model
+    /// request is made for it in the stopped host's process, and its caller
+    /// is answered that the input stays admitted and waits for a reload. A
+    /// session runtime started again over the same stores rebuilds the
+    /// session from storage and runs the input once, at the level it sets.
+    #[test]
+    fn a_turn_that_sets_a_level_after_its_hosts_runtime_stopped_is_admitted_and_runs_after_the_next_start()
+     {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        const LEVEL_PROMPT: &str = "a turn that sets a level after the host's runtime stopped";
+        const AFTER_RESTART: &str = "the turn after the restart";
+        let realm = GracefulShutdownRealm::new(GracefulShutdownStores::InMemoryWholeBlob);
+        // The route states `high`.
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        let host = rpc_host_runtime();
+        let (runtime, session_id) = host.block_on(async {
+            let runtime = realm.start().await;
+            runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(Arc::clone(&session_client)),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    Some(ContentInput::Text("deferred seed".to_string())),
+                    Vec::new(),
+                )
+                .await
+                .expect("create deferred session");
+            runtime_turn(&runtime, &session_id, "the first turn").await;
+            (runtime, session_id)
+        });
+        host.shutdown_timeout(Duration::from_secs(10));
+
+        let process = process_runtime_outliving_the_host();
+        let observed = process.block_on(async {
+            let task_ended_with_its_runtime = runtime
+                .service
+                .session_task_ended_with_its_runtime(&session_id)
+                .await;
+            let live_read_fails = runtime.service.has_live_session(&session_id).await.is_err();
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            let turn = tokio::time::timeout(
+                Duration::from_mins(1),
+                runtime.start_turn_via_runtime(
+                    &session_id,
+                    LEVEL_PROMPT.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    Some(level_overrides(TurnMetadataOverride::Set(
+                        EffortLevel::High,
+                    ))),
+                ),
+            )
+            .await;
+            // (code, the reason its data names) of the turn's answer.
+            let turn_answer = turn.ok().map(|answer| {
+                answer.map(|_| ()).map_err(|error| {
+                    (
+                        error.code,
+                        error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("reason"))
+                            .cloned(),
+                    )
+                })
+            });
+            let reload_required = runtime
+                .runtime_adapter
+                .durability_reload_required(&session_id)
+                .await
+                .is_some();
+            let left_open =
+                open_inputs_carrying(&realm.runtime_store, &session_id, LEVEL_PROMPT).await;
+            let before_restart = client.sent_efforts();
+            drop(runtime);
+            let restarted = realm.start().await;
+            restarted.set_default_llm_client(Some(Arc::clone(&session_client)));
+            runtime_turn(&restarted, &session_id, AFTER_RESTART).await;
+            let after_restart = client.sent_efforts();
+            restarted.shutdown().await;
+            (
+                (task_ended_with_its_runtime, live_read_fails),
+                turn_answer,
+                reload_required,
+                left_open,
+                before_restart,
+                after_restart,
+            )
+        });
+        process.shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(
+            observed,
+            (
+                (true, true),
+                Some(Err((
+                    error::INTERNAL_ERROR,
+                    Some(serde_json::json!("completion_authority_unavailable"))
+                ))),
+                true,
+                vec![(meerkat_runtime::InputLifecycleState::Queued, 0, false)],
+                vec![None],
+                vec![
+                    None,
+                    Some(AnthropicEffort::High),
+                    Some(AnthropicEffort::High)
+                ],
+            ),
+            "((the session's task ended with its runtime, the live read fails), the turn's \
+             answer: its input stays admitted and no runtime of this process completes it, the \
+             session's registration waits for a reload, the turn's input: (phase, stage \
+             attempts, staged onto a run), the level of each model request before the restart, \
+             and after it: the first turn, the turn that sets the level, the turn after the \
+             restart)"
+        );
     }
 
     /// The same stop, and then an external event sent to the idle session
@@ -36052,6 +36998,7 @@ mod tests {
             provider_params: None,
             auth_binding: None,
             transient_turn_context: None,
+            reasoning_effort: None,
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
         let rejected = runtime
@@ -38122,6 +39069,16 @@ mod tests {
         mob_state: &meerkat_mob_mcp::MobMcpState,
         prefix: &str,
     ) -> meerkat_mob::MobId {
+        mob_state
+            .mob_create_definition(rpc_worker_mob_definition(prefix))
+            .await
+            .expect("create the mob")
+    }
+
+    /// The definition of [`rpc_worker_mob`]: one turn-driven `worker`
+    /// profile.
+    #[cfg(feature = "mob")]
+    fn rpc_worker_mob_definition(prefix: &str) -> meerkat_mob::MobDefinition {
         let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(
             format!("{prefix}-{}", uuid::Uuid::new_v4().simple()),
         ));
@@ -38151,10 +39108,7 @@ mod tests {
                 durable: false,
             })),
         );
-        mob_state
-            .mob_create_definition(definition)
-            .await
-            .expect("create the mob")
+        definition
     }
 
     /// Spawn the turn-driven `worker-1` member on `mob_id`, answering its
@@ -41589,6 +42543,4517 @@ mod tests {
         assert_eq!(stored_meta.provider_params, Some(provider_params));
     }
 
+    /// What the refusal of a level says on a route whose levels no source
+    /// states: the test client reports no route.
+    const REASONING_EFFORT_LEVELS_UNKNOWN: &str = "no source states the levels this route accepts";
+
+    fn level_only_params(
+        level: meerkat_core::model_profile::capabilities::EffortLevel,
+    ) -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+        meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }
+    }
+
+    fn level_overrides(
+        level: meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    ) -> crate::handlers::turn::TurnOverrides {
+        crate::handlers::turn::TurnOverrides {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }
+    }
+
+    /// The turn's reasoning effort level is carried, unchanged, by every
+    /// copy between the turn's overrides, the runtime input's metadata and
+    /// the recovery overrides: a turn that names only the level is not an
+    /// empty turn, and set and clear both arrive.
+    #[test]
+    fn turn_reasoning_effort_is_carried_by_every_override_copy() {
+        use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        for level in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            let overrides = level_overrides(level.clone());
+            assert!(!overrides.is_empty(), "{level:?}");
+
+            // Overrides to the runtime input's metadata.
+            let metadata = SessionRuntime::turn_metadata_from_overrides(
+                None,
+                None,
+                None,
+                Some(&overrides),
+                None,
+            )
+            .expect("a turn that names only the level produces turn metadata");
+            assert_eq!(metadata.reasoning_effort, Some(level.clone()));
+
+            // The metadata back to overrides, as the executor reads them.
+            let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
+                .expect("metadata that carries only the level reconstructs overrides");
+            assert_eq!(round_tripped.reasoning_effort, Some(level.clone()));
+            let from_bare_metadata =
+                SessionRuntime::turn_overrides_from_metadata(Some(&RuntimeTurnMetadata {
+                    reasoning_effort: Some(level.clone()),
+                    ..Default::default()
+                }))
+                .expect("a level-only metadata reconstructs overrides");
+            assert_eq!(from_bare_metadata.reasoning_effort, Some(level.clone()));
+
+            // Overrides to the recovery of a session that is not live.
+            let recovered = runtime
+                .recovery_overrides_from_turn(Some(&overrides), false)
+                .expect("valid recovery overrides");
+            assert_eq!(recovered.reasoning_effort, Some(level));
+        }
+    }
+
+    /// A direct turn on a live session whose only override is the level: the
+    /// hot swap runs (the session's client states the level for its route,
+    /// so the swap is accepted), the session's identity carries the level,
+    /// and the turn's request is sent with the route's own effort field. The
+    /// level is sticky: the next turn, with no override, is sent with it
+    /// too. Once no source states the route's levels, the next turn is
+    /// refused before any provider request with the refusal's text, and the
+    /// level stays on the session until a turn clears it.
+    #[tokio::test]
+    async fn turn_reasoning_effort_hot_swaps_a_live_session_and_sends_a_stated_level() {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn(
+                        &session_id,
+                        "Hello".into(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        let live_params = || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .expect("live session")
+                    .session_metadata()
+                    .expect("live session metadata")
+                    .provider_params
+            }
+        };
+        turn(None).await.expect("the first turn runs");
+        assert_eq!(client.sent_efforts(), vec![None]);
+
+        turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect("a turn that sets a level the route states runs");
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+        assert_eq!(
+            client.sent_efforts(),
+            vec![None, Some(AnthropicEffort::High)],
+            "the turn's request carries the level as the route's own field"
+        );
+
+        // Sticky: the next turn, with no override, is sent at the level too.
+        turn(None).await.expect("the level stays on the session");
+        assert_eq!(
+            client.sent_efforts(),
+            vec![
+                None,
+                Some(AnthropicEffort::High),
+                Some(AnthropicEffort::High)
+            ]
+        );
+
+        // No source states the route's levels any more: the next turn's
+        // request is refused before it reaches the provider, and the level
+        // stays on the session. This entry answers with the failed run's
+        // own error; the typed answer a caller of `turn/start` gets comes
+        // through the runtime and is the next row's.
+        client.states_levels.store(false, AtomicOrdering::SeqCst);
+        let refused = turn(None)
+            .await
+            .expect_err("a level no source states for the route is refused");
+        assert!(
+            refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
+            "{refused:?}"
+        );
+        assert_eq!(
+            client.sent_efforts().len(),
+            3,
+            "the refused turn made no provider request"
+        );
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+
+        // A turn that clears the level runs, and the session has no params
+        // again.
+        turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+            .await
+            .expect("a turn that clears the level runs");
+        assert_eq!(live_params().await, None);
+        assert_eq!(client.sent_efforts().last(), Some(&None));
+    }
+
+    /// The same through the runtime: the level travels on the accepted
+    /// input's metadata to the executor, which hot swaps before the turn,
+    /// and the turn's request is sent with the route's own effort field.
+    /// Once no source states the route's levels, the next turn is refused
+    /// before any provider request and answers the same typed refusal.
+    #[tokio::test]
+    async fn turn_reasoning_effort_reaches_the_executor_through_the_runtime() {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        "Hello".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        let live_params = || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .expect("live session")
+                    .session_metadata()
+                    .expect("live session metadata")
+                    .provider_params
+            }
+        };
+        turn(None).await.expect("the first turn runs");
+        assert_eq!(client.sent_efforts(), vec![None]);
+
+        turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect("a turn that sets a level the route states runs");
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+        assert_eq!(
+            client.sent_efforts(),
+            vec![None, Some(AnthropicEffort::High)],
+            "the turn's request carries the level as the route's own field"
+        );
+
+        // No source states the route's levels any more: the next turn's
+        // request is refused before it reaches the provider, and the level
+        // stays on the session.
+        client.states_levels.store(false, AtomicOrdering::SeqCst);
+        let refused = turn(None)
+            .await
+            .expect_err("a level no source states for the route is refused");
+        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+        assert!(
+            refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
+            "{refused:?}"
+        );
+        assert_eq!(
+            refused
+                .data
+                .as_ref()
+                .map(|data| data["reasoning_effort_refusal"]["reason"].clone()),
+            Some(serde_json::json!("supported_levels_unknown")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            client.sent_efforts().len(),
+            2,
+            "the refused turn made no provider request"
+        );
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+
+        turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+            .await
+            .expect("a turn that clears the level runs");
+        assert_eq!(live_params().await, None);
+        assert_eq!(client.sent_efforts().last(), Some(&None));
+    }
+
+    /// A turn whose level the session's route does not accept is refused
+    /// typed, end to end, and leaves the session as it was: directly (the
+    /// hot swap before the turn answers the refusal) and through the runtime
+    /// (the executor's hot swap fails the turn's apply with the typed reason,
+    /// and the turn's answer is mapped back to the same refusal). The mock
+    /// client reports no route, so every level is refused as unknown and no
+    /// route is named. The session keeps its identity and keeps serving.
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_answers_the_typed_refusal_and_leaves_the_session() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for through_runtime in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = if through_runtime {
+                make_runtime_with_runtime_store(temp_factory(&temp), 10)
+            } else {
+                make_runtime(temp_factory(&temp), 10)
+            };
+            runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+            let session_id = runtime
+                .create_session(mock_build_config(), None, None, Vec::new())
+                .await
+                .unwrap();
+            let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    if through_runtime {
+                        runtime
+                            .start_turn_via_runtime(
+                                &session_id,
+                                "Hello".into(),
+                                Vec::new(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    } else {
+                        runtime
+                            .start_turn(
+                                &session_id,
+                                "Hello".into(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    }
+                }
+            };
+            let live_identity = || {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    runtime
+                        .service
+                        .export_live_session(&session_id)
+                        .await
+                        .expect("live session")
+                        .session_metadata()
+                        .expect("live session metadata")
+                        .llm_identity()
+                }
+            };
+            turn(None).await.expect("the first turn runs");
+            let before = live_identity().await;
+
+            let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))))
+            .await
+            .expect_err("a level the route does not accept is refused");
+            assert_eq!(
+                refused.code,
+                error::INVALID_PARAMS,
+                "through_runtime={through_runtime}: {refused:?}"
+            );
+            assert_eq!(
+                refused.data,
+                Some(serde_json::json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": false,
+                    "reasoning_effort_refusal": {
+                        "requested": "high", "provider": "anthropic",
+                        "model": "claude-sonnet-4-5", "route": null,
+                        "reason": "supported_levels_unknown", "supported": null,
+                        "facts": null,
+                    },
+                })),
+                "through_runtime={through_runtime}"
+            );
+            assert_eq!(
+                refused.message,
+                "agent error: reasoning effort 'high' cannot be checked for anthropic model \
+                 'claude-sonnet-4-5': no source states the levels this route accepts; \
+                 provider_params can set a provider-specific effort",
+                "through_runtime={through_runtime}"
+            );
+            // A direct turn's swap is refused before anything is staged: the
+            // live session is untouched. Through the runtime the refused
+            // dispatch may leave the live actor to be rebuilt from the
+            // stored session at the next turn (the runtime's own handling of
+            // a failed dispatch), so the stored identity is what the next
+            // turn proves.
+            if !through_runtime {
+                assert_eq!(
+                    live_identity().await,
+                    before,
+                    "a refused turn leaves the live session's identity"
+                );
+            }
+            turn(None).await.expect("the session keeps serving");
+            assert_eq!(
+                live_identity().await,
+                before,
+                "through_runtime={through_runtime}: a refused turn leaves the session's identity"
+            );
+        }
+    }
+
+    /// A turn through the runtime whose level the live session's route
+    /// refuses is refused before its input is admitted. The caller is
+    /// answered with the typed refusal; the level was judged once and no
+    /// request reached the provider. No input is stored for the turn, so
+    /// there is no stored input to end with any reason, and the session's
+    /// runtime registration stays.
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_on_a_live_session_stores_no_input() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input_state::InputTerminalOutcome;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let route_reads = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let client = || -> Arc<dyn LlmClient> {
+            Arc::new(CountingNoRouteMockLlmClient {
+                route_reads: Arc::clone(&route_reads),
+                requests: Arc::clone(&requests),
+            })
+        };
+        runtime.set_default_llm_client(Some(client()));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(client()),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        "Hello".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        turn(None).await.expect("the first turn runs");
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 1);
+        let route_reads_before = route_reads.load(AtomicOrdering::SeqCst);
+
+        let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect_err("a level the route does not accept is refused");
+        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+        assert_eq!(
+            refused
+                .data
+                .as_ref()
+                .map(|data| data["reasoning_effort_refusal"]["reason"].clone()),
+            Some(serde_json::json!("supported_levels_unknown")),
+            "{refused:?}"
+        );
+
+        // The only stored input is the first turn's, consumed: the refused
+        // turn was never admitted.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let terminals = runtime
+            .service
+            .runtime_store()
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("the stored input rows are readable")
+            .into_iter()
+            .map(|row| row.seed.terminal_outcome)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminals,
+            vec![Some(InputTerminalOutcome::Consumed)],
+            "the refused turn stores no input"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "the session's runtime registration stays"
+        );
+        assert_eq!(
+            route_reads.load(AtomicOrdering::SeqCst) - route_reads_before,
+            1,
+            "the level is judged once, before admission"
+        );
+        assert_eq!(
+            requests.load(AtomicOrdering::SeqCst),
+            1,
+            "the refused turn made no provider request"
+        );
+    }
+
+    /// A child mob the session owns, destroyed when its owner is archived.
+    #[cfg(feature = "mob")]
+    async fn insert_owned_child_mob(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        owner_session_id: &SessionId,
+    ) -> meerkat_mob::MobId {
+        let mob_id =
+            meerkat_mob::MobId::from(format!("owned-child-mob-{}", uuid::Uuid::new_v4().simple()));
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                auth_binding: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+                durable: false,
+            })),
+        );
+        let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+            .with_owner_bridge_session_create_authority(owner_session_id.clone(), true, false)
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create a child mob the session owns");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        // The host has inserted every handle it holds: member lookups (the
+        // implicit mob's among them) are complete from here on.
+        mob_state.declare_mob_set_restored();
+        mob_id
+    }
+
+    /// A turn through the runtime whose level the session's route refuses
+    /// is the caller's one request, refused: it must not cost the session
+    /// anything else. The session owns a child mob that is destroyed when
+    /// its owner is archived, and holds an implicit mob and an MCP adapter.
+    /// After the refusal both mobs and the adapter are still there, the
+    /// session is still live under its runtime registration, and its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_costs_the_session_nothing_else() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(BlockingLlmCallWitness::default());
+        let release = Arc::new(Notify::new());
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let blocking: Arc<dyn LlmClient> = Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        });
+        runtime.set_default_llm_client(Some(Arc::clone(&blocking)));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                runtime.session_service(),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        );
+        runtime.set_mob_state(Arc::clone(&mob_state));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(blocking),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let spawn_turn =
+            |prompt: &'static str, overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    runtime
+                        .start_turn_via_runtime(
+                            &session_id,
+                            prompt.into(),
+                            Vec::new(),
+                            event_tx,
+                            None,
+                            None,
+                            None,
+                            overrides,
+                        )
+                        .await
+                })
+            };
+        // The first turn materializes the session.
+        let first = spawn_turn("first", None);
+        wait_for_llm_calls(&calls, 1, "the first turn").await;
+        release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+
+        let child_mob = insert_owned_child_mob(&mob_state, &session_id).await;
+        let implicit_mob = mob_state
+            .get_or_create_implicit_mob_for_bridge_session(
+                &session_id.to_string(),
+                "claude-sonnet-4-5",
+            )
+            .await
+            .expect("the session's implicit mob");
+        let measure = || {
+            let runtime = Arc::clone(&runtime);
+            let mob_state = Arc::clone(&mob_state);
+            let session_id = session_id.clone();
+            let child_mob = child_mob.clone();
+            let implicit_mob = implicit_mob.clone();
+            async move {
+                (
+                    mob_state.handle_for(&child_mob).await.is_ok(),
+                    mob_state
+                        .find_implicit_mob_for_bridge_session(&session_id.to_string())
+                        .await
+                        == Some(implicit_mob),
+                    runtime.mcp_sessions.read().await.contains_key(&session_id),
+                    runtime.runtime_adapter.contains_session(&session_id).await,
+                    matches!(
+                        runtime.service.has_live_session(&session_id).await,
+                        Ok(true)
+                    ),
+                )
+            }
+        };
+        let untouched = (true, true, true, true, true);
+        assert_eq!(measure().await, untouched, "before the refused turn");
+
+        let refused = spawn_turn(
+            "refused",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        )
+        .await
+        .unwrap()
+        .expect_err("a level the route does not accept is refused");
+        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+
+        // What a failed start costs is taken after the caller is answered:
+        // give it time to show, and stop at the first loss.
+        let mut measured = measure().await;
+        for _ in 0..120 {
+            if measured != untouched {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            measured = measure().await;
+        }
+        assert_eq!(
+            measured, untouched,
+            "(child mob kept, implicit mob kept, MCP adapter kept, runtime registration kept, \
+             session still live)"
+        );
+
+        // The session keeps serving.
+        let next = spawn_turn("next", None);
+        wait_for_llm_calls(&calls, 2, "the next turn").await;
+        release.notify_one();
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// A blocking client whose route states the reasoning effort level
+    /// `high`: a turn can be held running on a route that takes one level
+    /// and refuses the others.
+    struct BlockingRouteMockLlmClient {
+        calls: Arc<BlockingLlmCallWitness>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl LlmClient for BlockingRouteMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![EffortLevel::High]),
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let calls = Arc::clone(&self.calls);
+            let release = Arc::clone(&self.release);
+            Box::pin(async_stream::stream! {
+                calls.record();
+                release.notified().await;
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Blocked response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_rpc_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// What a refusal answers: its code, the kind of its data and the
+    /// refusal's reason.
+    fn refusal_answer_shape(
+        error: &RpcError,
+    ) -> (i32, Option<serde_json::Value>, Option<serde_json::Value>) {
+        (
+            error.code,
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("kind"))
+                .cloned(),
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.pointer("/reasoning_effort_refusal/reason"))
+                .cloned(),
+        )
+    }
+
+    /// The answer to a turn that changes the session's provider-neutral
+    /// level, or the model of a session that holds one, while the session
+    /// has unfinished work: the code and the data, whose one key names the
+    /// reason.
+    fn level_change_needs_idle_session() -> (i32, Option<serde_json::Value>) {
+        (
+            error::SESSION_BUSY,
+            Some(serde_json::json!({"kind": "reasoning_effort_change_needs_idle_session"})),
+        )
+    }
+
+    /// The two forms a turn names a level in: the field `reasoning_effort`
+    /// itself ("direct"), and the key of that name inside `provider_params`
+    /// ("nested").
+    fn both_forms_of_a_level(
+        level: meerkat_core::model_profile::capabilities::EffortLevel,
+    ) -> [(&'static str, crate::handlers::turn::TurnOverrides); 2] {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        [
+            ("direct", level_overrides(TurnMetadataOverride::Set(level))),
+            (
+                "nested",
+                crate::handlers::turn::TurnOverrides {
+                    provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                        reasoning_effort: Some(level),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            ),
+        ]
+    }
+
+    /// A session on a route that states the level `high`, with one finished
+    /// turn.
+    async fn live_session_on_a_blocking_route() -> (
+        tempfile::TempDir,
+        Arc<SessionRuntime>,
+        Arc<BlockingRouteMockLlmClient>,
+        SessionId,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = Arc::new(BlockingRouteMockLlmClient {
+            calls: Arc::new(BlockingLlmCallWitness::default()),
+            release: Arc::new(Notify::new()),
+        });
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let first = spawn_runtime_turn(&runtime, &session_id, "first", None);
+        wait_for_llm_calls(&client.calls, 1, "the first turn").await;
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+        (temp, runtime, client, session_id)
+    }
+
+    fn spawn_runtime_turn(
+        runtime: &Arc<SessionRuntime>,
+        session_id: &SessionId,
+        prompt: &'static str,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+    ) -> tokio::task::JoinHandle<Result<RunResult, RpcError>> {
+        let runtime = Arc::clone(runtime);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    prompt.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    overrides,
+                )
+                .await
+        })
+    }
+
+    /// A turn request that names a level the session's route refuses and
+    /// arrives while another turn of the session is running is answered what
+    /// an idle session answers it: the same code, data kind and reason, and
+    /// it is answered while that turn still runs, since it admits nothing.
+    /// The running turn completes, a plain request sent behind the refused
+    /// one runs, the session keeps its runtime registration and takes its
+    /// next turn. The level is named in the field itself and inside
+    /// `provider_params`: both are answered the same.
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_behind_a_running_turn_is_refused_as_on_an_idle_session()
+    {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for (form, refused_level) in both_forms_of_a_level(EffortLevel::Low) {
+            let (_temp, runtime, client, session_id) = live_session_on_a_blocking_route().await;
+
+            // The answer of an idle session.
+            let idle = spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "refused, idle",
+                Some(refused_level.clone()),
+            )
+            .await
+            .unwrap()
+            .expect_err("a level the route does not state is refused");
+            assert_eq!(
+                refusal_answer_shape(&idle),
+                (
+                    error::INVALID_PARAMS,
+                    Some(serde_json::json!("reasoning_effort_refused")),
+                    Some(serde_json::json!("unsupported_level")),
+                ),
+                "{form}: {idle:?}"
+            );
+
+            // A turn is held running; the refused request arrives behind
+            // it, then a plain one.
+            let running = spawn_runtime_turn(&runtime, &session_id, "running", None);
+            wait_for_llm_calls(&client.calls, 2, "the running turn").await;
+            let mut refused = spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "refused, behind",
+                Some(refused_level),
+            );
+            let answered_while_running =
+                tokio::time::timeout(std::time::Duration::from_secs(10), &mut refused).await;
+            let (while_running, refused) = match answered_while_running {
+                Ok(joined) => (true, joined.unwrap()),
+                Err(_) => {
+                    // Not answered while the turn runs: let the turn end
+                    // and take the answer it is given then.
+                    client.release.notify_one();
+                    (
+                        false,
+                        tokio::time::timeout(std::time::Duration::from_mins(1), refused)
+                            .await
+                            .expect("the request behind the turn is answered once the turn ended")
+                            .unwrap(),
+                    )
+                }
+            };
+            let refused = refused.expect_err("the level is refused behind a running turn too");
+            assert_eq!(
+                (while_running, refusal_answer_shape(&refused)),
+                (true, refusal_answer_shape(&idle)),
+                "{form}: (answered while the turn runs, (code, data kind, reason)): {refused:?}"
+            );
+
+            let plain = spawn_runtime_turn(&runtime, &session_id, "plain, behind", None);
+            client.release.notify_one();
+            running.await.unwrap().expect("the running turn completes");
+            wait_for_llm_calls(&client.calls, 3, "the plain request behind the turn").await;
+            client.release.notify_one();
+            plain
+                .await
+                .unwrap()
+                .expect("the plain request behind the turn runs");
+            assert!(
+                runtime.runtime_adapter.contains_session(&session_id).await,
+                "{form}: the session keeps its runtime registration"
+            );
+            let next = spawn_runtime_turn(&runtime, &session_id, "next", None);
+            wait_for_llm_calls(&client.calls, 4, "the next turn").await;
+            client.release.notify_one();
+            next.await
+                .unwrap()
+                .expect("the session takes its next turn");
+        }
+    }
+
+    /// A turn that sets a level the session's route takes, sent while
+    /// another turn of the session runs, is not queued behind that turn: it
+    /// is answered that the session is busy, while the turn runs, and admits
+    /// nothing. The same request sent again when the session is idle runs.
+    /// (Until a level refused at a turn's start no longer ends the session's
+    /// other inputs, a turn that changes the level is admitted only on a
+    /// session with no unfinished input.) The level is named in the field
+    /// itself and inside `provider_params`: both are answered the same.
+    #[tokio::test]
+    async fn a_turn_that_sets_a_level_on_a_busy_session_is_answered_busy_and_runs_when_sent_again()
+    {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for (form, level) in both_forms_of_a_level(EffortLevel::High) {
+            let (_temp, runtime, client, session_id) = live_session_on_a_blocking_route().await;
+            let running = spawn_runtime_turn(&runtime, &session_id, "running", None);
+            wait_for_llm_calls(&client.calls, 2, "the running turn").await;
+            let busy = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                spawn_runtime_turn(
+                    &runtime,
+                    &session_id,
+                    "sets a level, behind",
+                    Some(level.clone()),
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{form}: the request is answered while the turn runs"))
+            .unwrap()
+            .expect_err("a turn that sets a level is not queued behind a running turn");
+            assert_eq!(
+                (busy.code, busy.data.clone()),
+                level_change_needs_idle_session(),
+                "{form}: {busy:?}"
+            );
+            assert_eq!(
+                runtime
+                    .runtime_adapter
+                    .list_active_inputs(&session_id)
+                    .await
+                    .map(|inputs| inputs.len())
+                    .unwrap_or(0),
+                1,
+                "{form}: the refused request admitted nothing beside the running turn"
+            );
+            client.release.notify_one();
+            running.await.unwrap().expect("the running turn completes");
+
+            // Sent again on the idle session, the turn runs.
+            let again =
+                spawn_runtime_turn(&runtime, &session_id, "sets a level, idle", Some(level));
+            wait_for_llm_calls(&client.calls, 3, "the turn with the level").await;
+            client.release.notify_one();
+            again
+                .await
+                .unwrap()
+                .unwrap_or_else(|error| panic!("{form}: the turn with the level runs: {error:?}"));
+        }
+    }
+
+    /// A session created with the provider-neutral level holds it, so a
+    /// model change on it is a change of a session that holds a level: sent
+    /// while a turn runs it is answered that the session is busy, with the
+    /// reason in its data, while the turn runs, and nothing is admitted.
+    /// Sent again when the session is idle it runs, and the session reads
+    /// the new model.
+    #[tokio::test]
+    async fn a_model_change_on_a_busy_session_created_with_a_level_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = Arc::new(BlockingRouteMockLlmClient {
+            calls: Arc::new(BlockingLlmCallWitness::default()),
+            release: Arc::new(Notify::new()),
+        });
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    provider_params: Some(ProviderParamsOverride {
+                        reasoning_effort: Some(EffortLevel::High),
+                        ..Default::default()
+                    }),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let first = spawn_runtime_turn(&runtime, &session_id, "first", None);
+        wait_for_llm_calls(&client.calls, 1, "the first turn").await;
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+
+        let model_change = || {
+            Some(crate::handlers::turn::TurnOverrides {
+                model: Some("claude-opus-4-8".to_string()),
+                ..Default::default()
+            })
+        };
+        let running = spawn_runtime_turn(&runtime, &session_id, "running", None);
+        wait_for_llm_calls(&client.calls, 2, "the running turn").await;
+        let busy = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            spawn_runtime_turn(&runtime, &session_id, "changes the model", model_change()),
+        )
+        .await
+        .expect("the request is answered while the turn runs")
+        .unwrap()
+        .expect_err("a model change on a session that holds a level is not queued");
+        assert_eq!(
+            (busy.code, busy.data.clone()),
+            level_change_needs_idle_session(),
+            "{busy:?}"
+        );
+        client.release.notify_one();
+        running.await.unwrap().expect("the running turn completes");
+
+        let again = spawn_runtime_turn(&runtime, &session_id, "changes the model", model_change());
+        wait_for_llm_calls(&client.calls, 3, "the turn that changes the model").await;
+        client.release.notify_one();
+        again
+            .await
+            .unwrap()
+            .expect("the model change runs on the idle session");
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .unwrap()
+            .expect("the session is readable");
+        assert_eq!(info.model, "claude-opus-4-8");
+    }
+
+    /// What a session with no provider-neutral level does is as it was
+    /// before that level existed: its turns that change the model, or carry
+    /// the provider's own effort parameter (`provider_tag`), are queued
+    /// behind a running turn and run. Three cases, each on its own session:
+    /// a model change on a session with no level; the provider's own effort
+    /// on a turn; a model change on a session that holds the provider's own
+    /// effort, after which the session reads the new model.
+    #[tokio::test]
+    async fn a_session_with_no_neutral_level_queues_model_and_provider_effort_changes_as_before() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiProviderTag, ProviderParamsOverride, ProviderTag, ReasoningEffort,
+            TurnMetadataOverride,
+        };
+
+        let own_effort = |effort: ReasoningEffort| {
+            TurnMetadataOverride::Set(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    reasoning_effort: Some(effort),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        };
+        let to_openai_with_its_own_effort = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("openai".to_string()),
+            provider_params: Some(own_effort(ReasoningEffort::Medium)),
+            ..Default::default()
+        };
+        let cases: [(
+            &str,
+            bool,
+            crate::handlers::turn::TurnOverrides,
+            Option<&str>,
+        ); 3] = [
+            (
+                "a model change on a session with no level",
+                false,
+                crate::handlers::turn::TurnOverrides {
+                    model: Some("claude-opus-4-8".to_string()),
+                    ..Default::default()
+                },
+                Some("claude-opus-4-8"),
+            ),
+            (
+                "the provider's own effort on a turn",
+                true,
+                crate::handlers::turn::TurnOverrides {
+                    provider_params: Some(own_effort(ReasoningEffort::Low)),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "a model change on a session that holds the provider's own effort",
+                true,
+                crate::handlers::turn::TurnOverrides {
+                    model: Some("gpt-5.5".to_string()),
+                    ..Default::default()
+                },
+                Some("gpt-5.5"),
+            ),
+        ];
+        for (case, holds_its_own_effort, queued_change, model_after) in cases {
+            let (_temp, runtime, client, session_id) = live_session_on_a_blocking_route().await;
+            let mut requests = 1;
+            if holds_its_own_effort {
+                // An idle turn gives the session the provider's own effort.
+                let given = spawn_runtime_turn(
+                    &runtime,
+                    &session_id,
+                    "gives the provider's own effort",
+                    Some(to_openai_with_its_own_effort.clone()),
+                );
+                requests += 1;
+                wait_for_llm_calls(&client.calls, requests, "the turn that gives the effort").await;
+                client.release.notify_one();
+                given
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|error| panic!("{case}: the setup turn runs: {error:?}"));
+            }
+
+            let running = spawn_runtime_turn(&runtime, &session_id, "running", None);
+            requests += 1;
+            wait_for_llm_calls(&client.calls, requests, "the running turn").await;
+            let mut queued =
+                spawn_runtime_turn(&runtime, &session_id, "queued change", Some(queued_change));
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(
+                !queued.is_finished(),
+                "{case}: the turn is not answered while the turn ahead runs"
+            );
+            client.release.notify_one();
+            running.await.unwrap().expect("the running turn completes");
+
+            // Its own turn starts: its request is made. An answer before
+            // that request is an answer without a run.
+            requests += 1;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
+            while client.calls.load(AtomicOrdering::SeqCst) < requests {
+                if queued.is_finished() {
+                    let answered = (&mut queued).await.unwrap().map(|_| ());
+                    panic!("{case}: the queued turn was answered without a run: {answered:?}");
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{case}: the queued turn never started"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            client.release.notify_one();
+            queued
+                .await
+                .unwrap()
+                .unwrap_or_else(|error| panic!("{case}: the queued turn runs: {error:?}"));
+            if let Some(model) = model_after {
+                let info = runtime
+                    .read_session_rich(&session_id)
+                    .await
+                    .unwrap()
+                    .expect("the session is readable");
+                assert_eq!(info.model, model, "{case}");
+            }
+        }
+    }
+
+    /// A session can be busy with nothing running. `session/external_event`
+    /// queues its event without waking the session: on an idle session the
+    /// event waits for the session's next turn and is an input that has not
+    /// ended until then. The busy rule asks whether the runtime holds such
+    /// an input, so a turn that sets a level is answered that the session
+    /// is busy although no turn runs. A plain turn is taken and takes the
+    /// waiting event with it; after it the same level-setting turn is
+    /// admitted and runs. A pin of what the rule does today, not a design.
+    /// (By reading, not by this row: a peer request with a silent comms
+    /// intent waits the same way on a session configured with such
+    /// intents; a mob member is built with none.)
+    #[tokio::test]
+    async fn a_level_turn_on_an_idle_session_that_holds_an_input_without_a_wake_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        spawn_runtime_turn(&runtime, &session_id, "first", None)
+            .await
+            .unwrap()
+            .expect("the first turn runs");
+        let unfinished = || async {
+            runtime
+                .runtime_adapter
+                .list_active_inputs(&session_id)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        };
+        let sets_a_level = || {
+            spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "sets a level",
+                Some(level_overrides(TurnMetadataOverride::Set(
+                    EffortLevel::High,
+                ))),
+            )
+        };
+
+        // An external event is accepted without a wake: it is queued and
+        // no turn starts.
+        let accepted = runtime
+            .accept_external_event_via_runtime(
+                &session_id,
+                "review.event".to_string(),
+                serde_json::json!({"status": "queued"}),
+                None,
+            )
+            .await
+            .expect("the event is accepted");
+        assert!(
+            matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "{accepted:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let state = runtime.runtime_adapter.runtime_state(&session_id).await;
+        assert_eq!(
+            (unfinished().await, format!("{state:?}").contains("Running")),
+            (1, false),
+            "(inputs that have not ended, a run in progress): the event waits and nothing \
+             runs: {state:?}"
+        );
+
+        // A turn that sets a level is answered busy, with nothing running.
+        let busy = tokio::time::timeout(std::time::Duration::from_secs(30), sets_a_level())
+            .await
+            .expect("the turn is answered")
+            .unwrap()
+            .expect_err("the waiting input counts as unfinished work");
+        assert_eq!(
+            ((busy.code, busy.data.clone()), unfinished().await),
+            (level_change_needs_idle_session(), 1),
+            "((code, data), inputs that have not ended): {busy:?}"
+        );
+        assert_eq!(
+            busy.message,
+            "session is busy: this turn is not queued behind unfinished work. On a session that \
+             holds a reasoning effort level, a turn that changes the model, the provider, the \
+             self-hosted server, the provider params, the auth binding or the level (sets, \
+             changes or clears it; a level inside provider_params counts as a change) needs a \
+             session with no unfinished work; so does a turn that sets a level on a session \
+             that holds none. Send it again when the session has no unfinished work. An event \
+             queued on an idle session counts as unfinished work: nothing is running to wait \
+             for, so send a plain turn first, or set the level when the session is created",
+            "the whole busy text: one term for what the turn needs, and this case named"
+        );
+
+        // A plain turn is taken, and takes the waiting input with it.
+        spawn_runtime_turn(&runtime, &session_id, "plain", None)
+            .await
+            .unwrap()
+            .expect("a plain turn runs");
+        assert_eq!(
+            unfinished().await,
+            0,
+            "the waiting input ended with the plain turn"
+        );
+
+        // Then the same level-setting turn is admitted and runs.
+        tokio::time::timeout(std::time::Duration::from_secs(30), sets_a_level())
+            .await
+            .expect("the turn is answered")
+            .unwrap()
+            .expect("the level-setting turn runs once nothing waits");
+    }
+
+    /// A deferred create answers its session before anything is judged, so
+    /// a session created with a level its route refuses exists. A plain turn
+    /// on it is refused for that level; a turn that names a level the route
+    /// states, or one that clears the level, runs.
+    #[tokio::test]
+    async fn a_deferred_session_with_a_refused_level_takes_a_turn_that_changes_the_level() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for change in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+            let client = RecordingHighStatingMockLlmClient::new();
+            let session_client: Arc<dyn LlmClient> = client.clone();
+            runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(session_client),
+                        provider_params: Some(ProviderParamsOverride {
+                            reasoning_effort: Some(EffortLevel::Low),
+                            ..Default::default()
+                        }),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            let refused = spawn_runtime_turn(&runtime, &session_id, "plain", None)
+                .await
+                .unwrap()
+                .expect_err("the session's level is refused at its first turn");
+            assert_eq!(
+                refusal_answer_shape(&refused),
+                (
+                    error::INVALID_PARAMS,
+                    Some(serde_json::json!("reasoning_effort_refused")),
+                    Some(serde_json::json!("unsupported_level")),
+                ),
+                "{change:?}: {refused:?}"
+            );
+            spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "changes the level",
+                Some(level_overrides(change.clone())),
+            )
+            .await
+            .unwrap()
+            .unwrap_or_else(|error| {
+                panic!("{change:?}: a turn that changes the level runs: {error:?}")
+            });
+        }
+    }
+
+    /// Every way a turn's target can carry a level its route refuses is
+    /// judged before the turn's input is admitted, on a live session: a
+    /// turn that names a level the route does not state, a turn whose new
+    /// provider params conflict with the level the session holds, and a
+    /// turn that names no level at all (a model-only switch) on a session
+    /// that holds one. Each is answered with the typed refusal; no input is
+    /// stored for it, the session's runtime registration and live identity
+    /// stay, and no provider request is made.
+    #[tokio::test]
+    async fn a_turn_whose_target_the_route_refuses_is_refused_before_admission() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        "Hello".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let stored_inputs = || {
+            let runtime = Arc::clone(&runtime);
+            let runtime_id = runtime_id.clone();
+            async move {
+                runtime
+                    .service
+                    .runtime_store()
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("the stored input rows are readable")
+                    .len()
+            }
+        };
+        // The live session's identity, or `None` when the session is not
+        // live any more.
+        let live_identity = || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .ok()
+                    .and_then(|session| session.session_metadata())
+                    .map(|metadata| metadata.llm_identity())
+            }
+        };
+
+        // The session holds a level its route states.
+        turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect("a turn that sets a level the route states runs");
+        let inputs_before = stored_inputs().await;
+        let identity_before = live_identity().await;
+        assert!(identity_before.is_some(), "the session is live");
+        let requests_before = client.sent_efforts().len();
+
+        let budget_beside_the_level = crate::handlers::turn::TurnOverrides {
+            provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                thinking_budget_tokens: Some(1024),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let model_only = crate::handlers::turn::TurnOverrides {
+            model: Some("claude-opus-4-5".to_string()),
+            ..Default::default()
+        };
+        for (trigger, overrides, route_states_levels, reason) in [
+            (
+                "a level the route does not state",
+                level_overrides(TurnMetadataOverride::Set(EffortLevel::Max)),
+                true,
+                "unsupported_level",
+            ),
+            (
+                "new provider params that conflict with the held level",
+                budget_beside_the_level,
+                true,
+                "conflicting_thinking_budget",
+            ),
+            (
+                "a model-only switch on a session that holds a level",
+                model_only,
+                false,
+                "supported_levels_unknown",
+            ),
+            (
+                "a level once no source states the route's levels",
+                level_overrides(TurnMetadataOverride::Set(EffortLevel::Low)),
+                false,
+                "supported_levels_unknown",
+            ),
+        ] {
+            client
+                .states_levels
+                .store(route_states_levels, AtomicOrdering::SeqCst);
+            let refused = turn(Some(overrides))
+                .await
+                .expect_err("a target the route refuses is refused");
+            assert_eq!(
+                refused.code,
+                error::INVALID_PARAMS,
+                "{trigger}: {refused:?}"
+            );
+            let data = refused.data.as_ref().expect("the typed refusal");
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{trigger}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], reason,
+                "{trigger}: {refused:?}"
+            );
+            assert_eq!(
+                (
+                    stored_inputs().await,
+                    runtime.runtime_adapter.contains_session(&session_id).await,
+                    live_identity().await == identity_before,
+                    client.sent_efforts().len(),
+                ),
+                (inputs_before, true, true, requests_before),
+                "{trigger}: (stored inputs, runtime registered, live identity kept, provider \
+                 requests)"
+            );
+        }
+
+        // The session keeps serving at the level it holds.
+        client.states_levels.store(true, AtomicOrdering::SeqCst);
+        turn(None).await.expect("the session keeps serving");
+        assert_eq!(live_identity().await, identity_before);
+    }
+
+    /// A turn that names the level the session already holds changes
+    /// nothing, so it is no reconfiguration: the client's route is read
+    /// exactly as often as for a turn that names no level (no judgement, no
+    /// client built for a target), the live identity stays, and the request
+    /// is sent at the level. Naming the same level on every turn is the
+    /// plain use of the option. A turn that changes the level (here: clears
+    /// it) is still a reconfiguration. Directly and through the runtime.
+    #[tokio::test]
+    async fn a_turn_that_repeats_the_sessions_level_is_no_reconfiguration() {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for through_runtime in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = if through_runtime {
+                make_runtime_with_runtime_store(temp_factory(&temp), 10)
+            } else {
+                make_runtime(temp_factory(&temp), 10)
+            };
+            let client = RecordingHighStatingMockLlmClient::new();
+            let session_client: Arc<dyn LlmClient> = client.clone();
+            runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(session_client),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    if through_runtime {
+                        runtime
+                            .start_turn_via_runtime(
+                                &session_id,
+                                "Hello".into(),
+                                Vec::new(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    } else {
+                        runtime
+                            .start_turn(
+                                &session_id,
+                                "Hello".into(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    }
+                }
+            };
+            let live_identity = || {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    runtime
+                        .service
+                        .export_live_session(&session_id)
+                        .await
+                        .expect("live session")
+                        .session_metadata()
+                        .expect("live session metadata")
+                        .llm_identity()
+                }
+            };
+            let route_reads = || client.route_reads.load(AtomicOrdering::SeqCst);
+            let high = || level_overrides(TurnMetadataOverride::Set(EffortLevel::High));
+
+            // The session takes the level: a change, so a reconfiguration.
+            turn(Some(high())).await.expect("the level is set");
+            let identity = live_identity().await;
+            assert_eq!(
+                identity.provider_params,
+                Some(level_only_params(EffortLevel::High))
+            );
+
+            // What a turn that names no level costs in route reads.
+            let before = route_reads();
+            turn(None).await.expect("a plain turn runs");
+            let plain_reads = route_reads() - before;
+
+            // The same level again, twice: exactly a plain turn's reads.
+            for repeat in 0..2 {
+                let before = route_reads();
+                turn(Some(high())).await.expect("the same level runs");
+                assert_eq!(
+                    route_reads() - before,
+                    plain_reads,
+                    "through_runtime={through_runtime}, repeat {repeat}: a turn that repeats \
+                     the level reads the route as a plain turn does"
+                );
+                assert_eq!(
+                    live_identity().await,
+                    identity,
+                    "through_runtime={through_runtime}"
+                );
+            }
+            assert_eq!(
+                client.sent_efforts().last(),
+                Some(&Some(AnthropicEffort::High)),
+                "through_runtime={through_runtime}: the request is sent at the level"
+            );
+
+            // A turn that changes the level is a reconfiguration.
+            turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+                .await
+                .expect("the level is cleared");
+            assert_eq!(
+                live_identity().await.provider_params,
+                None,
+                "through_runtime={through_runtime}"
+            );
+            // Clearing again asks for what the session already has.
+            let before = route_reads();
+            turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+                .await
+                .expect("clearing no level runs");
+            let cleared_reads = route_reads() - before;
+            let before = route_reads();
+            turn(None).await.expect("a plain turn runs");
+            assert_eq!(
+                cleared_reads,
+                route_reads() - before,
+                "through_runtime={through_runtime}: clearing a level the session does not hold \
+                 reads the route as a plain turn does"
+            );
+        }
+    }
+
+    /// The last message of a model request the failed-start rows' client
+    /// refuses: a turn that fails inside its run, after its input was
+    /// applied.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const FAILED_START_REFUSED_REQUEST: &str = "the provider refuses this request";
+
+    /// The prompt of the input the failed-start rows queue behind the turn
+    /// that fails.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const FAILED_START_QUEUED_INPUT: &str = "the input queued behind the failing turn";
+
+    /// The host's model client of the failed-start rows. It serves Anthropic
+    /// models only, so a turn that switches to another provider's model
+    /// cannot be applied on it. It holds each model request until the row
+    /// releases it, and then refuses a request whose last message is
+    /// [`FAILED_START_REFUSED_REQUEST`]. One read of its provider can be
+    /// held, so a row can queue an input behind the turn whose apply reads
+    /// it, and the held read can answer another provider: the build that
+    /// reads it fails, as a build does whose provider client is not
+    /// available.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[derive(Default)]
+    struct FailedStartLlmClient {
+        calls: AtomicUsize,
+        release: Notify,
+        /// A request whose last message is [`FAILED_START_QUEUED_INPUT`]
+        /// started.
+        queued_input_seen: AtomicBool,
+        /// The next request is answered at once with one call of a tool no
+        /// catalog has: the call is answered with its typed refusal, the
+        /// round commits, and the run goes on to its next request, which is
+        /// held like any other. A turn request on a session whose run is
+        /// past its first round commit is admitted and queued behind it.
+        answer_a_tool_call_next: AtomicBool,
+        hold_next_provider_read: AtomicBool,
+        held_read_answers_another_provider: AtomicBool,
+        provider_read_held: AtomicBool,
+        provider_read_released: AtomicBool,
+        /// What the client's route states about reasoning effort levels:
+        /// nothing (0: the client reports no route, as every other row has
+        /// it), the level `high` (1), the level `low` (2), or an account
+        /// list that is not loaded (3).
+        route_states_level: std::sync::atomic::AtomicU8,
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[async_trait]
+    impl LlmClient for FailedStartLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            let account = match self.route_states_level.load(AtomicOrdering::SeqCst) {
+                1 => meerkat_core::AccountLevelStatement::Stated(vec![EffortLevel::High]),
+                2 => meerkat_core::AccountLevelStatement::Stated(vec![EffortLevel::Low]),
+                3 => meerkat_core::AccountLevelStatement::ListUnavailable,
+                _ => return None,
+            };
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account,
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let last_message = request
+                .messages
+                .last()
+                .map(|message| format!("{message:?}"))
+                .unwrap_or_default();
+            let refused = last_message.contains(FAILED_START_REFUSED_REQUEST);
+            let queued_input = last_message.contains(FAILED_START_QUEUED_INPUT);
+            let tool_call = self
+                .answer_a_tool_call_next
+                .swap(false, AtomicOrdering::SeqCst);
+            Box::pin(async_stream::stream! {
+                let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                if queued_input {
+                    self.queued_input_seen.store(true, AtomicOrdering::SeqCst);
+                }
+                if tool_call {
+                    yield Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                        id: format!("failed-start-probe-call-{call}"),
+                        name: "failed_start_probe".into(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    });
+                    yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            meerkat_core::Provider::Anthropic,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    });
+                    yield Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(StopReason::ToolUse),
+                    });
+                    return;
+                }
+                self.release.notified().await;
+                if refused {
+                    yield Err(LlmError::InvalidRequest {
+                        message: FAILED_START_REFUSED_REQUEST.to_string(),
+                    });
+                    return;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Released response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            if self
+                .hold_next_provider_read
+                .swap(false, AtomicOrdering::SeqCst)
+            {
+                self.provider_read_held.store(true, AtomicOrdering::SeqCst);
+                let deadline = std::time::Instant::now() + Duration::from_secs(90);
+                // The read is synchronous, so the hold blocks its thread;
+                // `block_in_place` tells the runtime, which moves this
+                // worker's other tasks to another thread. The session's
+                // runtime still admits nothing while the apply that makes
+                // this read is in flight.
+                tokio::task::block_in_place(|| {
+                    while !self.provider_read_released.load(AtomicOrdering::SeqCst)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                });
+                if self
+                    .held_read_answers_another_provider
+                    .load(AtomicOrdering::SeqCst)
+                {
+                    return meerkat_core::Provider::OpenAI;
+                }
+            }
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// What a session still holds after one of its turns failed, and what
+    /// became of the input queued behind that turn.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[derive(Debug, PartialEq, Eq)]
+    struct FailedStartFacts {
+        /// The child mob the session owns is still there.
+        child_mob_kept: bool,
+        /// The members the child mob still lists.
+        child_mob_members: usize,
+        /// The child mob member's session is still stored.
+        child_member_session_stored: bool,
+        /// The session's implicit mob is still there.
+        implicit_mob_kept: bool,
+        /// The session's MCP adapter is still attached after the failure.
+        mcp_adapter_attached: bool,
+        /// The session's runtime registration is still there after the
+        /// failure.
+        runtime_registered: bool,
+        /// The session is still stored, and not archived.
+        session_stored: bool,
+        /// The input queued behind the failed turn reached the provider.
+        queued_input_reached_the_provider: bool,
+        /// How the queued input ended.
+        queued_input: FailedStartQueuedInput,
+        /// The answer to a plain turn after the failure.
+        next_turn: Result<(), String>,
+        /// The session's MCP adapter is attached after that turn.
+        mcp_adapter_attached_after_the_next_turn: bool,
+    }
+
+    /// How the input queued behind a failed turn ended.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[derive(Debug, PartialEq, Eq)]
+    enum FailedStartQueuedInput {
+        Completed,
+        /// It ended with the runtime registration it was queued on, without
+        /// a run: answered that its runtime was terminated, or abandoned
+        /// when its apply found the registration being retired.
+        EndedWithoutARun,
+        /// Its waiter failed or did not answer.
+        Unanswered(String),
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    impl FailedStartFacts {
+        /// A turn that fails inside its run costs the session its own
+        /// answer and nothing else.
+        fn nothing_lost() -> Self {
+            Self {
+                child_mob_kept: true,
+                child_mob_members: 1,
+                child_member_session_stored: true,
+                implicit_mob_kept: true,
+                mcp_adapter_attached: true,
+                runtime_registered: true,
+                session_stored: true,
+                queued_input_reached_the_provider: true,
+                queued_input: FailedStartQueuedInput::Completed,
+                next_turn: Ok(()),
+                mcp_adapter_attached_after_the_next_turn: true,
+            }
+        }
+
+        /// A turn that fails at its start costs the session nothing it
+        /// owns: its mobs, their members and the session itself stay. The
+        /// failed start retires the session's live runtime (its
+        /// registration and its MCP adapter), which the next turn builds
+        /// again. The input queued on the retired registration ends with
+        /// it: its sender is answered and sends it again.
+        fn the_session_keeps_what_it_owns() -> Self {
+            Self {
+                mcp_adapter_attached: false,
+                runtime_registered: false,
+                queued_input_reached_the_provider: false,
+                queued_input: FailedStartQueuedInput::EndedWithoutARun,
+                ..Self::nothing_lost()
+            }
+        }
+    }
+
+    /// A materialized JSON-RPC session that owns a child mob with one
+    /// member (destroyed when its owner is archived, as a mob an agent
+    /// creates is), holds its implicit mob and has an MCP adapter attached.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    struct FailedStartSession {
+        _temp: tempfile::TempDir,
+        runtime: Arc<SessionRuntime>,
+        mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+        client: Arc<FailedStartLlmClient>,
+        session_id: SessionId,
+        child_mob: meerkat_mob::MobId,
+        child_member_session: SessionId,
+        implicit_mob: meerkat_mob::MobId,
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type FailedStartTurn = tokio::task::JoinHandle<Result<RunResult, RpcError>>;
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    impl FailedStartSession {
+        async fn materialized() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+            Self::materialized_on(temp, runtime).await
+        }
+
+        /// [`Self::materialized`] on a session runtime the row built over
+        /// `temp`.
+        async fn materialized_on(temp: tempfile::TempDir, runtime: Arc<SessionRuntime>) -> Self {
+            let mob_state = rpc_mob_state_with_realm(&runtime);
+            runtime.set_mob_state(Arc::clone(&mob_state));
+            let client = Arc::new(FailedStartLlmClient::default());
+            runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig::new("claude-sonnet-4-5"),
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .expect("create the session");
+            let mut session = Self {
+                _temp: temp,
+                runtime,
+                mob_state,
+                client,
+                child_mob: meerkat_mob::MobId::from("not created yet"),
+                child_member_session: session_id.clone(),
+                implicit_mob: meerkat_mob::MobId::from("not created yet"),
+                session_id,
+            };
+
+            // The first turn materializes the session.
+            let first = session.spawn_turn("first", None);
+            session.release_request(1, "the first turn").await;
+            first.await.unwrap().expect("the first turn runs");
+
+            session.child_mob = session
+                .mob_state
+                .mob_create_definition_with_owner_bridge_session(
+                    rpc_worker_mob_definition("failed-start-child-mob"),
+                    session.session_id.clone(),
+                    true,
+                    false,
+                )
+                .await
+                .expect("create a child mob the session owns");
+            let (_identity, member_session) =
+                spawn_rpc_worker(&session.mob_state, &session.child_mob).await;
+            session.child_member_session = member_session;
+            session.implicit_mob = session
+                .mob_state
+                .get_or_create_implicit_mob_for_bridge_session(
+                    &session.session_id.to_string(),
+                    "claude-sonnet-4-5",
+                )
+                .await
+                .expect("the session's implicit mob");
+            let before = session.holdings().await;
+            assert_eq!(
+                before,
+                (true, 1, true, true, true, true, true),
+                "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+                 runtime registration, stored session) before any turn fails"
+            );
+            session
+        }
+
+        fn spawn_turn(
+            &self,
+            prompt: &'static str,
+            overrides: Option<crate::handlers::turn::TurnOverrides>,
+        ) -> FailedStartTurn {
+            let runtime = Arc::clone(&self.runtime);
+            let session_id = self.session_id.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        prompt.into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            })
+        }
+
+        /// Whether the client's `expected`th model request started within
+        /// `within`.
+        async fn request_entered(&self, expected: usize, within: Duration) -> bool {
+            tokio::time::timeout(within, async {
+                while self.client.calls.load(AtomicOrdering::SeqCst) < expected {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        /// Wait for the client's `expected`th model request and release it.
+        async fn release_request(&self, expected: usize, description: &str) {
+            assert!(
+                self.request_entered(expected, Duration::from_mins(1)).await,
+                "{description} did not reach the provider"
+            );
+            self.client.release.notify_one();
+        }
+
+        async fn active_inputs(&self) -> usize {
+            self.runtime
+                .runtime_adapter
+                .list_active_inputs(&self.session_id)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        }
+
+        /// Wait until the session holds `expected` active inputs.
+        async fn wait_for_active_inputs(&self, expected: usize) {
+            for _ in 0..2400 {
+                if self.active_inputs().await == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!(
+                "expected {expected} active inputs, found {}",
+                self.active_inputs().await
+            );
+        }
+
+        /// Start a turn and take it past its first round commit: its first
+        /// model request answers one tool call, the round commits, and its
+        /// second model request is held at the model. A turn request on a
+        /// session whose turn is past its first round commit is admitted
+        /// and queued behind that turn. (Before that commit it waits
+        /// without being admitted, and a request sent while another
+        /// request's apply is in flight is admitted behind that request's
+        /// turn only if it gets through its admission checks before the
+        /// turn starts.)
+        async fn start_turn_past_its_first_round(&self, prompt: &'static str) -> FailedStartTurn {
+            let requests = self.client.calls.load(AtomicOrdering::SeqCst);
+            self.client
+                .answer_a_tool_call_next
+                .store(true, AtomicOrdering::SeqCst);
+            let turn = self.spawn_turn(prompt, None);
+            assert!(
+                self.request_entered(requests + 2, Duration::from_mins(1))
+                    .await,
+                "the turn reaches its second model request"
+            );
+            turn
+        }
+
+        /// Serve every model request from here on as it comes, until the
+        /// returned task is aborted.
+        fn serve_model_requests(&self) -> tokio::task::JoinHandle<()> {
+            let client = Arc::clone(&self.client);
+            tokio::spawn(async move {
+                loop {
+                    client.release.notify_one();
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+        }
+
+        /// Hold the next read of the client's provider and start `turn`,
+        /// whose apply makes that read. Returns once the read is held: the
+        /// turn's input was admitted and its apply has not ended. Nothing
+        /// else is admitted on the session until the hold is released.
+        async fn start_turn_held_in_its_apply(
+            &self,
+            prompt: &'static str,
+            overrides: Option<crate::handlers::turn::TurnOverrides>,
+        ) -> FailedStartTurn {
+            self.client
+                .hold_next_provider_read
+                .store(true, AtomicOrdering::SeqCst);
+            let turn = self.spawn_turn(prompt, overrides);
+            for _ in 0..2400 {
+                if self.client.provider_read_held.load(AtomicOrdering::SeqCst) {
+                    break;
+                }
+                assert!(
+                    !turn.is_finished(),
+                    "the turn was answered before its apply read the client's provider"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(
+                self.client.provider_read_held.load(AtomicOrdering::SeqCst),
+                "the turn's apply reads the client's provider"
+            );
+            assert_eq!(
+                self.active_inputs().await,
+                1,
+                "the provider is read after the turn's input was admitted"
+            );
+            turn
+        }
+
+        /// Send an input to the session while its current turn's apply is
+        /// held, as a peer message, a completion notice or a scheduled
+        /// delivery is sent: through the runtime, not through a turn
+        /// request. The runtime admits nothing while the apply is in
+        /// flight, so the input waits at the runtime; the hold is then
+        /// released, and the input is admitted when the apply ends, behind
+        /// that turn.
+        async fn queue_input_behind_the_current_turn(
+            &self,
+        ) -> meerkat_runtime::completion::CompletionHandle {
+            use meerkat_runtime::input::{Input, PromptInput};
+
+            let queued = Input::Prompt(PromptInput::from_content_input(
+                FAILED_START_QUEUED_INPUT.into(),
+                SessionRuntime::typed_text_turn(None),
+            ));
+            let accept = {
+                let runtime = Arc::clone(&self.runtime);
+                let session_id = self.session_id.clone();
+                tokio::spawn(async move {
+                    runtime
+                        .runtime_adapter
+                        .accept_input_with_completion(&session_id, queued)
+                        .await
+                })
+            };
+            // The input has no admission checks of its own to pass: it is
+            // at the runtime as soon as its task runs.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            self.client
+                .provider_read_released
+                .store(true, AtomicOrdering::SeqCst);
+            let (_, waiter) = tokio::time::timeout(Duration::from_mins(1), accept)
+                .await
+                .expect("the runtime answers the queued input's admission")
+                .expect("the admission task")
+                .expect("the runtime admits the queued input");
+            self.wait_for_active_inputs(2).await;
+            waiter.expect("an admitted prompt has a completion waiter")
+        }
+
+        /// Whether `session_id` is stored and not archived.
+        async fn stored_and_not_archived(&self, session_id: &SessionId) -> bool {
+            self.runtime
+                .load_persisted_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+                && !self
+                    .runtime
+                    .authoritative_session_archived(session_id)
+                    .await
+                    .unwrap_or(true)
+        }
+
+        /// (child mob, its members, its member's session, implicit mob, MCP
+        /// adapter, runtime registration, stored session).
+        async fn holdings(&self) -> (bool, usize, bool, bool, bool, bool, bool) {
+            (
+                self.mob_state.handle_for(&self.child_mob).await.is_ok(),
+                self.mob_state
+                    .mob_list_members(&self.child_mob)
+                    .await
+                    .map(|members| members.len())
+                    .unwrap_or(0),
+                self.stored_and_not_archived(&self.child_member_session)
+                    .await,
+                self.mob_state
+                    .find_implicit_mob_for_bridge_session(&self.session_id.to_string())
+                    .await
+                    == Some(self.implicit_mob.clone()),
+                self.runtime
+                    .mcp_sessions
+                    .read()
+                    .await
+                    .contains_key(&self.session_id),
+                self.runtime
+                    .runtime_adapter
+                    .contains_session(&self.session_id)
+                    .await,
+                self.stored_and_not_archived(&self.session_id).await,
+            )
+        }
+
+        /// The typed kind of a failed turn's error.
+        fn turn_error_kind(error: &RpcError) -> Option<&str> {
+            error.data.as_ref()?.get("error")?.get("kind")?.as_str()
+        }
+
+        async fn turn_answer(turn: FailedStartTurn) -> Result<(), String> {
+            match tokio::time::timeout(Duration::from_secs(30), turn).await {
+                Ok(joined) => joined
+                    .expect("the turn task")
+                    .map(|_| ())
+                    .map_err(|error| format!("{} {}", error.code, error.message)),
+                Err(_) => Err("no answer within 30 s".to_string()),
+            }
+        }
+
+        async fn queued_input_end(
+            queued: meerkat_runtime::completion::CompletionHandle,
+        ) -> FailedStartQueuedInput {
+            use meerkat_runtime::completion::CompletionOutcome;
+
+            match tokio::time::timeout(Duration::from_secs(10), queued.try_wait()).await {
+                Ok(Ok(CompletionOutcome::Completed(_))) => FailedStartQueuedInput::Completed,
+                Ok(Ok(_)) => FailedStartQueuedInput::EndedWithoutARun,
+                Ok(Err(error)) => FailedStartQueuedInput::Unanswered(format!("{error}")),
+                Err(_) => FailedStartQueuedInput::Unanswered("no answer within 10 s".to_string()),
+            }
+        }
+
+        /// Release the failed turn and read what the session holds after it
+        /// was answered. `queued` is the input queued behind it.
+        async fn facts_after_the_failed_turn(
+            &self,
+            queued: meerkat_runtime::completion::CompletionHandle,
+        ) -> FailedStartFacts {
+            // The queued input runs next, if it is still queued.
+            let queued_input_reached_the_provider =
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !self.client.queued_input_seen.load(AtomicOrdering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok();
+            if queued_input_reached_the_provider {
+                self.client.release.notify_one();
+            }
+            let queued_input = Self::queued_input_end(queued).await;
+            let (
+                child_mob_kept,
+                child_mob_members,
+                child_member_session_stored,
+                implicit_mob_kept,
+                mcp_adapter_attached,
+                runtime_registered,
+                session_stored,
+            ) = self.holdings().await;
+
+            // A plain turn after the failure.
+            let requests = self.client.calls.load(AtomicOrdering::SeqCst);
+            let next = self.spawn_turn("next", None);
+            if self
+                .request_entered(requests + 1, Duration::from_secs(5))
+                .await
+            {
+                self.client.release.notify_one();
+            }
+            let next_turn = Self::turn_answer(next).await;
+            FailedStartFacts {
+                child_mob_kept,
+                child_mob_members,
+                child_member_session_stored,
+                implicit_mob_kept,
+                mcp_adapter_attached,
+                runtime_registered,
+                session_stored,
+                queued_input_reached_the_provider,
+                queued_input,
+                next_turn,
+                mcp_adapter_attached_after_the_next_turn: self
+                    .runtime
+                    .mcp_sessions
+                    .read()
+                    .await
+                    .contains_key(&self.session_id),
+            }
+        }
+    }
+
+    /// A turn that switches a live session to a model the host cannot serve
+    /// fails when it is applied, after its input was admitted. That is the
+    /// caller's one turn, failed, and no archive of the session: the session
+    /// keeps the child mob it owns with its member, and its implicit mob.
+    /// The failed start retires the session's live runtime, which the next
+    /// turn builds again.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_model_switch_at_turn_start_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        // The turn's model switch is held where it binds the host's client
+        // to the new model, and an input queues behind the turn.
+        let failing = session
+            .start_turn_held_in_its_apply(
+                "switches to a model the host cannot serve",
+                Some(crate::handlers::turn::TurnOverrides {
+                    model: Some("gpt-5.4".to_string()),
+                    provider: Some("openai".to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await;
+        let queued = session.queue_input_behind_the_current_turn().await;
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = failing
+            .await
+            .unwrap()
+            .expect_err("the model switch fails at the turn's start");
+        assert_eq!(
+            FailedStartSession::turn_error_kind(&failed),
+            Some("runtime_apply_failure"),
+            "the turn failed while it was applied: {failed:?}"
+        );
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::the_session_keeps_what_it_owns(),
+            "the failed turn was answered {failed:?}"
+        );
+    }
+
+    /// A stored session that is not live (after a restart or an eviction) is
+    /// rebuilt by its next turn, after that turn's input was admitted. A
+    /// build that fails there (its provider client is not available) fails
+    /// that one turn, and is no archive of the session: the session keeps
+    /// the child mob it owns with its member, and its implicit mob. The
+    /// failed start retires the session's live runtime, which the next turn
+    /// builds again once the client is back.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_recovery_build_at_turn_start_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+
+        // The recovering turn's build is held at its first read of the
+        // client's provider, an input queues behind the turn, and the held
+        // read then answers a provider that cannot serve the session.
+        session
+            .client
+            .held_read_answers_another_provider
+            .store(true, AtomicOrdering::SeqCst);
+        let failing = session
+            .start_turn_held_in_its_apply("recovers the session", None)
+            .await;
+        let queued = session.queue_input_behind_the_current_turn().await;
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = failing
+            .await
+            .unwrap()
+            .expect_err("the recovery build fails at the turn's start");
+        assert_eq!(
+            FailedStartSession::turn_error_kind(&failed),
+            Some("runtime_apply_failure"),
+            "the turn failed while it was applied: {failed:?}"
+        );
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            1,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::the_session_keeps_what_it_owns(),
+            "the failed turn was answered {failed:?}"
+        );
+    }
+
+    /// The surface's cleanup of a recovery that fails on a runtime
+    /// registration it created itself takes that registration back, and is
+    /// no archive of the session: the session keeps the child mob it owns
+    /// with its member, and its implicit mob, and its next turn runs. The
+    /// row drives the cleanup through the test-only direct recovery; in a
+    /// shipped build the same cleanup follows a failed create of a new
+    /// session, and a turn's recovery finds its registration already there.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_recovery_on_a_new_registration_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        // The session is stored, with no live session and no runtime
+        // registration, as after a restart.
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("discard the live session");
+        session
+            .runtime
+            .runtime_adapter
+            .unregister_session(&session.session_id)
+            .await
+            .expect("unregister the session's runtime");
+        assert!(
+            !session
+                .runtime
+                .runtime_adapter
+                .contains_session(&session.session_id)
+                .await,
+            "the row starts without a runtime registration"
+        );
+
+        // A recovery whose model override names another provider's model
+        // is refused after it registered the session's runtime.
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let refused = session
+            .runtime
+            .try_recover_persisted_session(
+                &session.session_id,
+                ContentInput::Text("recover".to_string()),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+                Some(&overrides),
+            )
+            .await
+            .expect_err("the recovery is refused after it registered the runtime");
+        assert!(refused.message.contains("provider"), "{refused:?}");
+
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, false, false, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the failed recovery"
+        );
+        let next = session.spawn_turn("next", None);
+        session.release_request(2, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+        assert!(
+            session
+                .runtime
+                .mcp_sessions
+                .read()
+                .await
+                .contains_key(&session.session_id),
+            "the next turn attaches the session's MCP adapter again"
+        );
+    }
+
+    /// A realtime open of a stored session that is not live rebuilds it. A
+    /// rebuild that fails there (its provider client is not available) takes
+    /// back the runtime registration the open created and is no archive of
+    /// the session: the session keeps the child mob it owns with its member,
+    /// and its implicit mob, and its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_realtime_open_rebuild_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        // The session is stored, with no live session and no runtime
+        // registration, as after a restart.
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("discard the live session");
+        session
+            .runtime
+            .runtime_adapter
+            .unregister_session(&session.session_id)
+            .await
+            .expect("unregister the session's runtime");
+
+        // The rebuild's first read of the client's provider answers a
+        // provider that cannot serve the session; nothing holds it.
+        session
+            .client
+            .held_read_answers_another_provider
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .client
+            .hold_next_provider_read
+            .store(true, AtomicOrdering::SeqCst);
+        let opened = session
+            .runtime
+            .realtime_session_open_config(
+                &session.session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await;
+        assert!(
+            opened.is_err(),
+            "the realtime open is refused: its session cannot be rebuilt"
+        );
+        assert!(
+            session
+                .client
+                .provider_read_held
+                .load(AtomicOrdering::SeqCst),
+            "the open's rebuild read the client's provider"
+        );
+
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, false, false, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the failed realtime open"
+        );
+        let next = session.spawn_turn("next", None);
+        session.release_request(2, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// A caller's cancel of a running turn ends that turn and costs the
+    /// session nothing it owns: its mobs and their member stay, and its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_running_turn_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        let running = session.spawn_turn("running", None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the running turn reaches the provider"
+        );
+        session
+            .runtime
+            .interrupt(&session.session_id)
+            .await
+            .expect("the caller cancels the running turn");
+        let cancelled = tokio::time::timeout(Duration::from_secs(20), running)
+            .await
+            .expect("the cancelled turn is answered")
+            .expect("the turn task");
+        assert!(
+            cancelled.is_err(),
+            "the cancelled turn does not complete: {cancelled:?}"
+        );
+
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the cancelled turn"
+        );
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("next", None);
+        session.release_request(requests + 1, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// A request cancelled while its turn is still queued ends that one
+    /// input, and is no archive of the session: the session keeps the child
+    /// mob it owns with its member, and its implicit mob. The turn request
+    /// is queued behind a running turn, and is cancelled as the JSON-RPC
+    /// cancel notification cancels it: by its exact input.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_queued_request_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        let first = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+        let first_inputs = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs");
+        let queued = session.spawn_turn("the queued request", None);
+        session.wait_for_active_inputs(2).await;
+        let queued_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .find(|input| !first_inputs.contains(input))
+            .expect("the queued request's input");
+
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(&session.session_id, &queued_input, "RPC request cancelled")
+            .await
+            .expect("the queued request's input is cancelled");
+
+        let serving = session.serve_model_requests();
+        let cancelled = tokio::time::timeout(Duration::from_mins(1), queued)
+            .await
+            .expect("the cancelled request is answered")
+            .expect("the request task");
+        assert!(
+            cancelled.is_err(),
+            "the cancelled request does not complete: {cancelled:?}"
+        );
+        let first = FailedStartSession::turn_answer(first).await;
+
+        let (child_mob, members, member_session, implicit_mob, _, _, stored) =
+            session.holdings().await;
+        assert_eq!(
+            (child_mob, members, member_session, implicit_mob, stored),
+            (true, 1, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, stored session) \
+             after the queued request was cancelled; the first request was answered {first:?}"
+        );
+        let next = session.spawn_turn("next", None);
+        let next = FailedStartSession::turn_answer(next).await;
+        serving.abort();
+        assert_eq!(next, Ok(()), "the next turn runs");
+    }
+
+    /// A request cancelled while its turn is running (the JSON-RPC cancel
+    /// notification cancels the request's exact input) ends that turn and
+    /// costs the session nothing it owns.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_running_request_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        let running = session.spawn_turn("running", None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the running turn reaches the provider"
+        );
+        let running_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .next()
+            .expect("the running request's input");
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(&session.session_id, &running_input, "RPC request cancelled")
+            .await
+            .expect("the running request's input is cancelled");
+        let cancelled = tokio::time::timeout(Duration::from_secs(20), running)
+            .await
+            .expect("the cancelled request is answered")
+            .expect("the request task");
+        assert!(
+            cancelled.is_err(),
+            "the cancelled request does not complete: {cancelled:?}"
+        );
+
+        let (child_mob, members, member_session, implicit_mob, _, _, stored) =
+            session.holdings().await;
+        assert_eq!(
+            (child_mob, members, member_session, implicit_mob, stored),
+            (true, 1, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, stored session) \
+             after the running request was cancelled"
+        );
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("next", None);
+        session.release_request(requests + 1, "the next turn").await;
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// An ordinary stop of the host with one turn request running and a
+    /// second one queued behind it keeps both for the next start and
+    /// destroys nothing the session owns: both requests are answered as
+    /// kept across the stop, and neither the session nor the member of its
+    /// child mob is archived.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ordinary_stop_with_a_queued_request_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        // One turn runs, past its first round commit, and one turn request
+        // is queued behind it.
+        let first = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+        let queued = session.spawn_turn("the queued request", None);
+        session.wait_for_active_inputs(2).await;
+
+        session
+            .runtime
+            .try_shutdown()
+            .await
+            .expect("the runtime shuts down");
+        for (request, turn) in [("running", first), ("queued", queued)] {
+            let stopped = tokio::time::timeout(Duration::from_secs(20), turn)
+                .await
+                .expect("the request is answered by the stop")
+                .expect("the request task")
+                .expect_err("the request does not complete in this process");
+            assert_eq!(
+                stopped.data.as_ref().map(|data| &data["kind"]),
+                Some(&serde_json::json!("requeued_across_stop")),
+                "the {request} request is kept across the stop: {stopped:?}"
+            );
+        }
+
+        // A destroyed mob retires its members and archives their sessions:
+        // the stores still say what the stop left.
+        assert_eq!(
+            (
+                session
+                    .stored_and_not_archived(&session.child_member_session)
+                    .await,
+                session.stored_and_not_archived(&session.session_id).await,
+            ),
+            (true, true),
+            "(the child mob member's session, the session) stored and not archived after \
+             the stop"
+        );
+    }
+
+    /// An ordinary stop of the host with a turn in flight keeps the turn for
+    /// the next start and destroys nothing the session owns: after the stop
+    /// neither the session nor the member of its child mob is archived.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ordinary_stop_with_a_turn_in_flight_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        let running = session.spawn_turn("running", None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the running turn reaches the provider"
+        );
+        session
+            .runtime
+            .try_shutdown()
+            .await
+            .expect("the runtime shuts down");
+        let stopped = tokio::time::timeout(Duration::from_secs(20), running)
+            .await
+            .expect("the turn in flight is answered by the stop")
+            .expect("the turn task")
+            .expect_err("the turn in flight does not complete in this process");
+        assert_eq!(
+            stopped.data.as_ref().map(|data| &data["kind"]),
+            Some(&serde_json::json!("requeued_across_stop")),
+            "the turn in flight is kept across the stop: {stopped:?}"
+        );
+
+        // A destroyed mob retires its members and archives their sessions:
+        // the stores still say what the stop left.
+        assert_eq!(
+            (
+                session
+                    .stored_and_not_archived(&session.child_member_session)
+                    .await,
+                session.stored_and_not_archived(&session.session_id).await,
+            ),
+            (true, true),
+            "(the child mob member's session, the session) stored and not archived after \
+             the stop"
+        );
+    }
+
+    /// One of several turn requests queued behind a running turn is
+    /// cancelled. That ends the one input and is no archive of the session:
+    /// the session keeps the child mob it owns with its member, and its
+    /// implicit mob.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_request_among_queued_ones_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        // The first request's turn is running and past its first round
+        // commit; two turn requests queue behind it, one after the other,
+        // and the first of those two is cancelled.
+        let first = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+        let first_inputs = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs");
+        let cancelled = session.spawn_turn("the cancelled request", None);
+        session.wait_for_active_inputs(2).await;
+        let cancelled_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .find(|input| !first_inputs.contains(input))
+            .expect("the cancelled request's input");
+        let other = session.spawn_turn("the other queued request", None);
+        session.wait_for_active_inputs(3).await;
+
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(
+                &session.session_id,
+                &cancelled_input,
+                "RPC request cancelled",
+            )
+            .await
+            .expect("the queued request's input is cancelled");
+
+        let serving = session.serve_model_requests();
+        let cancelled = tokio::time::timeout(Duration::from_mins(1), cancelled)
+            .await
+            .expect("the cancelled request is answered")
+            .expect("the request task");
+        assert!(
+            cancelled.is_err(),
+            "the cancelled request does not complete: {cancelled:?}"
+        );
+        let first = FailedStartSession::turn_answer(first).await;
+        let other = FailedStartSession::turn_answer(other).await;
+
+        let (child_mob, members, member_session, implicit_mob, _, _, stored) =
+            session.holdings().await;
+        assert_eq!(
+            (child_mob, members, member_session, implicit_mob, stored),
+            (true, 1, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, stored session) \
+             after one of the queued requests was cancelled; the first request was answered \
+             {first:?}, the other queued request {other:?}"
+        );
+        // The cancelled input's cleanup keeps the runtime registration the
+        // other requests are on: the running turn and the other queued
+        // request both complete and are answered their results.
+        for (request, answer) in [("running", &first), ("other queued", &other)] {
+            assert_eq!(
+                answer,
+                &Ok(()),
+                "the {request} request completes and is answered its result"
+            );
+        }
+        let next = session.spawn_turn("next", None);
+        let next = FailedStartSession::turn_answer(next).await;
+        serving.abort();
+        assert_eq!(next, Ok(()), "the next turn runs");
+    }
+
+    /// `mob/cancel_all_work` abandons every input a member's session holds
+    /// queued. A turn request queued on the member's session ends with it,
+    /// and that is no archive of the member's session: the mob the member's
+    /// session owns stays. The request queues behind a run the member's mob
+    /// admitted.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_members_cancelled_work_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        let members_mob = session
+            .mob_state
+            .mob_create_definition_with_owner_bridge_session(
+                rpc_worker_mob_definition("failed-start-members-mob"),
+                member_session.clone(),
+                true,
+                false,
+            )
+            .await
+            .expect("create a mob the member's session owns");
+
+        // A run the member's mob admitted is in flight: its first model
+        // request answers one tool call, the round commits, and its second
+        // request is held at the model. A turn request on a session whose
+        // run is past its first round commit is admitted and queued.
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        session
+            .client
+            .answer_a_tool_call_next
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .mob_state
+            .mob_member_send(
+                &session.child_mob,
+                meerkat_mob::AgentIdentity::from("worker-1"),
+                "the member's running turn".into(),
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .await
+            .expect("the member admits the turn");
+        assert!(
+            session
+                .request_entered(requests + 2, Duration::from_mins(1))
+                .await,
+            "the member's running turn reaches its second model request"
+        );
+
+        // A turn request on the member's session queues behind it.
+        let queued = {
+            let runtime = Arc::clone(&session.runtime);
+            let member_session = member_session.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &member_session,
+                        "the queued request".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+        let mut member_inputs = 0;
+        for _ in 0..1200 {
+            member_inputs = session
+                .runtime
+                .runtime_adapter
+                .list_active_inputs(&member_session)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0);
+            if member_inputs == 2 || queued.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            (member_inputs, queued.is_finished()),
+            (2, false),
+            "(the member session's active inputs, the request already answered): the turn \
+             request is admitted and queued behind the member's running turn"
+        );
+
+        let (member_runtime, member_fence) = session
+            .mob_state
+            .mob_member_binding_for_cancel(
+                &session.child_mob,
+                &meerkat_mob::AgentIdentity::from("worker-1"),
+            )
+            .await
+            .expect("the member's binding, as `mob/cancel_all_work` resolves it");
+        session
+            .mob_state
+            .mob_cancel_all_work(&session.child_mob, member_runtime, member_fence)
+            .await
+            .expect("cancel all of the member's work");
+        session.client.release.notify_one();
+        let cancelled = tokio::time::timeout(Duration::from_mins(1), queued)
+            .await
+            .expect("the queued request is answered")
+            .expect("the request task");
+        assert!(
+            cancelled.is_err(),
+            "the queued request does not complete: {cancelled:?}"
+        );
+
+        assert_eq!(
+            (
+                session.mob_state.handle_for(&members_mob).await.is_ok(),
+                session.stored_and_not_archived(&member_session).await,
+            ),
+            (true, true),
+            "(the mob the member's session owns, the member's session stored and not \
+             archived) after the member's work was cancelled"
+        );
+    }
+
+    /// A mob member's session is a session too: a turn a client starts on
+    /// it (`mob/turn_start`, or `turn/start` with the member's session)
+    /// that switches to a model the host cannot serve fails when it is
+    /// applied, and that is no archive of the member's session. The mob the
+    /// member's session owns stays.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_model_switch_on_a_members_turn_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        let members_mob = session
+            .mob_state
+            .mob_create_definition_with_owner_bridge_session(
+                rpc_worker_mob_definition("failed-start-members-mob"),
+                member_session.clone(),
+                true,
+                false,
+            )
+            .await
+            .expect("create a mob the member's session owns");
+
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let failing = {
+            let runtime = Arc::clone(&session.runtime);
+            let member_session = member_session.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &member_session,
+                        "switches to a model the host cannot serve".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        Some(crate::handlers::turn::TurnOverrides {
+                            model: Some("gpt-5.4".to_string()),
+                            provider: Some("openai".to_string()),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+            })
+        };
+        let failed = tokio::time::timeout(Duration::from_mins(1), failing)
+            .await
+            .expect("the member's turn is answered")
+            .expect("the turn task")
+            .expect_err("the model switch fails at the member's turn start");
+        assert_eq!(
+            (
+                FailedStartSession::turn_error_kind(&failed),
+                session.client.calls.load(AtomicOrdering::SeqCst),
+            ),
+            (Some("runtime_apply_failure"), requests),
+            "(the failed turn's kind, the model requests made): the member's turn failed \
+             while it was applied, with no model request: {failed:?}"
+        );
+
+        assert_eq!(
+            (
+                session.mob_state.handle_for(&members_mob).await.is_ok(),
+                session.stored_and_not_archived(&member_session).await,
+            ),
+            (true, true),
+            "(the mob the member's session owns, the member's session stored and not \
+             archived) after the member's turn failed at its start: {failed:?}"
+        );
+    }
+
+    /// Not affected, before or after the fix: a mob member whose session is
+    /// stored and not live, and cannot be rebuilt, when a client starts a
+    /// turn on it. The member's mob wakes the member before the surface
+    /// admits the turn; the rebuild fails in that wake and the turn is
+    /// refused before it is admitted, so no cleanup runs. The mob the
+    /// member's session owns stays.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_rebuild_on_a_members_turn_keeps_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        let members_mob = session
+            .mob_state
+            .mob_create_definition_with_owner_bridge_session(
+                rpc_worker_mob_definition("failed-start-members-mob"),
+                member_session.clone(),
+                true,
+                false,
+            )
+            .await
+            .expect("create a mob the member's session owns");
+        session
+            .runtime
+            .service
+            .discard_live_session(&member_session)
+            .await
+            .expect("the member's session is stored and no longer live");
+
+        // The next read of the client's provider answers a provider that
+        // cannot serve the member's session; nothing holds it.
+        session
+            .client
+            .held_read_answers_another_provider
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .client
+            .hold_next_provider_read
+            .store(true, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let failing = {
+            let runtime = Arc::clone(&session.runtime);
+            let member_session = member_session.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &member_session,
+                        "rebuilds the member's session".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+        let failed = tokio::time::timeout(Duration::from_mins(1), failing)
+            .await
+            .expect("the member's turn is answered")
+            .expect("the turn task")
+            .expect_err("the member's turn does not run");
+
+        // Why this case costs a member nothing, before and after the fix:
+        // the member's mob wakes it before the surface admits the turn, the
+        // wake's rebuild fails there, and the turn is refused with no input
+        // admitted, so no completion cleanup runs for it.
+        assert_eq!(
+            (
+                FailedStartSession::turn_error_kind(&failed),
+                session.client.calls.load(AtomicOrdering::SeqCst) - requests,
+            ),
+            (None, 0),
+            "(the refusal's kind, the model requests made): the member's turn is refused \
+             before it is admitted: {failed:?}"
+        );
+        assert_eq!(
+            (
+                session.mob_state.handle_for(&members_mob).await.is_ok(),
+                session.stored_and_not_archived(&member_session).await,
+            ),
+            (true, true),
+            "(the mob the member's session owns, the member's session stored and not \
+             archived) after the member's turn could not be started: {failed:?}"
+        );
+    }
+
+    /// The cleanup the completion relay runs is the same for every outcome
+    /// that asks for it (a turn that could not be applied, a result that
+    /// could not be saved, a turn abandoned or cancelled with no live
+    /// session, a runtime that ended): its scope comes from the cleanup
+    /// authority's ACTION alone, which the machine answers. `RetainRuntime`
+    /// runs no cleanup; `CleanupRuntime` retires the live runtime and keeps
+    /// what the session owns; `CleanupArchivedSession` also destroys the
+    /// session's mobs. This row runs the relay's own steps for each action,
+    /// with the mapping the relay uses, and reads the mob state.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_an_archived_sessions_cleanup_destroys_what_the_session_owns() {
+        use meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionCleanupAction as Action;
+
+        for (action, after_the_cleanup) in [
+            (
+                Action::RetainRuntime,
+                (true, 1, true, true, true, true, true),
+            ),
+            (
+                Action::CleanupRuntime,
+                (true, 1, true, true, false, false, true),
+            ),
+            (
+                Action::CleanupArchivedSession,
+                (false, 0, false, false, false, false, true),
+            ),
+        ] {
+            let session = FailedStartSession::materialized().await;
+            if let Some(scope) = RuntimeCleanupScope::of_completion_action(action) {
+                session
+                    .runtime
+                    .service
+                    .discard_live_session(&session.session_id)
+                    .await
+                    .expect("the relay discards the live session first");
+                session
+                    .runtime
+                    .archive_runtime_cleanup()
+                    .run_scoped(&session.session_id, scope)
+                    .await
+                    .expect("the completion cleanup runs");
+            }
+            assert_eq!(
+                session.holdings().await,
+                after_the_cleanup,
+                "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+                 runtime registration, stored session) after the completion cleanup of the \
+                 action {action:?}"
+            );
+        }
+    }
+
+    /// The guard of the rows above: archiving the session still destroys
+    /// the child mob it owns and its implicit mob.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archive_still_destroys_what_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        session
+            .runtime
+            .archive_session(&session.session_id)
+            .await
+            .expect("archive the session");
+
+        assert_eq!(
+            session.holdings().await,
+            (false, 0, false, false, false, false, false),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the archive"
+        );
+    }
+
+    /// The control of the two rows above: a turn that fails inside its run,
+    /// after its input was applied, costs the session nothing else.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_that_fails_inside_its_run_costs_the_session_nothing_it_owns() {
+        let session = FailedStartSession::materialized().await;
+
+        // The turn's model request is held, and an input queues behind the
+        // turn; the provider then refuses the request.
+        let failing = session.spawn_turn(FAILED_START_REFUSED_REQUEST, None);
+        assert!(
+            session.request_entered(2, Duration::from_secs(10)).await,
+            "the turn reaches the provider"
+        );
+        let queued = session.queue_input_behind_the_current_turn().await;
+        session.client.release.notify_one();
+        let failed = failing
+            .await
+            .unwrap()
+            .expect_err("the provider refuses the turn's request");
+
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::nothing_lost(),
+            "the failed turn was answered {failed:?}"
+        );
+    }
+
+    /// A turn that names the reasoning effort level in two places that
+    /// disagree (a level beside params that name another level, or a clear
+    /// beside params that name one) is the caller's request: it is answered
+    /// as invalid params with both places named, on a live session and on a
+    /// stored session that is not live, where the turn's recovery reports
+    /// the disagreement. No model request is made.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_that_names_the_level_in_two_places_that_disagree_is_invalid_params() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let both =
+            |level: TurnMetadataOverride<EffortLevel>| crate::handlers::turn::TurnOverrides {
+                reasoning_effort: Some(level),
+                provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                    reasoning_effort: Some(EffortLevel::Low),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+        // Read first, asserted second: a failure prints all four answers.
+        let mut observed = Vec::new();
+        for stored in [false, true] {
+            if stored {
+                session
+                    .runtime
+                    .service
+                    .discard_live_session(&session.session_id)
+                    .await
+                    .expect("the session is stored and no longer live");
+            }
+            for level in [
+                TurnMetadataOverride::Set(EffortLevel::High),
+                TurnMetadataOverride::Clear,
+            ] {
+                let refused = session
+                    .spawn_turn("names the level twice", Some(both(level.clone())))
+                    .await
+                    .unwrap()
+                    .expect_err("two places that disagree are refused");
+                observed.push((
+                    stored,
+                    matches!(level, TurnMetadataOverride::Clear),
+                    refused.code,
+                    refused.message,
+                    refused.data,
+                ));
+            }
+        }
+        let set_text = "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low'";
+        let clear_text =
+            "reasoning_effort is cleared but provider_params.reasoning_effort is 'low'";
+        for (stored, clear, code, message, data) in &observed {
+            assert_eq!(
+                (
+                    *code,
+                    message.contains(if *clear { clear_text } else { set_text }),
+                    data
+                ),
+                (error::INVALID_PARAMS, true, &None),
+                "stored={stored} clear={clear}: {observed:#?}"
+            );
+        }
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            requests,
+            "no refused turn made a model request"
+        );
+    }
+
+    /// A turn that names a reasoning effort level on a stored session that
+    /// is not live (after a restart or an eviction) is judged before its
+    /// input is admitted, as on a live session: the session's identity and
+    /// realm are read from what is stored. The client reports no route, so
+    /// the level is refused there (nothing states the levels the route
+    /// accepts). The refused request admits nothing: no input is stored for
+    /// it, no model request is made, and the session holds what it held
+    /// (its child mob with its member, its implicit mob, its runtime
+    /// registration and its MCP adapter). An input then sent through the
+    /// runtime with no turn request waiting on it (as a peer message or a
+    /// scheduled delivery is sent) runs, and so does the next turn. The
+    /// level is named in the field itself and inside `provider_params`: both
+    /// are answered the same.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_refused_on_a_stored_session_that_is_not_live_admits_nothing() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input::{Input, PromptInput};
+
+        for (form, refused_level) in both_forms_of_a_level(EffortLevel::High) {
+            let session = FailedStartSession::materialized().await;
+            session
+                .runtime
+                .service
+                .discard_live_session(&session.session_id)
+                .await
+                .expect("the session is stored and no longer live");
+            let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+            let held_before = session.holdings().await;
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+            let stored_inputs = || async {
+                session
+                    .runtime
+                    .service
+                    .runtime_store()
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("the stored input rows are readable")
+                    .into_iter()
+                    .map(|row| row.seed.terminal_outcome)
+                    .collect::<Vec<_>>()
+            };
+            let inputs_before = stored_inputs().await;
+
+            let refused = session
+                .spawn_turn("names a level", Some(refused_level))
+                .await
+                .unwrap()
+                .expect_err("the level is refused");
+            assert_eq!(
+                refusal_answer_shape(&refused),
+                (
+                    error::INVALID_PARAMS,
+                    Some(serde_json::json!("reasoning_effort_refused")),
+                    Some(serde_json::json!("supported_levels_unknown")),
+                ),
+                "{form}: {refused:?}"
+            );
+            assert_eq!(
+                session.client.calls.load(AtomicOrdering::SeqCst),
+                requests,
+                "{form}: the refused turn made no model request"
+            );
+            assert_eq!(
+                stored_inputs().await,
+                inputs_before,
+                "{form}: the refused request stored no input"
+            );
+            assert_eq!(
+                session.holdings().await,
+                held_before,
+                "{form}: (child mob, its members, its member's session, implicit mob, MCP \
+                 adapter, runtime registration, stored session) after the refused request"
+            );
+
+            // An input no turn request waits on runs.
+            let (_, waiter) = session
+                .runtime
+                .runtime_adapter
+                .accept_input_with_completion(
+                    &session.session_id,
+                    Input::Prompt(PromptInput::from_content_input(
+                        FAILED_START_QUEUED_INPUT.into(),
+                        SessionRuntime::typed_text_turn(None),
+                    )),
+                )
+                .await
+                .expect("the runtime admits the input");
+            session
+                .release_request(requests + 1, "the input sent through the runtime")
+                .await;
+            assert_eq!(
+                FailedStartSession::queued_input_end(
+                    waiter.expect("an admitted prompt has a completion waiter")
+                )
+                .await,
+                FailedStartQueuedInput::Completed,
+                "{form}"
+            );
+
+            // The next turn runs.
+            let next = session.spawn_turn("next", None);
+            session.release_request(requests + 2, "the next turn").await;
+            assert_eq!(
+                FailedStartSession::turn_answer(next).await,
+                Ok(()),
+                "{form}"
+            );
+            assert_eq!(
+                session.holdings().await,
+                (true, 1, true, true, true, true, true),
+                "{form}: (child mob, its members, its member's session, implicit mob, MCP \
+                 adapter, runtime registration, stored session) after the next turn"
+            );
+        }
+    }
+
+    /// A model switch is queued behind a running turn, and a turn that sets
+    /// a level the current model's route takes is sent behind the switch.
+    /// Admitted there, that turn would be judged again at its start, against
+    /// the model the switch moved the session to, and a refusal at a turn's
+    /// start ends the inputs queued on the session's runtime. So the turn
+    /// is not admitted: it is answered that the session is busy, at once,
+    /// and stores no input. The switch, a plain turn sent after it and an
+    /// input sent through the runtime with no turn request waiting on it (as
+    /// a peer message or a scheduled delivery is sent) all run; the session
+    /// keeps its runtime registration and what it owns. Sent again on the
+    /// idle session, the turn is judged against what the route states then:
+    /// refused typed when the route no longer states the level (the
+    /// fixture's route states one level for every model, so the row changes
+    /// what it states to stand for the model the switch selected), and run
+    /// when it does. The level is named in the field itself and inside
+    /// `provider_params`: both are answered the same.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_behind_a_queued_model_switch_is_answered_busy_and_costs_no_queued_input()
+    {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input::{Input, PromptInput};
+
+        for (form, level) in both_forms_of_a_level(EffortLevel::High) {
+            let session = FailedStartSession::materialized().await;
+            // The route states `high`.
+            session
+                .client
+                .route_states_level
+                .store(1, AtomicOrdering::SeqCst);
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+            let stored_inputs = || async {
+                session
+                    .runtime
+                    .service
+                    .runtime_store()
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("the stored input rows are readable")
+                    .len()
+            };
+
+            // A turn runs, past its first round; a model switch queues
+            // behind it.
+            let running = session.start_turn_past_its_first_round("running").await;
+            let switch = session.spawn_turn(
+                "switches the model",
+                Some(crate::handlers::turn::TurnOverrides {
+                    model: Some("claude-opus-4-8".to_string()),
+                    ..Default::default()
+                }),
+            );
+            session.wait_for_active_inputs(2).await;
+            let inputs_before = stored_inputs().await;
+
+            // The turn that sets a level is answered at once.
+            let busy = tokio::time::timeout(
+                Duration::from_secs(10),
+                session.spawn_turn("sets a level", Some(level.clone())),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{form}: the request is answered while the turn runs"))
+            .unwrap()
+            .expect_err("a turn that sets a level is not queued on a busy session");
+            assert_eq!(
+                (
+                    (busy.code, busy.data.clone()),
+                    stored_inputs().await,
+                    session.active_inputs().await
+                ),
+                (level_change_needs_idle_session(), inputs_before, 2),
+                "{form}: ((code, data), stored inputs, active inputs): {busy:?}"
+            );
+
+            // A plain turn and an input no turn request waits on queue
+            // behind the switch.
+            let plain = session.spawn_turn("plain", None);
+            session.wait_for_active_inputs(3).await;
+            let (_, waiter) = session
+                .runtime
+                .runtime_adapter
+                .accept_input_with_completion(
+                    &session.session_id,
+                    Input::Prompt(PromptInput::from_content_input(
+                        FAILED_START_QUEUED_INPUT.into(),
+                        SessionRuntime::typed_text_turn(None),
+                    )),
+                )
+                .await
+                .expect("the runtime admits the input");
+            session.wait_for_active_inputs(4).await;
+
+            // Everything queued runs.
+            let served = session.serve_model_requests();
+            assert_eq!(
+                (
+                    FailedStartSession::turn_answer(running).await,
+                    FailedStartSession::turn_answer(switch).await,
+                    FailedStartSession::turn_answer(plain).await,
+                    FailedStartSession::queued_input_end(
+                        waiter.expect("an admitted prompt has a completion waiter")
+                    )
+                    .await,
+                ),
+                (Ok(()), Ok(()), Ok(()), FailedStartQueuedInput::Completed),
+                "{form}: (the running turn, the model switch, the plain turn, the input sent \
+                 through the runtime)"
+            );
+            assert_eq!(
+                session.holdings().await,
+                (true, 1, true, true, true, true, true),
+                "{form}: (child mob, its members, its member's session, implicit mob, MCP \
+                 adapter, runtime registration, stored session) after the queue ran"
+            );
+
+            // Sent again on the idle session, the turn is judged on what the
+            // route states then.
+            session
+                .client
+                .route_states_level
+                .store(2, AtomicOrdering::SeqCst);
+            let refused = session
+                .spawn_turn(
+                    "sets a level, the route does not state it",
+                    Some(level.clone()),
+                )
+                .await
+                .unwrap()
+                .expect_err("the route does not state the level");
+            assert_eq!(
+                refusal_answer_shape(&refused),
+                (
+                    error::INVALID_PARAMS,
+                    Some(serde_json::json!("reasoning_effort_refused")),
+                    Some(serde_json::json!("unsupported_level")),
+                ),
+                "{form}: {refused:?}"
+            );
+            session
+                .client
+                .route_states_level
+                .store(1, AtomicOrdering::SeqCst);
+            let again = session.spawn_turn("sets a level, the route states it", Some(level));
+            assert_eq!(
+                FailedStartSession::turn_answer(again).await,
+                Ok(()),
+                "{form}: the turn with the level runs on the idle session"
+            );
+            served.abort();
+        }
+    }
+
+    /// A mob member's session is a session too: a turn a client starts on
+    /// it (`mob/turn_start`, or `turn/start` with the member's session)
+    /// enters by the same door. While a turn of the member runs, a turn
+    /// that sets a level the route takes is answered that the session is
+    /// busy, with the reason in its data, and a level the route refuses is
+    /// answered its typed refusal; the running turn completes.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_on_a_busy_members_session_is_answered_as_on_any_session() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        // The route states `high`.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let member_turn =
+            |prompt: &'static str, overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&session.runtime);
+                let member_session = member_session.clone();
+                tokio::spawn(async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    runtime
+                        .start_turn_via_runtime(
+                            &member_session,
+                            prompt.into(),
+                            Vec::new(),
+                            event_tx,
+                            None,
+                            None,
+                            None,
+                            overrides,
+                        )
+                        .await
+                })
+            };
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let running = member_turn("running", None);
+        assert!(
+            session
+                .request_entered(requests + 1, Duration::from_mins(1))
+                .await,
+            "the member's turn reaches the provider"
+        );
+
+        let answers = |level: EffortLevel| {
+            let turn = member_turn(
+                "names a level",
+                Some(level_overrides(TurnMetadataOverride::Set(level))),
+            );
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), turn)
+                    .await
+                    .expect("the request is answered while the member's turn runs")
+                    .expect("the turn task")
+                    .expect_err("a level turn is not queued on a busy member")
+            }
+        };
+        let busy = answers(EffortLevel::High).await;
+        assert_eq!(
+            (busy.code, busy.data.clone()),
+            level_change_needs_idle_session(),
+            "{busy:?}"
+        );
+        let refused = answers(EffortLevel::Low).await;
+        assert_eq!(
+            refusal_answer_shape(&refused),
+            (
+                error::INVALID_PARAMS,
+                Some(serde_json::json!("reasoning_effort_refused")),
+                Some(serde_json::json!("unsupported_level")),
+            ),
+            "{refused:?}"
+        );
+        let served = session.serve_model_requests();
+        assert_eq!(FailedStartSession::turn_answer(running).await, Ok(()));
+        served.abort();
+    }
+
+    /// On a session that holds a level, only plain turns and true repeats
+    /// of that level queue behind unfinished work. A turn runs. A turn that
+    /// changes the model and clears the level carries no level in its
+    /// target, and a turn that only clears the level changes no model, but
+    /// either one queued would let a turn that repeats the level, admitted
+    /// behind it as a repeat, set that level again at its own start: a
+    /// level set hidden in the queue, judged only there. So every turn
+    /// that changes anything of the session's LLM identity is answered that
+    /// the session is busy, with the reason in its data, at once, and
+    /// stores no input: a model change with a clear, a clear alone, and the
+    /// level named inside `provider_params` even when it equals the held
+    /// one (that form replaces the provider params; it is never a repeat).
+    /// A repeat of the level by the field itself queues and runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_model_change_with_a_clear_on_a_busy_session_that_holds_a_level_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "sets the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn that sets the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn that sets the level runs");
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let stored_inputs = || async {
+            session
+                .runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .len()
+        };
+
+        // A turn runs, past its first round.
+        let running = session.start_turn_past_its_first_round("running").await;
+        let inputs_before = stored_inputs().await;
+
+        // A model change with a clear is answered at once.
+        let busy = tokio::time::timeout(
+            Duration::from_secs(10),
+            session.spawn_turn(
+                "changes the model and clears the level",
+                Some(crate::handlers::turn::TurnOverrides {
+                    model: Some("claude-opus-4-8".to_string()),
+                    reasoning_effort: Some(TurnMetadataOverride::Clear),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .await
+        .expect("the request is answered while the turn runs")
+        .unwrap()
+        .expect_err("a model change on a session that holds a level is not queued");
+        assert_eq!(
+            (
+                (busy.code, busy.data.clone()),
+                stored_inputs().await,
+                session.active_inputs().await
+            ),
+            (level_change_needs_idle_session(), inputs_before, 1),
+            "((code, data), stored inputs, active inputs): {busy:?}"
+        );
+
+        // A clear alone, and the held level named inside `provider_params`,
+        // are answered at once too.
+        let [_, (_, nested_held_level)] = both_forms_of_a_level(EffortLevel::High);
+        for (what, overrides) in [
+            (
+                "a clear alone",
+                level_overrides(TurnMetadataOverride::Clear),
+            ),
+            ("the held level inside provider_params", nested_held_level),
+        ] {
+            let busy = tokio::time::timeout(
+                Duration::from_secs(10),
+                session.spawn_turn("changes the identity", Some(overrides)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{what}: the request is answered while the turn runs"))
+            .unwrap()
+            .expect_err("a change of the identity of a session that holds a level is not queued");
+            assert_eq!(
+                (
+                    (busy.code, busy.data.clone()),
+                    stored_inputs().await,
+                    session.active_inputs().await
+                ),
+                (level_change_needs_idle_session(), inputs_before, 1),
+                "{what}: ((code, data), stored inputs, active inputs): {busy:?}"
+            );
+        }
+
+        // A repeat of the level by the field itself queues and runs.
+        let repeat = session.spawn_turn(
+            "repeats the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session.wait_for_active_inputs(2).await;
+        let served = session.serve_model_requests();
+        assert_eq!(
+            (
+                FailedStartSession::turn_answer(running).await,
+                FailedStartSession::turn_answer(repeat).await,
+            ),
+            (Ok(()), Ok(())),
+            "(the running turn, the repeat of the level behind it)"
+        );
+        served.abort();
+        assert_eq!(
+            session.holdings().await,
+            (true, 1, true, true, true, true, true),
+            "(child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session) after the queue ran"
+        );
+    }
+
+    /// A deferred create's session is built by its first turn. While that
+    /// first turn is building, a turn that names a level is not queued
+    /// behind it: queued, it would be judged only at its own start. It is
+    /// answered that the session is busy, with the reason in its data, at
+    /// once, and nothing is admitted beside the first turn, which completes.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_sent_while_a_deferred_sessions_first_turn_builds_is_answered_busy() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = Arc::new(FailedStartLlmClient::default());
+        runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+        // The route states `high`.
+        client.route_states_level.store(1, AtomicOrdering::SeqCst);
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("the deferred session is created");
+
+        // The first turn's build is held where it reads the client's
+        // provider.
+        client
+            .hold_next_provider_read
+            .store(true, AtomicOrdering::SeqCst);
+        let first = spawn_runtime_turn(&runtime, &session_id, "first", None);
+        tokio::time::timeout(Duration::from_mins(1), async {
+            while !client.provider_read_held.load(AtomicOrdering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first turn's build reads the client's provider");
+
+        let answered = tokio::time::timeout(
+            Duration::from_secs(10),
+            spawn_runtime_turn(
+                &runtime,
+                &session_id,
+                "names a level",
+                Some(level_overrides(TurnMetadataOverride::Set(
+                    EffortLevel::High,
+                ))),
+            ),
+        )
+        .await;
+        // The held build is released whatever the answer was, so a failing
+        // row does not wait for the hold's own deadline.
+        client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let busy = answered
+            .expect("the request is answered while the first turn builds")
+            .unwrap()
+            .expect_err("a level turn is not queued behind a first turn that is building");
+        assert_eq!(
+            (busy.code, busy.data.clone()),
+            level_change_needs_idle_session(),
+            "{busy:?}"
+        );
+        assert_eq!(
+            runtime
+                .runtime_adapter
+                .list_active_inputs(&session_id)
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0),
+            1,
+            "nothing was admitted beside the first turn"
+        );
+
+        tokio::time::timeout(Duration::from_mins(1), async {
+            while client.calls.load(AtomicOrdering::SeqCst) < 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first turn reaches the provider");
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn completes");
+    }
+
+    /// A stored session that is not live holds a level its route no longer
+    /// states (not the transient reason: the route states another level). A
+    /// plain turn on it would rebuild the session with that level, so it is
+    /// judged before its input is admitted and refused there: nothing is
+    /// stored for it and the session holds what it held. The way out for
+    /// the caller is a turn that clears the level (or names one the route
+    /// states): the session has no unfinished input, so that turn is
+    /// admitted, the session is rebuilt without the level, and it runs; the
+    /// plain turn after it runs too.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plain_turn_on_a_stored_session_whose_held_level_is_refused_admits_nothing() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "sets the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn that sets the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn that sets the level runs");
+
+        // After a restart the session is stored and not live, and its route
+        // states `low` only.
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+        session
+            .client
+            .route_states_level
+            .store(2, AtomicOrdering::SeqCst);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let stored_inputs = || async {
+            session
+                .runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .len()
+        };
+        let inputs_before = stored_inputs().await;
+        let held_before = session.holdings().await;
+
+        let refused = session
+            .spawn_turn("plain", None)
+            .await
+            .unwrap()
+            .expect_err("the level the session holds is refused");
+        assert_eq!(
+            (
+                refusal_answer_shape(&refused),
+                stored_inputs().await,
+                session.holdings().await,
+                session.client.calls.load(AtomicOrdering::SeqCst),
+            ),
+            (
+                (
+                    error::INVALID_PARAMS,
+                    Some(serde_json::json!("reasoning_effort_refused")),
+                    Some(serde_json::json!("unsupported_level")),
+                ),
+                inputs_before,
+                held_before,
+                requests + 1,
+            ),
+            "((code, data kind, reason), stored inputs, what the session holds, model \
+             requests): {refused:?}"
+        );
+
+        // A turn that clears the level is admitted and runs; so does the
+        // plain turn after it.
+        let cleared = session.spawn_turn(
+            "clears the level",
+            Some(level_overrides(TurnMetadataOverride::Clear)),
+        );
+        session
+            .release_request(requests + 2, "the turn that clears the level")
+            .await;
+        assert_eq!(FailedStartSession::turn_answer(cleared).await, Ok(()));
+        let plain = session.spawn_turn("plain, after the clear", None);
+        session
+            .release_request(requests + 3, "the plain turn after the clear")
+            .await;
+        assert_eq!(FailedStartSession::turn_answer(plain).await, Ok(()));
+    }
+
+    /// The session holds a level and a turn runs. A request that changes
+    /// the model and clears the level is sent, then a request that repeats
+    /// the level the session holds, then a plain request and an input sent
+    /// through the runtime with no turn request waiting on it. Were the
+    /// first request queued, the repeat behind it would be admitted as a
+    /// repeat and would set the level on the new model at its start: a
+    /// model whose route does not state the level refuses it there, and a
+    /// refused start ends what is queued on the session's runtime. So the
+    /// first request is answered that the session is busy, at once, and
+    /// nothing behind it is touched: the repeat, the plain request and the
+    /// runtime input run, and the session holds what it held.
+    ///
+    /// The fixture's route states one level for every model. When the first
+    /// request is queued (a tree without this rule), the row lets the route
+    /// state another level from then on, to stand for the model that
+    /// request selects, and reports what became of everything behind it.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_repeat_behind_a_model_change_with_a_clear_costs_no_queued_input() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input::{Input, PromptInput};
+
+        let session = FailedStartSession::materialized().await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "sets the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn that sets the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn that sets the level runs");
+
+        // A turn runs, past its first round.
+        let running = session.start_turn_past_its_first_round("running").await;
+
+        // The model change with a clear.
+        let mut model_change = session.spawn_turn(
+            "changes the model and clears the level",
+            Some(crate::handlers::turn::TurnOverrides {
+                model: Some("claude-opus-4-8".to_string()),
+                reasoning_effort: Some(TurnMetadataOverride::Clear),
+                ..Default::default()
+            }),
+        );
+        let answered_at_once =
+            tokio::time::timeout(Duration::from_secs(10), &mut model_change).await;
+        let (queued_model_change, model_change_answer) = match answered_at_once {
+            Ok(joined) => (
+                None,
+                joined
+                    .expect("the turn task")
+                    .map(|_| ())
+                    .map_err(|error| (error.code, error.data)),
+            ),
+            Err(_) => {
+                // It was queued: the session will be on the model it
+                // selects, whose route does not state `high`.
+                session.wait_for_active_inputs(2).await;
+                session
+                    .client
+                    .route_states_level
+                    .store(2, AtomicOrdering::SeqCst);
+                (Some(model_change), Ok(()))
+            }
+        };
+        let ahead = if queued_model_change.is_some() { 2 } else { 1 };
+
+        // Behind it: a repeat of the level, a plain request, an input no
+        // turn request waits on.
+        let repeat = session.spawn_turn(
+            "repeats the level",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session.wait_for_active_inputs(ahead + 1).await;
+        let plain = session.spawn_turn("plain", None);
+        session.wait_for_active_inputs(ahead + 2).await;
+        let (_, waiter) = session
+            .runtime
+            .runtime_adapter
+            .accept_input_with_completion(
+                &session.session_id,
+                Input::Prompt(PromptInput::from_content_input(
+                    FAILED_START_QUEUED_INPUT.into(),
+                    SessionRuntime::typed_text_turn(None),
+                )),
+            )
+            .await
+            .expect("the runtime admits the input");
+        session.wait_for_active_inputs(ahead + 3).await;
+
+        let served = session.serve_model_requests();
+        let running = FailedStartSession::turn_answer(running).await;
+        if let Some(model_change) = queued_model_change {
+            let _ = FailedStartSession::turn_answer(model_change).await;
+        }
+        let facts = (
+            model_change_answer,
+            running,
+            FailedStartSession::turn_answer(repeat).await,
+            FailedStartSession::turn_answer(plain).await,
+            FailedStartSession::queued_input_end(
+                waiter.expect("an admitted prompt has a completion waiter"),
+            )
+            .await,
+            session.holdings().await,
+        );
+        served.abort();
+        let (busy_code, busy_data) = level_change_needs_idle_session();
+        assert_eq!(
+            facts,
+            (
+                Err((busy_code, busy_data)),
+                Ok(()),
+                Ok(()),
+                Ok(()),
+                FailedStartQueuedInput::Completed,
+                (true, 1, true, true, true, true, true),
+            ),
+            "(the model change with a clear, the running turn, the repeat of the level, the \
+             plain request, the input sent through the runtime, (child mob, its members, its \
+             member's session, implicit mob, MCP adapter, runtime registration, stored session))"
+        );
+    }
+
+    /// One reason for a refusal is transient: the source of the levels
+    /// exists and cannot be read now (an account's model list that is not
+    /// loaded). A stored session that holds a level and is not live is not
+    /// refused for it before admission: its plain turn is admitted and the
+    /// turn's own start judges the level, on what the source says then. The
+    /// same plain turn runs once the source can be read.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plain_turn_on_a_stored_session_whose_levels_source_is_not_loaded_is_judged_at_its_start()
+     {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let session = FailedStartSession::materialized().await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "names a level the route states",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn with the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn with the stated level runs");
+
+        // After a restart the session is stored and not live, and the
+        // account's list is not loaded.
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+        session
+            .client
+            .route_states_level
+            .store(3, AtomicOrdering::SeqCst);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let stored_inputs = || async {
+            session
+                .runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .len()
+        };
+        let inputs_before = stored_inputs().await;
+        let refused = session
+            .spawn_turn("plain, the list is not loaded", None)
+            .await
+            .unwrap()
+            .expect_err("the session's level cannot be judged while the list is not loaded");
+        assert_eq!(
+            (
+                refusal_answer_shape(&refused),
+                stored_inputs().await - inputs_before
+            ),
+            (
+                (
+                    error::INVALID_PARAMS,
+                    Some(serde_json::json!("reasoning_effort_refused")),
+                    Some(serde_json::json!("supported_levels_unavailable")),
+                ),
+                1
+            ),
+            "((code, data kind, reason), inputs stored for the turn): the turn was admitted \
+             and its start judged it: {refused:?}"
+        );
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            requests + 1,
+            "the refused turn made no model request"
+        );
+
+        // The list is loaded: the same plain turn runs.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("plain, the list is loaded", None);
+        session
+            .release_request(requests + 2, "the plain turn once the list is loaded")
+            .await;
+        assert_eq!(FailedStartSession::turn_answer(next).await, Ok(()));
+    }
+
+    /// A live session holds a level, the account's list is not loaded, and
+    /// the store fails the read that tells whether the session is live, for
+    /// one plain turn request. The request is answered with that read's
+    /// error before anything is admitted: no input is stored for it, no
+    /// model request is made, and the session stays live and holds what it
+    /// held. The same plain turn runs once the store and the list can be
+    /// read.
+    ///
+    /// A request whose failed read counted as "the session is not live" is
+    /// judged as a turn on a stored session is: the reason that the list is
+    /// not loaded is left to the turn's start, and the turn is admitted.
+    ///
+    /// The store refuses the next read of the session's catalog entry. The
+    /// live read makes that read for a live session (its archive check),
+    /// and the first read of the entry a plain turn request makes on a live
+    /// session that holds a level is the live read where the turn's level
+    /// is judged, before every other read of whether the session is live.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_whose_live_session_read_fails_is_answered_with_the_read_error_and_admits_nothing()
+     {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, store) = make_runtime_with_failing_runtime_store(temp_factory(&temp), 10);
+        let session = FailedStartSession::materialized_on(temp, runtime).await;
+        // The route states `high`, and a turn gives the session that level.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let leveled = session.spawn_turn(
+            "names a level the route states",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        session
+            .release_request(requests + 1, "the turn with the level")
+            .await;
+        leveled
+            .await
+            .unwrap()
+            .expect("the turn with the stated level runs");
+
+        // The session stays live, and the account's list is not loaded.
+        session
+            .client
+            .route_states_level
+            .store(3, AtomicOrdering::SeqCst);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session.session_id);
+        let stored_inputs = || async {
+            session
+                .runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .len()
+        };
+        // (live, the level the session holds).
+        let live_and_level = || async {
+            (
+                session
+                    .runtime
+                    .service
+                    .has_live_session(&session.session_id)
+                    .await
+                    .map_err(|error| error.to_string()),
+                session
+                    .runtime
+                    .current_materialized_llm_identity(&session.session_id)
+                    .await
+                    .map(|identity| {
+                        identity
+                            .provider_params
+                            .and_then(|params| params.reasoning_effort)
+                    })
+                    .map_err(|error| error.message),
+            )
+        };
+        let inputs_before = stored_inputs().await;
+        let held_before = session.holdings().await;
+        assert_eq!(
+            live_and_level().await,
+            (Ok(true), Ok(Some(EffortLevel::High))),
+            "(live, the level the session holds) before the request"
+        );
+
+        store.fail_next_catalog_entry_read_of(runtime_id.clone());
+        let mut turn = session.spawn_turn("plain, the live read fails", None);
+        let answer = match tokio::time::timeout(Duration::from_secs(10), &mut turn).await {
+            Ok(joined) => Some(joined.expect("the turn task").map(|_| ()).map_err(|error| {
+                (
+                    error.code,
+                    error.message.contains("forced runtime catalog failure"),
+                )
+            })),
+            // Not answered: the turn was admitted and its run waits at the
+            // model.
+            Err(_) => None,
+        };
+        assert_eq!(
+            (
+                answer,
+                store.catalog_entry_read_failure_is_pending(),
+                stored_inputs().await - inputs_before,
+                session.client.calls.load(AtomicOrdering::SeqCst),
+                session.holdings().await,
+                live_and_level().await,
+            ),
+            (
+                Some(Err((error::INTERNAL_ERROR, true))),
+                false,
+                0,
+                requests + 1,
+                held_before,
+                (Ok(true), Ok(Some(EffortLevel::High))),
+            ),
+            "(the answer: (code, it carries the failed read's error), the failed read is still \
+             to come, inputs stored for the turn, model requests, what the session holds, (live, \
+             the level the session holds))"
+        );
+
+        // The store and the list can be read: the same plain turn runs.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let next = session.spawn_turn("plain, the live read answers", None);
+        session
+            .release_request(requests + 2, "the plain turn once the live read answers")
+            .await;
+        assert_eq!(FailedStartSession::turn_answer(next).await, Ok(()));
+    }
+
     #[tokio::test]
     async fn materialized_hot_swap_updates_durable_identity_for_recovery() {
         let temp = tempfile::tempdir().unwrap();
@@ -42284,6 +47749,118 @@ mod tests {
                     "kind": "tool_grant_gate_refused",
                     "tool_grant_gate_refusal": {"kind": "family_not_mounted", "family": "comms"},
                 })
+            );
+        }
+    }
+
+    /// Refusal documents for the surface rows: a catalogued level the model
+    /// does not accept, a refusal that names no route, and the one transient
+    /// reason. Each with the `retryable` value its error data carries.
+    fn reasoning_effort_refusal_documents() -> Vec<(serde_json::Value, bool)> {
+        vec![
+            (
+                serde_json::json!({
+                    "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                    "route": {"backend": "anthropic_api", "api": "messages"},
+                    "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                    "facts": "catalog",
+                }),
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "requested": "high", "provider": "other", "model": "custom-model-1",
+                    "route": null,
+                    "reason": "supported_levels_unknown", "supported": null, "facts": null,
+                }),
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "requested": "high", "provider": "openai", "model": "account-model-1",
+                    "route": {"backend": "copilot", "api": "responses"},
+                    "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+                }),
+                true,
+            ),
+        ]
+    }
+
+    /// A refused `reasoning_effort` level answers one shape whichever
+    /// checkpoint refused: the session error path (a refused build), a turn
+    /// that failed for the refusal (an apply failure of its build, or a run
+    /// that failed before a provider request) and a refused live
+    /// reconfiguration all answer invalid params with the same message and
+    /// the same typed data, byte for byte. `retryable` is `true` only for
+    /// the unavailable reason; a refusal that names no route keeps
+    /// `"route": null`.
+    #[test]
+    fn a_refusal_inside_a_turn_answers_like_a_build_refusal() {
+        let session_id = SessionId::new();
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let build_answer = session_error_to_rpc(SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+            ));
+            assert_eq!(build_answer.code, error::INVALID_PARAMS, "{build_answer:?}");
+            assert_eq!(build_answer.code, -32602);
+            assert_eq!(build_answer.message, format!("agent error: {refusal}"));
+            assert_eq!(
+                build_answer.data,
+                Some(serde_json::json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                }))
+            );
+            let build_bytes = serde_json::to_string(&build_answer).expect("serialize");
+
+            let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(refusal.clone()),
+            };
+            let detail = format!("agent error: {refusal}");
+            // The turn's build was refused: an apply failure with the reason.
+            let mut apply_failure =
+                meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+            apply_failure.reason = Some(reason.clone());
+            // The run was refused before a provider request: a failed turn
+            // terminal with the reason.
+            let mut failed_run = meerkat_core::TurnErrorMetadata::terminal(
+                meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                meerkat_core::TurnTerminalOutcome::Failed,
+                detail.clone(),
+            );
+            failed_run.reason = Some(reason);
+
+            for turn_error in [apply_failure, failed_run] {
+                for outcome in [
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: detail.clone(),
+                        error: turn_error.clone(),
+                    },
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: detail.clone(),
+                        error: turn_error.clone(),
+                    },
+                ] {
+                    let answer = completion_outcome_to_rpc_result(outcome, &session_id)
+                        .expect_err("a refused level is an RPC error");
+                    assert_eq!(
+                        serde_json::to_string(&answer).expect("serialize"),
+                        build_bytes,
+                        "a refused turn answers the build refusal's bytes"
+                    );
+                }
+            }
+
+            let swap_answer = runtime_driver_error_to_rpc(
+                meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(refusal)),
+            );
+            assert_eq!(
+                serde_json::to_string(&swap_answer).expect("serialize"),
+                build_bytes,
+                "a refused live reconfiguration answers the build refusal's bytes"
             );
         }
     }
@@ -43208,6 +48785,7 @@ mod tests {
                             self_hosted_server_id: None,
                             provider_params: None,
                             auth_binding: None,
+                            reasoning_effort: None,
                         },
                     )
                     .await
@@ -43573,6 +49151,1357 @@ mod tests {
         assert!(
             !matches!(parked, Err(SessionError::Busy { .. })),
             "the parked projection was never refused as released: {parked:?}"
+        );
+    }
+
+    /// A model client that holds each model request until a row releases it.
+    #[cfg(feature = "mob")]
+    #[derive(Default)]
+    struct HeldModelLlmClient {
+        calls: AtomicUsize,
+        release: Notify,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl LlmClient for HeldModelLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            Box::pin(async_stream::stream! {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                self.release.notified().await;
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Released response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    type HeldTurnRequest = tokio::task::JoinHandle<Result<RunResult, RpcError>>;
+
+    /// Start a turn request on `session_id` in its own task.
+    #[cfg(feature = "mob")]
+    fn spawn_held_turn(
+        runtime: &Arc<SessionRuntime>,
+        session_id: &SessionId,
+        prompt: &'static str,
+    ) -> HeldTurnRequest {
+        let runtime = Arc::clone(runtime);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            let (event_tx, _event_rx) = mpsc::channel(100);
+            runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    prompt.into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        })
+    }
+
+    /// Whether the client's `expected`th model request started in time.
+    #[cfg(feature = "mob")]
+    async fn held_request_entered(client: &HeldModelLlmClient, expected: usize) -> bool {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while client.calls.load(AtomicOrdering::SeqCst) < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// A turn request's answer: `Ok` for a result, the error's code and
+    /// message otherwise.
+    #[cfg(feature = "mob")]
+    async fn held_turn_answer(request: HeldTurnRequest, description: &str) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(20), request)
+            .await
+            .unwrap_or_else(|_| panic!("{description} is answered"))
+            .expect("the request task")
+            .map(|_| ())
+            .map_err(|error| format!("{} {}", error.code, error.message))
+    }
+
+    /// A running turn past its first round commit with `queued` turn requests
+    /// queued behind it, one after the other. Returns the running request,
+    /// then each queued request with its input, in the order they queued.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn a_running_turn_with_queued_requests(
+        session: &FailedStartSession,
+        queued: usize,
+    ) -> (FailedStartTurn, Vec<(FailedStartTurn, InputId)>) {
+        let running = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+        let mut known = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs");
+        let mut requests = Vec::new();
+        for index in 0..queued {
+            let request = session.spawn_turn("a queued request", None);
+            session.wait_for_active_inputs(index + 2).await;
+            let input = session
+                .runtime
+                .runtime_adapter
+                .list_active_inputs(&session.session_id)
+                .await
+                .expect("list the active inputs")
+                .into_iter()
+                .find(|input| !known.contains(input))
+                .expect("the queued request's input");
+            known.push(input.clone());
+            requests.push((request, input));
+        }
+        (running, requests)
+    }
+
+    /// What became of a session's other work after one of its queued turn
+    /// requests ended: whether the ended request was refused, the running
+    /// request's answer, the other queued requests' answers, what the session
+    /// holds, and whether its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterOneQueuedRequestEnded = (
+        bool,
+        Result<(), String>,
+        Vec<Result<(), String>>,
+        (bool, usize, bool, bool, bool, bool, bool),
+        Result<(), String>,
+    );
+
+    /// Serve the model from here on and collect
+    /// [`AfterOneQueuedRequestEnded`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_one_queued_request_ended(
+        session: &FailedStartSession,
+        ended: FailedStartTurn,
+        running: FailedStartTurn,
+        others: Vec<FailedStartTurn>,
+    ) -> AfterOneQueuedRequestEnded {
+        let serving = session.serve_model_requests();
+        let ended = FailedStartSession::turn_answer(ended).await;
+        let running = FailedStartSession::turn_answer(running).await;
+        let mut other_answers = Vec::new();
+        for other in others {
+            other_answers.push(FailedStartSession::turn_answer(other).await);
+        }
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        (ended.is_err(), running, other_answers, holdings, next)
+    }
+
+    /// What [`AfterOneQueuedRequestEnded`] is when ending one queued request
+    /// ends nothing else: the request is refused, the running turn and the
+    /// `others` queued requests are answered their results, the session
+    /// keeps its child mob with its member, its implicit mob, its MCP
+    /// adapter, its runtime registration and its stored session, and its
+    /// next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn only_the_one_request_ended(others: usize) -> AfterOneQueuedRequestEnded {
+        (
+            true,
+            Ok(()),
+            vec![Ok(()); others],
+            (true, 1, true, true, true, true, true),
+            Ok(()),
+        )
+    }
+
+    /// A request cancelled while its turn is queued behind a running turn
+    /// ends that one request: the running turn completes and its request is
+    /// answered its result, and the session keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_queued_request_leaves_the_other_request_to_its_turn() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (cancelled, cancelled_input) = queued.remove(0);
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(
+                &session.session_id,
+                &cancelled_input,
+                "RPC request cancelled",
+            )
+            .await
+            .expect("the queued request's input is cancelled");
+        assert_eq!(
+            after_one_queued_request_ended(&session, cancelled, running, Vec::new()).await,
+            only_the_one_request_ended(0),
+            "(the cancelled request refused, the running request, the other queued requests, \
+             (child mob, its members, its member's session, implicit mob, MCP adapter, runtime \
+             registration, stored session), the next turn)"
+        );
+    }
+
+    /// What a turn that waits on its queued input is answered when that input
+    /// is cancelled by its exact input (as a request's cancel does it, with
+    /// the cancel's reason), and when it is recalled: the turn-failure code
+    /// with the text that the runtime ended the input before a run.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const CANCELLED_QUEUED_REQUEST_ANSWER: &str =
+        "-32603 runtime terminated: RPC request cancelled";
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    const RECALLED_QUEUED_REQUEST_ANSWER: &str =
+        "-32603 runtime terminated: input recalled before it started";
+
+    /// What a row reads after the middle one of three queued turn requests
+    /// ended: the ended request's answer (code and message, session ids
+    /// replaced), its input's stored phase and terminal, the running
+    /// request's answer, the answers of the two other queued requests (the
+    /// one queued before the ended one, then the one queued after it), the
+    /// order in which the three were answered, how many model requests were
+    /// made from the moment the model was served again until the other
+    /// requests were answered, what the session holds, and whether its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterTheMiddleQueuedRequestEnded = (
+        String,
+        String,
+        Result<(), String>,
+        (Result<(), String>, Result<(), String>),
+        Vec<&'static str>,
+        usize,
+        (bool, usize, bool, bool, bool, bool, bool),
+        Result<(), String>,
+    );
+
+    /// Serve the model from here on and collect
+    /// [`AfterTheMiddleQueuedRequestEnded`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_the_middle_queued_request_ended(
+        session: &FailedStartSession,
+        ended: FailedStartTurn,
+        ended_input: &InputId,
+        running: FailedStartTurn,
+        before: FailedStartTurn,
+        after: FailedStartTurn,
+    ) -> AfterTheMiddleQueuedRequestEnded {
+        let model_requests_before = session.client.calls.load(AtomicOrdering::SeqCst);
+        let answered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let watch = |label: &'static str, turn: FailedStartTurn| {
+            let answered = Arc::clone(&answered);
+            tokio::spawn(async move {
+                let answer = FailedStartSession::turn_answer(turn).await;
+                answered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(label);
+                answer
+            })
+        };
+        let running = watch("the running request", running);
+        let before = watch("the request queued before", before);
+        let after = watch("the request queued after", after);
+        let serving = session.serve_model_requests();
+        let ended = match without_session_ids(FailedStartSession::turn_answer(ended).await) {
+            Ok(()) => "its result".to_string(),
+            Err(text) => text,
+        };
+        let running = running.await.expect("the running request's watcher");
+        let before = before
+            .await
+            .expect("the watcher of the request queued before");
+        let after = after
+            .await
+            .expect("the watcher of the request queued after");
+        let model_requests =
+            session.client.calls.load(AtomicOrdering::SeqCst) - model_requests_before;
+        let ended_input = stored_input(session, ended_input).await;
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        let answered = answered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (
+            ended,
+            phase_and_terminal(&ended_input).to_string(),
+            running,
+            (before, after),
+            answered,
+            model_requests,
+            holdings,
+            next,
+        )
+    }
+
+    /// What [`AfterTheMiddleQueuedRequestEnded`] is when ending one queued
+    /// request ends nothing else. The ended request is answered
+    /// `ended_answer` and its input is stored as cancelled; the running turn
+    /// and the two other queued requests are answered their results, in the
+    /// order they were queued; one model request is made for each of the two
+    /// other requests and none for the ended one; the session keeps its
+    /// child mob with its member, its implicit mob, its MCP adapter, its
+    /// runtime registration and its stored session; and its next turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn only_the_middle_request_ended(ended_answer: &str) -> AfterTheMiddleQueuedRequestEnded {
+        (
+            ended_answer.to_string(),
+            "Abandoned, terminal Some(Abandoned { reason: Cancelled })".to_string(),
+            Ok(()),
+            (Ok(()), Ok(())),
+            vec![
+                "the running request",
+                "the request queued before",
+                "the request queued after",
+            ],
+            2,
+            (true, 1, true, true, true, true, true),
+            Ok(()),
+        )
+    }
+
+    /// The middle one of three turn requests queued behind a running turn
+    /// is cancelled by its exact input: that request's turn is answered that
+    /// the runtime ended its input, its input is stored as cancelled, no
+    /// model request is made for it, the running
+    /// turn completes and is answered its result, the two other queued
+    /// requests run after it in the order they were queued and are answered
+    /// their results, and the session keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_queued_request_leaves_the_running_turn_and_the_other_queued_request() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 3).await;
+        let (before, _before_input) = queued.remove(0);
+        let (cancelled, cancelled_input) = queued.remove(0);
+        let (after, _after_input) = queued.remove(0);
+        session
+            .runtime
+            .runtime_adapter
+            .cancel_input_if_present(
+                &session.session_id,
+                &cancelled_input,
+                "RPC request cancelled",
+            )
+            .await
+            .expect("the queued request's input is cancelled");
+        let measured = after_the_middle_queued_request_ended(
+            &session,
+            cancelled,
+            &cancelled_input,
+            running,
+            before,
+            after,
+        )
+        .await;
+        println!("the middle of three queued requests cancelled: {measured:?}");
+        assert_eq!(
+            measured,
+            only_the_middle_request_ended(CANCELLED_QUEUED_REQUEST_ANSWER),
+            "(the cancelled request's answer, its input's stored phase and terminal, the \
+             running request, (the request queued before, the request queued after), the order \
+             they were answered in, model requests made, (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session), the \
+             next turn)"
+        );
+    }
+
+    /// The middle one of three turn requests queued behind a running turn
+    /// is recalled by its input, as `session/recall_input` recalls it: that
+    /// request is answered that the runtime ended its input before a run and
+    /// its input is stored as cancelled, no model request is made for it,
+    /// the running turn completes and is answered its result, the two other
+    /// queued requests run after it in the order they were queued and are
+    /// answered their results, and the session keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recall_of_a_queued_turn_leaves_the_running_turn_and_the_other_queued_request() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 3).await;
+        let (before, _before_input) = queued.remove(0);
+        let (recalled, recalled_input) = queued.remove(0);
+        let (after, _after_input) = queued.remove(0);
+        recall_the_queued_request(&session, &recalled_input).await;
+        let measured = after_the_middle_queued_request_ended(
+            &session,
+            recalled,
+            &recalled_input,
+            running,
+            before,
+            after,
+        )
+        .await;
+        println!("the middle of three queued requests recalled: {measured:?}");
+        assert_eq!(
+            measured,
+            only_the_middle_request_ended(RECALLED_QUEUED_REQUEST_ANSWER),
+            "(the recalled request's answer, its input's stored phase and terminal, the \
+             running request, (the request queued before, the request queued after), the order \
+             they were answered in, model requests made, (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session), the \
+             next turn)"
+        );
+    }
+
+    /// What a member's session answers after `mob/cancel_all_work` ended the
+    /// member's running run: whether a turn request that was queued on the
+    /// member's session (when there was one) was refused, whether the
+    /// member's session is still registered, and the answers of the member's
+    /// next two turns (an error's text without its session id).
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    type AfterAMembersWorkWasCancelled =
+        (Option<bool>, bool, Result<(), String>, Result<(), String>);
+
+    /// A turn answer with every session id in its error text replaced, so
+    /// that the answers of two sessions can be compared.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn without_session_ids(answer: Result<(), String>) -> Result<(), String> {
+        answer.map_err(|text| {
+            text.split(' ')
+                .map(|word| {
+                    let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+                    if uuid::Uuid::parse_str(bare).is_ok() {
+                        word.replace(bare, "<session>")
+                    } else {
+                        word.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
+    /// A run the member's mob admitted is in flight on the member, past its
+    /// first round commit; with `queued_request`, a turn request on the
+    /// member's session queues behind it. Then `mob/cancel_all_work` on the
+    /// member. Collects [`AfterAMembersWorkWasCancelled`].
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn after_a_members_work_was_cancelled(
+        queued_request: bool,
+    ) -> AfterAMembersWorkWasCancelled {
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        let turn_on_the_member = |prompt: &'static str| {
+            let runtime = Arc::clone(&session.runtime);
+            let member_session = member_session.clone();
+            tokio::spawn(async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &member_session,
+                        prompt.into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+            })
+        };
+
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        session
+            .client
+            .answer_a_tool_call_next
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .mob_state
+            .mob_member_send(
+                &session.child_mob,
+                meerkat_mob::AgentIdentity::from("worker-1"),
+                "the member's running turn".into(),
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .await
+            .expect("the member admits the turn");
+        assert!(
+            session
+                .request_entered(requests + 2, Duration::from_mins(1))
+                .await,
+            "the member's running turn reaches its second model request"
+        );
+        let queued = if queued_request {
+            let queued = turn_on_the_member("the queued request");
+            let mut member_inputs = 0;
+            for _ in 0..1200 {
+                member_inputs = session
+                    .runtime
+                    .runtime_adapter
+                    .list_active_inputs(&member_session)
+                    .await
+                    .map(|inputs| inputs.len())
+                    .unwrap_or(0);
+                if member_inputs == 2 || queued.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!(
+                (member_inputs, queued.is_finished()),
+                (2, false),
+                "(the member session's active inputs, the request already answered): the turn \
+                 request is admitted and queued behind the member's running turn"
+            );
+            Some(queued)
+        } else {
+            None
+        };
+
+        let (member_runtime, member_fence) = session
+            .mob_state
+            .mob_member_binding_for_cancel(
+                &session.child_mob,
+                &meerkat_mob::AgentIdentity::from("worker-1"),
+            )
+            .await
+            .expect("the member's binding, as `mob/cancel_all_work` resolves it");
+        session
+            .mob_state
+            .mob_cancel_all_work(&session.child_mob, member_runtime, member_fence)
+            .await
+            .expect("cancel all of the member's work");
+        let serving = session.serve_model_requests();
+        let refused = match queued {
+            Some(queued) => Some(FailedStartSession::turn_answer(queued).await.is_err()),
+            None => None,
+        };
+        let registered =
+            still_registered_after(&session.runtime, &member_session, Duration::from_secs(2)).await;
+        let next = FailedStartSession::turn_answer(turn_on_the_member("next")).await;
+        let after_next = FailedStartSession::turn_answer(turn_on_the_member("after next")).await;
+        serving.abort();
+        (
+            refused,
+            registered,
+            without_session_ids(next),
+            without_session_ids(after_next),
+        )
+    }
+
+    /// `mob/cancel_all_work` on a member whose session holds a queued turn
+    /// request ends the member's work and nothing else: the queued request
+    /// is refused, the member's session keeps its runtime registration, and
+    /// the member's next turns are answered exactly as they are after a
+    /// `mob/cancel_all_work` with no request queued.
+    ///
+    /// The row pins that equality, and it pins today's answers as measured,
+    /// not as wanted: after a member's running run was cancelled, the first
+    /// turn a client starts on the member's session is answered an internal
+    /// error and is not run, and the turn after it runs (the changelog's
+    /// Known limitations). A change of either answer fails the row.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_all_work_on_a_member_keeps_the_members_registration() {
+        let (_, registered_plain, next_plain, after_next_plain) =
+            after_a_members_work_was_cancelled(false).await;
+        let with_a_queued_request = after_a_members_work_was_cancelled(true).await;
+        println!(
+            "no request queued: registered {registered_plain}, next turn {next_plain:?}, the \
+             turn after it {after_next_plain:?}; with a request queued: {with_a_queued_request:?}"
+        );
+        assert!(
+            registered_plain,
+            "a member's session stays registered after its work was cancelled"
+        );
+        let first_turn = match &next_plain {
+            Ok(()) => "its result",
+            Err(text) => text.as_str(),
+        };
+        assert!(
+            first_turn.starts_with("-32603 turn abandoned"),
+            "the first turn after a member's work was cancelled, with no request queued: \
+             {first_turn}"
+        );
+        assert_eq!(
+            after_next_plain,
+            Ok(()),
+            "the turn after it, with no request queued"
+        );
+        assert_eq!(
+            with_a_queued_request,
+            (Some(true), true, next_plain, after_next_plain),
+            "(the queued request refused, the member's session still registered, the member's \
+             next turn, the turn after it) with a turn request queued on the member"
+        );
+    }
+
+    /// The relay runs the cleanup the machine names, end to end, in an
+    /// arrangement where the machine names the cleanup of an archived
+    /// session and no archive call runs that cleanup itself (an archive
+    /// would hide the relay's). The row asserts the end state after the
+    /// relays ran, as measured. A control row that tells the relay apart
+    /// from the other readers of the same rule is tracked as a follow-up.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_runs_the_archive_cleanup_when_the_machine_names_it() {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (queued_request, _queued_input) = queued.remove(0);
+
+        let retired = session
+            .runtime
+            .runtime_adapter
+            .retire_runtime(&session.session_id)
+            .await
+            .expect("the runtime is retired");
+        let serving = session.serve_model_requests();
+        let running = FailedStartSession::turn_answer(running).await;
+        let queued_request = FailedStartSession::turn_answer(queued_request).await;
+        let mut registered = true;
+        for _ in 0..200 {
+            registered = session
+                .runtime
+                .runtime_adapter
+                .contains_session(&session.session_id)
+                .await;
+            if !registered {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        serving.abort();
+        let (child_mob, members, _member_session, implicit_mob, _adapter, _registration, _) =
+            session.holdings().await;
+        println!(
+            "the runtime's end answered {retired:?}; the running request {running:?}, the queued \
+             request {queued_request:?}; registered afterwards: {registered}; child mob \
+             {child_mob}, its members {members}, implicit mob {implicit_mob}"
+        );
+        assert_eq!(
+            (registered, child_mob, members, implicit_mob),
+            (false, false, 0, false),
+            "(runtime registration, child mob, its members, implicit mob) after the relays ran \
+             the cleanup the machine named; the running request was answered {running:?}, the \
+             queued one {queued_request:?}"
+        );
+    }
+
+    /// A client that closes its connection to a runtime other connections
+    /// share, while its turn request is queued behind a running turn,
+    /// withdraws that one request and nothing else: the running turn
+    /// completes and its request is answered its result, and the session
+    /// keeps everything it holds.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_closed_connection_withdraws_its_queued_request_and_nothing_else() {
+        use tokio::io::{AsyncWriteExt, BufReader};
+
+        let session = FailedStartSession::materialized().await;
+        let running = session
+            .start_turn_past_its_first_round("the running turn")
+            .await;
+
+        // A second connection to the same runtime sends a turn request,
+        // which queues behind the running turn.
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(Config::default(), meerkat_models::canonical()),
+        );
+        let (server_reader, mut client_writer) = tokio::io::duplex(65_536);
+        let (client_reader, server_writer) = tokio::io::duplex(65_536);
+        let server_runtime = Arc::clone(&session.runtime);
+        let connection = tokio::spawn(async move {
+            let mut server = crate::server::RpcServer::new(
+                BufReader::new(server_reader),
+                server_writer,
+                server_runtime,
+                config_store,
+            )
+            .expect("construct runtime authority");
+            // A connection to a shared runtime: its end is no shutdown of
+            // the runtime.
+            server.skip_shutdown_on_eof = true;
+            server.run().await.map_err(|error| error.to_string())
+        });
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "turn/start",
+            "params": {
+                "session_id": session.session_id.to_string(),
+                "prompt": "the queued request",
+            },
+        });
+        client_writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write the turn request");
+        client_writer.flush().await.expect("flush the turn request");
+        session.wait_for_active_inputs(2).await;
+
+        // The client goes away.
+        drop(client_writer);
+        drop(client_reader);
+        let connection_end = tokio::time::timeout(Duration::from_secs(30), connection)
+            .await
+            .expect("the connection ends")
+            .expect("the connection task");
+
+        let serving = session.serve_model_requests();
+        let running = FailedStartSession::turn_answer(running).await;
+        let holdings = session.holdings().await;
+        let next = FailedStartSession::turn_answer(session.spawn_turn("next", None)).await;
+        serving.abort();
+        assert_eq!(
+            (running, holdings, next),
+            (Ok(()), (true, 1, true, true, true, true, true), Ok(())),
+            "(the running request, (child mob, its members, its member's session, implicit mob, \
+             MCP adapter, runtime registration, stored session), the next turn) after the \
+             connection with the queued request closed; the connection ended {connection_end:?}"
+        );
+    }
+
+    /// The completion handle of an input a session holds queued on a runtime
+    /// no executor serves.
+    #[cfg(feature = "mob")]
+    async fn a_queued_inputs_completion_handle(
+        adapter: &Arc<meerkat_runtime::meerkat_machine::MeerkatMachine>,
+        session_id: &SessionId,
+    ) -> (InputId, meerkat_runtime::CompletionHandle) {
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("test machine should register runtime authority");
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "queued input fixture",
+            None,
+        ));
+        let queued_input = input.id().clone();
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(session_id, input)
+            .await
+            .expect("test machine should accept the queued input");
+        (
+            queued_input,
+            handle.expect("the queued input returns a completion handle"),
+        )
+    }
+
+    /// The surface's relay of an input that was taken back while its runtime
+    /// serves (by a recall of the one input, or by a reset of the runtime)
+    /// answers the request and cleans nothing up: the runtime registration
+    /// stays, and the request's admission is released.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_relay_of_an_input_taken_back_keeps_the_runtime_registration() {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        for taken_back_by in ["recall", "reset"] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = make_runtime(temp_factory(&temp), 1);
+            let session_id = SessionId::new();
+            runtime
+                .runtime_adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("prepare runtime bindings");
+            let relayed_input = InputId::new();
+            let admission = runtime
+                .service
+                .reserve_create_session_admission()
+                .await
+                .expect("reserve active turn");
+            runtime
+                .insert_runtime_pre_admission(session_id.clone(), relayed_input.clone(), admission)
+                .expect("insert pre-admission");
+
+            let (queued_input, handle) =
+                a_queued_inputs_completion_handle(&runtime.runtime_adapter, &session_id).await;
+            if taken_back_by == "recall" {
+                let recall = runtime
+                    .runtime_adapter
+                    .recall_queued_input(&session_id, &queued_input)
+                    .await
+                    .expect("the recall answers");
+                assert!(
+                    matches!(
+                        recall,
+                        Some(meerkat_runtime::QueuedInputRecall::Abandoned { .. })
+                    ),
+                    "the queued input is recalled: {recall:?}"
+                );
+            } else {
+                runtime
+                    .runtime_adapter
+                    .reset_runtime(&session_id)
+                    .await
+                    .expect("the runtime is reset");
+            }
+            let outcome = runtime
+                .spawn_runtime_pre_admission_cleanup_with_outcome(
+                    session_id.clone(),
+                    relayed_input,
+                    handle,
+                )
+                .await
+                .expect("cleanup task should report completion")
+                .expect("completion waiter should resolve");
+            assert!(
+                matches!(
+                    outcome,
+                    meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. }
+                ),
+                "{taken_back_by}: the input taken back is answered terminated: {outcome:?}"
+            );
+            assert!(
+                still_registered_after(&runtime, &session_id, Duration::from_millis(500)).await,
+                "{taken_back_by}: the relay leaves the serving runtime registered"
+            );
+            runtime
+                .create_session(mock_build_config(), None, None, Vec::new())
+                .await
+                .expect("the relay releases the request's admission");
+        }
+    }
+
+    /// Recall the queued turn request's input, as `session/recall_input`
+    /// recalls it.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn recall_the_queued_request(session: &FailedStartSession, input: &InputId) {
+        let recall = session
+            .runtime
+            .recall_queued_input(
+                &session.session_id,
+                &meerkat_contracts::SessionInputStateSelector::InputId(input.to_string()),
+            )
+            .await
+            .expect("the recall answers");
+        assert!(
+            recall.abandoned(),
+            "the queued request's input is withdrawn: {recall:?}"
+        );
+    }
+
+    /// Withdrawing one queued turn request of a session is no archive of the
+    /// session: the child mob the session owns keeps its member, its implicit
+    /// mob stays, the session stays stored, and its next turn runs. The
+    /// request is queued behind a running turn and recalled by its input.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recall_of_a_queued_turn_keeps_the_mob_the_session_owns() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (recalled, recalled_input) = queued.remove(0);
+        recall_the_queued_request(&session, &recalled_input).await;
+        let (recalled_refused, running, _others, holdings, next) =
+            after_one_queued_request_ended(&session, recalled, running, Vec::new()).await;
+        let (child_mob, members, member_session, implicit_mob, _, _, stored) = holdings;
+        assert_eq!(
+            (
+                recalled_refused,
+                child_mob,
+                members,
+                member_session,
+                implicit_mob,
+                stored,
+                next
+            ),
+            (true, true, 1, true, true, true, Ok(())),
+            "(the recalled request refused, child mob, its members, its member's session, \
+             implicit mob, stored session, the next turn) after the queued turn was recalled; \
+             the running request was answered {running:?}"
+        );
+    }
+
+    /// Withdrawing one queued turn request leaves the session's other
+    /// request to its turn: the turn that was running when the queued one was
+    /// recalled completes and its request is answered its result, and the
+    /// session keeps everything it holds, its runtime registration and its
+    /// MCP adapter included.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recall_of_a_queued_turn_leaves_the_other_request_to_its_turn() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (recalled, recalled_input) = queued.remove(0);
+        recall_the_queued_request(&session, &recalled_input).await;
+        assert_eq!(
+            after_one_queued_request_ended(&session, recalled, running, Vec::new()).await,
+            only_the_one_request_ended(0),
+            "(the recalled request refused, the running request, the other queued requests, \
+             (child mob, its members, its member's session, implicit mob, MCP adapter, runtime \
+             registration, stored session), the next turn)"
+        );
+    }
+
+    /// An input's stored record: phase, terminal, and whether a stop kept
+    /// it for the session's next start.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn stored_input(session: &FailedStartSession, input: &InputId) -> String {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        match session
+            .runtime
+            .runtime_adapter
+            .input_state(&session.session_id, input)
+            .await
+        {
+            Err(error) => format!("read failed: {error}"),
+            Ok(None) => "no row".to_string(),
+            Ok(Some(stored)) => format!(
+                "{:?}, terminal {:?}, kept for the next start {}",
+                stored.seed.phase,
+                stored.seed.terminal_outcome,
+                stored.state.stop_requeue.is_some()
+            ),
+        }
+    }
+
+    /// The phase and terminal of a [`stored_input`] row, without the stop's
+    /// keep mark.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn phase_and_terminal(row: &str) -> &str {
+        row.split(", kept for the next start").next().unwrap_or(row)
+    }
+
+    /// A turn request's answer in short: its result, the answer of a request
+    /// a stop kept queued for the next start, or the error's text.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    fn answer_in_short(answer: Result<(), String>) -> String {
+        match without_session_ids(answer) {
+            Ok(()) => "its result".to_string(),
+            Err(text)
+                if text.starts_with("-32003 the input stays queued across the runtime stop") =>
+            {
+                "kept across the stop (-32003)".to_string()
+            }
+            Err(text) => text,
+        }
+    }
+
+    /// Stop the session's runtime with a requeue of its queued inputs, as a
+    /// graceful shutdown does, in a task of its own.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn a_requeue_stop(
+        session: &FailedStartSession,
+    ) -> tokio::task::JoinHandle<Result<bool, String>> {
+        let adapter = Arc::clone(&session.runtime.runtime_adapter);
+        let witness = adapter
+            .current_session_registration_witness(&session.session_id)
+            .await
+            .expect("the session's runtime is registered");
+        tokio::spawn(async move {
+            adapter
+                .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+                    &witness,
+                    meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                        max_age: Duration::from_hours(1),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// What a bounded task answered, in short.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    async fn joined<T, E: std::fmt::Display>(
+        task: tokio::task::JoinHandle<Result<T, E>>,
+        done: impl FnOnce(T) -> String,
+    ) -> String {
+        match tokio::time::timeout(Duration::from_secs(30), task).await {
+            Err(_) => "did not return".to_string(),
+            Ok(joined) => match joined.expect("the task") {
+                Ok(value) => done(value),
+                Err(error) => format!("failed: {error}"),
+            },
+        }
+    }
+
+    /// An archive that comes after a requeue stop ends every input the stop
+    /// kept. The stop finds a turn held at the model and a turn request
+    /// queued behind it: it does not wait for the turn, it keeps both inputs
+    /// queued for the session's next start, and both requests are answered
+    /// that their input stays queued. The archive then ends both stored
+    /// inputs as retired, and ends what the session owns, as an archive
+    /// does. No input of the archived session stays without a terminal.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archive_after_a_requeue_stop_ends_the_inputs_the_stop_kept() {
+        let session = FailedStartSession::materialized().await;
+        let (running, mut queued) = a_running_turn_with_queued_requests(&session, 1).await;
+        let (queued_request, queued_input) = queued.remove(0);
+        let running_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .find(|input| input != &queued_input)
+            .expect("the running turn's input");
+
+        let stop = a_requeue_stop(&session).await;
+        let stopped = joined(stop, |done| format!("returned {done}")).await;
+        assert_eq!(
+            (
+                stopped.as_str(),
+                answer_in_short(FailedStartSession::turn_answer(running).await),
+                answer_in_short(FailedStartSession::turn_answer(queued_request).await),
+                stored_input(&session, &running_input).await,
+                stored_input(&session, &queued_input).await,
+            ),
+            (
+                "returned true",
+                "kept across the stop (-32003)".to_string(),
+                "kept across the stop (-32003)".to_string(),
+                "Staged, terminal None, kept for the next start true".to_string(),
+                "Queued, terminal None, kept for the next start true".to_string(),
+            ),
+            "after the stop: (the stop, the running request, the queued request, the running \
+             turn's stored input, the queued request's stored input)"
+        );
+
+        session
+            .runtime
+            .archive_session(&session.session_id)
+            .await
+            .expect("the session is archived");
+        // Phase and terminal are asserted. The stop's keep mark on a row
+        // that has ended is printed, not asserted.
+        let running_after = stored_input(&session, &running_input).await;
+        let queued_after = stored_input(&session, &queued_input).await;
+        println!(
+            "after the archive: the running turn's stored input: {running_after}; the queued \
+             request's stored input: {queued_after}"
+        );
+        let retired = "Abandoned, terminal Some(Abandoned { reason: Retired })";
+        assert_eq!(
+            (
+                phase_and_terminal(&running_after),
+                phase_and_terminal(&queued_after),
+                session.holdings().await,
+            ),
+            (
+                retired,
+                retired,
+                (false, 0, false, false, false, false, false),
+            ),
+            "after the archive: (the running turn's stored input, the queued request's stored \
+             input, (child mob, its members, its member's session, implicit mob, MCP adapter, \
+             runtime registration, stored session))"
+        );
+    }
+
+    /// An archive asked while a requeue stop of the session's runtime is in
+    /// progress. The fixture holds the stop in progress; the held turn's
+    /// input is the session's only input.
+    ///
+    /// Asserted, because it must hold whatever the first archive call
+    /// answers: the stop completes, the held turn's input reaches a
+    /// terminal, and the session is archived with everything it holds
+    /// ended, at the latest when the archive is asked again. Printed and not
+    /// asserted: what the first archive call answers and the state that
+    /// depends on that answer. That answer is tracked as a follow-up; read
+    /// this row again when it is settled.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archive_that_joins_a_requeue_stop_in_progress() {
+        let session = FailedStartSession::materialized().await;
+        session
+            .runtime
+            .service
+            .discard_live_session(&session.session_id)
+            .await
+            .expect("the session is stored and no longer live");
+        let held = session
+            .start_turn_held_in_its_apply("held in its apply", None)
+            .await;
+        let held_input = session
+            .runtime
+            .runtime_adapter
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("list the active inputs")
+            .into_iter()
+            .next()
+            .expect("the held turn's input");
+
+        let stop = a_requeue_stop(&session).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stop_in_progress = !stop.is_finished();
+        let input_while_the_stop_waits = stored_input(&session, &held_input).await;
+        let archive = {
+            let runtime = Arc::clone(&session.runtime);
+            let session_id = session.session_id.clone();
+            tokio::spawn(async move { runtime.archive_session(&session_id).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        println!(
+            "while the stop is in progress: the archive returned {}, the stop returned {}",
+            archive.is_finished(),
+            stop.is_finished()
+        );
+        assert_eq!(
+            (stop_in_progress, input_while_the_stop_waits.as_str()),
+            (true, "Staged, terminal None, kept for the next start false"),
+            "(the stop in progress when the archive is asked, the held turn's stored input then)"
+        );
+
+        session
+            .client
+            .provider_read_released
+            .store(true, AtomicOrdering::SeqCst);
+        let serving = session.serve_model_requests();
+        let stopped = joined(stop, |done| format!("returned {done}")).await;
+        let archived = match tokio::time::timeout(Duration::from_secs(30), archive).await {
+            Err(_) => "did not return".to_string(),
+            Ok(joined) => match joined.expect("the archive task") {
+                Ok(()) => "done".to_string(),
+                Err(error) => format!("refused: {} {}", error.code, error.message),
+            },
+        };
+        let held_answer = answer_in_short(FailedStartSession::turn_answer(held).await);
+        serving.abort();
+        let held_row = stored_input(&session, &held_input).await;
+        println!(
+            "the first archive call answered: {archived}; the held turn's request: \
+             {held_answer}; its stored input: {held_row}; (child mob, its members, its member's \
+             session, implicit mob, MCP adapter, runtime registration, stored session): {:?}",
+            session.holdings().await
+        );
+        assert_eq!(
+            (stopped.as_str(), held_row.contains("terminal Some(")),
+            ("returned true", true),
+            "(the stop, the held turn's stored input has a terminal: {held_row})"
+        );
+
+        // The session is archived with everything it holds ended: by the
+        // first call, or by the archive asked again with the stop over.
+        let last_archive = if archived == "done" {
+            archived
+        } else {
+            match session.runtime.archive_session(&session.session_id).await {
+                Ok(()) => "done".to_string(),
+                Err(error) => format!("refused: {} {}", error.code, error.message),
+            }
+        };
+        assert_eq!(
+            (last_archive.as_str(), session.holdings().await),
+            ("done", (false, 0, false, false, false, false, false)),
+            "the archive, asked again when its first call did not archive: (its answer, (child \
+             mob, its members, its member's session, implicit mob, MCP adapter, runtime \
+             registration, stored session))"
+        );
+    }
+
+    /// A stored session after its first turn, on a runtime whose model client
+    /// holds every request until the row releases it.
+    #[cfg(feature = "mob")]
+    async fn a_session_after_its_first_turn() -> (
+        tempfile::TempDir,
+        Arc<SessionRuntime>,
+        Arc<HeldModelLlmClient>,
+        SessionId,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = Arc::new(HeldModelLlmClient::default());
+        runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create the session");
+        let first = spawn_held_turn(&runtime, &session_id, "first");
+        assert!(
+            held_request_entered(&client, 1).await,
+            "the first turn reaches the model"
+        );
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+        (temp, runtime, client, session_id)
+    }
+
+    /// Whether the session still has a runtime registration after `wait`.
+    #[cfg(feature = "mob")]
+    async fn still_registered_after(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        wait: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if !runtime.runtime_adapter.contains_session(session_id).await {
+                return false;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Whether the session's next turn reaches the model and is answered its
+    /// result.
+    #[cfg(feature = "mob")]
+    async fn the_next_turn_runs(
+        runtime: &Arc<SessionRuntime>,
+        client: &HeldModelLlmClient,
+        session_id: &SessionId,
+    ) -> Result<(), String> {
+        let requests = client.calls.load(AtomicOrdering::SeqCst);
+        let next = spawn_held_turn(runtime, session_id, "next");
+        if !held_request_entered(client, requests + 1).await {
+            return Err("the next turn did not reach the model".to_string());
+        }
+        client.release.notify_one();
+        held_turn_answer(next, "the next turn").await
+    }
+
+    /// A runtime that is stopped while an external event this surface
+    /// admitted is still pending keeps its session usable: the stop
+    /// succeeds, the stopped runtime stays registered (no request waits on
+    /// the event, so nothing retires it), the session stays stored and not
+    /// archived, and its next turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runtime_stopped_with_an_event_pending_serves_the_next_turn() {
+        let (_temp, runtime, client, session_id) = a_session_after_its_first_turn().await;
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(10),
+            runtime.accept_external_event_via_runtime(
+                &session_id,
+                "inbox.item".to_string(),
+                serde_json::json!({ "body": "pending at the stop" }),
+                None,
+            ),
+        )
+        .await
+        .expect("the admission returns")
+        .expect("the event is admitted");
+        assert!(
+            matches!(admitted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+            "the event is accepted: {admitted:?}"
+        );
+        assert!(
+            runtime.runtime_adapter.contains_session(&session_id).await,
+            "the session is registered while its event is pending"
+        );
+
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(30),
+            runtime
+                .runtime_adapter
+                .stop_runtime_executor(&session_id, "the host stops"),
+        )
+        .await
+        .expect("the stop returns");
+        let registered =
+            still_registered_after(&runtime, &session_id, Duration::from_secs(5)).await;
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let archived = runtime
+            .authoritative_session_archived(&session_id)
+            .await
+            .unwrap_or(true);
+        let next = the_next_turn_runs(&runtime, &client, &session_id).await;
+        println!(
+            "stop answered {stopped:?}; registered afterwards: {registered}; stored: {stored}; \
+             archived: {archived}; the next turn: {next:?}"
+        );
+        assert!(stopped.is_ok(), "the stop succeeds: {stopped:?}");
+        assert_eq!(
+            (registered, stored, archived, next),
+            (true, true, false, Ok(())),
+            "(registered, stored, archived, the next turn) after a stop with an event pending"
+        );
+    }
+
+    /// A stop that comes while a turn request this surface admitted is held
+    /// at the model does not take the turn's answer away: the request is
+    /// answered its result once the model answers, the session stays stored
+    /// and not archived, and its next turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_with_a_turn_in_flight_leaves_the_turn_to_its_answer() {
+        let (_temp, runtime, client, session_id) = a_session_after_its_first_turn().await;
+        let in_flight = spawn_held_turn(&runtime, &session_id, "in flight");
+        assert!(
+            held_request_entered(&client, 2).await,
+            "the turn in flight reaches the model"
+        );
+
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(30),
+            runtime
+                .runtime_adapter
+                .stop_runtime_executor(&session_id, "the host stops"),
+        )
+        .await
+        .expect("the stop returns");
+        client.release.notify_one();
+        let answered = held_turn_answer(in_flight, "the request in flight").await;
+        let registered =
+            still_registered_after(&runtime, &session_id, Duration::from_secs(3)).await;
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let archived = runtime
+            .authoritative_session_archived(&session_id)
+            .await
+            .unwrap_or(true);
+        let next = the_next_turn_runs(&runtime, &client, &session_id).await;
+        println!(
+            "stop answered {stopped:?}; the request in flight: {answered:?}; registered \
+             afterwards: {registered}; stored: {stored}; archived: {archived}; the next turn: \
+             {next:?}"
+        );
+        assert_eq!(
+            (answered, stored, archived, next),
+            (Ok(()), true, false, Ok(())),
+            "(the request in flight, stored, archived, the next turn) after a stop with a turn \
+             in flight; the stop answered {stopped:?}, registered afterwards: {registered}"
         );
     }
 

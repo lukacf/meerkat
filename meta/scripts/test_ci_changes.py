@@ -167,6 +167,9 @@ CROSS_AREA_READS = {
     # other packs name the console or the TypeScript SDK for manual runs.
     ("examples/", "console/"): {"console"},
     ("examples/", "sdk/typescript/"): {"console"},
+    # examples/006's script installs the Python SDK from the checkout. It is
+    # run by hand: no lane runs it, so the read has no lane to reach.
+    ("examples/", "sdk/python/"): set(),
     # The flow editor's browser tests start console fixtures.
     ("flow-editor/", "console/"): {"flow_editor"},
     # The flow editor imports its component packages, and its source

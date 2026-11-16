@@ -147,9 +147,9 @@ const WHAT_A_LONG_TERM_AGENT_IS: &str = "A long-term agent is a durable, named m
     tools. For a helper that does one task and is discarded, use the worker tools (delegate, \
     fork_off, mob_spawn_member) instead.";
 
-const INSTRUCTIONS_REACH: &str = "It reaches the agent at its next run; a run that starts \
-    within moments of the change may still use the earlier instructions; earlier \
-    instructions are never rewritten.";
+const INSTRUCTIONS_REACH: &str = "It reaches the agent at its next run, or later when the \
+    result says so; a run that starts within moments of the change may still use the earlier \
+    instructions; earlier instructions are never rewritten.";
 
 const FIRST_MESSAGE_ANSWER: &str = "A create with a first message answers once the new agent's \
     session exists; the first run continues after the answer.";
@@ -236,15 +236,21 @@ fn description(name: &str) -> String {
              reserves stays as it is: an update that would give it another value or remove \
              it is refused `reserved_key` (at `set.labels` or `set.labels_remove`). \
              `profile` moves the \
-             agent to that profile's model, tools and skills on the same conversation. A \
+             agent to that profile's model, tools and skills on the same conversation. The \
+             move seats the agent again on that conversation; an agent that created mobs goes \
+             on listing and managing them when its new profile has the mob tools. A \
              move into a profile whose agents the host prepares is refused `unsupported` at \
              `set.profile`: create the agent in that profile instead. \
              `peers_add` and `peers_remove` change who it can message.\n\n\
              An instructions change is in the agent's record at once. {INSTRUCTIONS_REACH} \
              The result says what became of it in `agents[0].instructions.kind`: \
              `applies_at_next_run`; `applies_after_compaction` (the agent's model takes new \
-             instructions only at the head of what it reads, so the change reaches it after \
-             its next compaction); `applies_at_next_session` with a `reason` (the change \
+             instructions only at the head of what it reads, so the change does not reach \
+             it at its next run: it waits for the agent's next compaction, which a short \
+             conversation may never reach, and until then the agent follows its earlier \
+             instructions; only its host can bring the change in sooner, by resetting the \
+             agent, which discards its conversation); `applies_at_next_session` with a \
+             `reason` (the change \
              does not reach the agent as it runs now, and applies when it next starts a new \
              conversation); `unchanged`.\n\n\
              You cannot change yourself (`self_change_refused`). {CONFIGURED_AGENT}\n\n\
@@ -258,6 +264,11 @@ fn description(name: &str) -> String {
              it has no running member, messages to it are refused, and \
              identity_unarchive brings it back on the same conversation. Use this when the \
              agent may be needed later; identity_remove is for good.\n\n\
+             An agent that still owns mobs it created is not archived: the result is \
+             `refused` with `kind` `owns_mobs` and `count`, how many mobs it owns, and nothing \
+             is changed. An archive would remove those mobs. Ask that agent to destroy its \
+             mobs (its mob_destroy tool) and call identity_archive again, or leave the agent \
+             as it is.\n\n\
              The schedules that target the agent follow it: an archive pauses its active \
              schedules (`effect` is `paused`, `count` is how many are paused for it), and \
              identity_unarchive resumes exactly those. {SCHEDULES_ANSWER}\n\n\
@@ -288,6 +299,11 @@ fn description(name: &str) -> String {
              kept, and nothing can reach them; the agent's last conversation is harvested as \
              for any agent that leaves. This cannot be undone: use identity_archive \
              when the agent may be needed later.\n\n\
+             An agent that still owns mobs it created is not removed: the result is \
+             `refused` with `kind` `owns_mobs` and `count`, how many mobs it owns, and nothing \
+             is changed. A removal would remove those mobs. Ask that agent to destroy its \
+             mobs (its mob_destroy tool) and call identity_remove again, or leave the agent \
+             as it is.\n\n\
              Every schedule that targets the agent is ended (`effect` is `ended`, `count` is \
              how many). {SCHEDULES_ANSWER}\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \

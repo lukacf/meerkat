@@ -356,6 +356,7 @@ mod member_history_proxy;
 // `BridgeReply` consumer by construction and joins BRIDGE_CLASSIFIER_FILES.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_instruction;
+mod member_key_carry;
 mod member_live_proxy;
 mod member_operator_ceiling;
 mod member_session_authority;
@@ -497,8 +498,8 @@ pub use delegation::{
     DelegationTurnTerminal, LiveDelegationTerminalEvidence, render_bounded_delegation_task,
 };
 pub use delivery_scope::{
-    DeliveryScopeDecodeError, MEMBER_DELIVERY_SCOPE_VERSION, MemberBinding, MemberBindingHistory,
-    MemberBindingHistoryReadError, MemberBindingState, MemberDeliveryScope,
+    DeliveryScopeDecodeError, LineageSteps, MEMBER_DELIVERY_SCOPE_VERSION, MemberBinding,
+    MemberBindingHistory, MemberBindingHistoryReadError, MemberBindingState, MemberDeliveryScope,
     MemberIdentityManagement, ScopeIncarnation, ScopedRecoveryUnresolved, ScopedWorkRecovery,
     ScopedWorkState,
 };
@@ -624,6 +625,7 @@ pub use session_service::{
     SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
     observe_live_durable_source_via_projection_visibility, observe_member_status_view_via_read,
 };
+pub use session_service::{MemberRewindFork, MemberRewindLineageWitness};
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 use spawn_profile_authority::{
     AuthorizedSpawnProfileMaterial, authorize_spawn_profile_input,

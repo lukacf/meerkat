@@ -90,8 +90,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── Example 1: Token budget ──
 
     println!("=== Example 1: Token budget ===\n");
+    // The threshold is checked against the tokens measured after each call,
+    // and one call of this example uses a few thousand of them (the request
+    // carries more than the prompt). Keep the budget above that: a budget the
+    // first call already crosses ends the run with `BudgetExhausted` and, on a
+    // new session like this one, an empty `text`. Example 3 shows that on
+    // purpose.
     let budget = BudgetLimits::unlimited()
-        .with_max_tokens(2000) // Measured exhaustion threshold; a call can overshoot
+        .with_max_tokens(8000) // Measured exhaustion threshold; a call can overshoot
         .with_max_tool_calls(10) // Max tool invocations
         .with_max_duration(Duration::from_mins(1)); // Agent-lifetime wall-clock budget
 
@@ -105,10 +111,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let result = agent
         .run("Explain quantum computing in simple terms.".into())
-        .await?;
+        .await;
+    let tokens_used = result.as_ref().ok().map(|run| run.usage.total_tokens());
 
-    println!("Response: {}", result.text);
-    println!("Tokens used: {}", result.usage.total_tokens());
+    // Read how the run ended before reading its text: a run that exhausts
+    // its budget is `Ok` too.
+    println!("{}", describe_run(result)?);
+    if let Some(tokens) = tokens_used {
+        println!("Tokens used: {tokens}");
+    }
 
     // ── Example 2: Retry policy ──
 
@@ -125,9 +136,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // ── Example 3: Budget exhaustion handling ──
 
-    println!("\n=== Example 3: Tight budget (may be exhausted) ===\n");
+    println!("\n=== Example 3: Tight budget (exhausted by the first call) ===\n");
 
-    let tight_budget = BudgetLimits::unlimited().with_max_tokens(100); // Very tight budget
+    // Far below what one call uses. The call is still made: the budget counts
+    // measured tokens, so it can only be found exhausted afterwards. The run
+    // then ends with `BudgetExhausted`, and the answer of that call is not
+    // returned.
+    let tight_budget = BudgetLimits::unlimited().with_max_tokens(100);
 
     let (_tmp2, store2_dir) = scoped_store_dir(&std::env::current_dir()?)?;
     let factory2 = AgentFactory::new(store2_dir.clone());

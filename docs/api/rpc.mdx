@@ -85,7 +85,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 
@@ -176,6 +176,7 @@ of this full catalog.
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
+| `session/recall_input` | Session | `RecallInputParams` | `RecallInputResult` | Withdraw one input only while it is still queued; a run that has taken it is never interrupted (from 0.9.15) |
 | `session/compact` | Session | `CompactSessionParams` | `CompactSessionResult` | Ask a live session's next compaction check to compact, without a rebuild |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
@@ -231,7 +232,7 @@ of this full catalog.
 | `mob/fork_helper` | Mob | `MobForkHelperParams` | `MobHelperResult` | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/fork_member` | Mob | `MobForkMemberParams` | `MobForkMemberResult` | Fork a member's session at a message boundary into a new member (mob feature) |
 | `mob/force_cancel` | Mob | `MobMemberParams` | `MobForceCancelResult` | Force-cancel a member's active work (mob feature) |
-| `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a mob member by identity (mob feature) |
+| `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a `turn_driven` mob member by identity. A member in `autonomous_host` mode (the default) is refused with `-32602` (`mob/turn_start is only valid for turn_driven members; autonomous member '<id>' is driven by mob kickoff and mob/member_send`): send it work with `mob/member_send`, or start a turn with `turn/start` and the member's session id (`current_session_id` in the answer to `mob/member_status`) (mob feature) |
 | `mob/member_status` | Mob | `MobMemberParams` | `MobMemberStatusResult` | Read canonical status for a specific member (mob feature) |
 | `mob/snapshot` | Mob | `MobIdParams` | `MobSnapshotResult` | Point-in-time aggregate of mob status plus member list (mob feature) |
 | `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
@@ -521,7 +522,7 @@ the effect and answers a repeat from that record; see
 
 Since 0.9.11 a request also carries `requester` when the run the call serves
 has an original requester (see
-[Authorization](/concepts/authorization#sources%2C-peers%2C-and-knowledge-services)):
+[Authorization](/concepts/authorization#sources-peers-and-knowledge-services)):
 `{"principal": {"kind": "human", "id": "...", "qualification": {"kind":
 "qualified", "trust_domain_id": "..."}}}`, with `"carried": true` when the
 run's work reached its agent through another actor, such as a peer hop. The
@@ -635,9 +636,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.14"
+      "version": "0.9.15"
     },
-    "contract_version": "0.9.14",
+    "contract_version": "0.9.15",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -859,6 +860,20 @@ During execution, `session/event` notifications are emitted (see
   Provider-specific parameters (e.g., thinking config, reasoning effort).
 </ParamField>
 
+<ParamField body="reasoning_effort" type="string | null" default="null">
+  From 0.9.15; an older server ignores the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
+  The session's provider-neutral reasoning effort level: `none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh` or `max` (see
+  [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
+  setting as `provider_params.reasoning_effort`; a request that gives both
+  must give the same level, or it is refused as invalid params. A level the
+  model or its route does not accept fails the session's build with invalid
+  params whose `data` is
+  `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
+  before any provider request.
+</ParamField>
+
 <ParamField body="grant_gated_tools" type="object | null" default="null">
   Scoped tool grant gate, `{"families": [...], "tools": [...], "mcp_servers": [...], "unconfigured_mcp_servers": true}`:
   built-in tool families, tool names and MCP servers whose tools the session
@@ -953,7 +968,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.14",
+    "agent_version": "0.9.15",
     "model_name": "claude-opus-5"
   }
 }
@@ -1641,7 +1656,16 @@ Start a new turn on an existing session.
 Returns the same run-result shape as `session/create`. A `turn/start` that
 arrives while another turn on the same session is running is queued behind
 it: it runs once the running turn finishes, and the call returns its own
-result. It is not refused with `-32002` (`SESSION_BUSY`).
+result. It is not refused with `-32002` (`SESSION_BUSY`). From 0.9.15
+there is one exception: a turn that would change the session's model
+settings beside a provider-neutral reasoning effort level
+(`reasoning_effort`, or the key of that name inside `provider_params`) is
+not queued behind unfinished work. It is answered `-32002` at once with
+the data `{"kind": "reasoning_effort_change_needs_idle_session"}` and
+stores nothing: wait for the running turn's answer, then send it again.
+The cases are in the table under
+[Model settings on a busy session](#model-settings-on-a-busy-session). A
+later release is planned to queue it.
 
 Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
@@ -1764,6 +1788,32 @@ Only a mechanical failure is `-32603`.
   `thinking_budget_tokens`, and typed `provider_tag` extensions, not an
   arbitrary bag of provider-native keys. Applies alongside model/provider
   overrides.
+</ParamField>
+
+<ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
+  From 0.9.15; an older server refuses the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
+  The session's provider-neutral reasoning effort level from this turn on
+  (see [Reasoning effort](/concepts/providers#reasoning-effort)). A level
+  (`"high"`, or `{"action":"set","value":"high"}`) sets it,
+  `{"action":"clear"}` removes it, and omission/`null` keeps it. It is its
+  own setting: a turn that replaces or clears `provider_params` keeps the
+  level unless it also names this field, or its new params name the nested
+  `reasoning_effort` key. A turn that names both must ask for one outcome:
+  two different levels, or a clear beside a nested level, are refused as
+  invalid params. A level the model or its route does not accept is refused
+  with the `reasoning_effort_refused` data of `session/create`, and the
+  session keeps its identity; that refusal is answered when the request
+  arrives, also while another turn of the session runs. A turn that would
+  change the session's model settings beside a provider-neutral level is
+  taken only when the session has no unfinished work; otherwise it is
+  answered `session busy` at once (code `-32002`, `data.kind`
+  `reasoning_effort_change_needs_idle_session`) and nothing is stored. The
+  cases are in the table under
+  [Model settings on a busy session](#model-settings-on-a-busy-session).
+  `mob/turn_start` (valid for `turn_driven` members) takes the same field
+  and is answered the same; a member built from a profile whose
+  `provider_params` carry a level holds that level.
 </ParamField>
 
 <ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">
@@ -1943,7 +1993,24 @@ Queue a runtime-backed external event for an existing session.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "outcome_type": "accepted"
+    "outcome_type": "accepted",
+    "input_id": "01a1dea8-...",
+    "state": {
+      "input_id": "01a1dea8-...",
+      "current_state": "queued",
+      "attempt_count": 0,
+      "recovery_count": 0,
+      "history": [
+        {
+          "timestamp": "2026-11-15T10:02:18.495319354+00:00",
+          "from": "accepted",
+          "to": "queued",
+          "reason": "QueueAccepted"
+        }
+      ],
+      "created_at": "2026-11-15T10:02:18.494970884+00:00",
+      "updated_at": "2026-11-15T10:02:18.495319354+00:00"
+    }
   }
 }
 ```
@@ -1964,6 +2031,156 @@ caller checks the `contract_version` from `initialize` before relying on it.
 `{"by": "idempotency_key", "value": "<key>"}` reads the input back by the key
 the caller supplied; a server older than contract 0.9.12 finds no input that
 way, so read it there by the `input_id` the call answered.
+
+### session/recall_input
+
+From 0.9.15. Withdraw one queued input of a session, only if no run has taken it yet. The
+session's runtime decides in one step whether the input is still queued, the
+same fact a run reads when it takes the input: either the recall withdraws
+the input or a run runs it, never both. A recall never interrupts started
+work; to stop a run, use `turn/stop_run`.
+
+The recall is session-level: any caller that can act on the session can
+recall any queued input of it, also one another caller submitted, and also
+by an idempotency key it did not mint. Recalling an input withdraws
+everything the queue coalesced into it: when a later input took a queued
+earlier one in (the earlier one's terminal is `coalesced`), recalling the
+later one withdraws both contents. The answer names only the recalled input
+and does not say that other content went with it. A recall of the earlier
+input answers `already_terminal` with `coalesced` and withdraws nothing.
+
+`selector` names the input exactly as `session/input_status` does: by the
+`input_id` the submit answered, or by the `idempotency_key` you submitted it
+under.
+
+A client can name only an input whose submit has answered: `mob/member_send`
+names the member's session and the admitted input in its answer
+(`admission`, or a keyed send's `continuation` status), and
+`session/external_event` answers its `input_id` when the event is admitted,
+which is at once on a session with no turn running (the event then waits
+queued for the session's next turn) and only after the running turn has
+ended on a session with one; until then its idempotency key finds no input
+(`session/input_status` answers an empty object). A `turn/start` that waits
+behind a running turn takes no idempotency key and answers nothing until its
+own turn ends, so no call names its input: withdraw it by cancelling its
+request (see [Request cancellation](#request-cancellation)).
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":9,"method":"session/recall_input","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001","selector":{"by":"input_id","value":"01936f8b-0000-7000-8000-0000000000a1"}}}
+```
+
+```json Response (abandoned)
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "recall": {
+      "outcome": "abandoned",
+      "input_id": "01936f8b-0000-7000-8000-0000000000a1",
+      "attempt_count": 0
+    }
+  }
+}
+```
+
+```json Response (a run holds it)
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "recall": {
+      "outcome": "not_queued",
+      "input_id": "01936f8b-0000-7000-8000-0000000000a1",
+      "phase": "staged",
+      "run_id": "01936f8b-0000-7000-8000-000000000042"
+    }
+  }
+}
+```
+
+```json Response (second recall)
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "recall": {
+      "outcome": "already_terminal",
+      "input_id": "01936f8b-0000-7000-8000-0000000000a1",
+      "terminal": "cancelled"
+    }
+  }
+}
+```
+</CodeGroup>
+
+`recall.outcome` is one of:
+
+- `abandoned`: the input was still queued and is now withdrawn. Its terminal
+  is `cancelled` (durably, on a persistent runtime), no run will take it, and a
+  caller waiting on it is answered that the runtime ended it before a run
+  (a `turn/start` request that waits on it is answered `-32603` with
+  `runtime terminated: input recalled before it started`).
+  `attempt_count` is the number of run attempts counted for the input before
+  it was withdrawn (a failed attempt that returned the input to the queue to
+  be retried); `0` means no attempt was counted. It is not proof that no run
+  ever saw the input: a steer that joined a running turn and went back to
+  the queue because that turn discarded what it had appended counts no
+  attempt.
+- `not_queued`: a run has taken the input and it has not ended. Nothing was
+  touched and the run is not interrupted. `phase` is the input's lifecycle
+  state (`staged`, `applied` or `applied_pending_consumption`) and `run_id`,
+  when the runtime has one, the run that holds it.
+- `already_terminal`: the input already ended. Nothing was touched.
+  `terminal` is its terminal class (`completed`, `cancelled`, `abandoned`,
+  `superseded` or `coalesced`). A second recall of a recalled input answers
+  `cancelled` here, also after a restart.
+
+The list of outcomes can grow: keep an outcome you do not know as it is.
+
+Refusals use the existing error codes. An input this session does not hold
+(another session's input, an unknown key) and a malformed `input_id` are
+`-32602`; nothing is touched. An unknown or archived session is `-32001`. The
+recall never loads or wakes a session: one with no live runtime in the server
+answers `already_terminal` from its stored row when the input has ended, and
+is otherwise refused with `-32003` (session not running), so recall the input
+once the session runs again. A runtime without a store has only its live
+state to answer from. A server that does not serve the method (0.9.14 and
+earlier) answers method not found (`-32601`) and changes nothing.
+
+The session's ordinary refusals apply too: a session that is being torn down,
+or whose durable state needs a reload after a failed write, refuses the
+recall as it refuses its other mutations. An error is never an outcome: it
+does not say whether the input was withdrawn. After a durability refusal no
+call reloads the session: the runtime reloads it from its store the next
+time it prepares the session for a turn, and when the server restarts. So
+start the session's next turn, or restart the server, then read the input's
+status (`session/input_status`) or recall again: an input the failed call did withdraw is `cancelled` (a recall
+answers `already_terminal`), and one it did not withdraw is queued again and
+can be recalled, or is held by its run. Do not take `session/input_status` as
+that answer before the reload: until then it reads the live runtime, which
+can be ahead of the store after a failed write.
+
+There is no REST route for the recall, and no mob-level method that reaches
+a member hosted on another host: call `session/recall_input` on the host that
+serves the session (for a mob member, its member session, with the `input_id`
+the send answered).
+
+A send to an autonomous member answers no `input_id`, on 0.9.14 as on 0.9.15
+(by reading the code, not run): see
+[mob/member_send admission](#mob%2Fmember_send-admission).
+
+<ParamField body="session_id" type="string" required>
+  Session ID.
+</ParamField>
+
+<ParamField body="selector" type="object" required>
+  `{"by": "input_id", "value": "<input id>"}` or
+  `{"by": "idempotency_key", "value": "<key>"}`.
+</ParamField>
 
 ### mob/member_send admission
 
@@ -3912,7 +4129,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 14},
+    "contract_version": {"major": 0, "minor": 9, "patch": 15},
     "providers": [
       {
         "provider": "anthropic",
@@ -3976,7 +4193,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 14},
+    "contract_version": {"major": 0, "minor": 9, "patch": 15},
     "capabilities": [
       {
         "id": "sessions",
@@ -4295,7 +4512,7 @@ live transport's realtime observations. See
 
 | Event | Description |
 |-------|-------------|
-| `run_started` | Agent execution began. A repeated `run_started` for a run id that has no terminal yet means that run started over from its inputs (a durable run a store fence gap suspended before its first round commit, run again once the fence is back): drop what you received for that run id before |
+| `run_started` | Agent execution began. A repeated `run_started` for a run id that has no terminal yet means that run started over from its inputs (a durable run a store fence gap suspended before its first round commit, run again once the fence is back): drop what you received for that run id before. From 0.9.15, for a session that sets the provider-neutral `reasoning_effort` level, `reasoning_effort` holds the level as it resolves for the session's route when the run starts (`run_resumed` carries it too); a level that route does not take fails the run before `run_started` |
 | `run_resumed` | Since 0.9.5: a run continued from its last committed round, under its original run id, after a restart or, in the same process, once a store fence gap that suspended it ended; carries `run_id`, `round` and `resume_point` (`tools_pending` or `awaiting_model`). See [Durable runs](/guides/durable-runs#after-a-crash) |
 | `run_completed` | Agent run finished |
 | `extraction_succeeded` | Structured-output extraction succeeded after a completed run; `request_usage` has one usage row per extraction request |
@@ -4343,7 +4560,8 @@ live transport's realtime observations. See
 | `boundary_append_applied` | A durable steer's typed appends were written into the running turn at a model boundary; carries `run_id`, `input_id`, model-projected `content`, `append_count`, optional canonical `notices`, and optional application-time `transcript_start` offset |
 | `boundary_appends_discarded` | Exact discarded application facts (`session_id`, `run_id`, `input_ids`), published after any required requeue persistence succeeds |
 | `live_channel_closed` | One of the session's live channels closed; published after every committed close with `session_id`, `channel_id`, a typed `reason` (`LiveChannelCloseReason`) and `reopen_recommended` |
-| `request_reasoning_lowered` | One provider attempt of a turn that carries a reasoning-effort preference: the batch's `requested` disposition, the attempt's `baseline` effort, and the `outcome` it sent (`applied` with the level, or `not_applied` with a typed reason; absent when the batch applies no level). `turn_number` or `fallback_attempt` names the attempt |
+| `request_reasoning_lowered` | One provider attempt of a turn that carries a reasoning-effort preference: the batch's `requested` disposition, the attempt's `baseline` effort, and the `outcome` judged for it (`applied` with the level, or `not_applied` with a typed reason; absent when the batch applies no level). `turn_number` or `fallback_attempt` names the attempt; a fallback attempt is reported also when it is then skipped and no request is sent for it |
+| `request_reasoning_effort_resolved` | From 0.9.15: one request was handed to the provider client with the session's provider-neutral `reasoning_effort` level. `resolution` holds the level the request named (`requested`), the `level` sent, the `provider`, `model` and `route` (`backend`, `api`), the provider `fields` it was written to, the source of the route's levels (`facts`) and who decided the level (`decided_by`: `request`, or `preference` when the turn's reasoning preference replaced the session's level). Published once for each request handed to the provider client, after the call settled: it states the level the request was handed over with. A call that failed after the hand-over is counted even when nothing reached the provider (a connection error, for example), and a request refused before the hand-over reports nothing. `turn_number` is absent for a compaction summary request; `fallback_attempt` names a model-fallback attempt. The run result's `reasoning_effort` block (`requested`, `sent`) counts the same requests per distinct resolution; a run resumed from its durable run cursor after a restart counts the requests it sends from the resume on |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_callback_pending` | Interaction reached a callback boundary and is waiting for tool results |
 | `interaction_failed` | Interaction-scoped stream failed |
@@ -4578,7 +4796,7 @@ and `data`, never on the message text.
 | -32602 | Invalid params | Missing or invalid parameters. An input idempotency conflict has `data.code` `INPUT_IDEMPOTENCY_CONFLICT` and names the input the key is bound to in `data.existing_id`; a keyed `mob/member_send` conflict has `data.kind` `input_idempotency_conflict` and `data.delivery_id` |
 | -32603 | Internal error | Server error |
 | -32001 | Session not found | Session ID does not exist |
-| -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |
+| -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused, with one exception from 0.9.15: `data.kind` `reasoning_effort_change_needs_idle_session` answers a turn that would change the session's model settings beside a provider-neutral reasoning effort level (the cases are under `turn/start`, `reasoning_effort`; the one kind names the level also when the request only changed the model of a session that holds a level), while the session has unfinished work; nothing is stored, and the request is taken once the session has no unfinished work. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |
 | -32003 | Session not running | Session not in running state |
 | -32004 | Duplicate input | The request or input was already admitted; a deduplicated runtime input carries `data.existing_id` |
 | -32005 | Request cancelled | Cancelled before the response was published (see above) |
@@ -4606,6 +4824,191 @@ and `data`, never on the message text.
 | -32037 | Fork instruction refused | A fork was refused before commit because its child would inherit activated instructions that the fork instruction policy does not carry into it; `data.fork_instruction_refusal` names the cause and keys. Nothing was committed |
 | -32038 | Admission in progress | A realm admission fence the request needs is held, by an admission or another fenced write, beyond the request's bound: `config/set` and `config/patch` (with or without a config runtime). Nothing started and nothing was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts, so an immediate retry is not promised to succeed |
 | -32039 | Admission fence unavailable | A realm admission fence the request needs could not be opened, created, locked or identity-checked. Nothing started and nothing was written (fail closed) |
+
+### Reasoning effort refusal data
+
+A `reasoning_effort` level that the model's route does not accept is refused
+with `-32602` (invalid params) and this `error.data`:
+
+```json
+{
+  "kind": "reasoning_effort_refused",
+  "retryable": false,
+  "reasoning_effort_refusal": {
+    "requested": "max",
+    "provider": "anthropic",
+    "model": "claude-opus-4-5",
+    "route": {"backend": "anthropic_api", "api": "messages"},
+    "reason": "unsupported_level",
+    "supported": ["low", "medium", "high"],
+    "facts": "catalog"
+  }
+}
+```
+
+`reason` is one of `unsupported_level`, `supported_levels_unknown`,
+`supported_levels_unavailable`, `conflicting_provider_effort`,
+`conflicting_thinking_budget`, `conflicting_thinking_type`,
+`conflicting_reasoning_body` and `conflicting_reasoning_mode`. `route`,
+`supported` and `facts` are always present, never left out: `route` is
+`null` when the client that serves the session reports no route, and
+`supported` and `facts` are `null` when no source states the levels the
+route accepts, or the source cannot be read now. A conflict also names
+`conflicting_param`, and
+`conflicting_level` when the conflicting setting is itself a level.
+`retryable` is `true` only for `supported_levels_unavailable` (the account's
+model list is not loaded): the same request can succeed later with no change.
+Meerkat does not retry a refused level for the caller.
+
+The answer is the same wherever the level is refused, with two exceptions:
+a schedule's `create` spec and its prompt action refuse the key itself, with
+the schedule's invalid-params answer and no typed refusal data (see
+[Scheduling](/guides/scheduling#session-targets)). Second, through the MCP
+server a `meerkat_resume` of, or a `meerkat_comms_send` to, the session of a
+mob member that is not live, when that member's own build is refused for the
+level in its profile, answers the generic agent error (`-32013`) with a
+message that contains the refusal's sentence and no `reasoning_effort_refused`
+data; a level the resume itself carries is judged after the wake and is
+answered by the typed refusal as everywhere else. A session's level is
+checked when its agent is built: `session/create` answers the refusal (a
+deferred create reports it at its first `turn/start`), and so does the build
+of a resumed or recovered session, whose stored identity stays as it was. A
+`turn/start` whose overrides move a session to a model or level its route
+does not accept is refused the same way, before its input is stored: the
+session keeps its model, its level, its stored params and its live
+registration, and nothing is queued for the turn. That holds on a live
+session, also while another turn of it runs (that turn and the requests
+behind it go on as they were), and on a stored session that is not live
+(after a restart); there a turn that names no level is judged too, for the
+level the session holds, and a turn that clears the level or names one the
+route accepts is the way out. A request the route does accept can still be
+answered `-32002` (`SESSION_BUSY`) with the data
+`{"kind": "reasoning_effort_change_needs_idle_session"}`
+when the session has unfinished work (the cases are in the table under
+[Model settings on a busy session](#model-settings-on-a-busy-session)):
+that answer is not a level refusal, it
+carries no `reasoning_effort_refusal`, and the same request is taken once
+the session has no unfinished work. The other surfaces answer the same
+request in their
+own way: REST answers a level on a message for a session it holds live
+with HTTP 500 `session is busy`. The MCP server's `meerkat_resume` that
+names the level while a turn of the session runs is answered the same busy
+kind at once, by the MCP server's own rule: every resume that names the
+level then, whatever the session holds (a repeat, and a clear on a session
+that holds no level, are busy there, where the table below queues them);
+with no turn running it rebuilds the session (see [REST](/api/rest) and
+[MCP](/api/mcp)).
+
+A level is judged again when its turn starts. A `turn/start` refused
+there, after its input was stored, is a failed start: its stored input ends
+as abandoned with the reason `stopped`, not with the refusal, the session's
+live runtime is retired, and the other requests queued on that session end
+without a run (see Known limitations in the changelog; a later release is
+planned to change this). What can still be refused at its start: a
+deferred create's
+first turn; a turn on a stored session that is not live whose level cannot
+be judged yet (`supported_levels_unavailable`); a request sent without
+waiting for another one, when it reaches admission in the time between that
+other turn's admission on a session that has no turn running and its start
+(on a stored session that is not live: until that turn's rebuild ends); a
+model-identity change carried by an input that enters through the runtime
+without a turn request (a mob's own send, or a member turn an in-process
+Rust host starts with such an option); and a turn
+admitted while no turn was running, on a session whose model, level or route
+is changed by something else (a host's
+reconfiguration of a mob member, a config reload, an account's model list)
+between its admission and its start. A run that fails for the refusal
+reports it in `run_failed` as the `error_report` reason
+`{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
+`config`. No provider request is made for a refused level. The MCP server
+answers a refused level on `meerkat_run` and `meerkat_resume` as a tool
+error with the same code and data, except when the session is that of a mob
+member that is not live and that member's own build is refused for the level
+in its profile: that case is answered the generic agent error (`-32013`)
+with no typed data (the second exception
+[above](#reasoning-effort-refusal-data)).
+
+### Model settings on a busy session
+
+On a session that holds a provider-neutral reasoning effort level, anything
+that changes the model identity needs a session with no unfinished work; plain
+turns and true repeats of the level queue. On a session that holds none, only
+setting a level needs a session with no unfinished work; everything else
+queues as on 0.9.14. "Busy" in the table is `-32002` (`SESSION_BUSY`) with
+`error.data` `{"kind": "reasoning_effort_change_needs_idle_session"}`,
+answered at once, with nothing stored. It applies to `turn/start` and
+`mob/turn_start` while the session has an unfinished turn or queued input, and
+on a deferred session while its first turn is still building it.
+
+| The session | A plain turn | Repeats its level with `reasoning_effort` | Sets or changes the level | Clears the level | Changes the model, the provider, the self-hosted server, the provider params or the auth binding |
+|---|---|---|---|---|---|
+| holds a provider-neutral level | queued | queued | busy | busy | busy |
+| holds none | queued | nothing to repeat | busy | queued | queued |
+
+On an autonomous mob member (`runtime_mode` `autonomous_host`, the default)
+the unfinished work can be the member's own: a turn it started for its
+kickoff or on what its peers sent it, or a peer input queued on it. The
+caller cannot know when such a member is idle, and a plain turn first does
+not help against the member's own turns. Two ways on: send the request
+again (in two runs it was taken after 5 s and after 21 s; a member whose
+peers keep sending may stay busy for longer), or set the level in the
+member's profile or at its spawn, which does not depend on the member's
+traffic. `is_active: false` from `session/read` does not promise the
+change is taken (seen in a run). An autonomous member is addressed by
+`turn/start` with the member's session id: `mob/turn_start` is only valid
+for `turn_driven` members and is refused for an autonomous one with
+`-32602` before this rule is reached (seen in a run).
+
+- The model identity is the model, the provider, the self-hosted server,
+  the provider params, the auth binding, and the level itself (set, change,
+  clear).
+- Naming a field counts as changing it: on a busy session that holds a
+  level, a turn that names `model`, `provider`, `self_hosted_server_id`,
+  `provider_params` or `auth_binding` is answered busy even when the value
+  equals the session's. Only the level repeated with `reasoning_effort` is
+  a repeat.
+- A level named inside `provider_params` replaces the provider params and
+  is never a repeat: on a busy session that holds a level it is answered
+  busy even when it equals the held level. A client repeats its level with
+  the field `reasoning_effort`.
+- A session holds a level when a request set one (on create or on a turn),
+  when it was forked from or resumed as a session that holds one, and when
+  it is a mob member built from a profile whose `provider_params` carry
+  `reasoning_effort`. No host or realm configuration gives sessions a
+  level.
+- The price of holding a level: a client that sets a level once and then
+  varies `provider_params` per turn (a temperature, say) is answered busy
+  whenever another turn of the session runs or is queued, and so is a
+  `mob/turn_start` with a model override on a busy `turn_driven` member
+  built from a profile with a level. Wait for the running turn's answer,
+  then send the request again; do not poll (an autonomous mob member is
+  the exception: see the paragraph under the table). A session with
+  standing work may never be idle for such a request: stop sending, let
+  its queue drain, then make the change. On an autonomous mob member the
+  standing work is not the caller's to stop: send the request again, or
+  set the level in the member's profile or at its spawn.
+- The one `kind` names the level in every busy cell, also when the request
+  only changed the model.
+- No flow step, kickoff, peer message, member send, scheduled delivery or
+  wake is answered busy; the rule is on `turn/start` and `mob/turn_start`.
+  A model-identity change carried by such an input, or by a member turn
+  an in-process Rust host starts with a model, provider, params or
+  binding option, is queued and judged only when its turn starts.
+- Unfinished work is not only a running turn: an event queued on a session
+  that has no turn running counts. A session that received a
+  `session/external_event` while no turn was running (confirmed by a test),
+  or one configured with silent comms intents that holds an unread silent
+  request (by reading the code, not run), counts that input as unfinished
+  work until its next turn, and a turn from a busy cell is answered busy
+  there. Nothing is running to wait for. Three ways on: send a plain turn
+  first, then the change (confirmed by a test); or recall the event's input
+  with `session/recall_input` (its `input_id` is in the answer to
+  `session/external_event`), which answers `abandoned` and withdraws the
+  event: the session never receives it; then send the change (seen in a
+  run); or set the level when the session is created. The busy answer's text
+  names the first and the third. On an autonomous mob member the unfinished
+  work can be the member's own: see the paragraph under the table.
+- A later release is planned to queue these turns.
 
 ### comms/send error data
 

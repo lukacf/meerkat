@@ -858,6 +858,34 @@ impl SourceConfig {
         })
     }
 
+    /// Every member the configuration names: in an audience member grant,
+    /// as a triage route's member, in a forward audience's member grant and
+    /// among the conversation members, in that order.
+    pub(crate) fn named_members(&self) -> Vec<&Member> {
+        fn granted(grants: &[AudienceGrant]) -> impl Iterator<Item = &Member> {
+            grants.iter().filter_map(|grant| match grant {
+                AudienceGrant::Member { member } => Some(member),
+                AudienceGrant::Role { .. } | AudienceGrant::Label { .. } => None,
+            })
+        }
+        let mut members: Vec<&Member> = granted(&self.audience).collect();
+        for route in &self.routes {
+            if let SourceRoute::Triage {
+                member,
+                forward_audience,
+                ..
+            } = route
+            {
+                members.push(member);
+                if let Some(grants) = forward_audience {
+                    members.extend(granted(grants));
+                }
+            }
+        }
+        members.extend(&self.conversation_members);
+        members
+    }
+
     /// Whether a direct route lets members subscribe to `topic` directly.
     pub(crate) fn directly_routes(&self, topic: &Topic) -> bool {
         self.routes.iter().any(|route| {

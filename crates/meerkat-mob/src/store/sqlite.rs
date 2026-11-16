@@ -5162,6 +5162,25 @@ fn query_created_identities_page(
     Ok(super::CreatedIdentityScanPage { observations, next })
 }
 
+/// Read every journal event of the persistent mob store at `path`, in cursor
+/// order, with no running mob, for
+/// [`crate::MobStorage::read_definition_snapshot`]: open it read-only (a
+/// missing file is never created), check its schema without migrating it,
+/// and read the journal in one read transaction.
+pub(crate) async fn read_definition_journal_at(
+    path: PathBuf,
+) -> Result<Vec<MobEvent>, crate::MobDefinitionSnapshotReadError> {
+    tokio::task::spawn_blocking(move || read_definition_journal_at_sync(&path))
+        .await
+        .map_err(|error| MobStoreError::Internal(format!("sqlite task join failed: {error}")))?
+}
+
+fn read_definition_journal_at_sync(
+    path: &Path,
+) -> Result<Vec<MobEvent>, crate::MobDefinitionSnapshotReadError> {
+    Ok(read_mob_store_file(path, query_member_binding_events)?)
+}
+
 /// Why a read-only read of a persistent mob store by its path refused or
 /// failed: the cases each path reader's typed error names.
 enum MobStoreFileReadFault {
@@ -5176,6 +5195,18 @@ enum MobStoreFileReadFault {
 impl From<MobStoreError> for MobStoreFileReadFault {
     fn from(error: MobStoreError) -> Self {
         Self::Read(error)
+    }
+}
+
+impl From<MobStoreFileReadFault> for crate::MobDefinitionSnapshotReadError {
+    fn from(fault: MobStoreFileReadFault) -> Self {
+        match fault {
+            MobStoreFileReadFault::Missing { path } => Self::StoreMissing { path },
+            MobStoreFileReadFault::ForeignSchema { path, detail } => {
+                Self::ForeignSchema { path, detail }
+            }
+            MobStoreFileReadFault::Read(error) => Self::Read(error),
+        }
     }
 }
 
@@ -14595,6 +14626,164 @@ mod tests {
         );
     }
 
+    /// Row: the definition snapshot reader refuses a missing store and
+    /// creates none, and refuses a file that is not a mob store this build
+    /// reads (not SQLite, no mob schema, a mob schema from a newer build, an
+    /// older mob schema this build does not accept) and leaves it as it was,
+    /// each typed; a mob store that holds no mob answers `None`.
+    #[tokio::test]
+    async fn the_definition_snapshot_reader_refuses_missing_and_foreign_stores_and_creates_nothing()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let refused = crate::MobStorage::read_definition_snapshot(&missing).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::MobDefinitionSnapshotReadError::StoreMissing { path })
+                    if path == &missing
+            ),
+            "a missing store is refused typed: {refused:?}"
+        );
+        assert!(!missing.exists(), "the reader never creates a store");
+
+        let not_sqlite = dir.path().join("not-sqlite.db");
+        std::fs::write(&not_sqlite, b"this file is not a SQLite database").unwrap();
+        let no_mob_schema = dir.path().join("no-mob-schema.db");
+        Connection::open(&no_mob_schema)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (value INTEGER);")
+            .unwrap();
+        let ledger_only = |path: &Path, version: i64| {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meerkat_schema VALUES ('mob', ?1)",
+                params![version],
+            )
+            .unwrap();
+        };
+        let future_schema = dir.path().join("future-schema.db");
+        ledger_only(&future_schema, 9999);
+        // Version 2 is an older mob schema no build accepts as it is.
+        assert!(!MOB_DOMAIN.allowed_existing_versions.contains(&2));
+        let older_schema = dir.path().join("older-schema.db");
+        ledger_only(&older_schema, 2);
+        for path in [&not_sqlite, &no_mob_schema, &future_schema, &older_schema] {
+            let before = file_facts(path);
+            let refused = crate::MobStorage::read_definition_snapshot(path).await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(crate::MobDefinitionSnapshotReadError::ForeignSchema {
+                        path: refused_path,
+                        ..
+                    }) if refused_path == path
+                ),
+                "{} is refused as a foreign schema: {refused:?}",
+                path.display()
+            );
+            assert_eq!(
+                file_facts(path),
+                before,
+                "{} is left as it was",
+                path.display()
+            );
+        }
+
+        let empty = dir.path().join("empty.db");
+        drop(open_connection(&empty).unwrap());
+        assert_eq!(
+            crate::MobStorage::read_definition_snapshot(&empty)
+                .await
+                .unwrap(),
+            None,
+            "a store that holds no mob answers no definition"
+        );
+    }
+
+    /// The definition snapshot reader reads a released 0.9.2 store, a
+    /// predecessor that opening the store would migrate, as it is: it
+    /// neither migrates nor otherwise writes the file.
+    #[tokio::test]
+    async fn the_definition_snapshot_reader_reads_a_released_v10_store_without_migrating_it() {
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 10, build_released_0_9_2_mob_schema);
+        let before = std::fs::read(&path).unwrap();
+
+        let read = crate::MobStorage::read_definition_snapshot(&path)
+            .await
+            .expect("read a released v10 store");
+
+        assert_eq!(read, None, "the seeded store holds no mob");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(ledger_version(&path), 10);
+        assert!(!table_exists(&path, "mob_runtime_callback_claim_verifiers"));
+    }
+
+    /// The definition snapshot reader answers the definition a released
+    /// 0.9.2 store holds, read from that release's journal table, and
+    /// leaves the store unmigrated. The creation row is one this build
+    /// writes: no migration since that release rewrites a journal row.
+    #[tokio::test]
+    async fn the_definition_snapshot_reader_answers_the_definition_of_a_released_v10_store() {
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 10, build_released_0_9_2_mob_schema);
+        let (_written_dir, written) = temp_db_path();
+        let definition = sample_definition();
+        let storage = crate::MobStorage::persistent(&written).unwrap();
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                },
+            })
+            .await
+            .unwrap();
+        drop(storage);
+        let (cursor, mob_id, event_json) = Connection::open(&written)
+            .unwrap()
+            .query_row(
+                "SELECT cursor, mob_id, event_json FROM mob_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                params![cursor, mob_id, event_json],
+            )
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let read = crate::MobStorage::read_definition_snapshot(&path)
+            .await
+            .expect("read a released v10 store")
+            .expect("the store holds a definition");
+
+        assert_eq!((read.definition(), read.epoch()), (&definition, 1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(ledger_version(&path), 10);
+        assert!(!table_exists(&path, "mob_runtime_callback_claim_verifiers"));
+    }
+
     /// A created identity entry's row (schema version 2) and every row of a
     /// later schema are the created identity scan's, never the intent
     /// readers': the intent scan and the intent list read the host-adopted
@@ -15588,23 +15777,34 @@ mod tests {
         drop(catch_up);
     }
 
-    /// Count the ticks of `catch_up`'s watches that a change woke, from now
-    /// on. A safety sweep is not counted: it ticks on its interval whatever
-    /// the store does, so it is no sign of a wake.
-    fn count_watch_ticks(catch_up: &Arc<SqliteMobEventCatchUp>) -> Arc<AtomicU64> {
-        fn arm(catch_up: &Arc<SqliteMobEventCatchUp>, ticks: &Arc<AtomicU64>) {
+    /// The ticks of `catch_up`'s watches from the moment the count is armed,
+    /// by kind.
+    #[derive(Default)]
+    struct WatchTicks {
+        /// Ticks a change woke.
+        changed: AtomicU64,
+        /// Safety sweeps: they tick on their interval whatever the store
+        /// does, so one is no sign of a wake.
+        sweeps: AtomicU64,
+    }
+
+    /// Count the ticks of `catch_up`'s watches from now on, by kind.
+    fn count_watch_ticks(catch_up: &Arc<SqliteMobEventCatchUp>) -> Arc<WatchTicks> {
+        fn arm(catch_up: &Arc<SqliteMobEventCatchUp>, ticks: &Arc<WatchTicks>) {
             let again = Arc::downgrade(catch_up);
             let count = Arc::clone(ticks);
             lock_unpoisoned(&catch_up.test_hooks).tick = Some(Box::new(move |tick| {
-                if tick != SqliteWatchTick::Sweep {
-                    count.fetch_add(1, Ordering::SeqCst);
-                }
+                let kind = match tick {
+                    SqliteWatchTick::Changed => &count.changed,
+                    SqliteWatchTick::Sweep => &count.sweeps,
+                };
+                kind.fetch_add(1, Ordering::SeqCst);
                 if let Some(again) = again.upgrade() {
                     arm(&again, &count);
                 }
             }));
         }
-        let ticks = Arc::new(AtomicU64::new(0));
+        let ticks = Arc::new(WatchTicks::default());
         arm(catch_up, &ticks);
         ticks
     }
@@ -15639,7 +15839,7 @@ mod tests {
         catch_up.publish_available_from_storage().unwrap();
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(
-            ticks.load(Ordering::SeqCst),
+            ticks.changed.load(Ordering::SeqCst),
             0,
             "the observer's own catch-up woke its watch"
         );
@@ -15659,6 +15859,12 @@ mod tests {
         let held = open_existing_read_connection(&path).unwrap();
         let stores = SqliteMobStores::open(&path).unwrap();
         wait_for_watch_registrations(&path);
+        let wal = path.with_file_name("mob.db-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).map(|wal| wal.len()).unwrap_or(0),
+            0,
+            "the reopen committed nothing"
+        );
         drop(held);
         let catch_up = Arc::clone(&stores.event_bus.catch_up);
         // With a subscriber the sweep reads the store instead of returning
@@ -15672,10 +15878,14 @@ mod tests {
         swept_rx
             .recv_timeout(Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS) + OBSERVER_HANG_GUARD)
             .expect("the safety sweep reads the store for its subscriber");
+        assert!(
+            ticks.sweeps.load(Ordering::SeqCst) >= 1,
+            "the catch-up that read for the subscriber was not a safety sweep's"
+        );
         // The quiet window after the sweep's own catch-up.
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(
-            ticks.load(Ordering::SeqCst),
+            ticks.changed.load(Ordering::SeqCst),
             0,
             "a safety sweep on a quiet store was counted as a wake"
         );
@@ -15684,6 +15894,45 @@ mod tests {
             "the sweep published to a subscriber of a quiet store"
         );
         assert_eq!(*lock_unpoisoned(&catch_up.latest_broadcast_cursor), 0);
+        drop(stores);
+    }
+
+    /// The positive control of the two quiet rows above: a commit by
+    /// another writer is a tick a change woke, and it reaches the
+    /// subscriber. Without it those rows could pass blind: with a hook that
+    /// names every tick a sweep, or with a watch whose notifications never
+    /// registered (the commit would then arrive with the next sweep, and no
+    /// change tick would be counted).
+    #[test]
+    fn a_commit_by_another_writer_is_a_counted_tick() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        wait_for_watch_registrations(&path);
+        let catch_up = Arc::clone(&stores.event_bus.catch_up);
+        let mut rx = stores.event_store().subscribe().unwrap();
+        let ticks = count_watch_ticks(&catch_up);
+
+        raw_append(&path, 1);
+        let deadline = std::time::Instant::now()
+            + Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS)
+            + OBSERVER_HANG_GUARD;
+        let observed = loop {
+            match rx.try_recv() {
+                Ok(event) => break event,
+                Err(broadcast::error::TryRecvError::Empty) => {}
+                Err(error) => panic!("the subscription ended: {error}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the subscriber never observed the other writer's commit"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(observed.cursor, 1);
+        assert!(
+            ticks.changed.load(Ordering::SeqCst) >= 1,
+            "the other writer's commit reached the subscriber, but no tick was counted as woken by a change"
+        );
         drop(stores);
     }
 
@@ -17712,6 +17961,72 @@ mod tests {
     async fn temporary_council_unfinished_listing_tracks_settlement() {
         let (_dir, store) = sqlite_temporary_council_store();
         temporary_council_contract::unfinished_listing_tracks_settlement(&store).await;
+    }
+
+    #[tokio::test]
+    async fn temporary_council_convener_survives_insert_load_and_commit() {
+        let (_dir, store) = sqlite_temporary_council_store();
+        temporary_council_contract::convener_survives_insert_load_and_commit(&store).await;
+    }
+
+    /// The council row is plain JSON with no digest over it: a row as an
+    /// earlier release wrote it (no `convener` key, no
+    /// `temporary_mob_custody` key) loads as a council with no convener that
+    /// names no mob of its own, and a key this release does not know is
+    /// ignored. Everything else in the row is read as stored.
+    #[tokio::test]
+    async fn temporary_council_row_without_the_new_keys_and_with_an_unknown_key_loads() {
+        let (_dir, path) = temp_db_path();
+        let _stores = SqliteMobStores::open(&path).expect("open");
+        let store = SqliteTemporaryCouncilStore::open(&path).expect("open council store");
+        let mut record = temporary_council_contract::record("older-row");
+        record.convener = Some(crate::temporary_council::TemporaryCouncilConvener::new(
+            meerkat_core::SessionId::new(),
+        ));
+        let stored = store.insert_new(&record).await.expect("insert");
+        {
+            let conn = open_connection(&path).expect("raw connection");
+            let bytes: Vec<u8> = conn
+                .query_row(
+                    "SELECT record_json FROM mob_temporary_councils WHERE council_id = ?1",
+                    params![record.council_id.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("read the stored row");
+            let mut row: serde_json::Value = serde_json::from_slice(&bytes).expect("row json");
+            let object = row.as_object_mut().expect("the row is an object");
+            assert!(
+                object.remove("convener").is_some(),
+                "the stored row carries the convener key"
+            );
+            assert!(
+                object.remove("temporary_mob_custody").is_some(),
+                "the stored row carries the custody key"
+            );
+            object.insert(
+                "a_key_of_a_later_release".to_string(),
+                serde_json::json!({ "anything": true }),
+            );
+            let changed = conn
+                .execute(
+                    "UPDATE mob_temporary_councils SET record_json = ?1 WHERE council_id = ?2",
+                    params![
+                        serde_json::to_vec(&row).expect("encode the row"),
+                        record.council_id.as_str()
+                    ],
+                )
+                .expect("rewrite the stored row");
+            assert_eq!(changed, 1);
+        }
+        let loaded = store
+            .load(&record.council_id)
+            .await
+            .expect("load")
+            .expect("present");
+        let mut expected = stored;
+        expected.convener = None;
+        expected.temporary_mob_custody = None;
+        assert_eq!(loaded, expected);
     }
 
     #[tokio::test]

@@ -67,7 +67,7 @@ They replace the realm's composed `[confinement]` for every launch kind of
 this process. The workspace preset confines each launch to `--context-root`;
 without `--context-root` the server refuses to start with it. A start in which
 a confined process could change the server's realm state or user config
-document is refused (see [the host's own inputs](/concepts/configuration#the-hosts-own-inputs)).
+document is refused (see [the host's own inputs](/concepts/configuration#the-host%E2%80%99s-own-inputs)).
 At startup the server logs each launch kind's requested and effective
 confinement and warns for each required kind its platform cannot confine.
 
@@ -412,6 +412,19 @@ Create and run a new session.
   Max retries for structured output validation. `null`/omitted uses the server default on create and inherits the persisted session value on continue.
 </ParamField>
 
+<ParamField body="reasoning_effort" type="string | null" default="null">
+  From 0.9.15; an older server ignores the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
+  The session's provider-neutral reasoning effort level: `none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh` or `max` (see
+  [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
+  setting as `provider_params.reasoning_effort`; a request that gives both
+  must give the same level. A level the model or its route does not accept
+  is refused with HTTP 400, code `INVALID_PARAMS` and details
+  `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
+  before any provider request.
+</ParamField>
+
 <ParamField body="verbose" type="bool" default="false">
   Enable verbose event logging (server-side).
 </ParamField>
@@ -495,7 +508,7 @@ structured-output extraction fails. Inspect both `structured_output` and
 never requested. These optional REST fields are omitted when absent, not
 filled with `null`.
 
-### GET /sessions/{id}/history
+### GET /sessions/\{id\}/history
 
 Read committed transcript history for a session without changing the lightweight metadata shape of `GET /sessions/{id}`.
 
@@ -676,6 +689,35 @@ Continue an existing session.
 
 <ParamField body="structured_output_retries" type="u32 | null" default="null">
   Max retries for structured output validation. Omit / `null` to inherit the persisted session value on continue.
+</ParamField>
+
+<ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
+  From 0.9.15; an older server ignores the field. The 0.9.15 Python and TypeScript SDKs refuse to send it to an
+  older server, so nothing is sent.
+  The session's provider-neutral reasoning effort level from this message
+  on: a level (`"high"`, or `{"action":"set","value":"high"}`) sets it,
+  `{"action":"clear"}` removes it, and omission/`null` keeps the level the
+  session recorded. On a session this server does not hold live, a level
+  the model or its route does not accept is refused exactly as on
+  `POST /sessions`: HTTP 400, code `INVALID_PARAMS`
+  and the `reasoning_effort_refused` details. The stored session is
+  unchanged. A message that names this field rebuilds the session, like
+  one that names `model` or `max_tokens`: while this server holds the
+  session live, such a message is answered HTTP 500 `session is busy` and
+  changes nothing. So on REST a provider-neutral level can be set only when
+  the session is created (`POST /sessions`) or on a session this server
+  does not hold live. On a live session a message that names the level, or
+  a `model`, is not served: it is refused at once, whether or not a turn is
+  running, and nothing is stored or queued for it; a turn that is running
+  and the messages queued behind it go on. In 0.9.15 the answer is HTTP 500
+  with code `INTERNAL_ERROR` and a text that says the session is busy; read
+  it as "not served on a live session", and do not rely on that status or
+  code staying. It is not an answer to retry when the session is idle:
+  sending the message again while the server holds the session is refused
+  the same way. The typed busy answer of JSON-RPC
+  (`reasoning_effort_change_needs_idle_session`) does not apply to REST.
+  `provider_params` is not a member of this request and is not read here:
+  the field is the only form of the level on a message.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
@@ -1045,7 +1087,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 14},
+  "contract_version": {"major": 0, "minor": 9, "patch": 15},
   "providers": [
     {
       "provider": "anthropic",
@@ -1079,7 +1121,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 14},
+  "contract_version": {"major": 0, "minor": 9, "patch": 15},
   "capabilities": [
     {
       "id": "sessions",
@@ -1669,6 +1711,19 @@ maps to `BAD_REQUEST`/`400`, not a universal `SESSION_BUSY`/`409`.
 Do not require this envelope on every failure. Auth routes may return only
 `{"error":"..."}`; webhook admission has route-specific error projections,
 and framework JSON/path extraction errors can use different bodies.
+
+A `reasoning_effort` level that the model's route does not accept answers
+HTTP `400` with code `INVALID_PARAMS` and `details`
+`{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`,
+the object JSON-RPC carries as `error.data` (see
+[Reasoning effort refusal data](/api/rpc#reasoning-effort-refusal-data)). A
+refused session build and a turn that failed for the refusal answer the same
+way, on `POST /sessions` and on `POST /sessions/{id}/messages` alike. The
+refusal's `route`, `supported` and `facts` are always present and are `null`
+when they have no value; they are never left out. When a refused turn
+belongs to the request that created its session,
+`details` also carries `session_id`, `session_ref`, `session_created: true`
+and `resumable: true`.
 
 For a session that was durably created but whose first turn failed, the server
 returns `SESSION_CREATED_WITH_TURN_FAILURE` with resumable session identity in

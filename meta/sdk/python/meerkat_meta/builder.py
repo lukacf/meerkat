@@ -5,13 +5,18 @@ import copy
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from ._transport import PersistentTransport
 from .errors import GatewayTransportConflictError
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
 from .models import AuthBindingRef, NativeRealm, ToolArtifactRef
+
+if TYPE_CHECKING:
+    # Named by the annotation of `MetaBuilder.build`, which imports it when
+    # it runs. Without this a type checker cannot tell what `build` returns.
+    from .runtime import MetaRuntime
 
 
 @dataclass
@@ -151,7 +156,7 @@ class MetaBuilder:
             Meta.builder().event_log(event_log.null())
 
         The gateway accepts only the declared ephemeral storage kinds
-        (``"memory"`` — bounded queryable in-process store; ``"null"`` —
+        (``"memory"`` — queryable in-process store; ``"null"`` —
         events dropped) and rejects anything else at startup. Without this
         call no events are ingested at all.
 

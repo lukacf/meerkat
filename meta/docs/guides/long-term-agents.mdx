@@ -4,8 +4,6 @@ description: "Move an agent your configuration declares to run-time changes, the
 icon: "users-gear"
 ---
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Available from Meerkat Meta 0.9.15.
 
 A long-term agent is a durable, named member of the mob. It keeps its own
@@ -251,14 +249,21 @@ own `request_id` or by the outcome's `operation_id`.
 <CodeGroup>
 
 ```python Python
+from meerkat_meta import (
+    IdentityDone,
+    IdentityOperationUnknown,
+    IdentityPendingDecision,
+    IdentityRefused,
+)
+
 state = await identities.operation(request_id="adopt-scout-1")
-if state.outcome == "done":
+if isinstance(state, IdentityDone):
     ...
-elif state.outcome == "pending_decision":
+elif isinstance(state, IdentityPendingDecision):
     ...  # still held; state.deadline_ms
-elif state.outcome == "refused":
+elif isinstance(state, IdentityRefused):
     state.refusal.kind  # for example decision_closed
-elif state.outcome == "unknown":
+elif isinstance(state, IdentityOperationUnknown):
     ...  # nothing committed and nothing is held: asking it commits at most once
 ```
 
@@ -292,10 +297,35 @@ decision of an SDK host renders without them.
 
 ## 4. Create, update, archive and remove
 
+One limit to know before you change an agent's instructions. On a model that
+takes a system instruction only ahead of the conversation, a changed
+instruction reaches an agent that already has a conversation only when that
+conversation is compacted at the start of a run. Those models are every
+Gemini model, the Anthropic models up to and including `claude-opus-4-7`,
+`claude-sonnet-5` and `claude-haiku-4-5`, and the OpenAI models `gpt-live-1`
+and `gpt-live-1-codex`. Newer Anthropic models and the other OpenAI models
+take a changed instruction in mid-conversation, except an OpenAI model
+served through the ChatGPT backend (`chatgpt_backend`), whose requests carry
+no system instruction besides the prompt: there a change applies only from a
+new conversation. A model the catalog does not know is treated as taking it
+only ahead of the conversation. The instruction status tells for a given
+agent. That compaction may never happen by itself: a conversation is
+compacted only when it reaches its compaction threshold (by default about
+four fifths of the model's context window), never after a time or a number
+of turns. Until then the agent goes
+on following its earlier instructions. To bring the change into effect,
+reset the agent, which discards its conversation; **Instructions** below has
+it.
+
+One thing to know before you archive or remove an agent: an archive and a
+removal of an agent that still owns mobs it created are refused
+`owns_mobs`, until the agent has destroyed them (**Archive and unarchive**
+below). The agent in this block has created none.
+
 <CodeGroup>
 
 ```python Python
-from meerkat_meta import AgentSet, AgentSpec
+from meerkat_meta import AgentSet, AgentSpec, IdentityDone
 
 created = await identities.create(
     [
@@ -310,7 +340,9 @@ created = await identities.create(
     ],
     request_id="create-editor-1",
 )
-digest = created.agents[0].spec_digest
+digest = ""
+if isinstance(created, IdentityDone):
+    digest = created.agents[0].spec_digest or ""
 
 updated = await identities.update(
     "editor",
@@ -318,9 +350,12 @@ updated = await identities.update(
     request_id="update-editor-1",
     set=AgentSet(instructions=["Edit for clarity.", "Keep the author's voice."]),
 )
-agent = updated.agents[0]
-agent.instructions.kind        # "applies_at_next_run", ...
-digest = agent.spec_digest
+if isinstance(updated, IdentityDone):
+    agent = updated.agents[0]
+    if agent.instructions:
+        # "applies_at_next_run", "applies_after_compaction", ...
+        agent.instructions.kind
+    digest = agent.spec_digest or digest
 
 await identities.archive("editor", expected_spec_digest=digest, request_id="archive-editor-1")
 await identities.unarchive("editor", expected_spec_digest=digest, request_id="unarchive-editor-1")
@@ -350,7 +385,8 @@ const updated = await identities.update("editor", {
 });
 if (updated.outcome === "done") {
   const agent = updated.agents[0];
-  agent.instructions?.kind; // "applies_at_next_run", ...
+  // "applies_at_next_run", "applies_after_compaction", ...
+  agent.instructions?.kind;
   digest = agent.specDigest!;
 }
 
@@ -360,6 +396,13 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
 ```
 
 </CodeGroup>
+
+This block archives and removes the agent moments after changing its
+instructions, so the gateway log may show one or two
+`operator_instruction_delivery` warnings (`failure=AGENT_ERROR`,
+`failure=SESSION_NOT_FOUND`): the change was on its way into the agent's
+conversation when the conversation was archived. Nothing is lost: the change
+is already in the agent's record.
 
 - **Create.** One call creates 1 to 256 agents, all or nothing; they may name
   each other as peers. A new agent is dormant: nothing is loaded and nothing
@@ -384,21 +427,58 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   configuration gave it before its adoption) stays through an update that
   does not name it; an update that would change or remove it is refused
   `reserved_key` at `set.labels`, the removal of one of Meta's own labels at
-  `set.labels_remove`. A label change reaches the
-  agent's member at once while the member is idle, on the same conversation,
-  with no respawn and no reset; a member that held work then takes it at a
-  retry of the update, at its next update, or at its next seat. A `profile`
+  `set.labels_remove`. A label change is applied at once and does not
+  seat the agent again: the mob's roster and the access rules use the new
+  labels at once, an idle agent is released and takes them at its next
+  build, on the same conversation, and a busy one keeps what it was built
+  with until it is next released; a broken agent whose labels have changed
+  since it was last seated is seated again by its next update
+  (see
+  [Changing labels](/guides/agents-create-agents#changing-labels)). A `profile`
   change moves the agent
-  to that profile's model and tools on the same conversation.
+  to that profile's model and tools on the same conversation. The move
+  seats the agent again, and so does a change of `runtime_mode_override`:
+  an agent that created mobs with its own tools goes on listing and
+  managing them (see
+  [Moving a profile](/guides/agents-create-agents#moving-a-profile) for
+  what still ends that).
   `addressability` and `runtime_mode_override` take the values they take on
   a create and are the change class `capability` of your policy; an update
   sets a runtime mode and cannot return the agent to its profile's.
 - **Instructions.** A change of instructions is in the agent's record at
-  once. It reaches the agent at its next run; a run that starts within
-  moments of the change may still use the earlier instructions; earlier
-  instructions are never rewritten. The update's outcome says which applies:
-  `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
-  (with a `reason`) or `unchanged`.
+  once; earlier instructions are never rewritten. The update's outcome says
+  when the agent follows it. `applies_at_next_run`: at its next run (a run
+  that starts within moments of the change may still use the earlier
+  instructions); an agent that has no conversation yet takes the current
+  instructions in its first run, unless that run was already being started
+  when the update arrived. `applies_after_compaction`: the limit above; the
+  sample above answers it on such a model, because the agent's first message
+  has given it a conversation. `applies_at_next_session` (with a `reason`):
+  from the agent's next new conversation. `unchanged`: the update left the
+  instructions as they were. The instruction status
+  (`runtime.instruction_status(namespace="meerkat.identity.instructions", key="editor", identity="editor")`)
+  shows where a change stands, in `status["members"][0]["slots"][0]["state"]`:
+  `{"state": "pending", "reason": "leading_prefix_only_lowering"}` is
+  recorded and not yet followed; `{"state": "effective"}` is followed. Right
+  after the update the reason is `delivery_owed` for a moment: the change is
+  not in the agent's conversation yet (the other values are on the
+  [roster page](/concepts/roster#changing-an-agent%E2%80%99s-instructions)). A reset
+  (`runtime.reset("editor")`; in the Console, the roster's reset action where
+  the console configuration shows it, `show_reset`, and the viewer may reset
+  the agent) starts a new conversation led by the current instructions, and
+  the earlier conversation is lost. The call is available for every agent
+  that is not archived. The change
+  also takes effect at the agent's next compaction at the start of a run. A
+  respawn does not bring the change into effect, and neither does an archive
+  followed by an unarchive.
+  The SDKs can also compact the agent's conversation, which brings a waiting
+  instruction into effect on the same conversation:
+  `runtime.compact_member("editor")` in Python,
+  `runtime.compactMember("editor")` in TypeScript; before you use it on an
+  agent that created mobs, read the SDK reference
+  ([Python](/sdks/python#compacting-a-member%E2%80%99s-conversation),
+  [TypeScript](/sdks/typescript#compacting-a-member%E2%80%99s-conversation)):
+  against a gateway before 0.9.15 the call costs the agent those mobs.
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory, and messages to it are refused. Like any agent
   that leaves, it is owed the harvest and distillation of its last
@@ -407,13 +487,29 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   promised between them and the archive's answer. Unarchive
   brings it back on the same conversation. While it is archived the
   identity's status (`runtime.status(name)`) reads `archived` true; the
-  member is left out otherwise.
+  member is left out otherwise. An archive of an agent that still owns
+  mobs it created is refused `owns_mobs`, and nothing is changed: the
+  refusal says how many mobs there are, and names them to the host and to
+  an administrator. Have the agent destroy its mobs (`mob_destroy`) and
+  archive it then, or keep the agent. When the agent can no longer manage
+  a mob its session owns, no Meta host method destroys that mob, and the
+  agent's archive and its removal are refused through Meta while its
+  session owns it; on a gateway the way out is a reset of the agent, which
+  costs its conversation and, by the gateway's next start, those mobs (the
+  RPC reference lists the cases and the refusal's limits, under
+  `meta/identity/archive`). The
+  refusal is Meta's: a Rust host that calls Core's `archive_identity` or
+  `remove_identity` itself is not refused, and there the mobs the agent
+  created are removed with their stores when the host next starts, and
+  unarchiving the agent does not bring them back.
 - **Remove.** Removal is permanent: the name is never available again
   (`name_taken`). The agent's conversation and memory are kept, and no
   other agent can reach them. A removal owes what an archive owes (the
   harvest, the exit interview, the retirement hook); a removal of an
-  archived agent owes nothing more. Archive an agent that may be needed
-  later.
+  archived agent owes nothing more. A removal of an agent that still owns
+  mobs it created is refused `owns_mobs`, as its archive is. Archive an
+  agent that may be needed later, once it has destroyed the mobs it
+  created (**Archive and unarchive** above).
 - **Schedules.** The schedules that target an agent follow these three
   changes, so that none keeps firing at an agent that takes no delivery: an
   archive pauses its Active schedules, an unarchive resumes exactly the

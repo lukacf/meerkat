@@ -45,6 +45,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
+use meerkat::session_runtime::runtime_state::RuntimeCleanupScope;
 use meerkat::surface::{
     RequestAdmissionError, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
@@ -1306,6 +1307,11 @@ fn runtime_driver_error_to_session_error(
     if let Some(held) = error.durable_hold_session_error() {
         return held;
     }
+    // A reconfiguration refused for its reasoning effort level keeps the
+    // typed refusal a refused build has.
+    if let Some(refused) = error.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
 }
 
@@ -1515,13 +1521,17 @@ async fn discard_rebuilt_rest_session_after_api_error_locked(
     }
 }
 
+/// Take back the runtime of a session whose create failed after it was
+/// registered. The session was not archived, so this is the cleanup of a
+/// session that stays ([`cleanup_kept_session_runtime`]): it destroys no
+/// mob.
 async fn cleanup_rest_session_after_api_error(
     state: &AppState,
     session_id: &SessionId,
     primary: ApiError,
     operation: &str,
 ) -> ApiError {
-    match cleanup_archived_session_runtime(state, session_id).await {
+    match cleanup_kept_session_runtime(state, session_id).await {
         Ok(()) => primary,
         Err(cleanup) => ApiError::Internal(runtime_cleanup_failure_message(
             api_error_message(&primary),
@@ -1758,10 +1768,15 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             if runtime_termination_cleanup
                 && !state.runtime_adapter.contains_session(session_id).await =>
         {
+            // No generated authority named a cleanup here, so this is never
+            // the archive's: an archived session whose registration is gone
+            // returned above, and a session that is not archived keeps what
+            // it owns.
             cleanup_rest_runtime_after_verified_termination(
                 state,
                 session_id,
                 &runtime_termination_proof,
+                RuntimeCleanupScope::KeptSession,
             )
             .await?;
             return Ok(true);
@@ -1772,7 +1787,14 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             )));
         }
     };
-    if cleanup_authority.requires_runtime_cleanup() {
+    // The machine names the cleanup: none, the runtime's only, or the
+    // archive's. This surface hands the action to the one exhaustive mapping
+    // every surface shares and chooses nothing. A turn
+    // whose apply failed retires the session's live runtime, which its next
+    // turn builds again, and leaves the session what it owns: its mobs are
+    // destroyed by its archive, never by a failed turn.
+    let cleanup_scope = RuntimeCleanupScope::of_completion_action(cleanup_authority.action);
+    if let Some(scope) = cleanup_scope {
         match state.session_service.discard_live_session(session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -1783,10 +1805,11 @@ async fn cleanup_rest_runtime_after_completion_outcome(
                 state,
                 session_id,
                 &runtime_termination_proof,
+                scope,
             )
             .await?;
         } else {
-            cleanup_archived_session_runtime_until_terminal(state, session_id).await?;
+            cleanup_rest_session_runtime_until_terminal(state, session_id, scope).await?;
         }
     }
     Ok(cleanup_authority.releases_pre_admission())
@@ -2574,6 +2597,7 @@ pub use meerkat_contracts::wire::RestCreateSessionRequest as CreateSessionReques
 fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
     req.model.is_some()
         || req.provider.is_some()
+        || req.reasoning_effort.is_some()
         || req.auth_binding.is_some()
         || req.max_tokens.is_some()
         || req.output_schema.is_some()
@@ -2588,6 +2612,47 @@ fn rest_continue_system_prompts(req: &ContinueSessionRequest) -> Vec<String> {
     req.system_prompt.iter().cloned().collect()
 }
 
+/// The provider params a created session's build seats: the request's
+/// params with its `reasoning_effort` level folded in by Core's one rule. A
+/// request that names the level twice with two different levels is refused.
+fn create_session_build_provider_params(
+    req: &CreateSessionRequest,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, ApiError> {
+    let params = req.provider_params.clone().map(Into::into);
+    meerkat_core::resolve_build_provider_params(
+        params.as_ref(),
+        req.reasoning_effort
+            .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+    )
+    .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+/// The provider params a continue request's rebuild names, and whether the
+/// rebuild claims the session's reasoning effort level: a request that sets
+/// or clears the level claims it, so the rebuilt session holds that level
+/// (or none) beside its recorded params; a request that names none leaves
+/// the recorded level alone.
+fn continue_session_build_provider_params(
+    req: &ContinueSessionRequest,
+) -> Result<
+    (
+        Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+        bool,
+    ),
+    ApiError,
+> {
+    use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    let level = req.reasoning_effort.clone().map(|level| match level {
+        WireTurnMetadataOverride::Set(level) => TurnMetadataOverride::Set(level),
+        WireTurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
+    });
+    let claims_level = level.is_some();
+    meerkat_core::resolve_build_provider_params(None, level)
+        .map(|params| (params, claims_level))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
 fn create_session_resume_override_mask(
     req: &CreateSessionRequest,
     keep_alive_override: Option<bool>,
@@ -2599,6 +2664,7 @@ fn create_session_resume_override_mask(
         max_tokens: req.max_tokens.is_some(),
         structured_output_retries: req.structured_output_retries.is_some(),
         provider_params: req.provider_params.is_some(),
+        reasoning_effort: req.reasoning_effort.is_some(),
         preload_skills: req.preload_skills.is_some(),
         keep_alive: keep_alive_override.is_some(),
         comms_name: req.comms_name.is_some(),
@@ -5113,7 +5179,12 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(ApiError::RequestCancelled { details: None })
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, error } => {
+            if let Some(refused) =
+                reasoning_effort_refused_turn_api_error(&error, session_id, realm, session_created)
+            {
+                return Err(refused);
+            }
             let message = format!("turn abandoned: {reason}");
             if session_created {
                 Err(session_created_with_turn_failure_api_error(
@@ -5124,6 +5195,11 @@ fn completion_outcome_to_api_result(
             }
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
+            if let Some(refused) =
+                reasoning_effort_refused_turn_api_error(&error, session_id, realm, session_created)
+            {
+                return Err(refused);
+            }
             let message = format!("turn abandoned: {reason}");
             let details = json!({
                 "error": error,
@@ -5815,6 +5891,7 @@ fn help_request_to_create_session(
         enable_workgraph: Some(false),
         budget_limits: None,
         provider_params: None,
+        reasoning_effort: None,
         preload_skills: None,
         skill_refs: None,
         labels: None,
@@ -5833,6 +5910,9 @@ fn create_session_error_to_api(err: SessionError) -> ApiError {
     }
     if let Some(held) = session_durable_hold_api_error(&err) {
         return held;
+    }
+    if let Some(refused) = reasoning_effort_refused_api_error(&err) {
+        return refused;
     }
     let message = err.to_string();
     match err.primary_error() {
@@ -5871,6 +5951,12 @@ async fn create_session_inner(
     {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
+    // The level has one home, the build's provider params: both spellings
+    // of it must agree before anything is built.
+    let build_provider_params = match create_session_build_provider_params(&req) {
+        Ok(params) => params,
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
+    };
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -6036,7 +6122,7 @@ async fn create_session_inner(
         // `pre_session` only claims the new session's id.
         resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
         budget_limits: req.budget_limits,
-        provider_params: req.provider_params.clone().map(Into::into),
+        provider_params: build_provider_params,
         external_tools: help_tools.or(mcp_external_tools),
         // The session service decides hosting when it creates the actor.
         hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
@@ -6063,6 +6149,7 @@ async fn create_session_inner(
         schedule_tools: None,
         workgraph_tools: None,
         workgraph_namespace_grant: None,
+        host_tools: None,
         mob_tool_authority_context: None,
         preload_skills: req.preload_skills.clone(),
         realm_id: Some(state.realm.clone()),
@@ -6346,9 +6433,53 @@ fn parse_label_filters(
     Ok(if map.is_empty() { None } else { Some(map) })
 }
 
+/// The JSON body of `POST /schedules` and `PATCH /schedules/{id}`.
+///
+/// It is the plain JSON body in every respect but one. A body that does not
+/// read because it writes `reasoning_effort` directly in a `create` spec or
+/// on a prompt action is a refused schedule, not a malformed body: it gets
+/// the answer the schedule service gives the `provider_params` form (400
+/// with the refusal's sentence), so the refusal has one answer on this door.
+/// The schedule types refuse the member when they are read, and a parser
+/// reports that as text only, so the refusal is recognised by its sentence
+/// (`meerkat_schedule::direct_reasoning_effort_refusal`, reached through the
+/// facade). Every other rejection is
+/// the JSON extractor's own, unchanged.
+struct ScheduleRequestJson<T>(T);
+
+impl<S, T> axum::extract::FromRequest<S> for ScheduleRequestJson<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(request)) => Ok(Self(request)),
+            Err(rejection) => Err(schedule_request_rejection(rejection)),
+        }
+    }
+}
+
+fn schedule_request_rejection(rejection: axum::extract::rejection::JsonRejection) -> Response {
+    if let axum::extract::rejection::JsonRejection::JsonDataError(_) = &rejection
+        && let Some(refusal) = meerkat::direct_reasoning_effort_refusal(&rejection.body_text())
+    {
+        return schedule_error_to_api(meerkat::ScheduleDomainError::InvalidSchedule(
+            refusal.to_string(),
+        ))
+        .into_response();
+    }
+    rejection.into_response()
+}
+
 async fn create_schedule(
     State(state): State<AppState>,
-    Json(request): Json<meerkat::CreateScheduleRequest>,
+    ScheduleRequestJson(request): ScheduleRequestJson<meerkat::CreateScheduleRequest>,
 ) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     state
         .ensure_schedule_host_started()
@@ -6501,7 +6632,7 @@ async fn get_schedule(
 async fn update_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<meerkat::UpdateScheduleRequest>,
+    ScheduleRequestJson(request): ScheduleRequestJson<meerkat::UpdateScheduleRequest>,
 ) -> Result<Json<meerkat_contracts::wire::Schedule>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
@@ -7001,6 +7132,11 @@ async fn continue_session_inner(
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
+    let (continue_provider_params, continue_claims_reasoning_effort) =
+        match continue_session_build_provider_params(&req) {
+            Ok(v) => v,
+            Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
+        };
     let path_session_id = match resolve_session_id_for_state(id, state) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -7339,7 +7475,7 @@ async fn continue_session_inner(
             resume_session: Some(session),
             resume_session_intent: meerkat_core::SessionBuildIntent::Resume,
             budget_limits: None,
-            provider_params: None,
+            provider_params: continue_provider_params,
             external_tools: None,
             // The session service decides hosting when it creates the actor.
             hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
@@ -7366,6 +7502,7 @@ async fn continue_session_inner(
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
             realm_id: Some(state.realm.clone()),
@@ -7394,6 +7531,9 @@ async fn continue_session_inner(
                 auth_binding: auth_binding_override.is_some(),
                 max_tokens: req.max_tokens.is_some(),
                 structured_output_retries: req.structured_output_retries.is_some(),
+                // A request that sets or clears the level decides it; the
+                // session's other recorded params stay.
+                reasoning_effort: continue_claims_reasoning_effort,
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: req.comms_name.is_some(),
                 peer_meta: req.peer_meta.is_some(),
@@ -7492,11 +7632,16 @@ async fn continue_session_inner(
         {
             Ok(v) => v,
             Err(e) => {
+                // A level the rebuilt session's route refuses is the
+                // caller's request, answered as the create answers it.
+                let rebuild_error = reasoning_effort_refused_api_error(&e).unwrap_or_else(|| {
+                    ApiError::Internal(format!("Failed to rebuild session: {e}"))
+                });
                 let error = unregister_rest_runtime_after_api_error_locked(
                     state,
                     &session_id,
                     runtime_was_registered,
-                    ApiError::Internal(format!("Failed to rebuild session: {e}")),
+                    rebuild_error,
                 )
                 .await;
                 drop(caller_event_tx);
@@ -8743,7 +8888,23 @@ async fn cleanup_archived_session_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    cleanup_archived_session_runtime_until_terminal(state, session_id).await
+    cleanup_rest_session_runtime_until_terminal(
+        state,
+        session_id,
+        RuntimeCleanupScope::ArchivedSession,
+    )
+    .await
+}
+
+/// The cleanup of a session that stays: the runtime's teardown and the
+/// surface steps that follow it, and never the destroy of the mobs the
+/// session owns. The entry point for a cleanup that is never an archive.
+async fn cleanup_kept_session_runtime(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    cleanup_rest_session_runtime_until_terminal(state, session_id, RuntimeCleanupScope::KeptSession)
+        .await
 }
 
 /// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
@@ -8753,9 +8914,14 @@ async fn cleanup_archived_session_runtime(
 /// outcome); and once the outcome is delivered the runtime is gone, so a
 /// client reusing the session cannot race a half-torn-down registration. The
 /// wait ends on the saga's typed terminal result.
-async fn cleanup_archived_session_runtime_until_terminal(
+///
+/// `scope` says what became of the session: the cleanup of a session that
+/// stays (a turn whose apply failed) retires its live runtime and destroys
+/// none of its mobs.
+async fn cleanup_rest_session_runtime_until_terminal(
     state: &AppState,
     session_id: &SessionId,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     if let Some(registration) = state
         .runtime_adapter
@@ -8776,7 +8942,7 @@ async fn cleanup_archived_session_runtime_until_terminal(
             Err(error) => return Err(runtime_driver_error_to_session_error(error)),
         }
     }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_rest_runtime_after_unregistered(state, session_id, scope).await
 }
 
 /// Retire an archived REST session without erasing either required cleanup
@@ -8798,6 +8964,7 @@ async fn cleanup_rest_runtime_after_verified_termination(
     state: &AppState,
     session_id: &SessionId,
     cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     if !cleanup_observation.proves_runtime_termination_for(session_id) {
         return Err(SessionError::Unsupported(format!(
@@ -8809,23 +8976,32 @@ async fn cleanup_rest_runtime_after_verified_termination(
             "REST runtime termination cleanup for {session_id} expected an already-absent registration"
         )));
     }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_rest_runtime_after_unregistered(state, session_id, scope).await
 }
 
+/// The surface steps that follow the runtime's unregister. The mobs the
+/// session owns are destroyed for an archived session only
+/// ([`RuntimeCleanupScope::ArchivedSession`]); the MCP and comms steps run
+/// for a session that stays too, and its next turn builds them again.
 async fn cleanup_rest_runtime_after_unregistered(
     state: &AppState,
     session_id: &SessionId,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     #[cfg(feature = "mob")]
-    state
-        .mob_state
-        .destroy_bridge_session_mobs(&session_id.to_string())
-        .await
-        .map_err(|error| {
-            error.into_session_error(
-                "failed to destroy bridge session mobs during REST runtime cleanup",
-            )
-        })?;
+    if scope == RuntimeCleanupScope::ArchivedSession {
+        state
+            .mob_state
+            .destroy_bridge_session_mobs(&session_id.to_string())
+            .await
+            .map_err(|error| {
+                error.into_session_error(
+                    "failed to destroy bridge session mobs during REST runtime cleanup",
+                )
+            })?;
+    }
+    #[cfg(not(feature = "mob"))]
+    let _ = scope;
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]
@@ -9089,6 +9265,77 @@ fn session_durable_hold_api_error(error: &SessionError) -> Option<ApiError> {
     Some(ApiError::SessionNotRunningWithData {
         message: error.to_string(),
         details: meerkat_contracts::error::session_error_details(error).unwrap_or(Value::Null),
+    })
+}
+
+/// `ApiError::BadRequestWithData` for a refused `reasoning_effort` level
+/// (`AgentError::ReasoningEffortRefused`): HTTP 400 with the session
+/// transport's code (`INVALID_PARAMS`) and the error's typed data as
+/// details, `{"kind": "reasoning_effort_refused", "retryable": <bool>,
+/// "reasoning_effort_refusal": {...}}`, as JSON-RPC answers it. `None` for
+/// any other error.
+fn reasoning_effort_refused_api_error(error: &SessionError) -> Option<ApiError> {
+    let SessionError::Agent(agent_error) = error.primary_error() else {
+        return None;
+    };
+    if !matches!(
+        agent_error.primary_error(),
+        meerkat_core::error::AgentError::ReasoningEffortRefused(_)
+    ) {
+        return None;
+    }
+    Some(ApiError::BadRequestWithData {
+        message: error.to_string(),
+        code: meerkat_contracts::error::session_transport_error_code(error).to_string(),
+        details: error.structured_data()?,
+    })
+}
+
+/// The answer of a turn that failed for a refused `reasoning_effort` level
+/// (its typed reason is the refusal): exactly the answer of a refused build
+/// ([`reasoning_effort_refused_api_error`]), so a caller sees one shape
+/// whichever checkpoint refused. When the turn belongs to the request that
+/// created its session, the details also name the created session
+/// (`session_id`, `session_ref`, `session_created`, `resumable`), as a
+/// created session's other turn failures do, so the caller does not lose it.
+/// `None` for any other turn error.
+fn reasoning_effort_refused_turn_api_error(
+    turn_error: &meerkat_core::TurnErrorMetadata,
+    session_id: &SessionId,
+    realm: &meerkat_core::RealmId,
+    session_created: bool,
+) -> Option<ApiError> {
+    let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+        &turn_error.reason
+    else {
+        return None;
+    };
+    let answer = reasoning_effort_refused_api_error(&SessionError::Agent(
+        meerkat_core::error::AgentError::ReasoningEffortRefused(refusal.clone()),
+    ))?;
+    if !session_created {
+        return Some(answer);
+    }
+    Some(match answer {
+        ApiError::BadRequestWithData {
+            message,
+            code,
+            details: Value::Object(mut details),
+        } => {
+            details.insert("session_id".to_string(), json!(session_id.to_string()));
+            details.insert(
+                "session_ref".to_string(),
+                json!(format_session_ref(realm, session_id)),
+            );
+            details.insert("session_created".to_string(), json!(true));
+            details.insert("resumable".to_string(), json!(true));
+            ApiError::BadRequestWithData {
+                message,
+                code,
+                details: Value::Object(details),
+            }
+        }
+        other => other,
     })
 }
 
@@ -11478,6 +11725,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -11602,6 +11850,7 @@ mod tests {
                         system_prompt: None,
                         output_schema: None,
                         structured_output_retries: None,
+                        reasoning_effort: None,
                         keep_alive: None,
                         comms_name: None,
                         peer_meta: None,
@@ -11845,6 +12094,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -12066,6 +12316,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -12131,6 +12382,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -12270,6 +12522,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -12367,6 +12620,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -12511,6 +12765,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: Some(true),
                 comms_name: None,
                 peer_meta: None,
@@ -12587,6 +12842,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -13871,6 +14127,164 @@ mod tests {
             api_error.into_response().status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// `POST /schedules` and `PATCH /schedules/{id}` refuse a
+    /// `reasoning_effort` member written directly in a `create` spec or on a
+    /// prompt action with HTTP 400 and a text that names the member: the
+    /// answer the `provider_params` form gets. A refused create stores
+    /// nothing, and a refused update leaves the schedule as it was. The same
+    /// request with another unknown member is taken as before, and a body
+    /// that does not read for another reason keeps the answer it had (422).
+    #[tokio::test]
+    async fn schedule_create_and_update_refuse_a_direct_reasoning_effort_member() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let app = router(state.clone());
+        let send = |method: &'static str, uri: String, body: Value| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+        let on_demand = |create: Value, action: Value| {
+            json!({
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": create,
+                "action": action
+            })
+        };
+        let create_request = |target: Value| {
+            json!({
+                "name": "nightly",
+                "trigger": {
+                    "type": "once",
+                    "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                },
+                "target": target,
+                "planning_horizon_days": 1,
+                "planning_horizon_occurrences": 1
+            })
+        };
+        // The two direct forms, and the `provider_params` form beside them.
+        let refused_targets = [
+            (
+                on_demand(
+                    json!({"model": "claude-sonnet-4-6", "reasoning_effort": "high"}),
+                    json!({"type": "prompt", "prompt": "Check."}),
+                ),
+                "not accepted in a schedule's session settings",
+            ),
+            (
+                on_demand(
+                    json!({"model": "claude-sonnet-4-6"}),
+                    json!({"type": "prompt", "prompt": "Check.", "reasoning_effort": "high"}),
+                ),
+                "not accepted on a schedule's prompt action",
+            ),
+            (
+                on_demand(
+                    json!({
+                        "model": "claude-sonnet-4-6",
+                        "provider_params": {"reasoning_effort": "high"}
+                    }),
+                    json!({"type": "prompt", "prompt": "Check."}),
+                ),
+                "not accepted in a schedule's session settings",
+            ),
+        ];
+        let assert_refused = |(status, body): (StatusCode, String), sentence: &str| {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.contains("reasoning_effort") && body.contains(sentence),
+                "{body}"
+            );
+        };
+
+        for (refused, sentence) in &refused_targets {
+            let answer = send(
+                "POST",
+                "/schedules".to_string(),
+                create_request(refused.clone()),
+            )
+            .await;
+            assert_refused(answer, sentence);
+        }
+        assert!(
+            state.schedule_service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let mut accepted = missing_target_schedule_tool_args();
+        accepted["trigger"] = json!({
+            "type": "once",
+            "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+        });
+        accepted["target"]["action"]["colour"] = json!("blue");
+        let (status, body) = send("POST", "/schedules".to_string(), accepted).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "another unknown member is taken as before: {body}"
+        );
+        let stored = state.schedule_service.list().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        let before = serde_json::to_value(meerkat_contracts::wire::Schedule::from(&stored[0]))
+            .expect("wire schedule");
+        assert!(!before.to_string().contains("colour"), "{before}");
+
+        let schedule_uri = format!("/schedules/{}", stored[0].schedule_id);
+        for (refused, sentence) in &refused_targets {
+            let answer = send("PATCH", schedule_uri.clone(), json!({ "target": refused })).await;
+            assert_refused(answer, sentence);
+        }
+        let after = state
+            .schedule_service
+            .get(&stored[0].schedule_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(meerkat_contracts::wire::Schedule::from(&after))
+                .expect("wire schedule"),
+            before,
+            "a refused update changes nothing"
+        );
+
+        // A body that does not read for another reason: the answer it had.
+        let (status, body) = send(
+            "POST",
+            "/schedules".to_string(),
+            create_request(json!({"target_kind": "session", "type": "no_such_target"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let (status, body) = send(
+            "PATCH",
+            schedule_uri,
+            json!({ "target": {"target_kind": "session", "type": "no_such_target"} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     }
 
     #[tokio::test]
@@ -15436,6 +15850,916 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// The fault an armed [`ArmedFaultConfigStore`] answers its reads with.
+    #[cfg(feature = "mob")]
+    const FAILED_TURN_START_CONFIG_FAULT: &str =
+        "the realm config cannot be read at this turn's start";
+
+    /// A config store that serves `inner` until it is armed. An armed read
+    /// is refused with [`FAILED_TURN_START_CONFIG_FAULT`].
+    #[cfg(feature = "mob")]
+    struct ArmedFaultConfigStore {
+        inner: Arc<dyn ConfigStore>,
+        armed: AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl ConfigStore for ArmedFaultConfigStore {
+        async fn get(&self) -> Result<Config, meerkat_core::ConfigError> {
+            if self.armed.load(AtomicOrdering::SeqCst) {
+                return Err(meerkat_core::ConfigError::Validation(
+                    FAILED_TURN_START_CONFIG_FAULT.to_string(),
+                ));
+            }
+            self.inner.get().await
+        }
+
+        async fn set(&self, config: Config) -> Result<(), meerkat_core::ConfigError> {
+            self.inner.set(config).await
+        }
+
+        async fn patch(&self, delta: ConfigDelta) -> Result<Config, meerkat_core::ConfigError> {
+            self.inner.patch(delta).await
+        }
+
+        fn metadata(&self) -> Option<meerkat_core::ConfigStoreMetadata> {
+            self.inner.metadata()
+        }
+
+        async fn set_held(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            config: Config,
+        ) -> Result<(), meerkat_core::ConfigError> {
+            self.inner.set_held(guard, config).await
+        }
+
+        async fn patch_held(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            delta: ConfigDelta,
+        ) -> Result<Config, meerkat_core::ConfigError> {
+            self.inner.patch_held(guard, delta).await
+        }
+    }
+
+    /// The definition of the child mob a [`RestSessionWithOwnedMobs`] owns:
+    /// one turn-driven `worker` profile. The mob id is unique per owner
+    /// session, because a mob's supervisor registers under its mob id in the
+    /// process-wide in-process comms registry.
+    #[cfg(feature = "mob")]
+    fn rest_owned_child_mob_definition(owner: &SessionId) -> meerkat_mob::MobDefinition {
+        let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(
+            format!("rest-owned-child-mob-{owner}"),
+        ));
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                auth_binding: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+                durable: false,
+            })),
+        );
+        definition
+    }
+
+    /// A live REST session whose turns ran, which owns a child mob (destroyed
+    /// when its owner is archived, as a mob an agent creates is) and holds
+    /// its implicit mob.
+    ///
+    /// The session's runtime executor keeps the context it was attached
+    /// with. It is attached from a copy of the server state whose config
+    /// runtime reads through `config_fault`, while the continue handler
+    /// keeps the server's own. A continue made while the fault is armed
+    /// therefore passes every check the handler makes before it admits the
+    /// input, and fails where the executor's apply reads the realm config,
+    /// before the agent runs.
+    #[cfg(feature = "mob")]
+    struct RestSessionWithOwnedMobs {
+        _temp: TempDir,
+        state: AppState,
+        session_id: SessionId,
+        child_mob: meerkat_mob::MobId,
+        implicit_mob: meerkat_mob::MobId,
+        config_fault: Arc<ArmedFaultConfigStore>,
+        llm_calls: Arc<tokio::sync::watch::Sender<usize>>,
+    }
+
+    #[cfg(feature = "mob")]
+    impl RestSessionWithOwnedMobs {
+        async fn live() -> Self {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            // The mock counts each model request and returns its permit
+            // after use, so the one permit serves every request unheld.
+            let llm_calls = Arc::new(tokio::sync::watch::channel(0).0);
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&llm_calls),
+                release: Arc::new(tokio::sync::Semaphore::new(1)),
+            }));
+            let config_fault = Arc::new(ArmedFaultConfigStore {
+                inner: Arc::clone(&state.config_store),
+                armed: AtomicBool::new(false),
+            });
+            let mut executor_state = state.clone();
+            executor_state.config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+                Arc::clone(&config_fault) as Arc<dyn ConfigStore>,
+                temp.path().join("failed-turn-start-config-state.json"),
+            ));
+            let session_id = create_completed_rest_runtime_session(&executor_state).await;
+
+            let child_mob = state
+                .mob_state
+                .mob_create_definition_with_owner_bridge_session(
+                    rest_owned_child_mob_definition(&session_id),
+                    session_id.clone(),
+                    true,
+                    false,
+                )
+                .await
+                .expect("create a child mob the session owns");
+            let implicit_mob = state
+                .mob_state
+                .get_or_create_implicit_mob_for_bridge_session(
+                    &session_id.to_string(),
+                    &resolved_default_model(&state).await,
+                )
+                .await
+                .expect("the session's implicit mob");
+            let session = Self {
+                _temp: temp,
+                state,
+                session_id,
+                child_mob,
+                implicit_mob,
+                config_fault,
+                llm_calls,
+            };
+
+            // A plain continue: the attached executor applies the session's
+            // turns, and a turn that runs costs the session neither mob.
+            let plain = session.continue_turn("a plain turn").await;
+            assert!(
+                matches!(plain, RequestTerminal::Publish(Ok(_))),
+                "a plain turn runs before any turn fails: {plain:?}"
+            );
+            assert_eq!(
+                (
+                    session.child_mob_kept().await,
+                    session.implicit_mob_kept().await,
+                    session.stored_and_not_archived().await,
+                ),
+                (true, true, true),
+                "(child mob, implicit mob, stored session) before any turn fails"
+            );
+            session
+        }
+
+        /// One plain continue of the session through the continue handler's
+        /// body, with the handler's own answer.
+        async fn continue_turn(
+            &self,
+            prompt: &str,
+        ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+            let session_id = self.session_id.to_string();
+            Box::pin(continue_session_inner(
+                &self.state,
+                &session_id,
+                ContinueSessionRequest {
+                    injected_context: None,
+                    transient_turn_context: None,
+                    session_id: session_id.clone(),
+                    prompt: ContentInput::Text(prompt.to_string()),
+                    system_prompt: None,
+                    output_schema: None,
+                    structured_output_retries: None,
+                    reasoning_effort: None,
+                    keep_alive: None,
+                    comms_name: None,
+                    peer_meta: None,
+                    verbose: false,
+                    model: None,
+                    provider: None,
+                    auth_binding: None,
+                    max_tokens: None,
+                    hooks_override: None,
+                    enable_web_search: None,
+                    skill_refs: None,
+                    turn_tool_overlay: None,
+                    additional_instructions: None,
+                },
+                None,
+            ))
+            .await
+        }
+
+        /// The model requests the session's turns have made.
+        fn model_requests(&self) -> usize {
+            *self.llm_calls.borrow()
+        }
+
+        /// Whether the child mob the session owns is still there.
+        async fn child_mob_kept(&self) -> bool {
+            self.state
+                .mob_state
+                .handle_for(&self.child_mob)
+                .await
+                .is_ok()
+        }
+
+        /// Whether the session's implicit mob is still the one it held.
+        async fn implicit_mob_kept(&self) -> bool {
+            self.state
+                .mob_state
+                .find_implicit_mob_for_bridge_session(&self.session_id.to_string())
+                .await
+                == Some(self.implicit_mob.clone())
+        }
+
+        /// Whether the session is stored and not archived: the body-free
+        /// read the completion cleanup itself makes.
+        async fn stored_and_not_archived(&self) -> bool {
+            matches!(
+                committed_source_archived(&self.state.session_service, &self.session_id).await,
+                Ok(Some(false))
+            )
+        }
+    }
+
+    /// A turn whose apply fails at its start, after its input was admitted,
+    /// is that one turn failed and no archive of the session. The session's
+    /// executor cannot read the realm config where it validates the turn, so
+    /// the apply fails before the agent runs. The session keeps the child mob
+    /// it owns and its implicit mob, stays stored and not archived, and runs
+    /// its next turn. The child mob holds no member here: that a mob's
+    /// members and their sessions stay is measured by the JSON-RPC rows.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_failed_turn_start_keeps_the_mobs_a_rest_session_owns() {
+        let session = RestSessionWithOwnedMobs::live().await;
+        let requests_before = session.model_requests();
+
+        session
+            .config_fault
+            .armed
+            .store(true, AtomicOrdering::SeqCst);
+        let failed = session.continue_turn("a turn whose start fails").await;
+        session
+            .config_fault
+            .armed
+            .store(false, AtomicOrdering::SeqCst);
+
+        // The handler answers a continue it refuses before admission without
+        // publishing. A published `TURN_ABANDONED` whose error is a
+        // `runtime_apply_failure` is the completion of an admitted input
+        // whose apply failed, here on the armed config read.
+        match &failed {
+            RequestTerminal::Publish(Err(ApiError::InternalWithData { code, details, .. })) => {
+                assert_eq!(code.as_str(), "TURN_ABANDONED", "{failed:?}");
+                assert_eq!(
+                    details["error"]["kind"], "runtime_apply_failure",
+                    "{failed:?}"
+                );
+                assert!(
+                    details.to_string().contains(FAILED_TURN_START_CONFIG_FAULT),
+                    "the turn failed on the armed config read: {failed:?}"
+                );
+            }
+            other => panic!(
+                "the turn is admitted and its apply fails at its start, but it was answered \
+                 {other:?}"
+            ),
+        }
+        assert_eq!(
+            session.model_requests(),
+            requests_before,
+            "the failed turn made no model request"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the failed turn start, which is no archive of the \
+             session"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the failed turn start"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
+        );
+        assert!(
+            session.model_requests() > requests_before,
+            "the next turn reached the model"
+        );
+    }
+
+    /// The guard of the row above: archiving the session through the archive
+    /// route still destroys the child mob it owns and its implicit mob.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn an_archive_still_destroys_the_mobs_a_rest_session_owns() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let session = RestSessionWithOwnedMobs::live().await;
+
+        let response = router(session.state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/sessions/{}", session.session_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the archive answers: {payload}");
+        assert_eq!(payload["archived"], true, "{payload}");
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (false, false, false),
+            "(child mob, implicit mob, stored and not archived session) after the archive"
+        );
+    }
+
+    /// The input of `session_id` that is admitted and queued, not yet
+    /// running, other than the inputs in `ahead`. The bound is only a failure
+    /// backstop.
+    #[cfg(feature = "mob")]
+    async fn wait_for_rest_queued_input(
+        state: &AppState,
+        session_id: &SessionId,
+        ahead: &[meerkat_core::lifecycle::InputId],
+    ) -> meerkat_core::lifecycle::InputId {
+        for _ in 0..3000 {
+            let active_inputs = state
+                .runtime_adapter
+                .list_active_inputs(session_id)
+                .await
+                .unwrap_or_default();
+            for input_id in active_inputs {
+                if ahead.contains(&input_id) {
+                    continue;
+                }
+                let queued = matches!(
+                    state
+                        .runtime_adapter
+                        .input_state(session_id, &input_id)
+                        .await,
+                    Ok(Some(stored))
+                        if stored.seed.phase == meerkat_runtime::InputLifecycleState::Queued
+                );
+                if queued {
+                    return input_id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("no further input of {session_id} was admitted and left queued");
+    }
+
+    /// Wait until `session_id` has no active input left: every input it
+    /// admitted has ended. The bound is only a failure backstop.
+    #[cfg(feature = "mob")]
+    async fn wait_for_rest_inputs_to_end(state: &AppState, session_id: &SessionId) {
+        for _ in 0..3000 {
+            let ended = matches!(
+                state.runtime_adapter.list_active_inputs(session_id).await,
+                Ok(active_inputs) if active_inputs.is_empty()
+            );
+            if ended {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the inputs of {session_id} did not end");
+    }
+
+    /// A caller's cancel of a request whose input is still queued is that one
+    /// request cancelled and no archive of the session. A turn is held at the
+    /// model, a second tracked `POST /sessions/{id}/messages` is admitted to
+    /// the runtime and queued behind it, and `POST /requests/{id}/cancel`
+    /// cancels it: the real route, by the request's id, whose cancel action
+    /// abandons the request's exact queued input. That input ends as a
+    /// runtime termination, and the request's completion cleanup answers
+    /// that outcome by keeping the session's runtime, which still serves.
+    /// The session keeps the child mob it owns and its implicit mob, stays
+    /// stored and not archived, and runs its next turn.
+    ///
+    /// The completion cleanup takes the session's runtime registration lock
+    /// first. The row holds that lock from before the cancel until the turn
+    /// ahead of the queued request has ended, so the cleanup runs on a
+    /// runtime with no turn in flight: the row measures what the cleanup
+    /// does to the session's mobs and its runtime. The row below measures
+    /// what becomes of a turn that is still running when the cleanup runs.
+    /// That turn's own answer is not asserted here.
+    ///
+    /// The fixture's model never holds a turn, so the row first unloads the
+    /// session (its live session and its runtime registration, as for a
+    /// stored session nothing serves) and continues it through a copy of the
+    /// server state whose model waits on a gate the row holds: the continue
+    /// attaches the session again with that model.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_cancelled_queued_request_keeps_the_mobs_a_rest_session_owns() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        const CANCELLED_REQUEST: &str = "cancelled-queued-request";
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+
+        // The turn ahead: it attaches the session again and is held at the
+        // model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "turn-ahead-of-the-cancelled-request",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The request under test: admitted to the runtime, its input queued
+        // behind the running turn.
+        let cancelled =
+            spawn_tracked_rest_continue(&state, &session_id, CANCELLED_REQUEST, "the queued turn");
+        let queued_input = wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        // The request's handler holds this lock until it has admitted its
+        // input, installed its cancel action and attached its completion
+        // cleanup. From here both requests' completion cleanups wait for it.
+        let registration_lock = rest_runtime_registration_lock(&state, &session_id);
+        let registration_guard = registration_lock.mutex().lock().await;
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (true, true, true),
+            "(child mob, implicit mob, stored session) while the request is queued, before its \
+             cancel"
+        );
+
+        let response = tokio::time::timeout(
+            FAILURE_BOUND,
+            router(state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/requests/{CANCELLED_REQUEST}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the cancel of a queued request does not wait for the running turn")
+        .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the cancel answers: {payload}");
+        assert_eq!(payload["cancelled"], true, "{payload}");
+        let active_after_cancel = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the session's inputs after the cancel");
+        assert!(
+            !active_after_cancel.contains(&queued_input),
+            "the cancel ended the request's exact queued input: {active_after_cancel:?}"
+        );
+
+        // The running turn ends on its own, then the cleanups run.
+        model_gate.add_permits(1);
+        wait_for_rest_inputs_to_end(&state, &session_id).await;
+        drop(registration_guard);
+        drop(registration_lock);
+
+        let (cancelled_status, cancelled_body) = tokio::time::timeout(FAILURE_BOUND, cancelled)
+            .await
+            .expect("the cancelled request is answered")
+            .expect("cancelled request task");
+        assert_eq!(
+            cancelled_status,
+            StatusCode::from_u16(499).expect("499 is a valid status"),
+            "{cancelled_body}"
+        );
+        assert_eq!(
+            cancelled_body["code"], "REQUEST_CANCELLED",
+            "{cancelled_body}"
+        );
+        let _running_answer = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered")
+            .expect("running turn task");
+        assert_eq!(
+            session.model_requests(),
+            requests_before + 1,
+            "only the running turn reached the model: the cancelled request never ran"
+        );
+        // The cleanup under test ran to its end: the cancelled input's
+        // outcome kept the session's runtime, which serves on.
+        assert!(
+            state.runtime_adapter.contains_session(&session_id).await,
+            "the cancelled request's completion cleanup kept the session's runtime"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the cancelled queued request, which is no archive \
+             of the session"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the cancelled queued request"
+        );
+        // The kept runtime still calls the gated model: its next requests
+        // are served.
+        model_gate.add_permits(64);
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
+        );
+        assert!(
+            session.model_requests() > requests_before + 1,
+            "the next turn reached the model"
+        );
+    }
+
+    /// A caller's cancel of a request whose input is queued behind a running
+    /// turn ends that one request and nothing else. Set up as the row above,
+    /// but without holding the registration lock: the running turn is still
+    /// held at the model when the queued request is cancelled and its
+    /// completion cleanup runs. The running turn then completes and its
+    /// request is answered its result, the session's runtime stays
+    /// registered, the session keeps its mobs and stays stored, and its next
+    /// turn runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn a_cancelled_queued_request_leaves_the_running_turn_of_a_rest_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        const CANCELLED_REQUEST: &str = "cancelled-request-behind-a-running-turn";
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+
+        // The running turn: it attaches the session again and is held at the
+        // model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "running-turn-ahead-of-the-cancelled-request",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The request under test: admitted to the runtime, its input queued
+        // behind the running turn. Its handler holds the registration lock
+        // until it has installed its cancel action and attached its
+        // completion cleanup: taking the lock once waits for that.
+        let cancelled =
+            spawn_tracked_rest_continue(&state, &session_id, CANCELLED_REQUEST, "the queued turn");
+        let _queued_input = wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        {
+            let registration_lock = rest_runtime_registration_lock(&state, &session_id);
+            drop(registration_lock.mutex().lock().await);
+        }
+
+        let response = tokio::time::timeout(
+            FAILURE_BOUND,
+            router(state.clone()).oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/requests/{CANCELLED_REQUEST}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the cancel of a queued request does not wait for the running turn")
+        .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "the cancel answers: {payload}");
+        assert_eq!(payload["cancelled"], true, "{payload}");
+        // The cancelled request is answered while the running turn is still
+        // held at the model. If it is not, the row lets the model answer so
+        // that both requests end, and says so.
+        let mut cancelled = cancelled;
+        let answered_while_the_turn_runs =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut cancelled).await;
+        let cancelled_before_the_turn_ended = answered_while_the_turn_runs.is_ok();
+        // The model answers now, and every later model request is served.
+        model_gate.add_permits(64);
+        let (cancelled_status, cancelled_body) = match answered_while_the_turn_runs {
+            Ok(answered) => answered.expect("cancelled request task"),
+            Err(_) => tokio::time::timeout(FAILURE_BOUND, cancelled)
+                .await
+                .expect("the cancelled request is answered")
+                .expect("cancelled request task"),
+        };
+        let (running_status, running_body) = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered")
+            .expect("running turn task");
+        let mut registered = true;
+        for _ in 0..40 {
+            registered = state.runtime_adapter.contains_session(&session_id).await;
+            if !registered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            (
+                cancelled_before_the_turn_ended,
+                cancelled_status,
+                running_status,
+                registered,
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (
+                true,
+                StatusCode::from_u16(499).expect("499 is a valid status"),
+                StatusCode::OK,
+                true,
+                true,
+                true,
+                true
+            ),
+            "(the cancelled request answered while the turn ahead of it still runs, its answer, \
+             the running turn's answer, the session's runtime registered, child mob, implicit \
+             mob, stored session) after the queued request was cancelled; the cancelled request \
+             was answered {cancelled_body}, the running turn {running_body}"
+        );
+        let next = session.continue_turn("the next turn").await;
+        assert!(
+            matches!(next, RequestTerminal::Publish(Ok(_))),
+            "the session's next turn runs: {next:?}"
+        );
+    }
+
+    /// The server's ordinary stop with a request still queued ends nothing
+    /// the session owns. A turn is held at the model and a second tracked
+    /// `POST /sessions/{id}/messages` is admitted to the runtime and queued
+    /// behind it, as in the row above, and nothing is cancelled. The stop is
+    /// the server's own at its shutdown signal: schedule delivery stops and
+    /// every runtime registration is unregistered with the runtime's
+    /// graceful disposition, which requeues on this stored realm. The model
+    /// is never released before the stop. The queued request is answered as
+    /// kept for the session's next start (`409` `SESSION_NOT_RUNNING`, kind
+    /// `requeued_across_stop`), the stop leaves no runtime registration, no
+    /// further model request is made, and the session keeps the child mob it
+    /// owns and its implicit mob and stays stored and not archived.
+    ///
+    /// The running turn's request is answered by the stop too. Whether its
+    /// run is kept suspended for the next start or ended is the runtime
+    /// stop's decision per run, so its answer is reported in the messages
+    /// below and not asserted.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn an_ordinary_stop_with_a_queued_request_keeps_the_mobs_a_rest_session_owns() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+
+        let session = RestSessionWithOwnedMobs::live().await;
+        let session_id = session.session_id.clone();
+
+        // The fixture's model never holds a turn: unload the session and
+        // continue it through a copy of the server state whose model waits
+        // on a gate the row holds, which attaches the session again.
+        session
+            .state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&session.state, &session_id).await;
+        let model_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut state = session.state.clone();
+        state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&session.llm_calls),
+            release: Arc::clone(&model_gate),
+        }));
+        let requests_before = session.model_requests();
+        assert!(
+            state.runtime_adapter.has_runtime_persistence(),
+            "the runtime has a persistence store, so its graceful stop requeues"
+        );
+
+        // The turn ahead: held at the model.
+        let running = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "turn-running-at-the-ordinary-stop",
+            "the running turn",
+        );
+        wait_for_rest_llm_calls(
+            &session.llm_calls,
+            requests_before + 1,
+            "the running turn reaches the model",
+        )
+        .await;
+        let ahead = state
+            .runtime_adapter
+            .list_active_inputs(&session_id)
+            .await
+            .expect("the running turn's inputs");
+        assert!(
+            !ahead.is_empty(),
+            "the running turn's input is an active input of the session"
+        );
+
+        // The queued request: admitted to the runtime, its input queued
+        // behind the running turn.
+        let queued = spawn_tracked_rest_continue(
+            &state,
+            &session_id,
+            "request-queued-at-the-ordinary-stop",
+            "the queued turn",
+        );
+        wait_for_rest_queued_input(&state, &session_id, &ahead).await;
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+                session.stored_and_not_archived().await,
+            ),
+            (true, true, true),
+            "(child mob, implicit mob, stored session) while the request is queued, before the \
+             stop"
+        );
+
+        // The server's stop at its shutdown signal, before its HTTP drain.
+        // The model gate is still held: the stop does not wait for the turn.
+        state.shutdown_schedule_host().await;
+        tokio::time::timeout(
+            FAILURE_BOUND,
+            crate::unregister_runtime_sessions_for_shutdown(&state),
+        )
+        .await
+        .expect("the stop does not wait for the turn held at the model");
+        let (queued_status, queued_body) = tokio::time::timeout(FAILURE_BOUND, queued)
+            .await
+            .expect("the queued request is answered by the stop")
+            .expect("queued request task");
+        let (running_status, running_body) = tokio::time::timeout(FAILURE_BOUND, running)
+            .await
+            .expect("the running turn's request is answered by the stop")
+            .expect("running turn task");
+        // After the drain the server unregisters once more, for a session
+        // registered meanwhile. It then cancels the requests still tracked:
+        // none is left here, and the row cancels nothing.
+        crate::unregister_runtime_sessions_for_shutdown(&state).await;
+
+        assert_eq!(
+            queued_status,
+            StatusCode::CONFLICT,
+            "the queued request is kept across the stop, not ended: {queued_body}; the running \
+             turn's request was answered {running_status} {running_body}"
+        );
+        assert_eq!(queued_body["code"], "SESSION_NOT_RUNNING", "{queued_body}");
+        assert_eq!(
+            queued_body["details"]["kind"], "requeued_across_stop",
+            "{queued_body}"
+        );
+        assert!(
+            !state.runtime_adapter.contains_session(&session_id).await,
+            "the stop unregistered the session's runtime"
+        );
+        assert_eq!(
+            session.model_requests(),
+            requests_before + 1,
+            "only the running turn reached the model: nothing ran after the stop"
+        );
+
+        assert_eq!(
+            (
+                session.child_mob_kept().await,
+                session.implicit_mob_kept().await,
+            ),
+            (true, true),
+            "(child mob, implicit mob) after the ordinary stop, which is no archive of the \
+             session; the running turn's request was answered {running_status} {running_body}"
+        );
+        assert!(
+            session.stored_and_not_archived().await,
+            "the session is still stored, and not archived, after the ordinary stop"
+        );
+
+        // Released only now, so that nothing still waiting on the model
+        // outlives the row.
+        model_gate.add_permits(1);
+    }
+
     #[test]
     fn test_create_session_request_rejects_reserved_surface_metadata_keys() {
         let app_context = serde_json::json!({
@@ -16345,6 +17669,107 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert_eq!(payload["text"], "ok");
     }
 
+    /// A `POST /sessions` whose reasoning effort level the route does not
+    /// accept is refused by the session's build, before a session exists:
+    /// HTTP 400 with the typed details, which name no created session, and
+    /// no session is listed or stored afterwards. The mock client reports
+    /// no route, so every level is refused as unknown.
+    #[tokio::test]
+    async fn test_create_session_refused_for_its_level_leaves_no_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let app = router(state.clone());
+
+        // The level in both forms a create names it in: the direct member
+        // and the nested `provider_params` key.
+        for (form, body) in [
+            (
+                "direct",
+                serde_json::json!({"prompt": "Reply briefly.", "reasoning_effort": "high"}),
+            ),
+            (
+                "nested",
+                serde_json::json!({
+                    "prompt": "Reply briefly.",
+                    "provider_params": {"reasoning_effort": "high"}
+                }),
+            ),
+        ] {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                app.clone().oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/sessions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("the refused create route timed out")
+            .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{form}: {payload}");
+            assert_eq!(payload["code"], "INVALID_PARAMS", "{form}: {payload}");
+            assert_eq!(
+                payload["details"]["kind"], "reasoning_effort_refused",
+                "{form}: {payload}"
+            );
+            assert_eq!(
+                payload["details"]["reasoning_effort_refusal"]["reason"],
+                "supported_levels_unknown",
+                "{form}: {payload}"
+            );
+            assert_eq!(
+                (
+                    payload["details"].get("session_id"),
+                    payload["details"].get("session_created"),
+                ),
+                (None, None),
+                "{form}: the build refused the level before a session was created: {payload}"
+            );
+        }
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            listed["sessions"],
+            serde_json::json!([]),
+            "a create refused for its level leaves no session listed"
+        );
+        let stored = state
+            .session_service
+            .list(meerkat_core::service::SessionQuery::default())
+            .await
+            .expect("list the sessions the service holds");
+        assert!(
+            stored.is_empty(),
+            "a create refused for its level leaves no session: {} left",
+            stored.len()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Structured output over REST: validate-first and extraction fallback
     // -----------------------------------------------------------------------
@@ -16858,6 +18283,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -16939,6 +18365,123 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         );
     }
 
+    /// A continue request that names the provider-neutral reasoning effort
+    /// level, to set it or to clear it, rebuilds the session, as a request
+    /// that names another part of the LLM identity does.
+    #[test]
+    fn test_rest_continue_reasoning_effort_requires_rebuild() {
+        let request = |reasoning_effort: Option<serde_json::Value>| {
+            let mut body = serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue",
+            });
+            if let Some(value) = reasoning_effort {
+                body["reasoning_effort"] = value;
+            }
+            serde_json::from_value::<ContinueSessionRequest>(body).expect("continue request")
+        };
+        assert!(!rest_continue_requires_rebuild(&request(None)));
+        for value in [
+            serde_json::json!("high"),
+            serde_json::json!({"action": "set", "value": "low"}),
+            serde_json::json!({"action": "clear"}),
+        ] {
+            assert!(
+                rest_continue_requires_rebuild(&request(Some(value.clone()))),
+                "{value} decides the session's level"
+            );
+        }
+    }
+
+    /// The level of a create request reaches the build inside its provider
+    /// params (two different levels are refused), and a continue request
+    /// that sets or clears the level claims it on the rebuild.
+    #[test]
+    fn rest_reasoning_effort_build_params_and_resume_claim() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let create = |body: serde_json::Value| {
+            let request: CreateSessionRequest =
+                serde_json::from_value(body).expect("create request");
+            create_session_build_provider_params(&request)
+        };
+        let Ok(folded) = create(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+            "provider_params": {"temperature": 0.2},
+        })) else {
+            panic!("a level beside other params is folded");
+        };
+        let folded = folded.expect("params");
+        assert_eq!(folded.reasoning_effort, Some(EffortLevel::High));
+        assert_eq!(folded.temperature, Some(0.2));
+        let Ok(nested) = create(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "low",
+            "provider_params": {"reasoning_effort": "low"},
+        })) else {
+            panic!("the same level in both is accepted");
+        };
+        assert_eq!(
+            nested.and_then(|params| params.reasoning_effort),
+            Some(EffortLevel::Low)
+        );
+        let Ok(none) = create(serde_json::json!({"prompt": "hello"})) else {
+            panic!("a request without a level builds");
+        };
+        assert_eq!(none, None);
+        match create(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+            "provider_params": {"reasoning_effort": "low"},
+        })) {
+            Err(ApiError::BadRequest(message)) => assert_eq!(
+                message,
+                "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low': set \
+                 one of them, or the same level in both"
+            ),
+            _ => panic!("two different levels are a bad request"),
+        }
+        let request: CreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+        }))
+        .expect("create request");
+        assert!(create_session_resume_override_mask(&request, None).reasoning_effort);
+
+        let resume = |reasoning_effort: Option<serde_json::Value>| {
+            let mut body = serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue",
+            });
+            if let Some(value) = reasoning_effort {
+                body["reasoning_effort"] = value;
+            }
+            let request: ContinueSessionRequest =
+                serde_json::from_value(body).expect("continue request");
+            match continue_session_build_provider_params(&request) {
+                Ok((params, claims)) => (params.and_then(|params| params.reasoning_effort), claims),
+                Err(error) => {
+                    panic!("a continue request's level is never contradictory: {error:?}")
+                }
+            }
+        };
+        assert_eq!(
+            resume(Some(serde_json::json!("medium"))),
+            (Some(EffortLevel::Medium), true)
+        );
+        assert_eq!(
+            resume(Some(serde_json::json!({"action": "clear"}))),
+            (None, true),
+            "a clear claims the level and names none"
+        );
+        assert_eq!(
+            resume(None),
+            (None, false),
+            "absent keeps the recorded level"
+        );
+    }
+
     #[test]
     fn test_rest_continue_requires_rebuild_matches_surface_contract() {
         let mut req = ContinueSessionRequest {
@@ -16949,6 +18492,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             system_prompt: None,
             output_schema: None,
             structured_output_retries: None,
+            reasoning_effort: None,
             keep_alive: None,
             comms_name: None,
             peer_meta: None,
@@ -17147,6 +18691,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: Some(true),
                 comms_name: None,
                 peer_meta: None,
@@ -17231,6 +18776,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -17326,6 +18872,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -17421,6 +18968,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -17451,6 +18999,373 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert!(
             state.runtime_adapter.contains_session(&session_id).await,
             "failed rebuild validation must preserve an existing runtime registration"
+        );
+    }
+
+    /// A continue that names a level the session's route refuses is the
+    /// caller's request, refused: the rebuild's typed refusal is answered as
+    /// the create answers it (400, `INVALID_PARAMS`, the typed details), not
+    /// as an internal error. The session is one this server does not hold
+    /// live (the rebuild of a session it holds live is answered busy before
+    /// any build, whichever field asked for it): the refused rebuild leaves
+    /// no live session and no runtime registration behind.
+    #[tokio::test]
+    async fn test_continue_session_rebuild_refused_level_answers_400_with_the_typed_details() {
+        use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        state
+            .session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live session");
+        unregister_rest_runtime_session_until_terminal_for_test(&state, &session_id).await;
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                injected_context: None,
+                transient_turn_context: None,
+                session_id: session_id.to_string(),
+                prompt: ContentInput::Text("Continue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                reasoning_effort: Some(WireTurnMetadataOverride::Set(EffortLevel::High)),
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                auth_binding: None,
+                max_tokens: None,
+                hooks_override: None,
+                enable_web_search: None,
+                skill_refs: None,
+                turn_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(error)) => {
+                let (status, payload) = api_error_status_and_payload(error).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(payload["code"], "INVALID_PARAMS", "{payload}");
+                assert_eq!(
+                    payload["details"]["kind"], "reasoning_effort_refused",
+                    "{payload}"
+                );
+                assert_eq!(payload["details"]["retryable"], false, "{payload}");
+                assert_eq!(
+                    payload["details"]["reasoning_effort_refusal"]["reason"],
+                    "supported_levels_unknown",
+                    "{payload}"
+                );
+                assert_eq!(
+                    payload["details"]["reasoning_effort_refusal"]["requested"], "high",
+                    "{payload}"
+                );
+            }
+            other => panic!("expected the typed refusal, got {other:?}"),
+        }
+        assert_eq!(
+            (
+                state
+                    .session_service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("check the live session"),
+                state.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (false, false),
+            "a refused rebuild leaves no live session and no runtime registration behind"
+        );
+    }
+
+    /// A continue that names a level on a session this server still holds
+    /// live (the ordinary case after a completed turn) is answered busy
+    /// before any build, as every field that rebuilds the session is: HTTP
+    /// 500, `INTERNAL_ERROR`, "session is busy". Nothing is changed: the
+    /// session is live and registered as before. A documented limit (Known
+    /// limitations), pinned here as it is.
+    #[tokio::test]
+    async fn test_continue_session_level_on_a_live_session_answers_500_session_is_busy() {
+        use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_completed_rest_runtime_session(&state).await;
+        assert_eq!(
+            (
+                state
+                    .session_service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("check the live session"),
+                state.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (true, true),
+            "the server holds the session live after its completed turn"
+        );
+
+        let outcome = Box::pin(continue_session_inner(
+            &state,
+            &session_id.to_string(),
+            ContinueSessionRequest {
+                injected_context: None,
+                transient_turn_context: None,
+                session_id: session_id.to_string(),
+                prompt: ContentInput::Text("Continue".to_string()),
+                system_prompt: None,
+                output_schema: None,
+                structured_output_retries: None,
+                reasoning_effort: Some(WireTurnMetadataOverride::Set(EffortLevel::High)),
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                verbose: false,
+                model: None,
+                provider: None,
+                auth_binding: None,
+                max_tokens: None,
+                hooks_override: None,
+                enable_web_search: None,
+                skill_refs: None,
+                turn_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+        ))
+        .await;
+
+        match outcome {
+            RequestTerminal::RespondWithoutPublish(Err(error)) => {
+                let (status, payload) = api_error_status_and_payload(error).await;
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{payload}");
+                assert_eq!(payload["code"], "INTERNAL_ERROR", "{payload}");
+                assert!(
+                    payload["error"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("session is busy")),
+                    "{payload}"
+                );
+            }
+            other => panic!("expected the busy answer, got {other:?}"),
+        }
+        assert_eq!(
+            (
+                state
+                    .session_service
+                    .has_live_session(&session_id)
+                    .await
+                    .expect("check the live session"),
+                state.runtime_adapter.contains_session(&session_id).await,
+            ),
+            (true, true),
+            "the refused continue changes nothing: the session is live and registered"
+        );
+    }
+
+    /// A message that names the reasoning effort level, or a model, for a
+    /// session this server holds live is not served, and it is refused the
+    /// same way whether or not a turn is running: at once, with REST's own
+    /// answer (HTTP 500, `INTERNAL_ERROR`, a text that says the session is
+    /// busy), and nothing is stored or queued for it. A turn that is running
+    /// and a plain message queued behind it both complete, and the session
+    /// takes its next turn. The answer is never a JSON-RPC error text.
+    ///
+    /// `provider_params` is not a member of this request: a message that
+    /// carries it is read without it, as a plain message, and sets no level.
+    #[tokio::test]
+    async fn test_continue_session_level_on_a_live_session_is_refused_at_once_busy_or_idle() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
+        for (form, change) in [
+            ("level", serde_json::json!({"reasoning_effort": "high"})),
+            (
+                "clear",
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            ("model", serde_json::json!({"model": "claude-opus-4-8"})),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let mut state = load_rest_state_with_capacity(&temp, 4).await;
+            let calls = Arc::new(tokio::sync::watch::channel(0).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }));
+            let session_id = create_deferred_rest_runtime_session(&state).await;
+            let app = router(state.clone());
+            let post = |body: serde_json::Value| {
+                let app = app.clone();
+                let uri = format!("/sessions/{session_id}/messages");
+                tokio::spawn(async move {
+                    let response = app
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method("POST")
+                                .uri(uri)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body.to_string()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let body = response.into_body().collect().await.unwrap().to_bytes();
+                    let payload: serde_json::Value = serde_json::from_slice(&body)
+                        .unwrap_or_else(|_| serde_json::json!(String::from_utf8_lossy(&body)));
+                    (status, payload)
+                })
+            };
+            let message = |prompt: &str| serde_json::json!({"session_id": session_id.to_string(), "prompt": prompt});
+            let active_inputs = || async {
+                state
+                    .runtime_adapter
+                    .list_active_inputs(&session_id)
+                    .await
+                    .expect("the session's active inputs")
+                    .len()
+            };
+            let assert_not_served = |answer: &(StatusCode, serde_json::Value), when: &str| {
+                let (status, payload) = answer;
+                assert_eq!(
+                    *status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{form}, {when}: {payload}"
+                );
+                assert_eq!(
+                    payload["code"], "INTERNAL_ERROR",
+                    "{form}, {when}: {payload}"
+                );
+                let text = payload["error"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("session is busy"),
+                    "{form}, {when}: {payload}"
+                );
+                assert!(
+                    !text.contains("-32600") && !text.contains("destroyed"),
+                    "{form}, {when}: the answer is REST's own: {payload}"
+                );
+            };
+            let mut change_message = message("change the session");
+            for (member, value) in change.as_object().expect("a change is an object") {
+                change_message[member.as_str()] = value.clone();
+            }
+
+            // While a turn runs: refused at once, and nothing is stored.
+            let running = post(message("hold the turn open"));
+            wait_for_rest_llm_calls(&calls, 1, "the turn reaches the LLM").await;
+            assert_eq!(active_inputs().await, 1, "{form}: the running turn's input");
+            let refused = tokio::time::timeout(FAILURE_BOUND, post(change_message.clone()))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the change is answered while the turn runs"))
+                .expect("change task");
+            assert!(!running.is_finished(), "{form}: the turn is still running");
+            assert_not_served(&refused, "while a turn runs");
+            assert_eq!(
+                active_inputs().await,
+                1,
+                "{form}: the refused message stored and queued nothing"
+            );
+
+            // A plain message behind the running turn queues, and both run.
+            let mut plain = post(message("plain behind"));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut plain)
+                    .await
+                    .is_err(),
+                "{form}: a plain message waits behind the running turn"
+            );
+            release.add_permits(16);
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, running)
+                .await
+                .expect("the running turn finishes once released")
+                .expect("running turn task");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{form}: the running turn: {payload}"
+            );
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, plain)
+                .await
+                .expect("the queued message finishes")
+                .expect("queued message task");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{form}: the queued message: {payload}"
+            );
+
+            // On the idle live session: the same answer, and nothing stored.
+            assert_eq!(active_inputs().await, 0, "{form}: the session is idle");
+            let refused = tokio::time::timeout(FAILURE_BOUND, post(change_message))
+                .await
+                .unwrap_or_else(|_| panic!("{form}: the change is answered on the idle session"))
+                .expect("change task");
+            assert_not_served(&refused, "when idle");
+            assert_eq!(active_inputs().await, 0, "{form}: nothing stored when idle");
+
+            // The session takes its next turn.
+            let (status, payload) = tokio::time::timeout(FAILURE_BOUND, post(message("next turn")))
+                .await
+                .expect("the next turn finishes")
+                .expect("next turn task");
+            assert_eq!(status, StatusCode::OK, "{form}: the next turn: {payload}");
+        }
+
+        // `provider_params` is not read on this request: the message runs
+        // as a plain one.
+        let temp = TempDir::new().unwrap();
+        let mut state = load_rest_state_with_capacity(&temp, 4).await;
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "prompt": "a message with provider params",
+                            "provider_params": {"reasoning_effort": "high"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a message that carries `provider_params` runs as a plain message: {}",
+            String::from_utf8_lossy(&body)
         );
     }
 
@@ -17506,6 +19421,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -18022,6 +19938,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     fn test_run_result_to_response_carries_skill_diagnostics() {
         let session_id = SessionId::new();
         let result = meerkat_core::RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: session_id.clone(),
             usage: Default::default(),
@@ -18317,6 +20234,175 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         ));
 
         assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
+    /// Refusal documents for the REST rows, each with the `retryable` value
+    /// its details carry: a catalogued level the model does not accept, a
+    /// refusal that names no route, and the one transient reason.
+    fn reasoning_effort_refusal_documents() -> Vec<(Value, bool)> {
+        vec![
+            (
+                json!({
+                    "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                    "route": {"backend": "anthropic_api", "api": "messages"},
+                    "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                    "facts": "catalog",
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "requested": "high", "provider": "other", "model": "custom-model-1",
+                    "route": null,
+                    "reason": "supported_levels_unknown", "supported": null, "facts": null,
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "requested": "high", "provider": "openai", "model": "account-model-1",
+                    "route": {"backend": "copilot", "api": "responses"},
+                    "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+                }),
+                true,
+            ),
+        ]
+    }
+
+    async fn api_error_status_and_payload(error: ApiError) -> (StatusCode, Value) {
+        use http_body_util::BodyExt as _;
+        let response = error.into_response();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// The two turn errors a refused level reaches a completion as: an apply
+    /// failure of the turn's build, and a run that failed before a provider
+    /// request.
+    fn reasoning_effort_refused_turn_errors(
+        refusal: &meerkat_core::ReasoningEffortRefusal,
+    ) -> [meerkat_core::TurnErrorMetadata; 2] {
+        let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal.clone()),
+        };
+        let detail = format!("agent error: {refusal}");
+        let mut apply_failure =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+        apply_failure.reason = Some(reason.clone());
+        let mut failed_run = meerkat_core::TurnErrorMetadata::terminal(
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            meerkat_core::TurnTerminalOutcome::Failed,
+            detail,
+        );
+        failed_run.reason = Some(reason);
+        [apply_failure, failed_run]
+    }
+
+    /// A refused `reasoning_effort` level answers HTTP 400 `INVALID_PARAMS`
+    /// with the typed details, in one shape whichever checkpoint refused:
+    /// the session error path (a refused build), a refused live
+    /// reconfiguration, and a turn that failed for the refusal. `retryable`
+    /// is `true` only for the unavailable reason; a refusal that names no
+    /// route renders with `"route": null`.
+    #[tokio::test]
+    async fn a_refused_reasoning_effort_answers_400_with_the_typed_details() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let expected = json!({
+                "error": format!("agent error: {refusal}"),
+                "code": "INVALID_PARAMS",
+                "details": {
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                },
+            });
+
+            let mut answers = vec![
+                create_session_error_to_api(SessionError::Agent(
+                    meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+                )),
+                create_session_error_to_api(runtime_driver_error_to_session_error(
+                    meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                        refusal.clone(),
+                    )),
+                )),
+            ];
+            for turn_error in reasoning_effort_refused_turn_errors(&refusal) {
+                for outcome in [
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error.clone(),
+                    },
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error.clone(),
+                    },
+                ] {
+                    answers.push(
+                        completion_outcome_to_api_result(outcome, &session_id, &realm, false)
+                            .expect_err("a refused level is an API error"),
+                    );
+                }
+            }
+            for answer in answers {
+                let (status, payload) = api_error_status_and_payload(answer).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(payload, expected);
+            }
+        }
+    }
+
+    /// A turn refused for its level in the request that created its session
+    /// answers the same 400 and details, and names the created session
+    /// beside them, so the caller does not lose it.
+    #[tokio::test]
+    async fn a_refused_first_turn_names_the_created_session_beside_the_refusal() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            for turn_error in reasoning_effort_refused_turn_errors(&refusal) {
+                let answer = completion_outcome_to_api_result(
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error,
+                    },
+                    &session_id,
+                    &realm,
+                    true,
+                )
+                .expect_err("a refused level is an API error");
+                let (status, payload) = api_error_status_and_payload(answer).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(
+                    payload,
+                    json!({
+                        "error": format!("agent error: {refusal}"),
+                        "code": "INVALID_PARAMS",
+                        "details": {
+                            "kind": "reasoning_effort_refused",
+                            "retryable": retryable,
+                            "reasoning_effort_refusal": document,
+                            "session_id": session_id.to_string(),
+                            "session_ref": format_session_ref(&realm, &session_id),
+                            "session_created": true,
+                            "resumable": true,
+                        },
+                    })
+                );
+                assert_eq!(
+                    SessionError::reasoning_effort_refusal_from_data(&payload["details"]),
+                    Some(refusal.clone()),
+                    "the reader takes the refusal with the session members beside it"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mob")]
@@ -19531,6 +21617,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             let realm = meerkat_core::RealmId::parse("rest-cancel").unwrap();
             let response = run_result_to_response(
                 meerkat_core::types::RunResult {
+                    reasoning_effort: None,
                     text: "must not leak".to_string(),
                     session_id: SessionId::new(),
                     usage: meerkat_core::types::Usage::default(),

@@ -313,6 +313,44 @@ pub(crate) async fn broken_members_of(
         .collect()
 }
 
+/// A member Core holds Broken, as the gateway's init result and
+/// `meta/status` name it: Core's reason, and MobMachine's stable refusal
+/// code when the failure was a refusal that named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrokenMember {
+    pub(crate) member: meerkat_mob::AgentIdentity,
+    pub(crate) reason: String,
+    pub(crate) code: Option<String>,
+}
+
+/// [`broken_members_of`], each member with the refusal code MobMachine
+/// recorded for it, if any. The code is read from the machine state the
+/// mob's actor last published (`MobHandle::identity_entry`), so the read
+/// wakes no member and never waits on the mob actor. The code is advisory:
+/// a member whose entry this read cannot answer is named without one.
+pub(crate) async fn broken_member_facts_of(handle: &MobHandle) -> Vec<BrokenMember> {
+    broken_members_of(handle)
+        .await
+        .into_iter()
+        .map(|(member, reason)| {
+            let code = match handle.identity_entry(&member) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => {
+                    entry.broken.and_then(|fact| fact.code)
+                }
+                Ok(meerkat_mob::IdentityEntryRead::NotAnEntry {
+                    worker: Some(worker),
+                }) => worker.broken.and_then(|fact| fact.code),
+                _ => None,
+            };
+            BrokenMember {
+                member,
+                reason,
+                code,
+            }
+        })
+        .collect()
+}
+
 /// The boot answer of a root mob whose stored state could not be restored.
 ///
 /// A failure of the mob's store (a read the store could not serve now, or
@@ -613,6 +651,23 @@ impl LlmClient for ProviderAgnosticLlmClient {
         self.inner.controller_model_selection()
     }
 
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
+    // The route the wrapped client bound a projection to. The trait's
+    // default answers with the request-free route, which is not the
+    // projection's for a client whose route can change between requests.
+    fn reasoning_route_of(
+        &self,
+        projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route_of(projection)
+    }
+
     fn plain_model_route(
         &self,
         logical_model: &str,
@@ -730,6 +785,20 @@ impl meerkat_core::AgentLlmClient for ReplaySanitizingAgentLlmClient {
     // admission refuses the member as malformed.
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.inner.controller_model_selection()
+    }
+
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
+    // The default tag of the wrapped client. The trait's default is no tag,
+    // and a level resolved for a member whose client hides its tag would
+    // replace that client's default fields instead of joining them.
+    fn default_provider_tag(&self) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        self.inner.default_provider_tag()
     }
 
     fn controller_model_facts(
@@ -942,6 +1011,23 @@ impl LlmClient for ReplaySanitizingLlmClient {
 
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.inner.controller_model_selection()
+    }
+
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
+    // The route the wrapped client bound a projection to. The trait's
+    // default answers with the request-free route, which is not the
+    // projection's for a client whose route can change between requests.
+    fn reasoning_route_of(
+        &self,
+        projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route_of(projection)
     }
 
     fn plain_model_route(
@@ -5531,6 +5617,42 @@ macro_rules! delegate_mob_session_service {
             ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
                 self.inner.fork_source_tools(session_id).await
             }
+            // The member rewind fork seam (four methods). The trait defaults
+            // refuse as a service without durable fork authority does:
+            // unforwarded, every member rewind through this decorator is
+            // refused. Forwarded as they are: the child is the same member,
+            // so no other member's place is claimed and no runtime-plane
+            // identity is taken.
+            async fn preflight_member_rewind_fork(
+                &self,
+                fork: &meerkat_mob::MemberRewindFork,
+            ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+                self.inner.preflight_member_rewind_fork(fork).await
+            }
+            async fn fork_member_rewind_child(
+                &self,
+                fork: &meerkat_mob::MemberRewindFork,
+            ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+                self.inner.fork_member_rewind_child(fork).await
+            }
+            async fn observe_member_rewind_child(
+                &self,
+                planned_child_session_id: &meerkat_core::types::SessionId,
+            ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError>
+            {
+                self.inner
+                    .observe_member_rewind_child(planned_child_session_id)
+                    .await
+            }
+            async fn read_member_rewind_lineage_session(
+                &self,
+                witness: meerkat_mob::MemberRewindLineageWitness,
+                prefix_message_count: usize,
+            ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+                self.inner
+                    .read_member_rewind_lineage_session(witness, prefix_message_count)
+                    .await
+            }
             async fn authorize_revivable_retired_session(
                 &self,
                 session_id: &meerkat_core::types::SessionId,
@@ -6962,6 +7084,37 @@ impl MobSessionService for AfterCreateMobSessionService {
     ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
         self.inner.fork_source_tools(session_id).await
     }
+    // Forwarded, as in `delegate_mob_session_service!`: the four methods of
+    // the member rewind fork seam, whose trait defaults refuse.
+    async fn preflight_member_rewind_fork(
+        &self,
+        fork: &meerkat_mob::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindForkEvidence, SessionError> {
+        self.inner.preflight_member_rewind_fork(fork).await
+    }
+    async fn fork_member_rewind_child(
+        &self,
+        fork: &meerkat_mob::MemberRewindFork,
+    ) -> Result<meerkat_core::service::MemberRewindChildObservation, SessionError> {
+        self.inner.fork_member_rewind_child(fork).await
+    }
+    async fn observe_member_rewind_child(
+        &self,
+        planned_child_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<meerkat_core::service::MemberRewindChildObservation>, SessionError> {
+        self.inner
+            .observe_member_rewind_child(planned_child_session_id)
+            .await
+    }
+    async fn read_member_rewind_lineage_session(
+        &self,
+        witness: meerkat_mob::MemberRewindLineageWitness,
+        prefix_message_count: usize,
+    ) -> Result<meerkat_core::service::MemberRewindLineageRead, SessionError> {
+        self.inner
+            .read_member_rewind_lineage_session(witness, prefix_message_count)
+            .await
+    }
     async fn authorize_revivable_retired_session(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -7635,6 +7788,11 @@ pub struct MobBootstrapSpec {
     /// private member's owner to the members it asks for
     /// ([`crate::private_owners::PrivateOwners`]).
     pub(crate) private_owners: crate::private_owners::PrivateOwners,
+    /// The late-bound surface every member's `ask_user` tool reads (see
+    /// [`crate::ask_user`]): each member build of this spec mounts the tool
+    /// over it, and the runtime fills it once it can show a person a
+    /// question; unfilled, every call answers that no person can be asked.
+    pub(crate) ask_user_slot: crate::ask_user::AskUserSlot,
     /// The registry of the agent schedule tools a stock constructor attached
     /// over an injected schedule store, which the runtime adopts once its
     /// mobs exist, as a gateway composition adopts its own
@@ -7735,10 +7893,15 @@ impl MobBootstrapSpec {
         let personal_accounts_slot =
             crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
+        // The `ask_user` tool is mounted last, over the tools every other
+        // hook left on the build.
+        let ask_user_slot = crate::ask_user::AskUserSlot::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook: personal_accounts_slot
-                .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
+            hook: ask_user_slot.after_hook(
+                personal_accounts_slot
+                    .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
+            ),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7819,6 +7982,7 @@ impl MobBootstrapSpec {
             side_chat_memory_slot,
             personal_accounts_slot,
             private_owners,
+            ask_user_slot,
             schedule_target_registry: None,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
@@ -10855,6 +11019,9 @@ pub struct MobRuntime {
     /// Who each member of this runtime's mob is private to, shared by every
     /// clone (see [`crate::private_owners::PrivateOwners`]).
     private_owners: crate::private_owners::PrivateOwners,
+    /// The surface the members' `ask_user` tool reads, shared by every clone
+    /// (see [`crate::ask_user::AskUserSlot`]).
+    ask_user_slot: crate::ask_user::AskUserSlot,
     /// The schedule service the Console's schedule editor writes, once the
     /// gateway's schedule host attached it, shared by every clone (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
@@ -11864,6 +12031,7 @@ impl MobRuntime {
             side_chat_lineages: Arc::default(),
             run_members: Arc::default(),
             private_owners: spec.private_owners,
+            ask_user_slot: spec.ask_user_slot,
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: spec.personal_accounts_slot,
         };
@@ -11933,6 +12101,7 @@ impl MobRuntime {
             side_chat_lineages: Arc::default(),
             run_members: Arc::default(),
             private_owners: crate::private_owners::PrivateOwners::default(),
+            ask_user_slot: crate::ask_user::AskUserSlot::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
         }
@@ -11980,6 +12149,13 @@ impl MobRuntime {
     /// the runtime's start, and no caller waits for it.
     pub(crate) fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
         &self.private_owners
+    }
+
+    /// The surface the `ask_user` tool of this runtime's members reads, and
+    /// the durable decisions their question sets are held in once the
+    /// runtime filled it (see [`crate::ask_user::AskUserSlot`]).
+    pub(crate) fn ask_user_slot(&self) -> &crate::ask_user::AskUserSlot {
+        &self.ask_user_slot
     }
 
     /// The Steward's source of the members of this runtime's mob private to
@@ -18058,6 +18234,19 @@ realm_profile = "worker-v2"
             Some(crate::memory::dispatch_taint::controller_test_support::selection())
         }
 
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(crate::memory::dispatch_taint::controller_test_support::reasoning_route())
+        }
+
+        fn reasoning_route_of(
+            &self,
+            _projection: &meerkat_llm_core::LlmReplayProjection,
+        ) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(
+                crate::memory::dispatch_taint::controller_test_support::reasoning_route_of_a_projection(),
+            )
+        }
+
         fn plain_model_route(
             &self,
             logical_model: &str,
@@ -18151,6 +18340,69 @@ realm_profile = "worker-v2"
                     [meerkat_core::AssistantBlock::Text { .. }]
                 )
         )
+    }
+
+    /// A member's client reports the route of the client it wraps for the
+    /// provider-neutral `reasoning_effort` option, through every wrapper
+    /// Meta puts around a member's client: the two raw wrappers in both
+    /// orders the builder composes them, and the replay sanitizer around the
+    /// agent client. The trait's default is no route, and a level set on a
+    /// member whose client reports no route is refused as unknown on every
+    /// route, so a wrapper that omits the forward compiles and takes the
+    /// option away from every member. The raw wrappers answer for a replay
+    /// projection with what the wrapped client says about that projection
+    /// (not with its request-free route), and the agent-client sanitizer
+    /// reports the wrapped client's default provider tag.
+    #[test]
+    fn member_client_wrappers_forward_the_wrapped_clients_reasoning_route() {
+        use crate::memory::dispatch_taint::controller_test_support::{
+            PinnedInner, default_provider_tag, reasoning_route, reasoning_route_of_a_projection,
+        };
+        let inner: Arc<dyn LlmClient> = Arc::new(GovernedRawClient::default());
+        let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
+        assert_eq!(inner.reasoning_route(), Some(reasoning_route()));
+        assert_ne!(reasoning_route_of_a_projection(), reasoning_route());
+        for (shape, client) in [
+            (
+                "provider-agnostic",
+                ProviderAgnosticLlmClient::wrap(Arc::clone(&inner)),
+            ),
+            (
+                "sanitizer",
+                ReplaySanitizingLlmClient::wrap(Arc::clone(&inner)),
+            ),
+            (
+                "sanitizer over provider-agnostic",
+                ReplaySanitizingLlmClient::wrap(ProviderAgnosticLlmClient::wrap(Arc::clone(
+                    &inner,
+                ))),
+            ),
+            (
+                "provider-agnostic over sanitizer",
+                ProviderAgnosticLlmClient::wrap(ReplaySanitizingLlmClient::wrap(Arc::clone(
+                    &inner,
+                ))),
+            ),
+        ] {
+            assert_eq!(client.reasoning_route(), Some(reasoning_route()), "{shape}");
+            assert_eq!(
+                client.reasoning_route_of(&projection),
+                Some(reasoning_route_of_a_projection()),
+                "{shape}: the wrapped client's answer for the projection"
+            );
+        }
+
+        let wrapped = ReplaySanitizingAgentLlmClient::new(Arc::new(PinnedInner::default()));
+        assert_eq!(
+            meerkat_core::AgentLlmClient::reasoning_route(&wrapped),
+            Some(reasoning_route()),
+            "the replay sanitizer around the agent client"
+        );
+        assert_eq!(
+            meerkat_core::AgentLlmClient::default_provider_tag(&wrapped),
+            Some(default_provider_tag()),
+            "the replay sanitizer around the agent client"
+        );
     }
 
     /// Both raw wrappers, in both orders the builder composes them, carry the
@@ -19163,6 +19415,7 @@ realm_profile = "worker-v2"
             _req: CreateSessionRequest,
         ) -> Result<meerkat_core::types::RunResult, SessionError> {
             Ok(meerkat_core::types::RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id: self.session.id().clone(),
                 usage: meerkat_core::types::Usage::default(),
@@ -19776,6 +20029,7 @@ comms = true
                         .and_then(|build| build.initial_tool_filter.clone()),
                 );
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id,
                 usage: meerkat_core::types::Usage::default(),
@@ -20282,6 +20536,7 @@ comms = true
                 });
             }
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: "owner terminal result".to_string(),
                 session_id: session_id.clone(),
                 usage: meerkat_core::types::Usage::default(),

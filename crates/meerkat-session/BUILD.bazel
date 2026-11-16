@@ -60,11 +60,12 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -102,6 +103,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -116,7 +118,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -154,13 +156,14 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -198,13 +201,14 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -248,11 +252,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -311,14 +316,79 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/ephemeral_contract.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "ephemeral_contract",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-session:meerkat_session_with_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "member_rewind_fork_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "member_rewind_fork",
+    crate_root = "tests/member_rewind_fork.rs",
+    crate_features = [
+        "live",
+        "runtime-machine",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+        "src/event_store.rs",
+    ],
+    srcs = [
+        "tests/member_rewind_fork.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.15",
+        "CARGO_BIN_NAME": "member_rewind_fork",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -374,13 +444,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/persistence_compat.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "persistence_compat",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -437,13 +508,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/planned_identity_fork.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "planned_identity_fork",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -500,13 +572,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/regression_lifecycle.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "regression_lifecycle",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -563,13 +636,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/session-management/SKILL.md",
+        "src/event_store.rs",
     ],
     srcs = [
         "tests/session_store_append_only_trybuild.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "session_store_append_only_trybuild",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -610,6 +684,7 @@ test_suite(
     tests = [
         ":ephemeral_contract_test",
         ":meerkat_session_unit_test",
+        ":member_rewind_fork_test",
         ":persistence_compat_test",
         ":planned_identity_fork_test",
         ":regression_lifecycle_test",

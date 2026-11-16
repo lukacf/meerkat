@@ -332,12 +332,13 @@ multiplier = 2.0
 - Call timeout: a hard deadline on one model call, from `[retry]
   call_timeout`, else the catalog's `call_timeout_secs` (Claude Opus and Fable
   300s, Sonnet, `claude-haiku-5-5` and Gemini Flash 120s, Haiku 4.5 60s, most
-  OpenAI models and `gemini-3.1-pro-preview` 600s, `gemini-4-carbon` and
-  `gemini-4-argon` 900s;
+  OpenAI models and `gemini-3.1-pro-preview` 600s, `gemini-4-carbon`,
+  `gemini-4-argon` and `gemini-4-hydrogen` 900s;
   custom models: `[models.<id>] call_timeout_secs`). No per-request setting.
 - Stream watchdog: a stream silent for the window is aborted as a retryable
   stall. The window is `[retry] stream_inactivity_timeout`, else the model's
-  own (`gemini-4-carbon` and `gemini-4-argon` 900s, `gpt-5.5-pro` 7200s;
+  own (`gemini-4-carbon`, `gemini-4-argon` and `gemini-4-hydrogen` 900s,
+  `gpt-5.5-pro` 7200s;
   self-hosted models:
   `[self_hosted.models.<id>] stream_inactivity_timeout_secs`, at least 60),
   else 300s. It is resolved for each call, so a model switch or fallback uses
@@ -402,8 +403,10 @@ auth_binding = { realm = "global", binding = "openai_oauth" }
   target emits `model_fallback_skipped` with a reason: `provider_boundary`,
   `auth_unavailable`, `context_fit`, `context_unknown`, `output_budget`,
   `modality_parity`, `tool_parity` (output schema cannot compile, or web
-  search lost), `tool_choice_unsupported`, `request_unsupported`,
-  `admission_unavailable`.
+  search lost), `tool_choice_unsupported`, `reasoning_effort_unsupported`
+  (the target's route does not accept the session's `reasoning_effort`
+  level; a target that accepts it keeps the level for the attempt and for
+  later turns), `request_unsupported`, `admission_unavailable`.
 - A switch emits `model_fallback_staged` and `model_fallback_committed`, adds
   a `model_fallback` system notice (models, reason, limits, hidden tools) to
   the transcript, re-applies the output schema for the new provider, and runs

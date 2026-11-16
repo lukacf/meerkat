@@ -122,7 +122,7 @@ fn member_requests(name: &str) -> Vec<(&'static str, Value)> {
 /// over a Core that holds `member` live on its own session (registered after
 /// the fork that seated the member, which an identity of the name refuses),
 /// with agent memory in `memory_dir`, and an aggregator over the runtime.
-async fn fully_composed_console(
+pub(super) async fn fully_composed_console(
     runtime: &MobRuntime,
     member: &str,
     memory_dir: &std::path::Path,
@@ -1837,11 +1837,13 @@ async fn wiring_events_naming_a_hidden_member_reach_no_one_else() -> TestResult 
 }
 
 /// An announcement subscription names the member it delivers into: a
-/// request naming a member hidden from its caller is refused as a request
-/// naming an unknown member, before the announcement owner is asked, so no
-/// one subscribes another person's private member to anything.
+/// request naming a member hidden from its caller is answered as the same
+/// request naming a name no member holds, by the method itself, so no one
+/// subscribes another person's private member to anything. (The rows with
+/// an announcement owner are in `console_announcement_audience_tests`.)
 #[tokio::test]
-async fn announcement_requests_naming_a_hidden_member_are_refused_as_unknown() -> TestResult {
+async fn announcement_requests_naming_a_hidden_member_are_answered_as_naming_nobody() -> TestResult
+{
     let (_temp_dir, runtime) = runtime("private-announcements").await?;
     seeded_member(&runtime, "worker", "alpha", &[]).await?;
     let app = console_json_router_with_state(enforced_console(&runtime, None));
@@ -1850,81 +1852,24 @@ async fn announcement_requests_naming_a_hidden_member_are_refused_as_unknown() -
     let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
     assert!(forked["error"].is_null(), "{forked:#}");
 
-    let refused = console_rpc_as(
-        &app,
-        Some(&bob),
-        "meta/mob_announcements/subscriptions/put",
-        json!({
-            "operation_id": "op-bob",
-            "subscription_id": "sub-bob",
-            "member": { "mob_id": "private-announcements", "identity": "alpha-side" },
-            "topics": ["news"],
-        }),
-    )
-    .await;
-    assert_eq!(refused["error"]["code"], json!(-32001), "{refused:#}");
-    assert_eq!(
-        refused["error"]["message"],
-        json!("unknown identity: alpha-side"),
-        "{refused:#}"
-    );
+    let put = |identity: &str| {
+        console_rpc_as(
+            &app,
+            Some(&bob),
+            "meta/mob_announcements/subscriptions/put",
+            json!({
+                "operation_id": "op-bob",
+                "subscription_id": "sub-bob",
+                "member": { "mob_id": "private-announcements", "identity": identity },
+                "topics": ["news"],
+            }),
+        )
+    };
+    let hidden = put("alpha-side").await;
+    let absent = put("omega").await;
+    assert!(hidden["result"].is_null(), "{hidden:#}");
+    assert_eq!(masked(&hidden, "alpha-side"), masked(&absent, "omega"));
     Ok(())
-}
-
-/// The announcement listings name no member hidden from their caller: the
-/// subscription, delivery and audit rows of such a member are left out, and
-/// a shared member's stay.
-#[test]
-fn announcement_listings_name_no_hidden_member() {
-    let controller = AccessController::audience_only();
-    controller.record_agent_attributes(crate::access::AgentResourceAttributes {
-        identity: "alpha-side".to_string(),
-        agent_id: Some("alpha-side".to_string()),
-        role: Some("worker".to_string()),
-        labels: BTreeMap::from([(PRIVATE_TO.to_string(), "alice-key".to_string())]),
-    });
-    controller.record_agent_attributes(crate::access::AgentResourceAttributes {
-        identity: "alpha".to_string(),
-        agent_id: Some("alpha".to_string()),
-        role: Some("worker".to_string()),
-        labels: BTreeMap::new(),
-    });
-    let bob = controller.view_for_caller(Some(BOB), Some("bob-key"));
-    let member = |identity: &str| json!({ "mob_id": "team", "identity": identity });
-    for (method, mut result, key) in [
-        (
-            "meta/mob_announcements/subscriptions/list",
-            json!({ "subscriptions": [
-                { "id": "sub-private", "member": member("alpha-side") },
-                { "id": "sub-shared", "member": member("alpha") },
-            ] }),
-            "subscriptions",
-        ),
-        (
-            "meta/mob_announcements/deliveries/list",
-            json!({ "deliveries": [
-                { "batch_id": "b-private", "member": member("alpha-side") },
-                { "batch_id": "b-shared", "member": member("alpha") },
-            ] }),
-            "deliveries",
-        ),
-        (
-            "meta/mob_announcements/audit/list",
-            json!({ "entries": [
-                { "action": "subscribed", "member": member("alpha-side") },
-                { "action": "subscribed", "member": member("alpha") },
-            ] }),
-            "entries",
-        ),
-    ] {
-        retain_announcement_rows_visible_to(&bob, method, &mut result);
-        let rows = result[key].as_array().cloned().unwrap_or_default();
-        assert_eq!(rows.len(), 1, "{method}: {result:#}");
-        assert!(
-            !result.to_string().contains("alpha-side"),
-            "{method} names no hidden member: {result:#}"
-        );
-    }
 }
 
 /// A WorkGraph goal records the member it aims at, so another person may not

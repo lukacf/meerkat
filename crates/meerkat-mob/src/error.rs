@@ -2944,6 +2944,15 @@ impl MobError {
         }
     }
 
+    /// Whether this error says, by the `retryable` fact of its own
+    /// structured data, that the same request can succeed when asked again.
+    /// `false` when it says it cannot, and when it carries no such fact.
+    pub(crate) fn says_retryable(&self) -> bool {
+        self.structured_data()
+            .and_then(|data| data.get("retryable").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false)
+    }
+
     /// Structured data carried by an underlying domain error.
     ///
     /// Session materialization failures use this to preserve typed

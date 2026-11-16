@@ -183,6 +183,27 @@ should expose through the configured transport. Gemma 4 is reasoning-capable,
 but normalized reasoning controls and trace streaming still vary by serving
 stack, so validate the behavior you plan to rely on.
 
+`reasoning_effort_levels` declares the levels the model accepts for the
+provider-neutral [`reasoning_effort`](/concepts/providers#reasoning-effort)
+option, for example:
+
+```toml
+supports_reasoning = true
+reasoning_effort_levels = ["low", "medium", "high"]
+```
+
+A self-hosted server publishes no list of its own, so this declaration is
+the only source of the model's levels. A session that asks for a declared
+level gets it written as `reasoning_effort` and `reasoning.effort` on a
+`chat_completions` alias and as `reasoning.effort` on a `responses` alias. A
+level outside the declared list is refused before any request
+(`unsupported_level`, with `facts: "operator"`); with no declaration every
+level is refused as `supported_levels_unknown`; an empty list declares that
+the model takes no level. Declaring levels requires
+`supports_reasoning = true`: config validation refuses a declaration without
+it. A provider-specific effort the caller writes itself
+(`provider_params.provider_tag`) is unaffected.
+
 Keep `supports_web_search = false`. The current self-hosted factory path has no
 provider-native web-search lowering. Setting it to `true` would suppress the
 fallback without creating a native executor, so search requests would have no

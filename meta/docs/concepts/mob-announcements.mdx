@@ -25,7 +25,20 @@ the methods answer `mob_announcements_unavailable`.
 
 The console serves the same methods on `/console/rpc`. Every one of them,
 the reads included, needs the `runtime.admin` grant, and a read-only console
-refuses the ones that change state.
+refuses the ones that change state. From 0.9.15 they keep an agent private
+to another person, and its subscriptions and deliveries, from a caller who
+is not its owner: they are answered as ones that do not exist (see
+[Access control](/concepts/access-control#private-side-chats)).
+
+From 0.9.15 a gateway with mob announcements logs one WARN line at every
+start, under the target
+`meerkat_meta::mob_announcements::private_member_subscriptions`, while live
+subscriptions (active or paused) deliver into agents private to a person.
+The line gives their number (`live`) and how many of them do not have the
+id form the agent's own tool gives (`not_by_member_tool`); it names no
+agent and no subscription. An agent whose record cannot be read at that
+start is not counted. If the count cannot be made at a start, one WARN line
+under the same target says so instead.
 
 ## Announcements
 

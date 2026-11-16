@@ -126,7 +126,9 @@ Keep these unless a test deliberately pins another model. WASM mob flows use the
 same current identity-first mob runtime, including helper/fork/respawn
 controls, run-fenced stop, and runtime-committed session projection behavior.
 
-**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests. The package bin is `rkat-web-proxy` (`proxy/cli.mjs`; `--port`, default `PORT` or 3100; `--cors-origin`, default `*`). It serves `/anthropic/*`, `/openai/*`, and `/gemini/*` for each of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` that is set.
+**Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests. The package bin is `rkat-web-proxy` (`proxy/cli.mjs`; `--port`, default `PORT` or 3100; `--cors-origin`; from 0.9.15 `--host`). It serves `/anthropic/*`, `/openai/*`, and `/gemini/*` for each of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` that is set.
+
+From 0.9.15 the standalone proxy listens on the loopback interface (`127.0.0.1`) by default; `--host <address>` binds another address. Before it calls the provider it compares a request's `Origin` header with the allowed origin (loopback origins by default; `--cors-origin <origin>` names one, `*` allows any) and answers 403 for any other origin, preflights included; bound to a loopback address it also refuses a `Host` header that is not a loopback name or address. The proxy does not check who calls it in any other way: a request without an `Origin` header is forwarded (unless a browser marks it `Sec-Fetch-Site: cross-site` and the allowed origin is not `*`), so put a proxy that listens on another address behind your own authentication.
 
 ```bash
 # Standalone proxy
@@ -135,12 +137,18 @@ ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
 
 For a server with Fetch-style routing, set `ANTHROPIC_API_KEY` in that server's
 environment. Pass a `Request` and the path with the provider prefix removed,
-then return the resulting `Response`:
+then return the resulting `Response`. From 0.9.15 the handler applies the
+same origin rule: name the site's origin with `allowOrigin` (loopback origins
+only when it is not given, `'*'` for any); `loopbackHostOnly: true` adds the
+`Host` check. It does not authenticate callers, so the server does that
+before it calls the handler:
 
 ```typescript
 import { createProxyHandler } from '@rkat/web/proxy';
 
-const anthropicProxy = createProxyHandler('anthropic');
+const anthropicProxy = createProxyHandler('anthropic', {
+  allowOrigin: 'https://app.example.com',
+});
 
 export function handleRequest(request: Request): Promise<Response> {
   const { pathname } = new URL(request.url);
@@ -159,7 +167,7 @@ WASM client uses per-provider base URLs to point at the proxy natively — no fe
 ```typescript
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: 'proxy',  // dummy, proxy replaces it
-  anthropicBaseUrl: 'http://localhost:3100/anthropic',
+  anthropicBaseUrl: 'http://127.0.0.1:3100/anthropic',
 });
 ```
 
@@ -209,6 +217,7 @@ Notes:
 - `RuntimeConfig` uses `anthropicApiKey` / `anthropicBaseUrl`, `openaiApiKey` / `openaiBaseUrl`, and `geminiApiKey` / `geminiBaseUrl`. Raw WASM uses `anthropic_api_key` / `anthropic_base_url`, `openai_api_key` / `openai_base_url`, and `gemini_api_key` / `gemini_base_url`. Generic `apiKey` / `baseUrl` compatibility fields are deleted at both runtime and session boundaries; per-session credentials are not accepted.
 - `RuntimeConfig.mobpackTrust` (raw `mobpack_trust`: `policy` `strict` or `permissive`, plus `trusted_signers.signers` mapping signer id to Ed25519 public-key hex) is the runtime's pack trust store. It defaults to strict with no signers, so `initFromMobpack()` and raw `create_session` reject unsigned or unknown-signer packs (`untrusted_mobpack`); opt into `permissive` only for local demos. `inspect_mobpack` is read-only and skips trust verification.
 - `session.stopRun(runId, reason)` and `mob.stopMemberRun(agentIdentity, runId, reason)` (raw `stop_session_run` / `mob_stop_member_run`) stop one exact run; read `runId` from the `run_started` event's `identity.run_id`. They resolve to a `WireRunStopReceipt` union on `outcome` (`stopped`, `not_current`, `not_stoppable`); a stale run id is `not_current`, never an error.
+- `session.recallInput(inputId)` (raw `recall_session_input`) withdraws one input only while it is still queued. It resolves to a `WireQueuedInputRecall` union on `outcome`: `abandoned` (the input is withdrawn, its terminal is `cancelled`), `not_queued` (a run holds it; nothing is touched and the run is not interrupted) or `already_terminal`. The list of outcomes can grow: an outcome the SDK does not know is returned as it is, so keep it as it is. An input the session does not hold rejects with `invalid_params`. The runtime ships in the same package as the SDK, so there is no older server to meet: an older runtime module fails when it is initialised, with a plain error, and a session whose runtime binding of the same version has no recall export rejects with `MeerkatError` code `CAPABILITY_UNAVAILABLE`.
 - Use `clearExternalAuthResolver(wasm)` from `@rkat/web`, or pass `JsValue::NULL` / `undefined` to the raw WASM export, to clear the registration.
 - `register_tool_callback` registers promise-returning JS callbacks. `register_js_tool` registration is synchronous, but dispatch reports pending detached host work, not completion. The host observes `ToolCallRequested`, performs the action, and reports any actual completion/result through a later session/mob message. Both registrations require initialized runtime state; prefer the instance methods after `MeerkatRuntime.init(...)`.
 - Await `destroy_runtime(expected_handle?)` or `runtime.destroy()` for canonical session and mob teardown. The SDK passes the opaque bootstrap `runtime_handle` so stale wrappers cannot destroy a replacement runtime. Successful teardown clears subscriptions and the resolver, then drops `RuntimeState`; failures preserve cleanup authority for retry. This does not undo already-dispatched external host side effects.

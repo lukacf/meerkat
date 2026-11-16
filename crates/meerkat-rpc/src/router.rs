@@ -3068,6 +3068,10 @@ impl MethodRouter {
             "session/input_status" => {
                 routed_arm(|| self.handle_session_input_state(id, params)).await
             }
+            "session/recall_input" => {
+                routed_arm(|| handlers::session::handle_recall_input(id, params, &self.runtime))
+                    .await
+            }
             "session/stream_open" => {
                 routed_arm(|| self.handle_session_stream_open(id, params)).await
             }
@@ -12707,6 +12711,546 @@ mod tests {
         }
     }
 
+    /// A `session/create` whose reasoning effort level the model's route
+    /// does not take. With a first turn the create is refused and leaves no
+    /// session; a deferred create has answered its session id before the
+    /// level is judged, so its session stays and a later turn can name a
+    /// level the route takes, or clear the level.
+    mod create_with_a_refused_level {
+        use super::*;
+
+        // Bounds a failure only; the passing paths never wait for it.
+        const FAILURE_BOUND: Duration = Duration::from_secs(30);
+
+        /// The mock client on an account route whose model list states
+        /// `high` alone for the selected model: `high` is taken and every
+        /// other level is refused as unsupported.
+        struct OnlyHighLlmClient;
+
+        #[async_trait]
+        impl LlmClient for OnlyHighLlmClient {
+            fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Anthropic(
+                        meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                    ),
+                    api: meerkat_core::ModelApi::Messages,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        meerkat_core::model_profile::capabilities::EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                static MOCK: MockLlmClient = MockLlmClient {
+                    provider: meerkat_core::Provider::Anthropic,
+                };
+                MOCK.stream(request)
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        async fn only_high_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+            test_router_with_llm(Arc::new(OnlyHighLlmClient)).await
+        }
+
+        async fn call(
+            router: &MethodRouter,
+            method: &str,
+            params: serde_json::Value,
+        ) -> RpcResponse {
+            router
+                .dispatch(make_request(method, params))
+                .await
+                .expect("response")
+        }
+
+        /// The ids `session/list` shows.
+        async fn listed_sessions(router: &MethodRouter) -> Vec<String> {
+            let listed = call(router, "session/list", serde_json::json!({})).await;
+            result_value(&listed)["sessions"]
+                .as_array()
+                .expect("session/list answers its sessions")
+                .iter()
+                .map(|session| {
+                    session["session_id"]
+                        .as_str()
+                        .expect("a listed session names its id")
+                        .to_string()
+                })
+                .collect()
+        }
+
+        /// The answer is the typed refusal of `requested`, which the route
+        /// that states `high` alone does not take.
+        fn assert_refused_for_its_level(answer: &RpcResponse, requested: &str, context: &str) {
+            let refused = answer
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("{context}: expected a refusal, got {answer:?}"));
+            assert_eq!(
+                refused.code,
+                error::INVALID_PARAMS,
+                "{context}: {refused:?}"
+            );
+            let data = refused.data.as_ref().unwrap_or_else(|| {
+                panic!("{context}: the refusal carries typed data: {refused:?}")
+            });
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{context}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["requested"], requested,
+                "{context}"
+            );
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], "unsupported_level",
+                "{context}"
+            );
+            assert_eq!(
+                data["reasoning_effort_refusal"]["supported"],
+                serde_json::json!(["high"]),
+                "{context}"
+            );
+            // The refusal names no session: its data is the typed refusal
+            // and nothing else.
+            let mut members: Vec<&str> = data
+                .as_object()
+                .unwrap_or_else(|| panic!("{context}: the refusal data is an object: {data}"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            members.sort_unstable();
+            assert_eq!(
+                members,
+                ["kind", "reasoning_effort_refusal", "retryable"],
+                "{context}: {data}"
+            );
+        }
+
+        /// The two forms a create names its level in: the direct member and
+        /// the nested `provider_params` key.
+        fn level_forms(level: &str) -> [(&'static str, serde_json::Value); 2] {
+            [
+                ("direct", serde_json::json!({"reasoning_effort": level})),
+                (
+                    "nested",
+                    serde_json::json!({"provider_params": {"reasoning_effort": level}}),
+                ),
+            ]
+        }
+
+        /// `create` with the members of `level_form` added.
+        fn with_level(
+            mut create: serde_json::Value,
+            level_form: &serde_json::Value,
+        ) -> serde_json::Value {
+            for (member, value) in level_form.as_object().expect("a level form is an object") {
+                create[member.as_str()] = value.clone();
+            }
+            create
+        }
+
+        /// One refused create with a first turn: the session it staged is
+        /// read off `session/list` while its first turn waits before the
+        /// build, and after the refusal nothing of that session is left.
+        async fn refused_create_leaves_no_session(create: serde_json::Value, context: &str) {
+            let (router, _rx) = only_high_router().await;
+            assert!(listed_sessions(&router).await.is_empty(), "{context}");
+
+            let pause = router.runtime.pause_first_turns_before_promotion();
+            let creating = {
+                let router = router.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request("session/create", create))
+                        .await
+                        .expect("response")
+                })
+            };
+            tokio::time::timeout(FAILURE_BOUND, pause.reached())
+                .await
+                .expect("the first turn reaches the pause before its build");
+            let staged = listed_sessions(&router).await;
+            assert_eq!(
+                staged.len(),
+                1,
+                "{context}: the create's session while its first turn waits: {staged:?}"
+            );
+            let session_id = staged[0].clone();
+            let sid = meerkat_core::SessionId::parse(&session_id).expect("session id parses");
+            pause.release();
+
+            let answer = tokio::time::timeout(FAILURE_BOUND, creating)
+                .await
+                .expect("the refused create answers")
+                .expect("create task");
+            assert_refused_for_its_level(&answer, "low", context);
+
+            assert_eq!(
+                listed_sessions(&router).await,
+                Vec::<String>::new(),
+                "{context}: a create refused for its level leaves no session in session/list"
+            );
+            let read = call(
+                &router,
+                "session/read",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await;
+            assert_eq!(
+                read.error.as_ref().map(|error| error.code),
+                Some(error::SESSION_NOT_FOUND),
+                "{context}: session/read of the refused create's session: {read:?}"
+            );
+            assert!(
+                !router.runtime.pending_session_exists(&sid).await,
+                "{context}: no staged session is left"
+            );
+            assert!(
+                !router.runtime_adapter.contains_session(&sid).await,
+                "{context}: no runtime stays registered for the session"
+            );
+            assert!(
+                router.runtime.session_callback_route(&sid).is_none(),
+                "{context}: no callback route stays bound to the session"
+            );
+            assert_eq!(
+                router.runtime.first_build_waiter_count_for_testing(),
+                0,
+                "{context}"
+            );
+        }
+
+        /// An immediate create with a level the route does not take
+        /// answers the typed refusal and leaves no session, in either form
+        /// the level is named in.
+        #[tokio::test]
+        async fn a_create_with_a_first_turn_refused_for_its_level_leaves_no_session() {
+            for (form, level) in level_forms("low") {
+                refused_create_leaves_no_session(
+                    with_level(serde_json::json!({"prompt": "hello"}), &level),
+                    &format!("immediate, {form}"),
+                )
+                .await;
+            }
+        }
+
+        /// A `keep_alive` create: its first turn ends before a build, so the
+        /// create answers the same refusal and leaves no session either.
+        #[tokio::test]
+        async fn a_keep_alive_create_refused_for_its_level_leaves_no_session() {
+            for (form, level) in level_forms("low") {
+                refused_create_leaves_no_session(
+                    with_level(
+                        serde_json::json!({
+                            "prompt": "hello",
+                            "keep_alive": true,
+                            "comms_name": format!("refused-level-keep-alive-{form}"),
+                        }),
+                        &level,
+                    ),
+                    &format!("keep_alive, {form}"),
+                )
+                .await;
+            }
+        }
+
+        /// More refused creates than the runtime holds sessions cost it
+        /// nothing, and a create that names a level the
+        /// route takes then runs and is the only session listed.
+        #[tokio::test]
+        async fn creates_refused_for_their_level_hold_no_session_capacity() {
+            let (router, _rx) = only_high_router().await;
+            // The runtime holds ten sessions.
+            for round in 0..6 {
+                for (form, level) in level_forms("low") {
+                    let answer = call(
+                        &router,
+                        "session/create",
+                        with_level(serde_json::json!({"prompt": "hello"}), &level),
+                    )
+                    .await;
+                    assert_refused_for_its_level(&answer, "low", &format!("round {round}, {form}"));
+                }
+            }
+            assert_eq!(
+                listed_sessions(&router).await,
+                Vec::<String>::new(),
+                "refused creates leave no session"
+            );
+            let created = call(
+                &router,
+                "session/create",
+                serde_json::json!({"prompt": "hello", "reasoning_effort": "high"}),
+            )
+            .await;
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session/create returns a session id")
+                .to_string();
+            assert_eq!(listed_sessions(&router).await, vec![session_id]);
+        }
+
+        /// A client whose route states `high` until its first provider
+        /// request, and no levels after it. That request asks for a tool the
+        /// session does not have, so the turn makes a second request, which
+        /// is judged against the route as it is then: the level the build
+        /// accepted is refused inside the turn.
+        struct HighUntilTheFirstRequestLlmClient {
+            states_levels: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait]
+        impl LlmClient for HighUntilTheFirstRequestLlmClient {
+            fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+                if self.states_levels.load(std::sync::atomic::Ordering::SeqCst) {
+                    OnlyHighLlmClient.reasoning_route()
+                } else {
+                    None
+                }
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                self.states_levels
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                        id: "late-refusal-call".to_string(),
+                        name: "a_tool_the_session_does_not_have".to_string(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            meerkat_core::Provider::Anthropic,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(StopReason::ToolUse),
+                    }),
+                ]))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        /// A create whose first turn is refused for the level after its
+        /// session was built keeps the session: the build accepted the
+        /// level, the turn stored its messages, and a later provider request
+        /// of the same turn is refused because the route's levels changed.
+        /// The create answers the typed refusal, and the built session is
+        /// still listed and read, with its transcript. Only a session that
+        /// was never built is removed.
+        #[tokio::test]
+        async fn a_create_refused_for_its_level_after_its_build_keeps_the_built_session() {
+            let (router, _rx) = test_router_with_llm(Arc::new(HighUntilTheFirstRequestLlmClient {
+                states_levels: std::sync::atomic::AtomicBool::new(true),
+            }))
+            .await;
+            let answer = tokio::time::timeout(
+                FAILURE_BOUND,
+                call(
+                    &router,
+                    "session/create",
+                    serde_json::json!({"prompt": "hello", "reasoning_effort": "high"}),
+                ),
+            )
+            .await
+            .expect("the create answers");
+            let refused = answer
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected the refusal, got {answer:?}"));
+            assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+            let data = refused.data.as_ref().expect("the typed refusal data");
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{data}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], "supported_levels_unknown",
+                "the level is refused by the route as it is at the later request: {data}"
+            );
+
+            let listed = listed_sessions(&router).await;
+            assert_eq!(
+                listed.len(),
+                1,
+                "the built session stays after the late refusal: {listed:?}"
+            );
+            let read = call(
+                &router,
+                "session/read",
+                serde_json::json!({ "session_id": listed[0] }),
+            )
+            .await;
+            let read = result_value(&read);
+            assert_eq!(read["session_id"], listed[0]);
+            assert!(
+                read["message_count"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0),
+                "the built session keeps the transcript of its refused turn: {read}"
+            );
+        }
+
+        /// A deferred create has answered its session id before the
+        /// level is judged, so its session stays, in either form the level
+        /// is named in. A turn that names a level the route takes runs, a
+        /// turn that clears the level runs, and plain turns run after each.
+        /// A plain first turn is refused for the session's level and costs
+        /// the session nothing: it is still listed, still read, and the
+        /// next turn that names a level the route takes runs.
+        #[tokio::test]
+        async fn a_deferred_create_with_a_refused_level_keeps_its_session() {
+            let (router, _rx) = only_high_router().await;
+            let deferred_create = |level: serde_json::Value| {
+                let router = router.clone();
+                async move {
+                    let created = call(
+                        &router,
+                        "session/create",
+                        with_level(
+                            serde_json::json!({"prompt": "seed", "initial_turn": "deferred"}),
+                            &level,
+                        ),
+                    )
+                    .await;
+                    result_value(&created)["session_id"]
+                        .as_str()
+                        .expect("a deferred create returns its session id")
+                        .to_string()
+                }
+            };
+            let turn = |session_id: String, reasoning_effort: Option<serde_json::Value>| {
+                let router = router.clone();
+                async move {
+                    let mut params =
+                        serde_json::json!({"session_id": session_id, "prompt": "next"});
+                    if let Some(reasoning_effort) = reasoning_effort {
+                        params["reasoning_effort"] = reasoning_effort;
+                    }
+                    call(&router, "turn/start", params).await
+                }
+            };
+
+            let mut expected = Vec::new();
+            for (form, level) in level_forms("low") {
+                // A turn that names a level the route takes runs, and a
+                // plain turn after it.
+                let named = deferred_create(level.clone()).await;
+                let ran = turn(named.clone(), Some(serde_json::json!("high"))).await;
+                assert!(ran.error.is_none(), "{form}: a turn naming `high`: {ran:?}");
+                let ran = turn(named.clone(), None).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a plain turn after the turn naming `high`: {ran:?}"
+                );
+
+                // A turn that clears the level runs, and a plain turn after
+                // it.
+                let cleared = deferred_create(level.clone()).await;
+                let ran = turn(
+                    cleared.clone(),
+                    Some(serde_json::json!({"action": "clear"})),
+                )
+                .await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a turn clearing the level: {ran:?}"
+                );
+                let ran = turn(cleared.clone(), None).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a plain turn after the clearing turn: {ran:?}"
+                );
+
+                // A plain first turn is refused for the session's level;
+                // the session stays, a turn naming `high` then runs on it,
+                // and a plain turn after that.
+                let plain = deferred_create(level.clone()).await;
+                let refused = turn(plain.clone(), None).await;
+                assert_refused_for_its_level(
+                    &refused,
+                    "low",
+                    &format!("{form}: a plain first turn"),
+                );
+                let listed = listed_sessions(&router).await;
+                assert!(
+                    listed.contains(&plain),
+                    "{form}: the deferred session stays listed after its refused turn: {listed:?}"
+                );
+                let read = call(
+                    &router,
+                    "session/read",
+                    serde_json::json!({ "session_id": plain }),
+                )
+                .await;
+                assert_eq!(result_value(&read)["session_id"], plain, "{form}");
+                let ran = turn(plain.clone(), Some(serde_json::json!("high"))).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a turn naming `high` after the refused plain turn: {ran:?}"
+                );
+                let ran = turn(plain.clone(), None).await;
+                assert!(
+                    ran.error.is_none(),
+                    "{form}: a plain turn after the turn naming `high`: {ran:?}"
+                );
+                expected.extend([named, cleared, plain]);
+            }
+
+            let mut listed = listed_sessions(&router).await;
+            listed.sort();
+            expected.sort();
+            assert_eq!(listed, expected, "each deferred create kept its session");
+        }
+    }
+
     async fn pending_runtime_approval(router: &MethodRouter) -> String {
         let created = router
             .dispatch(make_request(
@@ -20853,6 +21397,486 @@ mod tests {
         );
     }
 
+    /// A client whose route states the reasoning effort level `high`, and
+    /// whose requests can be held: while `held` is set a request waits
+    /// before it answers.
+    #[cfg(feature = "mob")]
+    struct HeldRouteLlmClient {
+        calls: std::sync::atomic::AtomicUsize,
+        held: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl LlmClient for HeldRouteLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![EffortLevel::High]),
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            use std::sync::atomic::Ordering;
+            Box::pin(async_stream::stream! {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                while self.held.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Hello from the held client".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                });
+            })
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Through the JSON-RPC router, `turn/start` and `mob/turn_start` on a
+    /// session whose turn is running answer a turn that names the
+    /// provider-neutral reasoning effort level as the session runtime does:
+    /// a level the route takes is answered that the session is busy
+    /// (`-32002`, the reason in `data.kind`), a level the route refuses is
+    /// answered its typed refusal, each at once, and nothing is admitted
+    /// beside the running turn. The level is named in the field
+    /// `reasoning_effort` and inside `provider_params`; one parser serves
+    /// both methods. The running turns then complete.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_turn_on_a_busy_session_is_answered_at_once_through_the_router() {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
+        let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = meerkat::PersistenceBundle::new(sessions, store, memory_blob_store())
+            .expect("construct runtime authority");
+        let runtime =
+            SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                .expect("compose the RPC session runtime");
+        let client = Arc::new(HeldRouteLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.set_default_llm_client(Some(client.clone() as Arc<dyn LlmClient>));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let (notif_tx, _notif_rx) = mpsc::channel(100);
+        let router = Arc::new(
+            MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority"),
+        );
+        let call = |method: &'static str, params: serde_json::Value| {
+            let router = Arc::clone(&router);
+            async move {
+                router
+                    .dispatch(make_request(method, params))
+                    .await
+                    .expect("response")
+            }
+        };
+        let ok = |response: RpcResponse, what: &str| {
+            assert!(response.error.is_none(), "{what}: {:?}", response.error);
+            result_value(&response)
+        };
+
+        // A session with one finished turn, and a mob with one member.
+        let created = ok(
+            call(
+                "session/create",
+                serde_json::json!({"prompt": "Hello", "model": "claude-sonnet-4-5"}),
+            )
+            .await,
+            "the session is created",
+        );
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("a session id")
+            .to_string();
+        ok(
+            call(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "busy-level-mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": {"comms": true},
+                            }
+                        }
+                    }
+                }),
+            )
+            .await,
+            "the mob is created",
+        );
+        ok(
+            call(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "busy-level-mob",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                }),
+            )
+            .await,
+            "the member spawns",
+        );
+        ok(
+            call(
+                "mob/turn_start",
+                serde_json::json!({
+                    "mob_id": "busy-level-mob",
+                    "agent_identity": "worker-1",
+                    "prompt": "first",
+                }),
+            )
+            .await,
+            "the member takes its first turn",
+        );
+
+        // A turn runs on the session and one on the member: both held at
+        // the model.
+        let before = client.calls.load(Ordering::SeqCst);
+        client.held.store(true, Ordering::SeqCst);
+        let session_turn = serde_json::json!({"session_id": &session_id, "prompt": "running"});
+        let member_turn = serde_json::json!({
+            "mob_id": "busy-level-mob",
+            "agent_identity": "worker-1",
+            "prompt": "running",
+        });
+        let running_session = tokio::spawn(call("turn/start", session_turn.clone()));
+        let running_member = tokio::spawn(call("mob/turn_start", member_turn.clone()));
+        tokio::time::timeout(Duration::from_mins(1), async {
+            while client.calls.load(Ordering::SeqCst) < before + 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both running turns reach the model");
+        let active_inputs = || async {
+            router
+                .runtime_adapter()
+                .list_active_inputs(
+                    &meerkat_core::SessionId::parse(&session_id).expect("session id"),
+                )
+                .await
+                .map(|inputs| inputs.len())
+                .unwrap_or(0)
+        };
+        let active_before = active_inputs().await;
+
+        for (method, base) in [
+            ("turn/start", &session_turn),
+            ("mob/turn_start", &member_turn),
+        ] {
+            for form in ["direct", "nested"] {
+                let with_level = |level: &str| {
+                    let mut params = base.clone();
+                    params["prompt"] = serde_json::json!("names a level");
+                    if form == "direct" {
+                        params["reasoning_effort"] = serde_json::json!(level);
+                    } else {
+                        params["provider_params"] = serde_json::json!({"reasoning_effort": level});
+                    }
+                    params
+                };
+                let answer = |params: serde_json::Value| async move {
+                    tokio::time::timeout(Duration::from_secs(10), call(method, params))
+                        .await
+                        .unwrap_or_else(|_| panic!("{method} {form}: answered while the turn runs"))
+                        .error
+                        .unwrap_or_else(|| panic!("{method} {form}: the turn is not taken"))
+                };
+
+                let busy = answer(with_level("high")).await;
+                assert_eq!(
+                    (busy.code, busy.data.clone()),
+                    (
+                        error::SESSION_BUSY,
+                        Some(serde_json::json!({
+                            "kind": "reasoning_effort_change_needs_idle_session"
+                        })),
+                    ),
+                    "{method} {form}: {busy:?}"
+                );
+                let refused = answer(with_level("low")).await;
+                assert_eq!(
+                    (
+                        refused.code,
+                        refused
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("kind"))
+                            .cloned(),
+                        refused
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.pointer("/reasoning_effort_refusal/reason"))
+                            .cloned(),
+                    ),
+                    (
+                        error::INVALID_PARAMS,
+                        Some(serde_json::json!("reasoning_effort_refused")),
+                        Some(serde_json::json!("unsupported_level")),
+                    ),
+                    "{method} {form}: {refused:?}"
+                );
+            }
+        }
+        assert_eq!(
+            active_inputs().await,
+            active_before,
+            "no answered request was admitted on the session"
+        );
+
+        client.held.store(false, Ordering::SeqCst);
+        for (what, running) in [
+            ("the session's", running_session),
+            ("the member's", running_member),
+        ] {
+            let response = tokio::time::timeout(Duration::from_mins(1), running)
+                .await
+                .unwrap_or_else(|_| panic!("{what} running turn is answered"))
+                .expect("the turn task");
+            assert!(
+                response.error.is_none(),
+                "{what} running turn completes: {:?}",
+                response.error
+            );
+        }
+    }
+
+    /// A mob member built from a profile whose `provider_params` carry the
+    /// provider-neutral reasoning effort level holds that level, though no
+    /// client request named one. The profile reaches the member from the
+    /// mob's definition (`mob/create`) or from `mob/spawn`'s
+    /// `override_profile`: both seat the level. So on such a member a
+    /// `mob/turn_start` that changes the model, or only replaces the
+    /// provider params (a temperature, say), while the member has a turn
+    /// running, is answered that the session is busy, with the reason in
+    /// `data.kind`, at once. A plain `mob/turn_start` is queued behind the
+    /// running turn and runs.
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_built_from_a_profile_with_a_level_answers_a_model_change_busy() {
+        use std::sync::atomic::Ordering;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+            config.clone(),
+            meerkat_models::canonical(),
+        ));
+        let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = meerkat::PersistenceBundle::new(sessions, store, memory_blob_store())
+            .expect("construct runtime authority");
+        let runtime =
+            SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                .expect("compose the RPC session runtime");
+        let client = Arc::new(HeldRouteLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        });
+        runtime.set_default_llm_client(Some(client.clone() as Arc<dyn LlmClient>));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let (notif_tx, _notif_rx) = mpsc::channel(100);
+        let router = Arc::new(
+            MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority"),
+        );
+        let call = |method: &'static str, params: serde_json::Value| {
+            let router = Arc::clone(&router);
+            async move {
+                router
+                    .dispatch(make_request(method, params))
+                    .await
+                    .expect("response")
+            }
+        };
+        let ok = |response: RpcResponse, what: &str| {
+            assert!(response.error.is_none(), "{what}: {:?}", response.error);
+            result_value(&response)
+        };
+        let plain_profile = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "external_addressable": true,
+            "tools": {"comms": true},
+        });
+        let mut profile_with_the_level = plain_profile.clone();
+        profile_with_the_level["provider_params"] = serde_json::json!({"reasoning_effort": "high"});
+        // (the mob, the profile of its definition, the profile `mob/spawn`
+        // overrides it with)
+        for (mob_id, defined, overridden) in [
+            ("profile-level-mob", &profile_with_the_level, None),
+            (
+                "override-level-mob",
+                &plain_profile,
+                Some(&profile_with_the_level),
+            ),
+        ] {
+            let member_turn = |prompt: &str| {
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": "worker-1",
+                    "prompt": prompt,
+                })
+            };
+
+            // The profile carries the level; the member is built from it and
+            // takes its first turn.
+            ok(
+                call(
+                    "mob/create",
+                    serde_json::json!({
+                        "definition": {"id": mob_id, "profiles": {"worker": defined}}
+                    }),
+                )
+                .await,
+                "the mob is created",
+            );
+            let mut spawn = serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "runtime_mode": "turn_driven",
+            });
+            if let Some(overridden) = overridden {
+                spawn["override_profile"] = overridden.clone();
+            }
+            ok(call("mob/spawn", spawn).await, "the member spawns");
+            ok(
+                call("mob/turn_start", member_turn("first")).await,
+                "the member takes its first turn",
+            );
+
+            // A turn runs on the member, held at the model.
+            let before = client.calls.load(Ordering::SeqCst);
+            client.held.store(true, Ordering::SeqCst);
+            let running = tokio::spawn(call("mob/turn_start", member_turn("running")));
+            tokio::time::timeout(Duration::from_mins(1), async {
+                while client.calls.load(Ordering::SeqCst) < before + 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the running turn reaches the model");
+
+            for (what, key, value) in [
+                (
+                    "a model change",
+                    "model",
+                    serde_json::json!("claude-opus-4-8"),
+                ),
+                (
+                    "a change of the provider params",
+                    "provider_params",
+                    serde_json::json!({"temperature": 0.2}),
+                ),
+            ] {
+                let mut params = member_turn("changes the member's model settings");
+                params[key] = value;
+                let busy =
+                    tokio::time::timeout(Duration::from_secs(10), call("mob/turn_start", params))
+                        .await
+                        .unwrap_or_else(|_| panic!("{what}: answered while the turn runs"))
+                        .error
+                        .unwrap_or_else(|| panic!("{what}: the turn is not taken"));
+                assert_eq!(
+                    (busy.code, busy.data.clone()),
+                    (
+                        error::SESSION_BUSY,
+                        Some(serde_json::json!({
+                            "kind": "reasoning_effort_change_needs_idle_session"
+                        })),
+                    ),
+                    "{what}: {busy:?}"
+                );
+            }
+
+            // A plain turn is queued behind the running one, and both complete.
+            let plain = tokio::spawn(call("mob/turn_start", member_turn("plain")));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                !plain.is_finished(),
+                "a plain turn is not answered while the turn ahead runs"
+            );
+            client.held.store(false, Ordering::SeqCst);
+            for (what, turn) in [("the running turn", running), ("the plain turn", plain)] {
+                let response = tokio::time::timeout(Duration::from_mins(1), turn)
+                    .await
+                    .unwrap_or_else(|_| panic!("{what} is answered"))
+                    .expect("the turn task");
+                assert!(
+                    response.error.is_none(),
+                    "{what} completes: {:?}",
+                    response.error
+                );
+            }
+        }
+    }
+
     /// A `session/create` refusal keeps its typed error data: a deferred
     /// first prompt carrying inline video for a model without inline-video
     /// support is refused with `INVALID_PARAMS` and the unsupported-capability
@@ -27762,6 +28786,129 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             .expect("the keyed send is admitted")
         }
 
+        /// A member retired by its mob while a client's `mob/turn_start` on
+        /// it is in flight: the retire and the turn request are both
+        /// answered, and the member's session is left with no runtime
+        /// registration.
+        #[cfg(feature = "mob")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_member_retired_with_a_turn_start_in_flight_keeps_no_runtime_registration() {
+            const BOUND: Duration = Duration::from_secs(30);
+            let (router, runtime, _temp) = keyed_router(true).await;
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            runtime.set_default_llm_client(Some(Arc::new(GatedLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+                requests: Arc::new(StdMutex::new(Vec::new())),
+            })));
+            let mob_id = tokio::time::timeout(
+                BOUND,
+                create_mob_with_worker(&router, "retire-with-a-turn-in-flight"),
+            )
+            .await
+            .expect("the mob and its member are created without a model call");
+            let member_session = runtime
+                .mob_state()
+                .expect("the mob surface")
+                .mob_resolve_bridge_session_id(
+                    &meerkat_mob::MobId::from(mob_id.as_str()),
+                    &meerkat_mob::AgentIdentity::from("worker-1"),
+                )
+                .await
+                .expect("the member's session resolves")
+                .expect("the member holds a session");
+
+            let mut seen = calls.subscribe();
+            let turn = {
+                let router = router.clone();
+                let mob_id = mob_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "mob/turn_start",
+                            serde_json::json!({
+                                "mob_id": mob_id,
+                                "agent_identity": "worker-1",
+                                "prompt": "a turn in flight at the retire",
+                            }),
+                        ))
+                        .await
+                        .expect("mob/turn_start response")
+                })
+            };
+            tokio::time::timeout(BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the member's turn reaches the provider")
+                .expect("call counter stays open");
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .contains_session(&member_session)
+                    .await,
+                "the member's session is registered while its turn is in flight"
+            );
+
+            let retire = {
+                let router = router.clone();
+                let mob_id = mob_id.clone();
+                tokio::spawn(async move {
+                    router
+                        .dispatch(make_request(
+                            "mob/retire",
+                            serde_json::json!({
+                                "mob_id": mob_id,
+                                "agent_identity": "worker-1",
+                            }),
+                        ))
+                        .await
+                        .expect("mob/retire response")
+                })
+            };
+            // The retire may wait for the turn in flight: the provider
+            // answers shortly.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            release.add_permits(4);
+            let retired = tokio::time::timeout(BOUND, retire)
+                .await
+                .expect("the retire is answered")
+                .expect("retire task");
+            assert!(
+                retired.error.is_none(),
+                "the retire succeeds: {:?}",
+                retired.error
+            );
+            let turn = tokio::time::timeout(BOUND, turn)
+                .await
+                .expect("the turn request is answered")
+                .expect("turn task");
+
+            let mut registered = true;
+            for _ in 0..600 {
+                registered = runtime
+                    .runtime_adapter()
+                    .contains_session(&member_session)
+                    .await;
+                if !registered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            println!(
+                "the turn request was answered result {:?}, error {:?}; registered afterwards: \
+                 {registered}",
+                turn.result.is_some(),
+                turn.error
+            );
+            assert!(
+                !registered,
+                "the retired member's session keeps no runtime registration (the turn request \
+                 was answered result {:?}, error {:?})",
+                turn.result.is_some(),
+                turn.error
+            );
+        }
+
         /// the first answer is a receipt with a pending or admitted
         /// status; on replay delivery_id and committed_at_ms are identical,
         /// the status may advance, and nothing new is admitted.
@@ -27821,6 +28968,51 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 followed["state"]["input_id"], input_id,
                 "the admitted pair names a row session/input_status reads: {followed}"
             );
+            // The same pair names the input to session/recall_input on the
+            // member's session. The member may already have taken the input,
+            // so any of the three answers is right; each must agree with the
+            // row afterwards.
+            let recalled = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/recall_input",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "input_id", "value": input_id },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(recalled["recall"]["input_id"], input_id, "{recalled}");
+            let after = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/input_status",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "input_id", "value": input_id },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            let terminal = &after["state"]["terminal_outcome"];
+            match recalled["recall"]["outcome"].as_str() {
+                Some("abandoned") => assert_eq!(
+                    terminal, "cancelled",
+                    "a recalled member input is cancelled: {after}"
+                ),
+                Some("not_queued") => assert_ne!(
+                    terminal, "cancelled",
+                    "an input the member's run holds is not cancelled: {after}"
+                ),
+                Some("already_terminal") => assert_eq!(
+                    &recalled["recall"]["terminal"], terminal,
+                    "an ended member input answers its own terminal: {after}"
+                ),
+                other => panic!("unexpected recall outcome {other:?}: {recalled}"),
+            }
         }
 
         /// the first answer reports pending or admitted, and an admitted
@@ -28576,6 +29768,411 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                     .expect("read the entry's input ledger")
                     .is_some(),
                 "the entry's session holds the input"
+            );
+        }
+    }
+
+    /// `session/recall_input`: withdraw one input only while it is still
+    /// queued. Every row drives the wire (JSON params and results).
+    mod queued_input_recall {
+        use super::caller_idempotency_key::keyed_router;
+        use super::*;
+
+        async fn create_session(router: &MethodRouter) -> String {
+            let resp = router
+                .dispatch(make_request(
+                    "session/create",
+                    serde_json::json!({ "prompt": "Hello" }),
+                ))
+                .await
+                .unwrap();
+            result_value(&resp)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string()
+        }
+
+        /// Queue one external event on an idle session and return its input
+        /// id. Nothing runs it until the session's next turn.
+        async fn queue_event(router: &MethodRouter, session_id: &str, body: &str) -> String {
+            let admitted = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/external_event",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "kind": "generic_json",
+                            "event_type": "inbox.item",
+                            "payload": { "body": body },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(admitted["outcome_type"], "accepted", "{admitted}");
+            let input_id = admitted["input_id"]
+                .as_str()
+                .expect("the admission names its input")
+                .to_string();
+            let state = input_state(router, session_id, &input_id).await;
+            assert_eq!(
+                state["current_state"], "queued",
+                "the event waits queued for the next turn: {state}"
+            );
+            input_id
+        }
+
+        async fn input_state(
+            router: &MethodRouter,
+            session_id: &str,
+            input_id: &str,
+        ) -> serde_json::Value {
+            result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/input_status",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "input_id", "value": input_id },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            )["state"]
+                .clone()
+        }
+
+        /// Recall the input named by its runtime input id.
+        async fn recall(router: &MethodRouter, session_id: &str, input_id: &str) -> RpcResponse {
+            recall_selected(router, session_id, "input_id", input_id).await
+        }
+
+        /// Recall the input named as `session/input_status` names it.
+        async fn recall_selected(
+            router: &MethodRouter,
+            session_id: &str,
+            by: &str,
+            value: &str,
+        ) -> RpcResponse {
+            router
+                .dispatch(make_request(
+                    "session/recall_input",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "selector": { "by": by, "value": value },
+                    }),
+                ))
+                .await
+                .unwrap()
+        }
+
+        async fn run_turn(router: &MethodRouter, session_id: &str) {
+            let turn = router
+                .dispatch(make_request(
+                    "turn/start",
+                    serde_json::json!({ "session_id": session_id, "prompt": "continue" }),
+                ))
+                .await
+                .unwrap();
+            assert!(turn.error.is_none(), "the next turn runs: {turn:?}");
+        }
+
+        /// A queued input is abandoned: its terminal is `cancelled`, the next
+        /// turn does not run it, and a second recall answers
+        /// `already_terminal`.
+        #[tokio::test]
+        async fn recall_abandons_a_queued_input_and_a_second_recall_is_already_terminal() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let input_id = queue_event(&router, &session_id, "withdraw me").await;
+
+            let first = result_value(&recall(&router, &session_id, &input_id).await);
+            assert_eq!(first["session_id"], session_id.as_str(), "{first}");
+            assert_eq!(
+                first["recall"],
+                serde_json::json!({
+                    "outcome": "abandoned",
+                    "input_id": input_id,
+                    "attempt_count": 0,
+                }),
+                "{first}"
+            );
+
+            let state = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(state["current_state"], "abandoned", "{state}");
+            assert_eq!(state["terminal_outcome"], "cancelled", "{state}");
+            assert!(
+                state.get("last_run_id").is_none(),
+                "a recalled input was never bound to a run: {state}"
+            );
+
+            run_turn(&router, &session_id).await;
+            let after_turn = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(
+                after_turn["terminal_outcome"], "cancelled",
+                "the next turn does not run a recalled input: {after_turn}"
+            );
+
+            let second = result_value(&recall(&router, &session_id, &input_id).await);
+            assert_eq!(second["recall"]["outcome"], "already_terminal", "{second}");
+            assert_eq!(second["recall"]["terminal"], "cancelled", "{second}");
+        }
+
+        /// The selector is `session/input_status`'s: a caller that only kept
+        /// the idempotency key it submitted under recalls by that key, and an
+        /// unknown key is refused like an unknown input id.
+        #[tokio::test]
+        async fn recall_by_idempotency_key_withdraws_the_keyed_input() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let admitted = result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/external_event",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "kind": "generic_json",
+                            "event_type": "inbox.item",
+                            "idempotency_key": "inbox:recall-1",
+                            "payload": { "body": "withdraw me by key" },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(admitted["outcome_type"], "accepted", "{admitted}");
+            let input_id = admitted["input_id"].as_str().expect("input id").to_string();
+
+            let unknown =
+                recall_selected(&router, &session_id, "idempotency_key", "inbox:never-sent").await;
+            assert_eq!(
+                unknown.error.as_ref().map(|error| error.code),
+                Some(crate::error::INVALID_PARAMS),
+                "a key this session never admitted is refused: {unknown:?}"
+            );
+
+            let first = result_value(
+                &recall_selected(&router, &session_id, "idempotency_key", "inbox:recall-1").await,
+            );
+            assert_eq!(first["recall"]["outcome"], "abandoned", "{first}");
+            assert_eq!(first["recall"]["input_id"], input_id.as_str(), "{first}");
+            let state = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(state["terminal_outcome"], "cancelled", "{state}");
+
+            let second = result_value(
+                &recall_selected(&router, &session_id, "idempotency_key", "inbox:recall-1").await,
+            );
+            assert_eq!(second["recall"]["outcome"], "already_terminal", "{second}");
+            assert_eq!(second["recall"]["input_id"], input_id.as_str(), "{second}");
+            assert_eq!(second["recall"]["terminal"], "cancelled", "{second}");
+        }
+
+        /// An input a turn already consumed answers `already_terminal` with
+        /// its `completed` terminal, and nothing changes.
+        #[tokio::test]
+        async fn recall_of_a_completed_input_is_already_terminal() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let input_id = queue_event(&router, &session_id, "run me").await;
+            run_turn(&router, &session_id).await;
+            let consumed = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(consumed["terminal_outcome"], "completed", "{consumed}");
+
+            let answer = result_value(&recall(&router, &session_id, &input_id).await);
+            assert_eq!(answer["recall"]["outcome"], "already_terminal", "{answer}");
+            assert_eq!(answer["recall"]["terminal"], "completed", "{answer}");
+            let after = input_state(&router, &session_id, &input_id).await;
+            assert_eq!(after["terminal_outcome"], "completed", "{after}");
+        }
+
+        /// Another session's input is unknown to this session: the recall is
+        /// refused as invalid params and the other session's input stays
+        /// queued.
+        #[tokio::test]
+        async fn recall_of_another_sessions_input_is_refused_and_touches_nothing() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let owner = create_session(&router).await;
+            let other = create_session(&router).await;
+            let input_id = queue_event(&router, &owner, "the owner's event").await;
+
+            let refused = recall(&router, &other, &input_id).await;
+            let error = refused
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("another session's input is refused: {refused:?}"));
+            assert_eq!(error.code, crate::error::INVALID_PARAMS, "{error:?}");
+            let state = input_state(&router, &owner, &input_id).await;
+            assert_eq!(
+                state["current_state"], "queued",
+                "the owner's input is untouched: {state}"
+            );
+
+            let never_admitted = meerkat_core::lifecycle::InputId::new().to_string();
+            let unknown = recall(&router, &owner, &never_admitted).await;
+            assert_eq!(
+                unknown.error.as_ref().map(|error| error.code),
+                Some(crate::error::INVALID_PARAMS),
+                "an input this session never admitted is refused: {unknown:?}"
+            );
+        }
+
+        /// A malformed input id is invalid params; an unknown session is the
+        /// ordinary session-not-found.
+        #[tokio::test]
+        async fn recall_refuses_a_malformed_input_id_and_an_unknown_session() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let malformed = recall(&router, &session_id, "not-an-input-id").await;
+            assert_eq!(
+                malformed.error.as_ref().map(|error| error.code),
+                Some(crate::error::INVALID_PARAMS),
+                "{malformed:?}"
+            );
+            let unknown_session = recall(
+                &router,
+                &meerkat_core::SessionId::new().to_string(),
+                &meerkat_core::lifecycle::InputId::new().to_string(),
+            )
+            .await;
+            assert_eq!(
+                unknown_session.error.as_ref().map(|error| error.code),
+                Some(crate::error::SESSION_NOT_FOUND),
+                "{unknown_session:?}"
+            );
+        }
+
+        /// Concurrent recalls of one queued input: exactly one abandons it,
+        /// the others answer `already_terminal`, and none hangs.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_recalls_of_one_queued_input_abandon_it_exactly_once() {
+            const RECALLS: usize = 8;
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let router = Arc::new(router);
+            let session_id = create_session(&router).await;
+            let input_id = queue_event(&router, &session_id, "withdraw me once").await;
+
+            let mut calls = Vec::with_capacity(RECALLS);
+            for _ in 0..RECALLS {
+                let router = Arc::clone(&router);
+                let session_id = session_id.clone();
+                let input_id = input_id.clone();
+                calls.push(tokio::spawn(async move {
+                    result_value(&recall(&router, &session_id, &input_id).await)
+                }));
+            }
+            let mut abandoned = 0;
+            let mut already_terminal = 0;
+            for call in calls {
+                let answer = tokio::time::timeout(Duration::from_mins(1), call)
+                    .await
+                    .expect("no recall hangs")
+                    .expect("the recall task ends");
+                match answer["recall"]["outcome"].as_str() {
+                    Some("abandoned") => abandoned += 1,
+                    Some("already_terminal") => {
+                        assert_eq!(answer["recall"]["terminal"], "cancelled", "{answer}");
+                        already_terminal += 1;
+                    }
+                    other => panic!("unexpected recall outcome {other:?}: {answer}"),
+                }
+            }
+            assert_eq!(abandoned, 1, "exactly one recall abandons the input");
+            assert_eq!(already_terminal, RECALLS - 1);
+        }
+
+        /// A session with no live runtime in the server: the recall never
+        /// loads it. An input that has ended answers `already_terminal` from
+        /// its stored row; an input a stop kept queued is refused as session
+        /// not running, and its row is untouched.
+        #[tokio::test]
+        async fn recall_on_a_session_with_no_live_runtime_answers_the_store_or_is_not_running() {
+            let (router, _runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let sid = meerkat_core::SessionId::parse(&session_id).expect("session id");
+            let ended = queue_event(&router, &session_id, "ends with the stop").await;
+
+            // Stop the session's runtime: the queued event ends with it. Then
+            // start it again with nothing to run its inputs, queue a durable
+            // prompt, and stop it keeping queued prompts for the next start.
+            let registration = router
+                .runtime_adapter
+                .current_session_registration_witness(&sid)
+                .await
+                .expect("the live session's registration");
+            assert!(
+                router
+                    .runtime_adapter
+                    .unregister_session_registration_until_terminal_if_current(&registration)
+                    .await
+                    .expect("stop the session's runtime"),
+                "the registration is torn down"
+            );
+            router
+                .runtime_adapter
+                .register_session(sid.clone())
+                .await
+                .expect("start the session's runtime with no executor");
+            let prompt = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                "kept for the next start",
+                None,
+            ));
+            let kept = prompt.id().to_string();
+            let (admitted, _waiter) = router
+                .runtime_adapter
+                .accept_input_with_completion(&sid, prompt)
+                .await
+                .expect("admit the prompt");
+            assert!(admitted.is_accepted(), "{admitted:?}");
+            let registration = router
+                .runtime_adapter
+                .current_session_registration_witness(&sid)
+                .await
+                .expect("the restarted session's registration");
+            router
+                .runtime_adapter
+                .unregister_session_registration_until_terminal_reporting_queued_inputs_if_current(
+                    &registration,
+                    meerkat_runtime::UnregisterQueuedInputs::Requeue {
+                        max_age: Duration::from_mins(10),
+                    },
+                )
+                .await
+                .expect("stop the runtime keeping queued prompts");
+            assert!(!router.runtime_adapter.contains_session(&sid).await);
+            let kept_state = input_state(&router, &session_id, &kept).await;
+            assert_eq!(
+                kept_state["current_state"], "queued",
+                "the stop kept the prompt queued in the store: {kept_state}"
+            );
+
+            // The kept input's phase lives in a runtime that is not loaded.
+            let refused = recall(&router, &session_id, &kept).await;
+            assert_eq!(
+                refused.error.as_ref().map(|error| error.code),
+                Some(crate::error::SESSION_NOT_RUNNING),
+                "a queued input of a session with no live runtime is refused: {refused:?}"
+            );
+            let kept_after = input_state(&router, &session_id, &kept).await;
+            assert_eq!(
+                kept_after["current_state"], "queued",
+                "the refused recall leaves the kept input queued: {kept_after}"
+            );
+
+            // The ended input answers from its stored row.
+            let ended_state = input_state(&router, &session_id, &ended).await;
+            assert!(
+                ended_state["terminal_outcome"].is_string(),
+                "the first stop ended the queued event: {ended_state}"
+            );
+            let answer = result_value(&recall(&router, &session_id, &ended).await);
+            assert_eq!(answer["recall"]["outcome"], "already_terminal", "{answer}");
+            assert_eq!(
+                answer["recall"]["terminal"], ended_state["terminal_outcome"],
+                "{answer}"
+            );
+            assert!(
+                !router.runtime_adapter.contains_session(&sid).await,
+                "no recall loads the session"
             );
         }
     }

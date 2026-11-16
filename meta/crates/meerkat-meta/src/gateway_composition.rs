@@ -1726,6 +1726,16 @@ pub async fn adopt_schedule_mob_targets(
     if ScheduleFiringRole::of_runtime(runtime) == ScheduleFiringRole::QuiescedCandidate {
         return mob_state;
     }
+    // From here on the schedules that target a member private to a person
+    // end with it, the ends the runtime saw before this point included. A
+    // candidate launch, above, follows none: it deletes nothing.
+    runtime
+        .mob_runtime()
+        .private_owners()
+        .follow_member_ends(Arc::new(
+            crate::schedule_wiring::EndedPrivateMemberSchedules::new(schedule_service.clone()),
+        ))
+        .await;
     match crate::schedule_wiring::repair_resumable_session_targets_to_mob_members(
         schedule_service,
         mob_target_registry,

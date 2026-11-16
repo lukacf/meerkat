@@ -233,10 +233,17 @@ impl MemberCapabilityInvariantContext {
         // exactness from what they wrap; a host that supplies a dispatcher on
         // the trait default is the remaining legitimate source of
         // `NonExactCatalog`, and that is a steady state, not a defect.
+        //
+        // The build's host tools are a supplied participant too: the factory
+        // composes them into the same final composite. The stock `ask_user`
+        // tool Meta puts there declares an exact catalog, so it changes no
+        // build's judgement; a dispatcher a host puts there that does not
+        // makes the composite non-exact like any other participant.
         let catalog_exactness = if [
             build.external_tools.as_ref(),
             build.schedule_tools.as_ref(),
             build.workgraph_tools.as_ref(),
+            build.host_tools.as_ref(),
         ]
         .into_iter()
         .flatten()

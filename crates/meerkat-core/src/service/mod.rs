@@ -704,6 +704,46 @@ impl SessionError {
         )
     }
 
+    /// Structured-data `kind` of [`Self::member_rewind_source_audit_incomplete`].
+    pub const MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND: &'static str =
+        "member_rewind_source_audit_incomplete";
+
+    /// A member rewind fork refused before anything was committed: its
+    /// source is an archived session of the member's rewind lineage whose
+    /// committed transcript rewrites are not all audited
+    /// (`missing_audit_receipts` of them have no audit receipt). A member
+    /// rewind reads an archived session without writing to it, so the
+    /// missing receipts are not appended, and nothing else repairs an
+    /// archived session's audit: this source is refused for good. The data
+    /// names the session the caller asked for and the count, nothing else.
+    pub fn member_rewind_source_audit_incomplete(
+        source_session_id: &SessionId,
+        missing_audit_receipts: usize,
+    ) -> Self {
+        Self::FailedWithData {
+            message: format!(
+                "archived session {source_session_id} has {missing_audit_receipts} transcript \
+                 rewrite commit(s) without an audit receipt; a member rewind fork reads an \
+                 archived session without repairing its audit log"
+            ),
+            data: serde_json::json!({
+                "kind": Self::MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND,
+                "source_session_id": source_session_id.to_string(),
+                "missing_audit_receipts": missing_audit_receipts,
+            }),
+        }
+    }
+
+    /// Whether this error is a [`Self::member_rewind_source_audit_incomplete`].
+    pub fn is_member_rewind_source_audit_incomplete(&self) -> bool {
+        matches!(
+            self.primary_error(),
+            Self::FailedWithData { data, .. }
+                if data.get("kind").and_then(serde_json::Value::as_str)
+                    == Some(Self::MEMBER_REWIND_SOURCE_AUDIT_INCOMPLETE_KIND)
+        )
+    }
+
     /// Structured-data `kind` of [`Self::mob_member_session_addressed_by_id`].
     pub const MOB_MEMBER_SESSION_ADDRESSED_BY_ID_KIND: &'static str =
         "mob_member_session_addressed_by_id";
@@ -760,6 +800,14 @@ impl SessionError {
     /// ([`crate::error::AgentError::ToolGrantGateRefused`]) on the wire. The
     /// `tool_grant_gate_refusal` member carries the typed refusal.
     pub const TOOL_GRANT_GATE_REFUSED_KIND: &'static str = "tool_grant_gate_refused";
+
+    /// Structured-data `kind` of a refused `reasoning_effort` level
+    /// ([`crate::error::AgentError::ReasoningEffortRefused`]) on the wire.
+    /// The `reasoning_effort_refusal` member carries the typed refusal; the
+    /// advisory `retryable` member beside it is `true` only for the
+    /// transient reason
+    /// ([`crate::ReasoningEffortRefusalReason::is_transient`]).
+    pub const REASONING_EFFORT_REFUSED_KIND: &'static str = "reasoning_effort_refused";
 
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
@@ -836,6 +884,13 @@ impl SessionError {
                     "tool_grant_gate_refusal": refusal,
                 }))
             }
+            Self::Agent(crate::error::AgentError::ReasoningEffortRefused(refusal)) => {
+                Some(serde_json::json!({
+                    "kind": Self::REASONING_EFFORT_REFUSED_KIND,
+                    "retryable": refusal.reason.is_transient(),
+                    "reasoning_effort_refusal": refusal,
+                }))
+            }
             _ => None,
         }
     }
@@ -876,6 +931,22 @@ impl SessionError {
             return None;
         }
         serde_json::from_value(data.get("tool_grant_gate_refusal")?.clone()).ok()
+    }
+
+    /// Read a refused `reasoning_effort` level back off the wire: the typed
+    /// refusal of the [`Self::REASONING_EFFORT_REFUSED_KIND`] projection
+    /// [`Self::structured_data`] gives. The advisory `retryable` member is
+    /// not read: the refusal's reason states it. Other or malformed
+    /// structured data fails closed as `None`.
+    pub fn reasoning_effort_refusal_from_data(
+        data: &serde_json::Value,
+    ) -> Option<crate::ReasoningEffortRefusal> {
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::REASONING_EFFORT_REFUSED_KIND)
+        {
+            return None;
+        }
+        serde_json::from_value(data.get("reasoning_effort_refusal")?.clone()).ok()
     }
 
     /// Secret-free projection of a resume hold: the hold class, the session it
@@ -1353,6 +1424,44 @@ pub struct SessionBuildOptions {
     pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Host-issued namespace authority required whenever WorkGraph resolves on.
     pub workgraph_namespace_grant: Option<WorkGraphNamespaceGrant>,
+    /// Tools of the embedding host's own, composed beside the build's tools.
+    ///
+    /// The agent factory composes this dispatcher as one more part of the
+    /// build's tool surface, beside whatever the build's base is (its
+    /// builtin composite, its `external_tools`, its own MCP adapter, or the
+    /// empty dispatcher) and after the comms, scheduler and WorkGraph
+    /// surfaces, before the mob surface. A host uses it for tools every
+    /// agent it builds gets, without wrapping the build's `external_tools`
+    /// and without knowing which base the factory builds.
+    ///
+    /// - Its tools join the build's tool list. A name it lists that another
+    ///   part of the build lists too is offered by neither, and a call of
+    ///   it is refused: the host keeps its names apart from the build's.
+    ///   The build logs one warning for such a name, when both parts first
+    ///   list it (`SHARED_TOOL_NAME_LOG_TARGET`), with the build's session.
+    /// - Its catalog joins the composed surface's as any composed part's
+    ///   does. The surface is exact only when every part is, so a
+    ///   dispatcher that declares an exact catalog of inline entries leaves
+    ///   the build's catalog mode and the catalog's control tools as they
+    ///   are without it, and one that does not declare an exact catalog
+    ///   makes the whole surface not exact. Its deferred entries and its
+    ///   pending catalog sources are the surface's too.
+    /// - The ops lifecycle binding, which the factory makes on the final
+    ///   composed surface, reaches it when it declares that capability; it
+    ///   must then be held by this build alone, or the build fails. The
+    ///   session's mob operator authority, the external tool surface handle
+    ///   and the MCP server lifecycle handle are bound to the build's
+    ///   `external_tools` and base only, never to this dispatcher.
+    /// - Whether the build's `external_tools` only observe bindings
+    ///   ([`AgentToolDispatcher::observes_bindings_only`]) is asked of
+    ///   `external_tools` alone, as without this option.
+    /// - A declared deny list may name its tools: they are tools the build
+    ///   composes, not external tools.
+    ///
+    /// It is a dispatcher of the host's process: no session record carries
+    /// it, and a resumed or recovered build has none until its host sets it
+    /// again. `None`, the default, composes nothing.
+    pub host_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<crate::RealmId>,
     pub instance_id: Option<String>,
@@ -2339,6 +2448,11 @@ pub struct ResumeOverrideMask {
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
+    /// The build decides the session's provider-neutral reasoning effort
+    /// level: the level its params name, or none when they name none. Without
+    /// it the stored level stays, across a `provider_params` claim too,
+    /// unless the build's params name a level.
+    pub reasoning_effort: bool,
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
@@ -2472,6 +2586,7 @@ impl Default for SessionBuildOptions {
             schedule_tools: None,
             workgraph_tools: None,
             workgraph_namespace_grant: None,
+            host_tools: None,
             preload_skills: None,
             realm_id: None,
             instance_id: None,
@@ -2563,6 +2678,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("schedule_tools", &self.schedule_tools.is_some())
             .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field("workgraph_namespace_grant", &self.workgraph_namespace_grant)
+            .field("host_tools", &self.host_tools.is_some())
             .field("preload_skills", &self.preload_skills)
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
@@ -3516,6 +3632,173 @@ pub struct DurableSessionForkTarget {
     /// runs without activating them, so a fork without an activation
     /// window strips them under the default instead of refusing.
     pub declared_instructions: crate::ForkInstructionPolicy,
+}
+
+/// How a member rewind fork reads its source session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRewindSource {
+    /// The member's current session. An archived session is refused, as
+    /// every durable fork refuses one.
+    Current,
+    /// An earlier session of the member's rewind lineage, which its mob
+    /// archived when the member moved on. The mob proves the lineage before
+    /// it asks; the session owner checks that the session is bound to the
+    /// member the request names, reads it without writing to it, and takes
+    /// an archived session.
+    ArchivedLineage,
+}
+
+/// One member rewind fork: a durable fork of a mob member's own session at
+/// `message_count`, into a child session id its owner reserved first, born
+/// bound to the same member.
+///
+/// The fork inherits: its instruction policy is
+/// [`crate::ForkInstructionPolicy::ReactivateInherited`], the child keeps
+/// the source's effective tool access policy, and the source must be
+/// quiescent. None of the three is the caller's to choose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindForkRequest {
+    /// The session to fork.
+    pub source_session_id: SessionId,
+    /// The complete message boundary the child's prefix ends at.
+    pub message_count: usize,
+    /// The child session id, reserved by the caller before the fork.
+    pub planned_child_session_id: SessionId,
+    /// The member the source is bound to and the child is born bound to.
+    pub member_binding: crate::MobMemberBinding,
+    /// How the source is read.
+    pub source: MemberRewindSource,
+}
+
+/// What a member rewind fork child must show: the prefix it was cut at and
+/// the execution references it inherits. References only: no transcript
+/// text, no blob content and no credential material.
+///
+/// `prefix_digest` is taken over the prefix as the child commits it, after
+/// the fork's blob preflight has normalized its images, so it equals the
+/// committed child's [`crate::Session::transcript_prefix_digest`] at
+/// `prefix_message_count`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindForkEvidence {
+    /// Number of source messages the child's prefix holds.
+    pub prefix_message_count: usize,
+    /// Content digest of that prefix, normalized as the child commits it.
+    pub prefix_digest: String,
+    /// The effective tool access policy the child inherits.
+    pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// The auth binding reference the child inherits.
+    pub auth_binding: Option<crate::AuthBindingRef>,
+    /// The realm the child inherits.
+    pub realm_id: Option<crate::RealmId>,
+}
+
+/// What a planned member rewind fork child shows, read from its committed
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindChildObservation {
+    /// The session that was observed. A verification of the observation
+    /// proves something about this session and about no other.
+    pub session_id: SessionId,
+    /// The child's own evidence.
+    pub evidence: MemberRewindForkEvidence,
+    /// The member the child is bound to, if any.
+    pub member_binding: Option<crate::MobMemberBinding>,
+    /// Whether the child is archived.
+    pub archived: bool,
+}
+
+/// One field of a member rewind fork child's evidence, in the order a
+/// verification compares them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MemberRewindEvidenceField {
+    PrefixMessageCount,
+    PrefixDigest,
+    ToolAccessPolicy,
+    AuthBinding,
+    RealmId,
+    MemberBinding,
+}
+
+impl MemberRewindEvidenceField {
+    /// Stable name of the field, for logs and typed causes.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrefixMessageCount => "prefix_message_count",
+            Self::PrefixDigest => "prefix_digest",
+            Self::ToolAccessPolicy => "tool_access_policy",
+            Self::AuthBinding => "auth_binding",
+            Self::RealmId => "realm_id",
+            Self::MemberBinding => "member_binding",
+        }
+    }
+}
+
+impl std::fmt::Display for MemberRewindEvidenceField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A planned member rewind fork child that is not the child its record
+/// describes: the first evidence field that differs. It names the field
+/// only, never either value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the planned member rewind child differs from its record in {field}")]
+pub struct MemberRewindChildConflict {
+    /// The first field that differs.
+    pub field: MemberRewindEvidenceField,
+}
+
+impl MemberRewindForkEvidence {
+    /// Prove that an observed child is the child this evidence describes,
+    /// bound to `member`.
+    ///
+    /// Every field is compared, the prefix digest and the member binding
+    /// included, in the order of [`MemberRewindEvidenceField`]; the first
+    /// that differs is named. Whether the child is archived is not part of
+    /// the evidence: the caller decides what an archived child means.
+    pub fn verify_child(
+        &self,
+        member: &crate::MobMemberBinding,
+        observed: &MemberRewindChildObservation,
+    ) -> Result<(), MemberRewindChildConflict> {
+        let conflict = |field| Err(MemberRewindChildConflict { field });
+        let child = &observed.evidence;
+        if child.prefix_message_count != self.prefix_message_count {
+            return conflict(MemberRewindEvidenceField::PrefixMessageCount);
+        }
+        if child.prefix_digest != self.prefix_digest {
+            return conflict(MemberRewindEvidenceField::PrefixDigest);
+        }
+        if child.tool_access_policy != self.tool_access_policy {
+            return conflict(MemberRewindEvidenceField::ToolAccessPolicy);
+        }
+        if child.auth_binding != self.auth_binding {
+            return conflict(MemberRewindEvidenceField::AuthBinding);
+        }
+        if child.realm_id != self.realm_id {
+            return conflict(MemberRewindEvidenceField::RealmId);
+        }
+        if observed.member_binding.as_ref() != Some(member) {
+            return conflict(MemberRewindEvidenceField::MemberBinding);
+        }
+        Ok(())
+    }
+}
+
+/// What source resolution reads of one session of a member's rewind
+/// lineage: its length, and the digest of its first messages when it holds
+/// that many.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRewindLineageRead {
+    /// Number of messages the session holds.
+    pub message_count: usize,
+    /// Content digest of the session's first `prefix_message_count`
+    /// messages as the read asked for them; `None` when the session holds
+    /// fewer.
+    pub prefix_digest: Option<String>,
 }
 
 /// Outcome of a durable fork that first waited, bounded, for the source
@@ -4823,6 +5106,111 @@ mod tests {
                 "{other}"
             );
         }
+    }
+
+    /// The `kind` of the wire data an agent error carries in its session
+    /// error's projection ([`SessionError::structured_data`]), or `None`.
+    ///
+    /// The match names every variant, so a new one does not compile until it
+    /// is placed here. A variant that carries wire data of its own needs its
+    /// arm in `structured_data`, and a decision on every surface that
+    /// reports an agent error without its session error: `rkat run` reads
+    /// the details of its failure document by variant (`owner_details` in
+    /// the CLI's exit status module, with its row
+    /// `agent_errors_with_wire_data_have_a_failure_document_decision`).
+    fn agent_error_wire_data_kind(error: &crate::error::AgentError) -> Option<&'static str> {
+        use crate::error::AgentError;
+        match error {
+            AgentError::ToolGrantGateRefused(_) => Some(SessionError::TOOL_GRANT_GATE_REFUSED_KIND),
+            AgentError::ReasoningEffortRefused(_) => {
+                Some(SessionError::REASONING_EFFORT_REFUSED_KIND)
+            }
+            AgentError::Llm { .. }
+            | AgentError::StoreError(..)
+            | AgentError::Tool { .. }
+            | AgentError::WithSettlementFailures { .. }
+            | AgentError::OperationRefused { .. }
+            | AgentError::PolicyIndeterminate { .. }
+            | AgentError::McpError(..)
+            | AgentError::SessionNotFound(..)
+            | AgentError::TokenBudgetExceeded { .. }
+            | AgentError::TimeBudgetExceeded { .. }
+            | AgentError::ToolCallBudgetExceeded { .. }
+            | AgentError::MaxTokensReached { .. }
+            | AgentError::ContentFiltered { .. }
+            | AgentError::MaxTurnsReached { .. }
+            | AgentError::Cancelled
+            | AgentError::InvalidStateTransition { .. }
+            | AgentError::OperationNotFound(..)
+            | AgentError::DepthLimitExceeded { .. }
+            | AgentError::ConcurrencyLimitExceeded
+            | AgentError::ConfigError(..)
+            | AgentError::InvalidToolAccess { .. }
+            | AgentError::SkillResolutionFailed { .. }
+            | AgentError::InternalError(..)
+            | AgentError::StickyModelFallbackAuthorityUnknown { .. }
+            | AgentError::ModelFallbackResumeHeld { .. }
+            | AgentError::SessionDurableProjectionAuthorityUnknown { .. }
+            | AgentError::BuildError(..)
+            | AgentError::SessionIdentityInUse(..)
+            | AgentError::DeclaredToolUnknown(..)
+            | AgentError::ToolArtifactRefused(..)
+            | AgentError::AuthReauthRequired { .. }
+            | AgentError::CallbackPending { .. }
+            | AgentError::CallbackBatchPending { .. }
+            | AgentError::StructuredOutputValidationFailed { .. }
+            | AgentError::InvalidOutputSchema(..)
+            | AgentError::HookDenied { .. }
+            | AgentError::HookTimeout { .. }
+            | AgentError::HookExecutionFailed { .. }
+            | AgentError::HookConfigInvalid { .. }
+            | AgentError::TerminalFailure { .. }
+            | AgentError::NoPendingBoundary
+            | AgentError::ControlAppendBlockedByCallbackBatch
+            | AgentError::DurableSnapshotSyncUnsupported
+            | AgentError::HookLaunchRefused { .. }
+            | AgentError::ClientModelChangeRequiresHotSwap { .. }
+            | AgentError::InstructionActivation(..)
+            | AgentError::StagedPromptDirectedTurnRefused
+            | AgentError::RunSuspended { .. } => None,
+        }
+    }
+
+    /// The agent errors that carry wire data of their own are the two the
+    /// list above names, and the session projection agrees with the list.
+    #[test]
+    fn the_agent_errors_with_wire_data_are_the_listed_ones() {
+        use crate::error::AgentError;
+        let refusal: crate::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level",
+            "supported": ["low", "medium", "high"], "facts": "catalog",
+        }))
+        .unwrap();
+        let samples = [
+            AgentError::ToolGrantGateRefused(Box::new(
+                crate::tool_grant::GrantGateRefusal::NoGrantService,
+            )),
+            AgentError::ReasoningEffortRefused(Box::new(refusal)),
+            AgentError::ConfigError("a configuration error".to_string()),
+            AgentError::InternalError("an internal error".to_string()),
+            AgentError::Cancelled,
+        ];
+        let mut with_data = 0;
+        for sample in samples {
+            let listed = agent_error_wire_data_kind(&sample);
+            let label = sample.to_string();
+            let projected = SessionError::Agent(sample).structured_data();
+            let kind = projected
+                .as_ref()
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(kind, listed, "{label}");
+            assert_eq!(projected.is_some(), listed.is_some(), "{label}");
+            with_data += usize::from(listed.is_some());
+        }
+        assert_eq!(with_data, 2);
     }
 
     #[test]

@@ -90,8 +90,14 @@ that should report back.
 rkat run --tools full "Ask one helper to inspect the test failure, then summarize what it found."
 ```
 
-A delegate helper is ephemeral: it is retired after its one task, and also when
-the calling turn stops waiting for it first.
+A delegate helper is ephemeral: it is retired after its one task. If the
+call that started it ends first (the tool call's time limit, ten minutes by
+default, or a hard interrupt of the calling turn), the call does not retire
+the helper: it finishes its turn and then stays seated, until its owner's
+session is archived through a surface (for an owner that is a mob member
+retired by its mob: until the host's next start). On a Meta gateway the idle
+sweep retires it once it has been idle for
+`implicit_delegate_idle_retire_secs` (300 seconds by default).
 
 Unless its `tooling` supplies a profile, a helper runs on the model and
 provider (and self-hosted server) the calling session runs on when the call
@@ -111,6 +117,14 @@ included), and its result says it created the mob. The current identity is
 read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
 and MCP servers keep; a session on the in-memory ephemeral session service,
 which keeps none, delegates on the route it was built with.
+
+A session's implicit mob (its delegates and the forks seated there) and the
+mobs its agent created belong to the session, and they end with it: they are
+destroyed when the session is archived. From 0.9.15, besides that, only the
+route change described above replaces the implicit mob, and a mob the agent
+created ends when it is destroyed by name: a turn that fails, is cancelled
+or is abandoned, a request that is cancelled, and a stop of the host end
+none of them, and the session keeps its mobs for its next turn.
 
 <Warning>
 Known issue, noted 2026-11-13: in releases up to and including 0.9.14 (the first affected release differs by case: see the release page for the range of each), a turn that cannot be started can permanently destroy the mobs its session owns. See
@@ -232,6 +246,14 @@ A small mob definition has profiles and optional wiring:
 Profiles are role contracts. Spawn requests may override selected profile
 fields, but the definition remains the durable source for the mob's intended
 shape.
+
+From 0.9.15 a mob id that starts with `council--` is reserved: it is the id
+form of the
+mob a [temporary council](/guides/temporary-councils#real-temporary-mobs)
+runs in. A create under such an id is refused, on every surface, as an
+invalid definition (`reserved_system_identifier` at `id`). A mob an earlier
+release created under such an id keeps loading and working; the mob state
+logs one warning that names it.
 
 <Warning>
 **Every profile that spawns a member must set `comms = true` under `tools`.**
@@ -432,9 +454,62 @@ image_generation_provider = "gemini"
 auto_compact_threshold = 60000
 # Profile fields that win over durable session metadata when a member
 # resumes. Without this, editing `model` in the definition does NOT apply to
-# resumed durable sessions. Vocabulary: model | provider | provider_params.
+# resumed durable sessions. Vocabulary: model | provider | provider_params |
+# reasoning_effort (from 0.9.15).
 resume_overrides = ["model", "provider"]
 ```
+
+A profile sets its members' provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) level in its
+provider params: `provider_params = { reasoning_effort = "high" }`. The
+member's build checks the level against the profile's model and route like
+any session's, and refuses it with the same typed `reasoning_effort_refused`
+data. From 0.9.15, a member built from such a profile holds the level
+(also when the profile came with `mob/spawn`'s `override_profile`): while it has a
+turn running or queued, a JSON-RPC request that changes its model,
+provider, provider params, auth binding or level is answered
+`SESSION_BUSY` at once and is not queued (see
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+The request is `mob/turn_start` for a `turn_driven` member, and
+`turn/start` with the member's session id for an autonomous one
+(`mob/turn_start` is refused for an autonomous member with `-32602`). An
+autonomous member runs turns of its own, so the caller cannot know when
+it is idle: send the request again, or set the level in the profile or
+at the spawn.
+No flow step, kickoff, peer message, member send, scheduled delivery or
+wake is answered busy; the rule is on `turn/start` and `mob/turn_start`.
+A resumed member keeps the level its session recorded. With
+`provider_params` in `resume_overrides`, a level the profile's params name is
+seated with them, and params that name no level leave the recorded level in
+place; add `reasoning_effort` to `resume_overrides` to make the profile
+decide the level on resume in every case: the level its `provider_params`
+name, or none. A member host that runs 0.9.14 refuses
+a member spec that carries a level: it fails closed with a spec digest
+mismatch and does not ignore the level, so upgrade member hosts before a
+profile sets a level.
+
+From 0.9.15, a level in a profile is a one-way step for a rollback. A mob
+whose definition holds a level in any profile, even a profile no member ever
+used, cannot be read by 0.9.14: after a rollback 0.9.14 quarantines the whole
+mob (its content is kept, and the mob is whole again on 0.9.15), and a Meta
+gateway on 0.9.14 does not start on a state directory that holds such a mob,
+so nothing stored in that directory can be used there. Removing the level
+from the definition afterwards does not help; the only way back is to
+destroy the mob on 0.9.15 and create it anew, which loses its members,
+their conversations and its history. See
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
+
+If the route stops accepting the profile's level between a member's spawn
+and its resume (an account's model list changed, or the model was swapped),
+only that member is affected. Under on-demand restore it stays dormant until
+its first wake and is then listed as broken with the reason; under eager
+restore it is broken at start. The mob keeps running and nothing is lost: the
+member keeps its seat, its session and its conversation. To recover, make
+the route accept the level again or change the level, then respawn that
+member (the same session, the conversation kept) or restart the host. A
+plain retry does not seat it, and removing the level from the profile alone
+does not help, because a resumed member keeps the level its session
+recorded.
 
 A profile's `auth_binding` is an explicit build input: its members build on
 that binding, a resumed member included, and a spawn that names its own
@@ -739,7 +814,7 @@ message text can still use the runtime context placeholders described below.
     const runtime = await MeerkatRuntime.init(wasm, {
       model: "gpt-5.5",
       openaiApiKey: "proxy",
-      openaiBaseUrl: "http://localhost:3100/openai",
+      openaiBaseUrl: "http://127.0.0.1:3100/openai",
     });
 
     const mob = await runtime.createMob({
@@ -789,7 +864,7 @@ Spawn defaults matter:
 | `entry_custody` (Rust `SpawnMemberSpec` only) | `false`: the member is a worker. `true` (`with_entry_custody(true)`) seats the member of an identity entry through a spawn or a dormant seat: a host's own durable identity, which no worker reconcile spawns or retires (`reconcile` and `ensure_member` refuse a spec with entry custody), no spawn without entry custody takes, and neither the agent lane nor the agent mob tools act on (see [Identity entries](/reference/mob-architecture#identity-entries)) |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
-when a host wants explicit dispatch control.
+when a host wants explicit dispatch control: only they take `mob/turn_start`.
 
 A fresh `autonomous_host` member runs exactly one kickoff turn (one model
 request) when it is spawned: on its `initial_message`, or without one on a
@@ -919,6 +994,33 @@ re-spawned a member under a pre-reset identity resumes after a restart (0.9.3
 and earlier failed that resume with an internal error). A store written
 before 0.9.4 whose last epoch already reused a generation still resumes, and
 that identity's next spawn goes above the recovered high-water.
+
+When a session's mobs end depends on what archives the session. A member
+its mob retires has its session archived by the mob, and the mobs that
+session owns (the mobs its agent created with `mob_create`, and the session's
+implicit mob with its delegates and forks) end with it at the next start of
+the host: the mob's retire archives the session and leaves its mobs to that
+start. The archive of a store-owned identity is such a retirement: each of
+the mobs its agent created is removed with its store at the host's next
+start, and unarchiving the identity does not bring them back. A session
+archived through a surface's own archive call (JSON-RPC
+`session/archive`, the REST and MCP archive) has its mobs destroyed at that
+call. A
+worker's respawn (`respawn`, `mob/respawn`, the `mob_respawn` tool of
+`MobMcpDispatcher`) retires the member and gives its successor a new session,
+so the mobs the old incarnation created and its delegates are not carried
+over to the successor.
+An identity entry's member is respawned on its own session
+(`MobHandle::respawn_member`, and `respawn` of such a member), so the mobs
+that session owns do not end with the respawn, and its agent keeps managing
+the mobs it created with `mob_create`: that management follows a member
+through its same-session successors, and ends when the member is reset onto
+a fresh session or is retired and later seated again. Which side a member
+is on follows from how it was created: a member a
+host seats through an identity entry (a declared or store-owned identity, the
+way a host keeps a durable roster) is an entry's member; a member spawned
+directly (a host's spawn call, an agent's `mob_spawn_member`, a helper) is a
+worker.
 
 ### Dormant seats and comms keys (Rust hosts)
 
@@ -1166,19 +1268,38 @@ cancels the work that member had admitted when the cancel was taken, not one
 unit: the member's current run is cancelled at the run's next boundary, and
 the input it held queued is abandoned. Input admitted after the cancel is
 untouched. Cancelling an idle member is not an error. On success the result
-is `{"mob_id": "...", "ok": true}`.
+is `{"mob_id": "...", "ok": true}`. The cancel is of that member's work
+only: a flow run on another member stays active, and from 0.9.15 a stop of
+the mob is still refused while it is (see
+[Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 <Warning>
-Known issue in 0.9.5 through 0.9.14 (the range read from the source; 0.8.51
-through 0.9.4 not determined), noted 2026-11-13, confirmed by a test for `turn/start` on the member's
-session id (`mob/turn_start` reaches the same path, read from the source):
-if a client has a turn of its own queued on that member's session,
-`mob/cancel_all_work` also abandons it, and the mobs that member's session
-owns are then destroyed. Work the mob itself admitted (member sends,
-submitted work) does not trigger this. See the
+Known issue in 0.9.5 through 0.9.14, noted 2026-11-13 and corrected
+2026-11-14 after runs on the published 0.9.14 `rkat-rpc` (measured on
+0.9.14; 0.9.5 through 0.9.13 read from the source; 0.8.51 through 0.9.4 not
+determined): `mob/cancel_all_work` can destroy the mobs that the member's
+session owns.
+
+- With a turn waiting: the mobs are destroyed when a turn a client sent to
+  the member's session (`turn/start` on its session id) or a
+  `mob/turn_start` is waiting behind the member's run when the cancel is
+  taken (measured on a default realm and on a realm created with
+  `--realm-backend jsonl`). The waiting turn itself may still run. With
+  nothing waiting, a default realm keeps the mobs.
+- On a realm created with `--realm-backend jsonl`, nothing needs to be
+  waiting: the first turn started on the member's session after the cancel
+  (measured for `turn/start`) is answered with an internal error (`-32603`)
+  and is not completed, and the mobs are destroyed at that turn. Before
+  0.9.14 this case is not determined.
+
+Work the mob itself admitted (member sends, submitted work) and still queued
+at the cancel does not count as a waiting turn. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
-Until a release with the fix, do not call `mob/cancel_all_work` while such a
-turn is queued.
+Until a release with the fix, do not call `mob/cancel_all_work` on a member
+while such a turn is queued. On a `jsonl` realm, do not call it at all on a
+member whose session owns mobs; if you already have, restart the process
+before the next turn is sent to that member (after a restart the next turn
+ran and the mobs were kept, in one run).
 </Warning>
 
 ## Flows
@@ -1468,6 +1589,29 @@ In text mode the same facts print as `usage`, `cost`, and `transcript` lines,
 the last of which carries the ready-to-run `rkat session export-atif <id>`
 command. `rkat run --export-atif` writes a trajectory for a single-session run.
 
+### Stopping a mob with an active flow run
+
+A mob refuses a stop while one of its flow runs is active. `mob/lifecycle`
+with `action: "stop"` (`MobHandle::stop` in embedded Rust) is answered with
+the invalid transition error (`MobError::InvalidTransition`, `invalid state
+transition: Running -> Stopped`), the mob stays running and the run goes on.
+On JSON-RPC this is error `-32602` with the message `invalid state
+transition: Running -> Stopped` and no error data.
+
+To stop the mob, wait for the run to end, or cancel it with `mob/flow_cancel`
+(`MobHandle::cancel_flow`; the run id is the one `mob/flow_run` or `mob/run`
+returned) and send the stop once `mob/flow_status` reports the run terminal. A stop
+sent right after the run turns terminal can still be refused for a moment;
+send it again. A run that `mob/flow_cancel` does not bring to a terminal
+status keeps the stop refused; complete, reset or destroy the mob instead.
+
+Cancelling one member's work does not end a flow run on another member.
+From 0.9.15, after `mob/force_cancel`, `mob/hard_cancel_member` or
+`mob/cancel_all_work` on one member, a flow run that is active on another
+member is still active and the stop is still refused until that run ends or
+is cancelled. In 0.9.14 the stop was admitted and the run went on, no
+longer counted (read from the 0.9.14 source, not run on that release).
+
 ## Observe And Operate
 
 | Task | Methods |
@@ -1492,6 +1636,8 @@ embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
 Each retirement runs through the ordinary retire path and every one is
 attempted; the first failure is reported, and a retry converges. Members
 spawned by other means are not affected.
+The mobs the retired member created itself and its delegates end with its
+session, at the next start of the host.
 
 Retiring a declared identity that its host's roster still lists does not
 remove it: the identity entry outlives the retirement, and the host's next
@@ -1506,7 +1652,10 @@ cancelling a member whose runtime is no longer live, or one already retiring,
 converges as a no-op success rather than an admission error. An identity the
 roster has never seen is refused with a typed `MemberNotFound`. A member whose
 runtime registration needs a durability reload is refused with a typed
-`MemberReloadRequired` (`-32029`) until its registration is reloaded.
+`MemberReloadRequired` (`-32029`) until its registration is reloaded. The
+cancel is of that member's work only: a flow run on another member stays
+active, and from 0.9.15 a stop of the mob is still refused while it is (see
+[Stopping a mob with an active flow run](#stopping-a-mob-with-an-active-flow-run)).
 
 ## Persistence
 
@@ -1580,7 +1729,11 @@ quarantined.
   manage, and only a mob's actor can answer that, so it never lists a
   quarantined mob: it fails closed. Its structured data carries `kind:
   "mob_quarantined"`, `mob_id`, `class`, `retryable`, `content_retained`,
-  `cause` (the failure the last restore attempt met) and `code`. Only a mob
+  `cause` (the failure the last restore attempt met) and `code`. From
+  0.9.15: an agent's own mob tool that names the id is answered the same
+  kind with `mob_id`, `class`, `retryable` and `content_retained` only, no
+  `cause` and no `code`; the cause is in the host's list and in the host's
+  log. Through 0.9.14 an agent's tool is answered every field. Only a mob
   root that cannot be created, read or listed still fails the whole restore.
 
 The class says why a mob is quarantined:
@@ -1595,7 +1748,13 @@ The class says why a mob is quarantined:
   that meets a re-attempt in flight answers the refusal at once and never
   waits for it. Any call that addresses a `store_unavailable` mob by id can
   start the re-attempt, before the call checks what its caller may do with
-  the mob. A re-attempt runs to its end even when the call that started it
+  the mob. From 0.9.15: an agent's own mob tool is the exception (through
+  0.9.14 it starts the re-attempt like any other call): it starts the
+  re-attempt only when the agent's authority names the mob (a manage grant,
+  a spawn profile scope or a recorded incarnation under the id) or the
+  agent's session is the creator the mob's creation record names; any other
+  agent's call is answered the refusal and starts nothing. A re-attempt runs
+  to its end even when the call that started it
   goes away (a client that disconnects), and a call that meets a mob a
   re-attempt is restoring answers the refusal or the restored mob, never
   that the mob does not exist. A list never re-attempts, and a
@@ -2019,6 +2178,28 @@ typed `failure` (`cause`, `message`, `code`, `structured_data`): present
 means the mob's actor has stopped; `status` is the last machine phase. Before
 0.9.5 the row read `Running`.
 
+From 0.9.15 the observation also carries `owed_intent`: the Stop, Complete,
+Reset, retirement of every member or Destroy that was durably begun and has
+not landed, or `None` when the mob's machine state owes nothing. A resume waits
+only a short bounded time for the first attempt at a recovered Stop or
+Complete, so the phase read right after it can still be `Running` while the
+Stop is owed. A host that acts on the phase after a resume (lifting a Stopped
+mob, for example) first calls
+`MobHandle::wait_until_no_lifecycle_intent_is_owed()`, which returns the phase
+once nothing is owed and has no bound of its own. Two reads say "nothing
+owed" while the mob's log still owes an intent: the read handle inside a
+pre-activation hook of a resume (the open intent is applied after the hook;
+read it from the handle the resume returns), and the handles of an actor that
+a graceful Shutdown ended over an owed Stop (they read `Stopped`; the next
+resume reports the Stop as owed and drives it). When the actor ends before the
+intent lands, the wait returns a typed error: the fail-stop cause, the
+closed-actor error for a task that ended in a live phase, or
+`ActorCommandChannelClosed` for an actor that ended in a terminal phase with
+the intent still owed; after a graceful Shutdown over an owed Stop the wait
+returns `Stopped`, as those handles read. That `Stopped` is the answer of
+that actor: a host that records "stopped" durably takes it from the next
+start's wait, not from a wait a Shutdown may have ended.
+
 A member whose cleanup delivery the start cannot restore (a retiring member,
 or any member bound to a session of a Stopped or Completed mob) does not fail
 the start when the failure is the member's own and came before the restore had
@@ -2306,6 +2487,17 @@ execution, session history, credentials, compaction, and memory. A remote
 member therefore uses its host's realm even when the controller has a realm
 with the same name.
 
+From 0.9.15: do not use a reasoning effort level on a placed member if you
+may ever go back to 0.9.14. While the member's host runs 0.9.14, the
+controlling mob cannot follow a placed member whose session ran a turn with
+a level, and no step on 0.9.14 ends that. After such a member's host has
+run 0.9.14 and returned, the controlling host can skip events when that
+member's event stream is resumed from a cursor, and a wait for the
+completion of its run can time out; the stored events are complete (read
+from the source, not run). What ends that condition, and what is not
+established about it, is in
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
+
 A placed member can also be wired to an external peer (`mob/wire` with an
 external peer descriptor). The edge is the same controller-owned external
 edge as for a local member; its trust row is installed on the member's host,
@@ -2536,7 +2728,7 @@ wasm-pack output into that bundle; it does not compile wasm32.
 | External spawn rejected | Verify the external binding includes address, Ed25519 identity, and typed bootstrap token |
 | Flow run missing | Use `mob/flows` first and confirm the `flow_id` exists in the definition |
 | Live open fails | Confirm the member's model has realtime capability and `rkat-rpc --live-ws` is enabled when using RPC audio |
-| `delegate` answers `mob_quarantined` for the session's `implicit-<session id>` mob, cause `unknown_model` | An implicit mob made before implicit mobs named their provider, on a model that has since left the catalog, fails its restore and stays quarantined. With no process serving the realm, remove its store (`mob--implicit-<session id>.db` and its `-wal` and `-shm` files in the realm's state directory); the next `delegate` creates the mob again |
+| `delegate` answers `mob_quarantined` for the session's `implicit-<session id>` mob, cause `unknown_model` (from 0.9.15: the answer names the class only, and the host's mob list shows that mob quarantined with cause `unknown_model`) | An implicit mob made before implicit mobs named their provider, on a model that has since left the catalog, fails its restore and stays quarantined. With no process serving the realm, remove its store (`mob--implicit-<session id>.db` and its `-wal` and `-shm` files in the realm's state directory); the next `delegate` creates the mob again |
 
 ## See Also
 

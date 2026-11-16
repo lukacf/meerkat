@@ -117,6 +117,7 @@ impl SessionAgent for SettleProbeAgent {
         let session_id = self.session.id().clone();
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 session_id: session_id.clone(),
@@ -124,6 +125,7 @@ impl SessionAgent for SettleProbeAgent {
             })
             .await;
         let result = RunResult {
+            reasoning_effort: None,
             text: "ran".to_string(),
             session_id: session_id.clone(),
             usage: Usage::default(),

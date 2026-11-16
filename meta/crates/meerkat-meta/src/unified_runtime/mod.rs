@@ -531,6 +531,11 @@ pub struct UnifiedRuntimeCore {
     /// The Console send path console schedule fires take, installed by the
     /// console router build (`crate::console_schedules`).
     console_schedule_doors: crate::console_schedules::ConsoleScheduleDoorSlot,
+    /// The driver of the executor of the question sets this runtime's
+    /// members ask (`crate::ask_user`): armed once the runtime keeps
+    /// durable decisions and serves its long-term agents, stopped at
+    /// shutdown.
+    ask_user_driver: std::sync::Mutex<Option<crate::ask_user::AskUserDriver>>,
 
     // Meta-side label sidecar for mob- and run-scoped metadata
     metadata_table: Arc<RuntimeMetadataTable>,
@@ -841,6 +846,8 @@ impl UnifiedRuntime {
             mob_events_store.clone(),
             persistent_metadata.clone(),
             mob_runtime.implicit_delegate_retirement_overrides(),
+            mob_runtime.private_owners().clone(),
+            mob_runtime.speaks_for_composition(),
         );
         // The probe starts at construction while the error hook is installed
         // later (`set_error_hook`), so it holds the late-bound slot and reads
@@ -975,6 +982,7 @@ impl UnifiedRuntime {
                 keyed_inject_slot: crate::runtime::keyed_inject::pending_keyed_inject_slot(),
                 console_governed_ingress: Default::default(),
                 console_schedule_doors: Default::default(),
+                ask_user_driver: std::sync::Mutex::new(None),
                 metadata_table,
                 persistent_metadata,
                 console_audit,
@@ -1002,6 +1010,8 @@ impl UnifiedRuntime {
         idle_retire_overrides: Option<
             crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides,
         >,
+        private_owners: crate::private_owners::PrivateOwners,
+        speaks_for_composition: bool,
     ) -> Option<JoinHandle<()>> {
         let runtime_handle = tokio::runtime::Handle::try_current().ok()?;
         Some(runtime_handle.spawn(run_mob_events_subscription(
@@ -1009,6 +1019,8 @@ impl UnifiedRuntime {
             store,
             persistent_metadata,
             idle_retire_overrides,
+            private_owners,
+            speaks_for_composition,
         )))
     }
 
@@ -1984,6 +1996,9 @@ impl UnifiedRuntime {
         // policy. It builds one value and starts nothing.
         self.attach_identity_reads(&context.runtime);
         self.identity_first_context = Some(context);
+        // The members' questions are served from here on, whatever the
+        // launch's identity policy (`crate::ask_user`).
+        self.serve_ask_user();
         if let Some(projection) = self.console_projection.get() {
             projection.update_identity_authority("default", self.identity_runtime_ref().cloned());
         }
@@ -2332,6 +2347,68 @@ impl UnifiedRuntime {
     /// gateway install those of a persistent state directory at their build.
     pub fn set_durable_decisions(&mut self, decisions: crate::durable_decisions::RuntimeDecisions) {
         self.durable_decisions = decisions;
+        self.serve_ask_user();
+    }
+
+    /// Serve the questions this runtime's members ask a person
+    /// (`crate::ask_user`), from the durable decisions and the identity
+    /// runtime installed now; a runtime without an identity runtime serves
+    /// none, and its members' calls answer that no person can be asked. It
+    /// fills the surface the members' `ask_user` tool reads and arms the
+    /// driver of the kind's executor, which starts when it has work: at
+    /// once when the decision store already holds a set, otherwise at the
+    /// first set held. Until then nothing is opened, claimed or read, and
+    /// no pass is made. No driver is armed for a runtime that keeps no
+    /// durable decisions or on a candidate launch. Called when either part
+    /// is installed, whatever the launch's identity policy; a later call
+    /// replaces what an earlier one armed.
+    pub(crate) fn serve_ask_user(&self) {
+        if self.identity_first_context.is_none() {
+            return;
+        }
+        let surface = crate::ask_user::AskUserSurface::new(
+            self.durable_decisions.clone(),
+            self.console_schedule_doors.served(),
+            self.mob_id(),
+        );
+        let driver = crate::ask_user::spawn_ask_user_driver(
+            &self.durable_decisions,
+            // The composition's own handle of its mob: a back-edge, never
+            // its public owner.
+            Arc::new(crate::ask_user::MemberKeyedNotices::new(
+                self.mob_runtime.clone(),
+            )),
+            crate::durable_decisions::DecisionExecutorDriver::DEFAULT_TICK,
+            surface.held_signal(),
+        );
+        self.mob_runtime.ask_user_slot().fill(surface);
+        *self
+            .ask_user_driver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = driver;
+    }
+
+    /// Stop serving the members' questions: their calls answer that no
+    /// person can be asked, and the executor's driver stops. What it left
+    /// owed is settled by the next process's first pass.
+    pub(crate) fn stop_ask_user(&self) {
+        self.mob_runtime.ask_user_slot().clear();
+        self.ask_user_driver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+
+    /// How many passes the driver of the members' question sets has
+    /// finished: `None` while it has not started (the runtime never held a
+    /// set), then one at its start and one for each change of a decision
+    /// and each tick it waited out. A diagnostic.
+    pub fn ask_user_driver_passes(&self) -> Option<u64> {
+        self.ask_user_driver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(crate::ask_user::AskUserDriver::passes)
     }
 
     /// Meta's answer to whether the party that decided a decision may still
@@ -4327,11 +4404,13 @@ async fn subscribe_agent_events_for_console_forwarder(
 ///
 /// Exits when the upstream `event_rx` closes (machine destroyed) or
 /// when subscription setup fails after a stale-cursor fallback.
-async fn run_mob_events_subscription(
+pub(crate) async fn run_mob_events_subscription(
     handle: MobHandle,
     store: MobEventsStore,
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
     idle_retire_overrides: Option<crate::mob_handle_runtime::ImplicitDelegateRetirementOverrides>,
+    private_owners: crate::private_owners::PrivateOwners,
+    speaks_for_composition: bool,
 ) {
     let mob_id = handle.mob_id().as_str().to_string();
     let resume_cursor = match persistent_metadata.get_subscription_cursor(&mob_id).await {
@@ -4394,6 +4473,11 @@ async fn run_mob_events_subscription(
         },
     };
 
+    // A launch that does not speak for its composition installs no follower
+    // of the ends of private members: once it has only held one, it writes
+    // the cursor no further, so the launch that does speak is shown that
+    // event again at its next start.
+    let mut cursor_kept_for_a_held_end = false;
     while let Some(event) = subscription.event_rx.recv().await {
         let envelope = store.project_mob_event(&event).await;
         // Idle-retire opt-ins follow the members they were set for: a
@@ -4401,6 +4485,24 @@ async fn run_mob_events_subscription(
         // destroy) releases the opt-in bound to exactly the retired session.
         if let Some(overrides) = idle_retire_overrides.as_ref() {
             overrides.observe_mob_event(&mob_id, &event).await;
+        }
+        // What follows the end of a member private to a person is done, or
+        // held for the composition's follower, before the cursor moves past
+        // the event: a durable cursor shows the event again after a stop in
+        // between.
+        let held = private_owners.observe_mob_event(&handle, &event).await;
+        if held && !speaks_for_composition && !cursor_kept_for_a_held_end {
+            cursor_kept_for_a_held_end = true;
+            tracing::info!(
+                mob_id = %mob_id,
+                cursor = envelope.cursor,
+                "mob_events subscription: this launch does not speak for its composition and \
+                 follows no end of a member private to a person; its cursor stays before the \
+                 first such end"
+            );
+        }
+        if cursor_kept_for_a_held_end {
+            continue;
         }
         if let Err(err) = persistent_metadata
             .set_subscription_cursor(&mob_id, envelope.cursor)

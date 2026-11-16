@@ -255,9 +255,32 @@ pub enum RuntimeDriverError {
     /// started: its requeue max age is under one millisecond or over the cap.
     #[error("unregister queued-input disposition refused: {0}")]
     QueuedInputsRefused(crate::meerkat_machine::UnregisterQueuedInputsError),
+
+    /// A live session's LLM reconfiguration was refused for the
+    /// `reasoning_effort` level its target identity carries: the route of
+    /// the client built for the target does not accept the level. Nothing
+    /// was applied: the session keeps its identity, its client and its
+    /// stored params. The message is the refusal's own text; read the
+    /// refusal's fields. Boxed to keep the error small.
+    #[error("{0}")]
+    ReasoningEffortRefused(Box<meerkat_core::ReasoningEffortRefusal>),
 }
 
 impl RuntimeDriverError {
+    /// The typed session error for a reconfiguration refused for its
+    /// `reasoning_effort` level ([`Self::ReasoningEffortRefused`]), or
+    /// `None` for any other error. Surfaces use it so the refusal keeps the
+    /// wire form a refused build and a refused turn have, instead of
+    /// becoming an internal error.
+    pub fn reasoning_effort_refused_session_error(&self) -> Option<meerkat_core::SessionError> {
+        match self {
+            Self::ReasoningEffortRefused(refusal) => Some(meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
+            )),
+            _ => None,
+        }
+    }
+
     /// The typed session refusal for a session this runtime owner may not
     /// host (#1813): another runtime owner hosts it, or its hosting claim is
     /// unavailable. `None` for any other error. Surfaces use it so the
@@ -534,6 +557,50 @@ mod tests {
     // Verify traits are object-safe
     fn _assert_driver_object_safe(_: &dyn RuntimeDriver) {}
     fn _assert_control_plane_object_safe(_: &dyn RuntimeControlPlane) {}
+
+    /// A reconfiguration refused for its `reasoning_effort` level projects
+    /// the session error a refused build has: the same typed agent error,
+    /// so the same structured data. Its text is the refusal's own. No other
+    /// error projects it.
+    #[test]
+    fn a_refused_reconfiguration_projects_the_build_refusals_session_error() {
+        let document = serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+            "facts": "catalog",
+        });
+        let refusal: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(document.clone()).unwrap();
+        let error = RuntimeDriverError::ReasoningEffortRefused(Box::new(refusal.clone()));
+        assert_eq!(error.to_string(), refusal.to_string());
+
+        let session_error = error
+            .reasoning_effort_refused_session_error()
+            .expect("a refused reconfiguration has a typed session error");
+        assert!(matches!(
+            &session_error,
+            meerkat_core::SessionError::Agent(meerkat_core::AgentError::ReasoningEffortRefused(carried))
+                if **carried == refusal
+        ));
+        assert_eq!(
+            session_error.structured_data(),
+            Some(serde_json::json!({
+                "kind": "reasoning_effort_refused",
+                "retryable": false,
+                "reasoning_effort_refusal": document,
+            }))
+        );
+        assert!(
+            RuntimeDriverError::ValidationFailed {
+                reason: "another refusal".to_string(),
+            }
+            .reasoning_effort_refused_session_error()
+            .is_none()
+        );
+        assert!(error.hosting_session_error().is_none());
+        assert!(error.teardown_in_progress_session_error().is_none());
+    }
 
     #[test]
     fn teardown_in_progress_maps_to_typed_retryable_session_error() {

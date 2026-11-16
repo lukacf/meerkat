@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-15
+
 A console that can identify a person shows a timeline frame stored without
 member attributes, the memory steward's conflict signals and the system
 page's records that speak of an agent, to an administrator only. See
@@ -14,9 +16,67 @@ Security, Upgrade and Changed.
 
 ### Breaking
 
+- Behaviour only: a mob create under a mob id that starts with `council--`
+  through Meta's mob tools (an agent's `mob_create` included) is now
+  refused as an invalid definition; 0.9.14 accepted it. See Changed, and
+  Breaking in the Meerkat changelog. A mob already stored under such an id
+  keeps loading and working.
+
 - Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
   variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
   needs both arms.
+
+- Behaviour-only (not measured by the gate): on the Console,
+  `meta/mob_announcements/declarations/apply` refuses a declared
+  subscription of one member that the applied declarations do not already
+  hold unchanged when it names a member that is not seated, or is private
+  to another person: `-32047` `unknown_member`, and nothing is applied.
+  0.9.14 kept such a subscription pending until its member was seated. A
+  member this gateway does not serve, and a member of a peer that cannot be
+  used, are not seated. While the member's check cannot be read, the apply
+  is refused for now: `-32047` `native_unavailable`, nothing is applied, and
+  the same apply can be made again once the member's check can be read (for
+  a member of a mob that does not run: once that mob runs). Seat the member
+  first, or apply the declarations over the stdio gateway (or declare them
+  in the gateway's options or its sidecar), where a subscription for a
+  member that is not seated yet is kept pending. A subscription the applied
+  declarations already hold unchanged is carried as it is, and role-selected
+  subscriptions are declared as before. A subscription put over the stdio
+  gateway for a member of a mob that does not run is refused there too
+  (`native_unavailable`).
+
+- Behaviour-only (not measured by the gate): on the Console,
+  `meta/mob_announcements/sources/put` refuses a source that names, in an
+  audience member grant, a triage route, a forward audience or its
+  conversation members, a member that is not seated, or is private to
+  another person: `-32047` `unknown_member`, and nothing is written. A
+  member this gateway does not serve, and a member of a peer that cannot
+  be used, are not seated. While a named member's check cannot be read,
+  the put is refused for now: `-32047` `native_unavailable`, nothing is
+  written, and the same put can be made again once the member's check can be
+  read (for a member of a mob that does not run: once that mob runs). The
+  same holds for a source declared through
+  `meta/mob_announcements/declarations/apply` on the Console, unless the
+  applied declarations already hold it unchanged. 0.9.14 stored a source
+  that named a member not seated yet. Seat the member first, or put or
+  declare the source over the stdio gateway (or in the gateway's options or
+  its sidecar), which stores it as before. A member of a mob on another
+  gateway is named as before.
+
+- Behaviour-only (not measured by the gate): on a Console that can identify
+  a person, `meta/schedule/list`, `update`, `pause`, `resume` and `delete`
+  answer a caller who is not an access administrator for an agent the
+  Console does not know as for an agent that does not exist (an empty list;
+  `schedule_not_found` for a schedule named by its id), as the memory reads
+  and the session attach do. For a short time after a gateway start, until
+  the gateway has read who its members are private to (and for as long as
+  that read fails; it is tried again), that is every member
+  that ended before the start, the person it was private to included; a
+  Console that identifies nobody answers its one operator so for that time
+  too. Ask again: once that read has succeeded the methods answer for an
+  ended member as the access rules and its owner decide. An agent on the
+  roster and an archived agent are answered as before, and an access
+  administrator always is.
 
 - Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
   variants `Declared` and `Created` and gains `Identity`. A `name_taken`
@@ -51,13 +111,113 @@ Security, Upgrade and Changed.
   activates a construction yet: write `allow` or `require_approval`, and the
   preparation mode `required`.
 
+- Behaviour: a member whose profile configures an MCP server that offers a
+  tool named `ask_user` loses that tool at the upgrade. Members now get
+  the stock tool `ask_user` (see Added), a tool name two parts of a
+  member's build list is offered by neither, and so such a member's model
+  is offered no tool named `ask_user`: neither its server's nor the stock
+  one. Such a member also has no stock `ask_user`: it cannot put a question
+  to a person until its server's tool has another name. The member builds
+  and runs, and its other tools are offered. It is
+  not silent: once the server has connected, each build of such a member
+  logs one warning on the gateway's stderr (target
+  `meerkat::tools::shared_name`: "more than one part of a tool surface
+  lists this tool name: it is offered by none of them", with `tool`, the
+  two sources in `listed_by`, and the member's session and comms name in
+  `tools_of`). **Check before upgrading:** the check is the
+  configuration. A member is affected when an MCP server of its profile
+  (`[[profiles.<name>.tools.mcp_servers]]`), or one attached to its live
+  session, offers a tool named `ask_user` and the server's entry maps that
+  tool to no other name (`tool_names`): ask the server for its tool list,
+  or read its documentation. The member's tool list does not answer the
+  question: on 0.9.14 `meta/identity/resolved_tools` does not list the
+  tools of a profile's server (the list then holds `tool_catalog_search`
+  and `tool_catalog_load`), so a list without the name proves nothing. A
+  member whose host supplies a tool named `ask_user` as one of its build's
+  external tools keeps it. **Do:** give
+  the server's tool another name: map it in the profile
+  (`tool_names = { ask_user = "ask_operator" }` on the server's entry), or
+  rename it on the server. The member then has the server's tool under the
+  new name and the stock `ask_user`, and its prompts and instructions that
+  name the tool must name the new one. In this release no setting keeps a
+  profile server's tool under the name `ask_user` on a Meta member:
+  `tools.deny = ["ask_user"]` hides the name whatever offers it, and does
+  not bring the server's tool back. See Known limitations.
+
 - Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
   the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
   late-bound reference to the session bridge, through which it asks whether
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
 
+- Behaviour-only (not measured by the gate): the Console's request entry
+  points (`POST /console/rpc` and `/console/rpc/multipart`) refuse a request
+  whose parameters are malformed, as invalid params (`-32602`), before any
+  method runs. A client that follows the RPC reference is not affected, and
+  no shipped client sends such a request.
+
+- Behaviour-only (not measured by the gate): on the Console, an adopt
+  declaration (`mob/adopt_member_identity_declaration`) whose owned wiring
+  names, as an end of an edge, a name that is not a member its caller may
+  view is refused as naming an unknown agent (`-32001`). 0.9.14 accepted an
+  edge to an agent that was not seated yet. Seat the other agent first, or
+  declare the edge through the stdio gateway.
+
 ### Security
+
+- The Console's mob announcement methods (`meta/mob_announcements/*`) check
+  the caller's access to every agent a request or a stored record names;
+  closes cases in which a request could act on, or be shown, an agent the
+  caller may not see. Who could make such a request: on a Console where
+  access rules are enforced, a holder of `runtime.admin` who is not an
+  access administrator; on a Console where they are not, any caller the
+  Console serves (with sign-in, any person signed in). Affected: 0.9.11
+  through 0.9.14. The methods are served without their caller's view in
+  every release from 0.9.9 through 0.9.14 (the handler is one and the same
+  file in each of them; the effects were run on unreleased code whose
+  handler is byte for byte the released one; not run on a released version);
+  agents private to a person (`console.private_to`) exist from 0.9.11, and
+  in 0.9.9 and 0.9.10 a holder of `runtime.admin` is meant to reach every
+  agent through these methods. Upgrading alone does not undo it. The upgrade
+  removes nothing, and a subscription that was recorded before the upgrade
+  for an agent private to another person keeps delivering into that agent
+  until the host cancels it. REQUIRED host step after the upgrade: review
+  every live mob announcement subscription the host cannot account for from
+  its own records, and have the owner of each agent private to a person say
+  which of that agent's subscriptions to keep. See Upgrade for the host's
+  step.
+
+- The Console's request entry points now refuse malformed parameters. This
+  closes a case in which a request could be served without the access check
+  for the agent it named. Who could make such a request: a person signed in
+  to the Console who is not an access administrator. Affected: 0.9.9
+  through 0.9.14 where the check is an access rule, and 0.9.11 through
+  0.9.14 where it is the rule about an agent private to a person
+  (`console.private_to`); read from the code at each of the tags v0.9.9,
+  v0.9.10, v0.9.11, v0.9.12, v0.9.13 and v0.9.14 (0.9.11 is the first
+  release with agents private to a person).
+
+- An adopt declaration made on the Console
+  (`mob/adopt_member_identity_declaration`) can no longer name, as the far
+  end of a wiring edge it owns, an agent its caller may not see: such an
+  adoption is refused as naming an unknown agent, and nothing is recorded.
+  Who could make such an adoption: a caller who may adopt, which is a
+  holder of `runtime.admin` where access rules are enforced and any person
+  signed in where they are not, and only while adopting an agent they could
+  see that had no declaration yet, and only toward an agent whose name
+  sorts after it. The effect: such a caller could make an agent it cannot
+  view stop taking messages at that agent's owner's next change. Under
+  `identity_owned` wiring custody the other agent stops converging (at once
+  if it had not converged yet, otherwise from its owner's next change on),
+  its owner's later changes do not become active, and, if it had converged
+  before, it stops taking messages; under the default custody nothing
+  shows. Every such edge has this effect, also one adopted with permission
+  (see Upgrade and Fixed); what the access check now closes is that a
+  caller could cause it for an agent it could not view. Affected: 0.9.11
+  through 0.9.14: the edge ends were not checked at any of the tags v0.9.9,
+  v0.9.10, v0.9.11, v0.9.12, v0.9.13 and v0.9.14 (read from the code at
+  each), and agents private to a person exist from 0.9.11. What such an
+  adoption left behind stays in the store: see Upgrade.
 
 - The Console decides an agent for which no member is seated on the
   agent's own record (its profile as its role, and its labels) wherever a
@@ -143,10 +303,68 @@ Security, Upgrade and Changed.
   receives both as before.
 - On a console that can identify a person, a gating audit entry or pending
   request whose origin is an agent the console does not know is shown to an
-  administrator only, like every other record the console cannot attribute.
+  administrator only, like every other record the console cannot attribute,
+  and only an administrator decides such a request. A decide by the id of a
+  request the pending list withholds from its caller (`meta/gating/decide`
+  on the Console) is answered as a decide of an id that is not pending, and
+  the request stays pending. That also holds for a request whose origin an
+  access rule or a private owner keeps from the caller, which was answered
+  `access_denied`. Through 0.9.14 the pending list, the audit read and the
+  decide all asked only whether the caller may view the agent that holds
+  the origin's name, so a person who is not an administrator and may view
+  that agent was shown such a request and could decide it. Only a host
+  supplies a request's origin. On a Console that requires sign-in and has
+  no access configuration, a person's decide by id could in a narrow window
+  be applied to a request whose origin is an agent private to another
+  person; a request is now judged at the moment its decision is applied.
+  Affects 0.9.11 through 0.9.14 (read from the released sources; a run on
+  the development source showed the window). The Console's delivery history
+  (`meta/delivery/history`) follows the pending list as well: the record
+  of an approval notification carries the request's id and action text, and
+  is withheld from a caller the list would not show the request, and, on a
+  console that can identify a person, from everyone but an administrator
+  once the request is no longer held. A page of that history holds the
+  newest records its caller may read, up to its limit. Through 0.9.14 that
+  record was shown to every caller who may read the delivery history,
+  whatever the request's origin (from 0.9.11, unless the record itself
+  names an agent private to another person). On a Console that requires
+  sign-in and has no access configuration there is no administrator: a
+  request whose origin the Console does not know is shown to nobody there
+  and decided by nobody there. Its host decides or withdraws it, or it runs
+  into its timeout.
 - In 0.9.11 through 0.9.14, on a console that does not require sign-in and
   whose access rules are off, a caller who sent no token could read the
   conversation of a private side chat after that side chat had ended.
+- In 0.9.11 through 0.9.14 the session of a private side chat that had ended
+  could be attached again as a shared member
+  (`meta/attach_existing_session`, or `meta/ensure_member` with
+  `resume_session_id`): the member came back without its owner, and everyone
+  who could see it could send to it and read the whole conversation. It
+  happened when the side chat's own owner or an access administrator
+  attached the session; when a signed-in person who could spawn, view and
+  send to the name attached it after another member had been created under
+  that name and had ended; and, on a console that does not require sign-in
+  and whose access rules are off, when a caller who sent no token attached
+  it after such a member had ended, or after a restart before the console
+  had read who its members are private to. A caller other than the owner had
+  to know the session's id and the ended member's name. From 0.9.15 a member
+  seated on such a session is private to the side chat's owner again,
+  whoever attaches it, on the Console and on the stdio gateway; a caller who
+  sent no token gets a refusal or a member it cannot read, never a shared
+  one. A member that an earlier release attached in this way stays shared
+  until it is retired; its owner or an administrator can then attach its
+  session again, and it comes back private. Not covered: a host that seats a
+  member on a stored session through the Rust runtime's own spawn calls
+  decides the member's labels itself; use the two methods. And a host that
+  runs Meta's runtime without a session service is an exception: there the
+  host's own call, and an administrator's on the Console, are refused
+  (`session_owner_unknown`) for a session that the mob's member history
+  never held, where 0.9.14 attached it, and a private session that 0.9.11
+  through 0.9.14 seated shared is still seated shared, since its stored
+  document cannot be read; retire such a member on a gateway with a session
+  service. (0.9.14 by runs on a build of its tag; 0.9.11 through 0.9.13 read
+  from the source; 0.9.15 by its tests and by runs on this release's code,
+  the caller with no token among them.)
 - A deny rule naming an agent's memory now also withholds the realm's dream
   history when the console does not know that agent (for example after it
   was retired); before, such a rule was not consulted for signed-in people
@@ -167,7 +385,262 @@ Security, Upgrade and Changed.
   to set attributes while unpacking, so Meta's own use is not known to be
   affected.
 
+- A console whose visibility policy includes nested members listed the
+  participants of a running temporary council as members and read their
+  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
+  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
+  console, which hides them, was not affected. A participant is a fork of
+  its source member, so its history begins with a copy of the source's
+  earlier turns, and nothing linked it to its source: it was decided on its
+  own name, its council role and the labels it inherits. A caller the access
+  rules deny the source by identity, by role or through the member that
+  spawned it could therefore read the source's earlier turns in the
+  participant's frames, while the council ran and afterwards; such a
+  caller could also send to, inspect and retire the participant by name. A
+  rule on a label the participant inherits still applied, so a source
+  private to a person stayed private. A council participant is now a
+  console member on no policy: it is not listed, a member action by its
+  name (send, inspect, retire, blobs) answers as for an agent that does not
+  exist, the console reads none of its history, and a frame a console
+  stored for one with its member attributes is served to nobody, in a
+  timeline read by its name too; one stored without them is read as any
+  such frame is (see above).
+  Such a frame of a participant (every one a release that stored no member
+  attributes wrote, 0.8.27 through 0.8.49, and a record first written after
+  its council ended) can hold the participant's replies and, from those
+  releases, the copied earlier turns of its source. It is read only by that
+  frame's own name in the Console timeline: by an administrator on a Console
+  that can identify a person, and by the one anonymous operator on a Console
+  that can identify nobody. A council's mob is known from the council's own
+  record; a stored
+  frame whose mob id has a council mob's form (`council--...`) and names no
+  mob the runtime holds is treated the same, so those frames stay unserved
+  on a host that does not keep council records across a restart. Limits: an
+  ordinary mob whose id has that form is treated as a council's where the
+  console cannot tell the two apart, so under the id of a council that
+  settled a member named like one of that council's seats is listed while
+  its stored frames are not served, under that id every frame dated up to
+  the time the council settled stays unserved, whoever wrote it (the frames
+  of a later mob created under the id before the settling was recorded, and
+  its frames dated before the settling or without a real time, included),
+  and under the id of a council that still owes cleanup its members stay
+  unlisted and their frames unserved until the council settles. Members a
+  participant itself creates in another mob are ordinary nested members:
+  they are listed and served like any other. The change covers the
+  console's member views; mob announcements, which need the runtime
+  administration grant, are outside it and treat a council's mob like any
+  other mob the runtime hosts. Other nested members are listed and served
+  as before while a runtime is registered; with none registered no nested
+  mob's stored frames are served (see above). Frames a console stored for
+  participants before this release stay in its console store; those stored
+  with their member attributes are unserved.
+  Affected: 0.8.27 through 0.9.14. The 0.9.13 notes said the next release
+  would no longer list a council's participants; 0.9.14 shipped without
+  this change and still lists them.
+
+- On a Console that several people sign in to, with agent memory on (it is
+  off unless `runtime_options.agent_memory` is set at the gateway's start):
+  what a private side chat, or a member it created, stored in agent memory
+  can become readable to other people after that member has ended, once a
+  later member takes the same name or an agent is registered or created
+  under it: to the person that later member or agent is private to, or, when
+  it is private to nobody, to everyone who may see it. An agent registered
+  or created under that name is also given those notes itself: on its turns,
+  by default and whatever its profile, the full text of each note that
+  shares a word with the message it is answering; and when it starts, if its
+  profile has the memory tools, a list of the notes with their titles and
+  descriptions, where a note that names the agent can be given in full. A
+  later member of that name that has the memory tool can also change or
+  remove what was stored, and the person who stored it can lose sight of it
+  in the Console. Affects 0.9.11 through this release.
+
+  Until a fix, on such a gateway leave agent memory out (do not set
+  `runtime_options.agent_memory`) and restart. Leaving agent memory out
+  costs every agent its memory. While it is out, every memory read through
+  the Console is refused, no agent has the memory tool, and nothing more is
+  given to any agent from the store. This deletes nothing and takes nothing
+  back. The stored records stay on disk, and they are served, and given to
+  agents, again as soon as agent memory is turned back on. An agent that was
+  built while agent memory was on keeps what it was already given: the list
+  of titles and descriptions in its instructions, and every note text and
+  recall result already in its conversation, and it sends them to its model
+  on every later turn. While agent memory is out, resetting such an agent
+  (`meta/reset`) ends its conversation and removes them with it; taking it
+  off the roster and declaring it again does not. With agent memory on,
+  under any of the narrower settings below, a reset does not help: the agent
+  is built with the list again and is given the notes again on its turns.
+
+  Three narrower settings each close a part.
+  `agent_memory.per_turn_injection: "off"` stops the notes that are added to
+  agents' turns, for every agent of the gateway, and nothing else: an agent
+  whose profile has the memory tools is still given the list when it starts,
+  and the whole text of a note that names it. `agent_memory.recorder_tool:
+  false` stops members storing, recalling, changing and removing with their
+  own tool; it does not remove what is already stored, does not stop the
+  Console's memory panel from showing it, and does not stop what agents are
+  given when they start and on their turns. Where access control is already
+  enabled, a deny rule on `agent.memory.read` with no `subjects` or `groups`
+  and no resource selector closes the Console's memory panel, the memory
+  recall and manifest reads through the Console, and the memory quarantine
+  decisions, to everyone who is not listed under `admins`, and keeps the
+  agents' own memory; it does not stop a member's own memory tool, nor what
+  agents are given when they start and on their turns. Where a memory
+  steward is configured (`agent_memory.steward`), turn it off as well (leave
+  the `steward` key out, or set `"enabled": false` in it; a `steward` block
+  without `enabled` turns it on): once a later member or agent holds such a
+  name, the steward's next run can copy the ended member's notes into the
+  mob's shared memory, where they stay; every agent of the gateway is then
+  given their titles and descriptions, and an administrator, a person
+  granted `mob.memory.read`, or anyone where access control is off, can read
+  them whole in the Console. Before an agent is registered or created, an
+  administrator looks for its name in the memory panel. What a member's tool
+  changed or removed is kept in the store, marked as superseded or removed,
+  and is not deleted.
+
+  A fix is planned as the first change of the next release.
+
 ### Upgrade
+
+- Required host step after upgrading a gateway that serves mob announcements:
+  review every live mob announcement subscription the host cannot account for
+  from its own records, and have the owner of each agent private to a person
+  (`console.private_to`) say which of that agent's to keep. The upgrade
+  cancels none, and a subscription keeps delivering until the host cancels it.
+  While live subscriptions deliver into agents private to a person, every
+  start logs one WARN line under the target
+  `meerkat_meta::mob_announcements::private_member_subscriptions` with two
+  counts and no name.
+
+  1. All live subscriptions, page by page, over the stdio gateway, where the
+     host is shown every agent:
+
+         {"jsonrpc":"2.0","id":1,"method":"meta/mob_announcements/subscriptions/list","params":{"limit":256}}
+
+     and for the next page add `"after": "<the last row's id>"` until a page
+     holds fewer than 256 rows. Keep the rows whose `state` is `active` or
+     `paused`. Take out only the rows the host can account for from its own
+     records (the ones its own declarations hold:
+     `meta/mob_announcements/declarations/get` lists them by id; and the puts
+     its own applications made, where it has a record of them). Every row it
+     cannot account for is on the list.
+  2. A narrowing aid for the order of the review, never a filter of the list:
+     the private agents of the gateway's own mob. Read the roster
+     (`meta/list_members`; each row carries `labels`; `meta/identity/get`
+     answers one agent's `labels`) and mark the rows of step 1 whose
+     `member.mob_id` is the gateway's mob and whose `member.identity` is an
+     agent whose labels carry `console.private_to`: take those to the agents'
+     owners first. A row whose `member.mob_id` is another mob hosted here (a
+     mob an agent created) cannot be marked this way: these calls do not read
+     that mob's roster. The start line does read it, so its first count can be
+     larger than the number of rows marked here. Do not try to match the
+     count: review every row of the list.
+  3. One more column, a help for the order and nothing more: whether the row's
+     `id` has the form the agent's own subscription tool gives,
+     `m-<16 hex digits>-<name>` (the first 16 hex digits of the SHA-256 of the
+     member's key, then the name the agent chose). The form is computable from
+     the mob id and the agent's name, so it does not prove who made a
+     subscription, and a row without it may be one the host itself made for
+     the agent. The second count of the start line is the count of rows
+     without the form among the ones it counts.
+  4. Cancel a subscription the owner does not keep:
+
+         {"jsonrpc":"2.0","id":2,"method":"meta/mob_announcements/subscriptions/cancel","params":{"operation_id":"cancel-found","subscription_id":"sub-found","expected_revision":1}}
+
+     with the row's `id` as `subscription_id`, its `revision` as
+     `expected_revision`, and an `operation_id` of the host's own. It answers
+     the subscription as cancelled and the batches that still hold its
+     announcements.
+  5. Check: an announcement made afterwards is not captured for it, and
+     `meta/mob_announcements/deliveries/list` with the agent as `member` shows
+     no delivery after the ones made before the cancel.
+  6. Who made a subscription through the Console: the Console audit log
+     (`meta/console/audit`, in Meta from 0.9.11) has one row per Console
+     change with its caller and, among the row's identifiers, the
+     subscription's id, for as long as it keeps the row (by default 20000 rows
+     per record set and none older than 365 days; across restarts only where
+     the gateway's metadata store keeps its realm documents: a read answers
+     `retention`: `durable` or `process`). A subscription made over the stdio
+     gateway or by an agent's own tool has no row there.
+
+- If you run a client of your own against the Console's request entry
+  points (`POST /console/rpc`, `/console/rpc/multipart`), check that it
+  sends each request's parameters as the RPC reference documents them. A
+  request whose parameters are malformed is now refused with `-32602`.
+
+- If a client of yours adopts an identity through the Console with wiring
+  the adoption owns, each end of an edge must be a seated agent the caller
+  may view: an edge to an agent that is not seated yet is refused on the
+  Console (see Breaking). Seat that agent first, or make the adoption
+  through the stdio gateway.
+
+- An adopt declaration made on the Console before this upgrade may have
+  recorded a wiring edge to an agent its caller could not see (see
+  Security). The upgrade deletes nothing. Such an edge stays in the
+  adopting agent's declaration and in the other agent's stored plan. No
+  method removes it yet: a second adopt of either agent is refused, and a
+  new declaration of the other agent does not drop it (read from the
+  source). Retiring the adopting agent does not free the other one (run on
+  the published Meta 0.9.14). Measured on a store that holds such an edge:
+  the edge wires nothing and adds no trust. When the other agent is under
+  the default wiring custody (`external_managed`) it converges as before,
+  and its owner's next change is committed and becomes active. When the
+  other agent is under `identity_owned` wiring custody, it reads
+  `repair_blocked` instead of converged: at once if it had not converged
+  yet, otherwise from its owner's next change on. A change its owner makes
+  is then committed but does not become active, and if the agent had
+  converged before, it also refuses messages (admission closed for identity
+  convergence); a restart does not clear it. This is so for every edge
+  another agent's declaration owns toward such an agent, also one adopted
+  with permission (run on the published Meta 0.9.14; 0.8.26 through 0.9.13
+  read from the source; see Fixed). The adopting agent itself reads
+  `repair_blocked` and refuses messages from its first reconcile pass when
+  no wiring call made that edge (on 0.9.14: always; run on the published
+  Meta 0.9.14). Not run: a gateway with an identity roster, and versions
+  before 0.9.14. On Core's own `rkat-rpc` 0.9.14 the same was run; there a
+  turn the host starts (`mob/turn_start`) still runs on a blocked agent,
+  while delivered messages (`mob/member_send`) are refused. To find such
+  edges, list the adopted declarations that own wiring. The query is
+  read-only; run it against a copy of the mob store (in a gateway's state
+  directory, the database `event_log.sqlite3`). It was run on a store a
+  0.9.14 gateway wrote, which holds such an edge:
+
+  ```sql
+  SELECT mob_id, agent_identity,
+         json_extract(CAST(record_json AS TEXT), '$.intent.owned_wiring')
+  FROM mob_identity_intents
+  WHERE json_valid(CAST(record_json AS TEXT))
+    AND json_array_length(CAST(record_json AS TEXT),
+                          '$.intent.owned_wiring') > 0;
+  ```
+
+  It lists each adopting agent's row with the edges it owns (`a` is the
+  adopting agent, `b` the other agent); the other agent's own row shows the
+  edge under its stored plan. For each row, the agents to look at are those
+  named as `b`: read each one's wiring custody and its status. The query
+  cannot tell an edge recorded without permission from one recorded with
+  it: review each against who may view the other agent.
+
+- Agents' mob tools: every mob of a Meta host has a member tool audience,
+  with or without private members, so every agent of a Meta host now
+  reads a refused mob tool (`mob_spawn_member`, `fork_off`,
+  `council`, `conclude_objective`, `mob_check_member`,
+  `mob_retire_member`, `mob_list_members`, `mob_wire`, `mob_unwire`) this
+  way. What it still sees: a refusal with a type of its own (a member or a
+  profile not found, a member that already exists, a scope denial), a
+  provider authentication failure with its kind, provider, realm and
+  binding, `retryable: true` for a retirement still in progress, and for
+  any other refusal the text `the mob refused the call. The host's log has
+  the cause.` with `Refusal class: <class>.` (`wiring_error`,
+  `session_error`, `storage_error` and the like) when the refusal has such
+  a class. What it no longer sees: the refusal's free text (why a wire, a
+  spawn or a retire was refused in words), the outcome text of a failed
+  `fork_off` run and the error of a `council` that could not run. A
+  refusal for a reserved runtime-plane member name is answered like any
+  other refusal of the mob, with its class: the agent is not told that the
+  name is reserved. A
+  `council` that started and then failed still answers its outcome with
+  the mob's own text. The host reads the whole refusal in its log, at
+  `warn`, with the mob's id and the tool's name.
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an
@@ -188,6 +661,43 @@ Security, Upgrade and Changed.
   0.9.14 such an agent was built from its record at once.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves.
+
+- If a client of yours applies announcement declarations or puts an
+  announcement source through the Console: a declared subscription for a
+  member that is not seated yet, and a source that names such a member, are
+  refused there (see Breaking). Seat the member first, or use the stdio
+  gateway. On the Console, `declarations/apply` and `sources/put` refuse
+  with `native_unavailable` while a named member's check cannot be read, and
+  the same request is judged as any other once it can. For a member of a mob
+  hosted here that does not run, that is once the mob runs again. A mob held
+  until its owner resolves runs again when the session of the agent that
+  created it is restored (the gateway looks at its held mobs again at its
+  next pass); if that agent is archived the mob is torn down instead, and
+  its members are then answered as not seated. A quarantined mob is listed
+  with its `class` under `quarantined_mobs` in `meta/status`: a
+  `store_unavailable` mob is restored again by the next call that addresses
+  it through the runtime and by the next start; for `store_unreadable` and
+  `resume_refused`, repair the mob's store and restart the gateway (see
+  Meerkat's mobs guide, "Quarantined mobs and degraded members"). The
+  refusal itself retries nothing. Meanwhile the host can declare the same
+  subscription or source over the stdio gateway (or in the gateway's options
+  or its sidecar): a declared subscription is kept pending there as before,
+  and a source is stored as before.
+
+- Hosts whose customizer has side effects: see Known limitations, respawn
+  during a pending role move.
+
+- A host that used a respawn to discard queued prompts must withdraw them
+  another way: see Changed, the entry on the inputs a respawn hands to the
+  member's successor.
+
+- A host that matches on the `stage` of a failed `meta/compact_member`: a
+  call whose maintenance turn ended for good without completing is now
+  answered at `stage: "profile_restored"`, with the member's threshold
+  restored, where 0.9.14 answered `stage: "terminal"`. The `kind`, the
+  `completion_type` and the typed error are unchanged, and `terminal`
+  remains for an outcome that restores nothing. Match on the `kind`, or
+  take both stages: see Fixed.
 
 - The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
   `meta-v0.9.14`) were run against a development build of this release's
@@ -221,6 +731,11 @@ Security, Upgrade and Changed.
   the first send over one is delivered, and builds the recipient when it
   is not built. Before upgrading, unwire the ones you do not want
   (`meta/cross_mob/unwire`).
+
+- Python Meta SDK: the return type of `build()` and the return or parameter
+  types of twelve `MobHandle` methods are now visible to type checkers; a
+  project that runs mypy or pyright may report errors that were hidden
+  before. Nothing changes at run time.
 
 - No backfill is done. A timeline frame stored without member attributes is
   shown to administrators only, whichever release through 0.9.14 stored it
@@ -263,8 +778,63 @@ Security, Upgrade and Changed.
   caller is answered "access denied: the session has no established owner"
   where access rules are enforced, and as for a session that does not
   exist otherwise.
+- The `meta/init` result can carry a new optional member, `broken_members`
+  (see Added). It is additive: an SDK of an earlier release ignores it (the
+  Python and TypeScript SDKs read `http_base_url` and
+  `http_public_base_url` from the init result by name and nothing else),
+  and a start that left no member broken writes the result it wrote
+  before.
+
+- A reasoning effort level in a mob definition is a one-way step with
+  respect to 0.9.14. A Meta gateway on 0.9.14 does not start on the state
+  directory of a mob whose stored definition holds a level
+  (`provider_params.reasoning_effort` in a profile) or lists
+  `reasoning_effort` in a profile's `resume_overrides`: the start is
+  refused at the state check, and removing the level from the definition
+  file does not help, because the stored history holds it. The refused
+  starts write nothing to the mob's store, and a 0.9.15 gateway starts on
+  it again with the level. To roll back, destroy the mob on 0.9.15 and
+  create it anew without the level first. A mob whose definition never
+  held a level starts and serves on 0.9.14 as before. Measured with
+  development builds of both releases. See Meerkat's changelog (Upgrade
+  notes) for sessions, Core hosts and realm profiles.
+
+- `meta/attach_existing_session` and `meta/ensure_member` with
+  `resume_session_id`: from 0.9.15 a member seated on the stored session of
+  a private side chat is private to the side chat's owner (see Security and
+  Changed). **Do:** retire every member that 0.9.11 through 0.9.14 seated on
+  such a session, and do not build on a shared member coming back from one.
 
 ### Added
+
+- The gateway's ready report names the members its start left broken. The
+  `meta/init` result (the legacy response and the `ready`
+  `meta/init_settled` notification) carries `broken_members` when Core
+  holds members Broken at the moment the gateway becomes ready: the
+  entries `meta/status` already answers with (`member_id`, `error`), for
+  the same reader, the process that launched the gateway. A start that
+  builds more members than `runtime_options.max_sessions` admits (16 by
+  default, so an eager restore of a larger mob) was ready with the members
+  past the limit broken and said so only in `meta/status` and in
+  `identity_bootstrap`; it now lists them, each with
+  `Max sessions reached` in `error`. The field is absent when no member is
+  broken, so a start that left none broken writes the result it wrote
+  before. The Python and TypeScript SDKs ignore the key, as they ignore
+  `broken_members` of `meta/status`: a host that speaks the protocol
+  itself reads it. The list
+  is a snapshot of that moment: a member that breaks later is named by
+  `meta/status` only, and a member `member_restore` leaves dormant is never
+  in it. The gateway also logs one warning at ready with the count and the
+  names of up to 8 of them. The list is Core's, in the init result and in
+  `meta/status`: it can name a member the member list leaves out, an
+  earlier incarnation of an identity that list shows under its current one.
+
+- A `broken_members` entry, in the init result and in `meta/status`, gains
+  `code`: Core's stable refusal code, present only when the failure was a
+  refusal that named one (a refused runtime binding, or the host's refusal
+  of the member's registration), at a restore or at a wake. Advisory: most
+  causes have none (the session limit is read from `error`), and the
+  vocabulary may grow.
 
 - `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
   true` on an agent the host's roster lists while it is served from its
@@ -329,6 +899,86 @@ Security, Upgrade and Changed.
   schedule to another agent. A Console schedule whose create read the agent
   just before its archive is paused for the agent once it is written. See
   the known limitations under "Agent changes" in the RPC reference.
+
+- An archive or a removal of an agent that still owns mobs it created is
+  refused, and nothing is changed (`meta/identity/archive` and
+  `meta/identity/remove` on the stdio gateway and on the Console, both
+  SDKs' `archive` and `remove`, the agents' `identity_archive` and
+  `identity_remove` tools, and either change when a person approved it). A
+  mob an agent creates with its own `mob_create` ends with the archive of
+  the agent's session, and both changes retire the agent's member, which
+  archives that session. The refusal is the family's error `-32058` with
+  the kind `owns_mobs`, about `name`: `count` is how many mobs the agent
+  owns and `mobs` is their ids, and its sentence says what to do: have the
+  agent destroy its mobs first, or keep the agent. The list (`mobs`) is the
+  host's, as the list of an agent's schedules is: it is written for the
+  stdio gateway's caller and for a Console caller with `runtime.admin`; an
+  agent that asks for the change and a Console caller without
+  `runtime.admin` are answered `count` and no list. From Rust, the family
+  (`IdentityFamily`) withholds the list only for an agent requester: a host
+  that serves any caller other than its operator through the family clears
+  `mobs` in the refusal's kind itself. A plan of the change answers the
+  same refusal, and a change that would wait for a person's decision is
+  refused before a decision is held. An agent whose grant does not admit
+  the change is answered by its grant and told nothing of the mobs. When
+  the gateway cannot read which mobs it hosts at the moment the change is
+  asked, the change is refused `admission_unsettled` (retryable,
+  `correlation` `owned_mobs`), with one sentence that carries none of the
+  host's error; when that read succeeds and the one right before the
+  commit fails, the answer is the family's `admission_unsettled` for a
+  change that did not finish, with the operation's id as its
+  `correlation`, and nothing was written. Once the agent has
+  destroyed its mobs the same request commits. What counts is every mob
+  whose owner is the agent's session and that ends with that session's
+  archive, a mob the gateway holds before activation included; the mob the
+  agent's `delegate` helpers run in does not count, since no agent tool
+  destroys it and it is made again at the next delegation, unless the
+  gateway holds it before activation; see the ways out for a held mob in
+  the first limit. Both calls are
+  new in this release, so no host on an earlier release meets the refusal.
+  Four limits. The remedy is the agent's own tool, and no Meta host method
+  destroys an agent's mob: an agent that can no longer manage a mob its
+  session owns (a profile move left it on a profile without the mob tools,
+  its member was retired and woken again on its session, as a respawn of
+  a member the same-session step does not serve does and as every respawn
+  a gateway made on 0.9.9 through 0.9.14 did, its host took its right to
+  create mobs away, the gateway holds the mob before activation, or a Rust
+  host created the mob for the session) is refused both changes through
+  Meta while its session owns
+  that mob; a mob held before activation is observed again at
+  the gateway's next start, and a Rust host destroys the mob through the
+  agent mob tools' state (`MobMcpState::mob_destroy`, and
+  `destroy_held_child_mob` for a held one). What counts is the session the
+  agent is seated on now, so a gateway host's way out is a reset of the
+  agent (`meta/reset`; `meta/respawn_member` and `meta/delete_identity`
+  seat it the same way): the agent's conversation ends, the agent is
+  seated on a fresh session that owns no mob, and its archive or its
+  removal is no longer refused for those mobs, which still stand and end
+  no later than the gateway's next start. The agent's mobs are read when
+  the change is asked and again right before it is committed, so a mob
+  that appears after that is not seen (one the agent creates in a run
+  still going, or one a Rust host creates for the agent's session); an
+  agent that has no seated member is not read at all, so the removal of an
+  archived agent is served unread; and a mob
+  whose store did not restore is not counted, since its owner is not read.
+  The refusal is Meta's, so a Rust host that calls Core's
+  `archive_identity` or `remove_identity` itself is not refused. There the
+  mobs the agent created are removed with their stores when the host next
+  starts, and unarchiving the agent does not bring them back; when an
+  archived agent is unarchived and runs before that start, the mobs stay
+  hosted and the agent no longer manages them. And the refusal answers a
+  change asked of this family: a configured agent that its host takes out
+  of the configuration is not refused. When the gateway applies a
+  configuration that no longer lists the agent, at its start or at a
+  roster refresh, the agent's member is retired, and the mobs the agent
+  created end no later than the gateway's next start after that; have the
+  agent destroy its mobs first. The Console says the refusal
+  in its own words and keeps the gateway's sentence in the Details. Rust:
+  `identity_creation::IdentityRefusalKind` gains `OwnsMobs { count, mobs }`;
+  the executor seam asks the launch which mobs a session owns through the
+  new trait `identity_creation::OwnedMobs`
+  (`CoreChangeExecutor::with_owned_mobs`), and the gateway's launch answers
+  it from the owner records of the mobs its agent mob tools host.
 
 - `meta/schedule/list` and every Console schedule write answer
   `paused_for_target: true` on a schedule that is paused because its agent
@@ -607,10 +1257,11 @@ Security, Upgrade and Changed.
   - Request actions and normalization for an archive, an unarchive and an
     adoption (`ArchiveIdentitySpec`, `UnarchiveIdentitySpec`,
     `AdoptIdentitySpec`, `normalize_archive`, `normalize_unarchive`,
-    `normalize_adopt`), and ten refusal kinds: `privileged_field`,
+    `normalize_adopt`), and eleven refusal kinds: `privileged_field`,
     `grant_revoked`, `private_requester`, `owner_read_only`,
-    `not_adoptable`, `not_archived`, `declared_apply_open`, `purge_refused`,
-    `mob_not_running`, `purged`. Their variants of `IdentityRefusalKind`
+    `not_adoptable`, `not_archived`, `owns_mobs`, `declared_apply_open`,
+    `purge_refused`, `mob_not_running`, `purged`. Their variants of
+    `IdentityRefusalKind`
     (which is `non_exhaustive`) are declared after every earlier one, so no
     earlier variant's implicit discriminant moves. A refusal carries a
     detail sentence (`IdentityRefusal::detail`, `to_refused`).
@@ -651,7 +1302,7 @@ Security, Upgrade and Changed.
   reads what became of it. Every refusal raises one error,
   `IdentityRefusedError` (`-32058`), with the typed `kind`, `field`, `detail`,
   `retryable` and the kind's own members. `IDENTITY_REFUSAL_KINDS` is the
-  closed vocabulary of 57 kinds: adding a kind is a breaking change of the
+  closed vocabulary of 58 kinds: adding a kind is a breaking change of the
   SDKs. Instruction outcomes and seats are closed vocabularies too; advisory
   values are kept as the gateway sent them. See the guide "Create and change
   long-term agents from host code".
@@ -823,8 +1474,12 @@ Security, Upgrade and Changed.
   once more as the one standing entry of the record. A removal still
   revokes the record, and a fork that holds the entry is told so at its
   next run. A model that takes a system instruction only ahead of the
-  conversation applies the change after a compaction or with a fresh
-  conversation. A fork of the agent follows the record by Meerkat's rule for
+  conversation applies the change after a compaction at the start of a run
+  or with a fresh
+  conversation. A short conversation may never reach that compaction by
+  itself: `meta/reset` brings the change into effect and gives the agent's
+  conversation up, and `meta/instruction_status` says whether a change is
+  in effect. A fork of the agent follows the record by Meerkat's rule for
   a member and its forks: a fork that is live when the change is recorded
   gets the entry at its next run, once; a fork taken afterwards has the
   record in its own snapshot, which a durable fork has recorded in its
@@ -930,8 +1585,232 @@ Security, Upgrade and Changed.
   locally hosted mob members signed TCP comms endpoints
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
+- The changes of the mob's long-term agents (`meta/identity/create`,
+  `meta/identity/update`, `meta/identity/adopt`, and the `identity_create`
+  and `identity_update` tools) never give an agent the label or a name of
+  Meerkat's approval branches. A create whose agent gives the label
+  `decision.approval_branch` is refused `reserved_key`, naming the key, at
+  `agents[i].labels`; an update that adds it, at `set.labels`; and an
+  adoption of an agent whose configuration gives it, at `name`. A create
+  or an adoption of an agent whose name begins `approval-branch-` and
+  holds only ASCII letters, digits, `-` and `_` (a name Meerkat holds as
+  written) is refused `invalid_name` at
+  that name (`agents[i].name`, `name`). Nothing is created or changed.
+  Meerkat seats that label and those names only on an approval branch it
+  opens itself, so no agent with one could be seated. An agent whose
+  record carries the label already keeps it through an update that does
+  not add it, and `set.labels_remove` takes it off. `meta/identity/plan`
+  does not check the key or the prefix: it answers as for any other label
+  or name, and the change itself is then refused.
+
+- Mob members get the stock tool `ask_user`: an agent asks a person a set of
+  multiple-choice questions (1 to 10 questions with 2 to 8 choices each, a
+  recommended choice and free text where the agent allows them), the call
+  returns at once, and the typed answers reach the agent later as an input
+  of its own. A set is a durable decision of kind `ask_user.questions`: it
+  survives a restart and ends `timed_out` at its deadline (one hour unless
+  the call says otherwise). The call answers `no_human_surface`, and holds
+  nothing, when there is no person to show the questions to or no way back
+  to the asker: the gateway serves no Console; its Console can identify no
+  person (it requires no sign-in and has no access control with a trusted
+  token issuer) or takes no changes (read-only); it keeps no durable
+  decisions (no persistent state directory); it runs a candidate launch; or
+  no answer can be routed to the asker, as for a member of a mob other than
+  the runtime's own (a sub-mob an agent created, for one). A member whose
+  build already has a tool named `ask_user` among its external tools (the
+  tools its host supplies to the build) keeps that tool and gets none from
+  the gateway: its questions are that tool's, are not held or listed here,
+  and whoever mounted it shows and answers them. A tool of that name from
+  an MCP server the member's profile configures is not kept: it and the
+  stock tool are offered by neither, and the member has no tool of that
+  name (see Breaking and Known limitations). A member of a host that
+  installs a member registration hook
+  (`member_runtime_registration_hook`) gets none either: that host decides
+  each member's prepared tool surface whole, so the member carries only the
+  tools its build was asked for. Every other member of a runtime is offered
+  the tool, unless it is denied it: a profile that lists `ask_user` in
+  `tools.deny` keeps it from its members, whose model is not offered it.
+  `meta/gating/questions` lists the open sets, soonest deadline first: all
+  of them on the stdio gateway, and on the Console (with `gating.view`) the
+  ones whose asking agent the caller may view. A set is answered through
+  `meta/gating/decide` with its `pending_id`: `approve` with
+  `presented_digest` and `answers` answers it, `reject` with
+  `presented_digest` dismisses it, and the result is
+  `{pending_id, kind: "question_set", outcome, decided_at_ms}`. On the
+  Console a signed-in person with `gating.decide` who can view the asking
+  agent answers. Nothing is decided by a refused request. A decide the set
+  itself refuses is answered `-32602` with `data.kind = "decision_refused"`
+  and the refusal as an object, `data.decision_refusal.kind`: `not_open`
+  (answered, dismissed, withdrawn or timed out already), `subject_changed`
+  (the `presented_digest` is not the set's), `expired` (the deadline passed
+  as the decision was applied) or `not_eligible`. A request at fault (an
+  invalid answer set, no digest, `escalate`) is plain invalid params. A
+  caller who is not a signed-in person is refused `approver_unauthenticated`
+  and a person without `gating.decide` `access_denied`. A set that is not
+  listed to the caller is answered exactly as an id that is not pending.
+  The Console shows each open set as a card, at the top of the inbox's
+  Pending tab and in the asking agent's chat, and counts it in "Needs you"
+  and on the Approvals view: who asked and by when, one group of choices
+  per question, the agent's recommendation marked and never preselected,
+  "Something else" for the person's own words where allowed, Send answers
+  and Dismiss. A set is listed once on the Pending tab, as that card, and
+  not among the durable decisions below it; a set the question list does
+  not hold is shown there, as a read-only decision card. A card says
+  "Answered" or
+  "Dismissed" once the gateway confirmed it, "Not accepted" with what to do
+  when the gateway refused the reply and still lists the set, and why
+  nobody can answer when the caller
+  is not signed in or may not decide. A set the gateway no longer lists
+  leaves the screen whole; where its card was, one line says that the
+  question is no longer listed here. The deadline shown is the gateway's,
+  and the card never ends a set by the browser's clock. The Console reads
+  at most the gateway's own limits of a set (10 questions, 8 choices each,
+  the text lengths); a set larger than that is shown up to them, says
+  what is not shown, and takes no answer and no dismissal from the
+  Console, since a reply attests the whole set. Python
+  `MobHandle.gating_questions`, `gating_answer` and `gating_dismiss` and
+  TypeScript `gatingQuestions`, `gatingAnswer` and `gatingDismiss` wrap the
+  two methods. An SDK or Console older than this release does not list a
+  question set as a question or as an approval (sets are not part of
+  `meta/gating/pending`): it meets one only as a durable decision of a kind
+  it does not know, which an older Console shows as a read-only card to a
+  caller who may see the decision. A set nobody answers ends `timed_out` at
+  its deadline. On the Console a question set is read through
+  `meta/decisions/list`, `get` and `rendering`, and withdrawn through
+  `meta/decisions/withdraw`, only by a caller who may view its asking agent.
+  See [Question sets](docs/concepts/gating.mdx#question-sets).
+
+- Python `MetaRuntime.compact_member(identity, *, floor_tokens=None,
+  timeout=None)` and TypeScript `MetaRuntime.compactMember(identity,
+  { floorTokens, timeoutMs })` call `meta/compact_member`, which neither SDK
+  could call. A host can compact a member's conversation now: the older
+  turns are summarized and the most recent ones are kept, at the cost of one
+  model turn and two in-place rebuilds of the member.
+  A `meta/compact_member` call that is admitted rebuilds the identity,
+  whether it then compacts, compacts nothing or fails. On a 0.9.15 gateway a
+  completed call keeps an identity's listing and management of the mobs it
+  created with its own tools (one run; a call that times out, or completes
+  without compacting, rebuilds by the same step: read from the source, not
+  run), unless the same-session step does not serve its member (see the RPC
+  reference); against a gateway on 0.9.9 through 0.9.14 the call costs it
+  that, and upgrading does not give it back (see the `meta/compact_member`
+  section of the RPC reference). Where the cost applies, have the identity
+  destroy a mob it created before the call if it must not be left running
+  unmanaged.
+  A changed instruction that waits for a compaction (an update answered
+  `applies_after_compaction`, on a model that takes a system instruction
+  only ahead of the conversation) takes effect with it. The call waits for
+  the reply for the verb's timeout plus 30 seconds, whatever the
+  transport's request timeout is, because the gateway holds the call past
+  that timeout. The result is the gateway's: check its `compaction_applied`,
+  which is `false` when the conversation holds no fewer messages than
+  before the call (one shorter than `floor_tokens`, 1024 tokens by default,
+  is left as it is). A failure is the RPC error with `data.kind`, for
+  example `compact_member_busy` or `compact_member_timeout`. The Console's
+  RPC route does not forward the verb.
+
+- A spawn whose draft sets one provider param keeps the
+  `reasoning_effort` level its profile declares in `provider_params`, as it
+  keeps the profile's other declared params, and a draft's own level wins.
+  The level is Meerkat's new provider-neutral setting
+  (`ProviderParamsOverride.reasoning_effort`; see Meerkat's changelog):
+  Meerkat resolves it for the route that serves each of the member's
+  requests, and a level that route does not accept refuses the member's
+  build or its turn before any provider request. See Known limitations for
+  what a resume does with a profile's level.
+
+- A member's LLM client reports the reasoning route of the provider client
+  it is built on (`AgentLlmClient::reasoning_route()` and
+  `LlmClient::reasoning_route()`, new in Meerkat; see its changelog). Meta's
+  client wrappers (the mob-wide default client, the two replay sanitizers
+  and the dispatch taint observer) now forward the call. A wrapper that kept
+  the default would report no route for the members it decorates, whatever
+  the provider client states.
 
 ### Changed
+
+- A label change of an agent created at run time (`meta/identity/update`,
+  the agent tool `identity_update`) does not seat the agent again. The
+  agent keeps its member and its conversation, and goes on listing and
+  managing the mobs it created with its own tools. The mob's roster reads
+  the new labels from the update on, and what decides by a label decides
+  on them at once, in both directions: an access rule's `match_labels` at
+  the next call (an open event stream within 20 seconds), the identity
+  policy's rules on the agent's record. An idle agent is released by the
+  update, so its next build is composed with the new labels (your
+  customizer is handed them, without a label that was removed). A busy
+  agent is not interrupted, the answer does not say that it was busy, and
+  going idle builds nothing: it keeps what it was built with until it is
+  next released (a later update of it once it is idle, `meta/retire`, an
+  idle retirement, a restart). An agent of a host whose sessions are not
+  durable, a placed agent and an agent wired to a placed agent are not
+  released by a label change and keep their build. What
+  trails until the agent is next seated is the record of its seat in the
+  mob's journal: it decides nothing an update can change, and it is what
+  an earlier release that serves the same store reads. No turn, wake,
+  build or restart of the agent brings it in line. Before rolling back,
+  either respawn the agent (`meta/respawn`), which keeps its conversation
+  and, for an agent that created mobs, its listing and management of
+  them on this release (while an earlier release runs the agent lists
+  and manages none of them, and the return restores that with no call),
+  or set its labels back to the ones it was seated with and apply the
+  change again after the return (nothing is seated, so the agent manages
+  its mobs on the earlier release as well). If the agent held work at
+  that update, its record is brought in line only by another update of
+  it once it is idle (a new request that changes something: the same
+  request sent again reads back its first answer); see the rollback
+  notes of Meerkat's upgrade guide before a rollback. A removed label
+  stays in the peer metadata of
+  the agent's conversation, which its peers read, until the agent starts a
+  new conversation. One agent is still seated again: a broken one (its
+  build was refused for good, it serves nothing). Once its labels have
+  changed since it was last seated, any update of it seats it again, the
+  update that changes them included; if it had created mobs before, it
+  goes on listing and managing them. See "Changing labels" in the created
+  agents guide.
+
+- The texts say what a profile move of an agent created at run time does.
+  A profile move (`set.profile`), and a host's change of the runtime mode
+  (`set.runtime_mode_override`), seats the agent again on the same
+  conversation, and an agent seated again this way goes on listing and
+  managing the mobs it created with its own tools (see Fixed: an identity
+  keeps managing the mobs it created); its new profile's tools decide what
+  it can call. Another agent the host's rules let change it can do that to
+  an agent through `identity_update` (a profile move), and a host through
+  `meta/identity/update`; an agent cannot do it to itself. What still ends
+  that management is a reset or a delete of the agent: have the agent
+  destroy such a mob first. An archive of an agent that still owns mobs it
+  created is refused `owns_mobs` (see Added). The `identity_update` tool's
+  description says so now, and so do "Moving a profile" in the created
+  agents guide, the long-term agents guide and `meta/identity/update` in
+  the RPC reference. Text only: no call answers differently.
+
+- `meta/decisions/list` on the Console pages over what its caller may see: a
+  decision the caller may not see fills no place in a page and is never a
+  cursor, and the request's filters choose among the decisions it may see.
+  `meta/decisions/list`, `get`, `rendering` and `withdraw` on the Console
+  tell only an access administrator of rows the decision store cannot
+  decode (a caller allowed `decisions.admin` who is a person listed under
+  `admins`, or any caller allowed it on a Console that identifies no
+  person). A caller who administers decisions by a rule no longer reads them:
+  `unreadable` is empty for it, and by its id such a row is answered as an
+  id that names no decision; to keep reading them, list that person under
+  `admins`.
+
+- The create admission of the agent mob tools reads who creates a temporary
+  council's mob from the council's convener, which Meerkat's create request
+  now carries (`MobCreateRequest::council`), instead of from the council's
+  own owner session, which names no member. A council's mob is therefore
+  recorded as private to whoever the member that convened it is private to,
+  like every other mob a member creates; a council no member convened has no
+  creator. The record decides who a member spawned into that mob later is
+  private to. Who a council participant is private to does not change: a
+  participant is a fork that copies its source's labels. No council that
+  Meta's own tools start changes: a private member's `council` call is still
+  refused before the tool runs (`private_member_council`), a shared member's
+  council stays private to no one, and so does a council a host runs
+  directly. A council's mob left over from before a restart is read as
+  private to no one, as before.
 
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is
@@ -949,14 +1828,28 @@ Security, Upgrade and Changed.
   the agent, put the label in its row: at its create, or by an update. An
   update seats an agent that is owed its seat (one created with a first
   message) at once; an agent Core already holds a member of is refused
-  until its row carries the label, takes its row's labels at the update
-  itself while its member is idle, and is served at its next send, with
-  no respawn or reset (a member that held work then takes them at a
-  retry of the update, at its next update, or at a respawn or a reset).
+  until its row carries the label: the update that puts it there seats
+  the refused agent again, and it is served at its next send, with no
+  respawn or reset of yours. Any other agent keeps its seat at a label
+  change and takes its row's labels at its next build (see the entry on
+  a label change above).
   The same holds after a later label change of a row. A customizer that
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 
+- From 0.9.15 a gating decide on the Console (`meta/gating/decide`)
+  follows the pending list (see Security): a decide of a request the list
+  does not show its caller is answered as a decide of an id that is not
+  pending is. Two answers change with it. New in 0.9.15: on a console that
+  can identify a person, a decide of a request whose origin is an agent the
+  console does not know gets that answer unless the caller is an
+  administrator; through 0.9.14 such a decide was applied for a person who
+  may view that agent. And a decide of a request whose origin an access
+  rule or a private owner keeps from the caller is no longer answered
+  `access_denied`: it gets that answer too. A client that handled
+  `access_denied` on this call now gets the answer for an id that is not
+  pending; `access_denied` still answers a caller without the
+  `gating.decide` grant.
 - A declared definition update (`runtime_options.declare_spec_update` on
   the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
   agents were created on, or renames it, is refused: Meerkat answers the
@@ -974,6 +1867,29 @@ Security, Upgrade and Changed.
   reads the records. It was accepted before,
   and such an agent then failed each restore with a profile-not-found
   reason.
+- A respawn hands the inputs queued on the member to its successor, for
+  the members the respawn fix serves (see Fixed). A prompt sent just
+  before a respawn now runs afterwards, once, on the respawned identity;
+  in 0.9.14 it never ran. A host that used a respawn to discard queued
+  prompts must withdraw them another way. Core hands them over as its
+  same-session successor does: the durable prompts that are neither
+  directed nor bound to an objective are kept and run on the successor's
+  first wake, every other queued input ends stopped, and the turn in
+  flight is cancelled. A kept prompt runs only if the successor wakes
+  within 15 minutes of the respawn: after that it ends as expired and
+  does not run, so a respawn whose wake fails and whose identity is woken
+  later than that loses the prompt, with a typed answer. A sender that
+  waits for a kept prompt's completion is answered at the respawn that
+  the input stays queued and is not to be sent again (Core's
+  `MemberInputRequeuedAcrossStop`): sending it again would run it twice.
+
+  The successor's seat is also composed earlier than in 0.9.14: the
+  host's customizer is asked for it before the member is replaced. The
+  tools that answer publishes therefore reach the identity while its
+  earlier member is still live, and they stay published when Core then
+  refuses the respawn because another lifecycle operation of the member
+  is in progress (read from the source).
+
 - On the Console, a read, a plan and a change of one agent
   (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
   and `adopt`) answer an agent the caller may not view exactly as a name no
@@ -1107,9 +2023,9 @@ Security, Upgrade and Changed.
   edges an identity's row declares; default none), `holds_identity_entry`
   (whether Core holds a member id as an identity entry; default `false`)
   and `respawn_member_on_own_session` (Core's same-session successor;
-  default a refusal). A host's own wrapper of a session bridge forwards
-  them to the bridge it wraps. The identity runtime no longer calls
-  `created_identities`.
+  default `BridgeError::Unsupported`). A host's own wrapper of a session
+  bridge forwards them to the bridge it wraps. The identity runtime no
+  longer calls `created_identities`.
 
 - A held add (`IdentityFirstRuntimeContext::add_member_held`) of a name an
   identity holds through its row answers
@@ -1195,6 +2111,69 @@ Security, Upgrade and Changed.
   the roster, so the roster's search and view controls are directly above
   the roster list.
 
+- On the Console, the mob announcement methods (`meta/mob_announcements/*`)
+  keep an agent private to another person, and its records, from a caller
+  who is not its owner, as the Console's other methods do. A subscription,
+  a delivery, a declared subscription and an escalation of such an agent
+  are answered as ones that do not exist and are left out of listings,
+  whose pages are filled from the other rows. An id that such a record
+  holds is answered as taken. An answer about a source, and a refusal, name
+  no such agent. A declarations apply leaves the declared subscriptions of
+  such agents as they are. A role-selected subscription takes no agent
+  private to a person; a source's role or label audience grant admits such
+  an agent only to subscribe itself (read from the code, not run). A member
+  is judged as the agent the view speaks of when this gateway's runtime
+  holds its mob; every member is judged while that cannot be said, and only
+  a member of a mob that is positively another gateway's (one the contact
+  directory files a peer under) is judged as itself. The stdio gateway,
+  whose caller is the host, answers as before.
+
+- At every start, a gateway with mob announcements logs one WARN line
+  under the target
+  `meerkat_meta::mob_announcements::private_member_subscriptions` while
+  live subscriptions deliver into agents private to a person
+  (`console.private_to`): how many there are (active or paused), and how
+  many of those do not have the id form the agent's own tool gives. The
+  line names no agent and no subscription. See Upgrade for the required host
+  step.
+
+- Meerkat reserves the mob id form `council--...` for temporary councils, so
+  a mob create under such an id through Meta's mob tools is refused as an
+  invalid definition (diagnostic `reserved_system_identifier`); see the
+  Meerkat changelog. A council also no longer runs inside a mob it did not
+  create: one convened under a council id whose mob id a mob of the runtime
+  already holds (the runtime's own mob included) ends at seating and seats
+  nobody there. The console's limits for an ordinary mob whose id has a
+  council mob's form therefore concern only a mob created under such an id
+  by Meta 0.9.14 or earlier, which keeps loading and working, and a mob a
+  host built and inserted itself. One consequence for such a mob: a council
+  convened under the matching council id creates no mob, and its record
+  still settles as a council whose temporary mob is gone. The console then
+  reads the ordinary mob as one under the id of a council that settled: it
+  serves none of the mob's frames dated up to the settling and lists a
+  member named like one of the council's seats without its stored frames,
+  and while that council is unfinished it lists none of the mob's members.
+  The console hides more than it has to there and serves nothing it did not
+  serve before.
+
+- From 0.9.15 a member seated on the stored session of a member that was
+  private to a person (`meta/attach_existing_session`, or
+  `meta/ensure_member` with `resume_session_id`, on the Console and on the
+  stdio gateway) is private to that person again, whoever makes the call: it
+  carries the labels its first seat carried and, like every private member,
+  is not wired by the mob definition's wiring rules and is left out of
+  role-wide flow steps. A session that was private to no one is seated as
+  before. Where neither the mob's member history nor the session's stored
+  document says whose the session was, the call is refused (`-32030`,
+  `session_owner_unknown`); on the Console a session the caller may not know
+  of is still answered as a session that does not exist. A host that
+  attached such sessions and expected a shared member must not rely on that.
+
+- A schedule aimed at a private Console side chat, or at a member it forked,
+  is deleted when that member ends, whoever made the schedule (see Fixed). A
+  schedule that should outlive such a member must target a member that
+  stays.
+
 ### Fixed
 
 - An agent created at run time that the mob's start seats before the
@@ -1231,6 +2210,149 @@ Security, Upgrade and Changed.
   `activate_without_identity_context`, settle that the composition has no
   customizer and ask Core once to seat them from their records (see
   Upgrade).
+
+- A respawn of an identity is no longer followed by the loss of the mobs
+  its session owns, for the served members named below. In Meta 0.9.9
+  through 0.9.14, on a gateway or a host that keeps its state on disk, a
+  respawn whose wake failed (the provider or a credential was unavailable,
+  or the host's build refused it), or whose process ended before the
+  identity had woken again, was followed at the next start by the loss of
+  the mobs the identity's session owned: the child mobs its agent created
+  with `mob_create`, with their members, and its implicit mob, which holds
+  its delegates and forks. The identity, its conversation and its memory
+  were kept. A respawn that completed removed no mobs, and neither did one
+  whose identity woke again on its session before the process stopped. This
+  entry is about whether the mobs exist: what a respawned identity's own
+  tools list and manage of the mobs it created is the next entry's subject.
+  Mobs lost this way are not restored by the upgrade. `meta/respawn`
+  (`MetaRuntime.respawn` in both SDKs, `IdentityRuntime::respawn`), the
+  Console's respawn and the two rebuilds of `meta/compact_member` were
+  affected: all of them end the member's incarnation through one shared
+  step. For the respawn the loss and the fix are confirmed by a test. For
+  the compact call, that its rebuild takes the shared step is confirmed by
+  a test
+  (`a_roster_identitys_incarnation_ends_through_cores_one_step_successor`,
+  and
+  `compact_member_whose_rebuild_the_host_refuses_keeps_the_member_on_its_session`,
+  which runs the call and reads that the member stays on its session and
+  the session does not read archived); the loss of mobs across a restart
+  through the compact call is read from the source. Every identity of 0.9.9
+  through 0.9.14 is a configured one, so every identity of those releases
+  was affected. Agents created at run time are new in 0.9.15 and were never
+  affected: their respawn and the compact call's rebuilds have used the one
+  step since they exist. On 0.9.9 and 0.9.10 a gateway could enter the
+  state by itself: at each roster compile it respawned, once, every listed
+  identity whose live member had been created before an upgrade from an
+  older release and had not been respawned since. A respawn, the Console's
+  and the rebuilds now replace the member by its successor on the same
+  session in one step in Core, as they already did for an agent created at
+  run time: the identity is never without a member, and after a failed wake
+  it stays seated on the session it had, its next delivery wakes it, and a
+  restart does not remove the mobs its session owns. The host's customizer
+  is asked as before: once for the successor's seat, whose build is
+  composed before Core is asked (a build the host refuses now refuses the
+  respawn before anything changes, where it used to leave the identity
+  without a member), and once for its build; `after_create` is told once,
+  of the session the respawn keeps. That is the count of 0.9.14 (two calls:
+  confirmed by a test for a served member; Known limitations names one case
+  that can differ). The successor is seated with the customizer's current
+  answer, as the seat of 0.9.14 was: its labels and its profile and model
+  overrides. A session a build already created keeps the context, the
+  instructions and the system prompt its builds recorded, as in 0.9.14, and
+  a member that was seated and never built takes the current answer whole
+  at its first build (its system prompt, instructions and context:
+  confirmed by a test; the inputs that live in the process, such as a
+  compaction curator, reach that build through the build preparation, as
+  after a restart: read from the source).
+  - Served members: every configured identity whose member runs in this
+    process on a session the gateway's store keeps, over the stock
+    session bridge. That is the stock composition over a persistent state
+    directory.
+  - Not served, and handled as in 0.9.14 (the member is retired and then
+    woken; a line is logged each time, with the cause: a warning unless
+    the member is never exposed). Still exposed
+    to the loss (see Known limitations): an identity served through a
+    host's own `SessionBridge` that does not implement
+    `respawn_member_on_own_session` or does not say that its sessions
+    outlive their members (`session_outlives_member`), and a member
+    Core's same-session step refuses (its session's creation record or
+    spawn continuity cannot be read, for example). The host's customizer
+    is asked twice for such a member too: the seat composed for the step
+    seats the identity again at the wake (that the seat is composed once
+    is confirmed by a test over a test bridge; the count of two, with the
+    build's call, is read from the source: no stock composition reaches
+    this path). Unchanged, exposure not established: a
+    member placed on another host. Never exposed: a member whose sessions
+    are kept in memory only (`meta/respawn` refuses such a member before
+    anything is retired, as before) and a member without a session. Fork
+    children and side chats are not respawned.
+  - The inputs queued on a served member are handed to its successor
+    (see Changed).
+  - Rust: `SessionBridge::respawn_member_on_own_session` takes the
+    identity's spec and, for an identity the host's roster holds, the
+    seat's build the host composed (`Some(draft)`; `None` for an agent
+    created at run time, seated with its row's record), and its default
+    answers `BridgeError::Unsupported`. It uses the new
+    `MemberRespawn::with_profile_override`, `with_model_override` and
+    `with_build_inputs_of` of Meerkat's mob (see Meerkat's changelog).
+
+- An identity keeps managing the mobs it created with its own `mob_create`
+  after it is respawned. In Meta 0.9.9 through 0.9.14, once an identity
+  that had created a mob was respawned (`meta/respawn`, the Console's
+  respawn, each rebuild of `meta/compact_member`), its own mob tools no
+  longer listed that mob and refused its calls on it (`mob_list_members`,
+  `mob_check_member`, `mob_retire_member`, `mob_destroy`), at once and
+  after a restart, while the mob and its members went on running. No
+  gateway call was found that lists, stops or destroys such a mob (read
+  from the source). From this release an
+  identity whose member is replaced by its successor on its own session
+  keeps that management (the fix is Meerkat's: see its changelog, Fixed,
+  `meerkat-mob-mcp`).
+  - Keeps it: `meta/respawn` and the Console's respawn of a served member
+    (see the entry above for which members are served); the rebuilds of
+    `meta/compact_member`, which take the same step; a move of an agent
+    created at run time to another profile and a change of its runtime
+    mode (`meta/identity/update`, the `identity_update` tool). The
+    respawn, the profile move and the mode change are confirmed by tests;
+    a completed `meta/compact_member` by one run; a call that times out,
+    and one that completes without compacting, rebuild the member by the
+    same step (read from the source; not run).
+  - Still ends it: `meta/reset`, `meta/reset_all` and
+    `meta/delete_identity`, which take a fresh session; a respawn or a
+    compact rebuild of a member that is not served (it is retired and
+    then woken, as in 0.9.14); a raw member that is retired and attached
+    again (`meta/retire_member`, then `meta/attach_existing_session` or
+    `meta/ensure_member` with a resume session); an identity the roster
+    unlisted and lists again; an agent that is archived and unarchived
+    where the archive is not refused (a Rust host that calls Core's
+    `archive_identity` itself, or a mob the refusal does not count;
+    through Meta an archive of an agent that still owns mobs it created is
+    refused `owns_mobs`, see Added). The reset, the delete, and the
+    archive with its unarchive are confirmed by tests. That a respawn of a
+    member that is not served retires and wakes it is confirmed by a test;
+    that a compact rebuild of one does so is read from the source; not
+    run. The others are read from the source.
+  - Not brought back: a mob whose creator lost its management on 0.9.9
+    through 0.9.14 stays as it is. Upgrading does not bring the mob back
+    into its creator's reach, and neither does a respawn of the identity
+    on this release (both by a run: a mob created and its creator
+    respawned through the published 0.9.14 gateway, then this release on
+    the same state, then `meta/respawn` there). The same holds for a
+    creator that lost it by a `meta/compact_member` on 0.9.9 through
+    0.9.14, a completed call or one that failed or timed out after its
+    first rebuild: each rebuild retired and seated the member as those
+    releases' respawn did (read from the source at each tag), and the
+    upgrade does not bring the mob back (one run, of a completed call on
+    the published 0.9.14 gateway; for a call that failed or timed out
+    after its first rebuild, read from the source; not run). A mob the
+    identity created after that respawn or compact call is in its reach,
+    and stays there through its respawns on this release (read from the
+    source). On a stock gateway
+    the way found to end a mob that is out of its creator's reach is a
+    reset or a delete of the identity, followed by the gateway's next
+    start (read from the source): the identity's conversation ends, and
+    every mob its session owns, the ones it still manages among them, is
+    removed with its members and its store.
 
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the
@@ -1585,12 +2707,211 @@ Security, Upgrade and Changed.
   the known issue on the Meta 0.9.14 release page:
   https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
 
+- `meta/compact_member` no longer leaves its temporary compaction threshold
+  on the member when its maintenance turn fails. On Meta 0.9.9 through
+  0.9.14 a call whose maintenance turn ended in a definite failure (a
+  provider error, a rate limit, or a request the compaction could not make
+  smaller, which is what a conversation of a few short messages gives)
+  answered the failure and left the threshold (1024 tokens by default) on
+  the member's seat, where it survived a gateway restart. The member then
+  compacted again every third model request, a later ordinary turn failed
+  the same way ("compaction is irreducible at the configured retention"),
+  and every later `compact_member` on the identity answered
+  `compact_member_busy` until the gateway restarted (read from the released
+  sources, and seen in runs on 0.9.14). Now the call rebuilds the member at
+  its original threshold before it answers a maintenance turn that ended
+  for good: abandoned (`abandoned`, `abandoned_with_error`), cancelled
+  (`cancelled`) or consumed with no result (`completed_without_result`). It
+  still answers the error, with the same `kind`
+  (`compact_member_completion_failed`), `completion_type` and typed error
+  metadata, and with `stage: "profile_restored"` where it answered
+  `terminal`; a second call is taken at once. When that rebuild fails, the
+  call answers `compact_member_rebuild_failed` at stage `profile_restore`
+  with the terminal's `completion_type`, and the threshold may still be on
+  the member. An outcome that does not prove the turn ended
+  (`wrong_session`, `callback_pending`, `callback_batch_pending`,
+  `completed_with_finalization_failure`, `runtime_terminated`,
+  `outcome_unknown`, a superseded incarnation) restores nothing, as before.
+  Only an agent the host's configuration declares could be left with the
+  threshold by a release (0.9.9 through 0.9.14 refuse the call for an agent
+  created at run time), and nothing stored is repaired: such a member keeps
+  the threshold until it is cleared (see Known limitations and the
+  `meta/compact_member` section of the RPC reference).
+
+- A teardown of the runtime that follows a force cancel of a member now
+  cancels the mob's active flow runs before it stops the mob, as a teardown
+  without a force cancel always did (see Core's changelog, Fixed: the
+  mob's count of active flow runs).
+
+- Meta: when a private Console side chat ends (its owner closes it or it is
+  retired), every schedule aimed at it that was there at its end is deleted,
+  whoever made it: the schedules it made for itself, schedules a host made
+  for it, and its owner's deferred Console sends to it. A member it forked
+  ends with it, and its schedules are deleted in the same way, also when it
+  idles out. A member it spawned stays seated when the side chat is closed;
+  its schedules stay until it ends, and their deliveries fail meanwhile.
+  Before, these schedules were kept and fired into any later member given
+  the same name, an ordinary name an agent picks again for a helper
+  included; once a shared member held the name, other agents that have the
+  schedule tools could list and read them, prompt included, and change,
+  pause, resume and delete them. A respawn and a reset of a private member
+  are not ends and keep its schedules. Each delete is logged with the
+  schedule's id, never with what it sends. A schedule ended in this way is
+  no longer listed and never fires. Once a member that is not that person's
+  own holds the name, an agent that names its id is still answered its
+  record and its occurrences. An update of its name, description or labels,
+  and a second delete of it, are accepted; an update of its trigger or its
+  target, a pause and a resume are refused: nothing about it can be made to
+  fire. Once it is deleted, no agent tool gives its id to an agent that is
+  not that person's own. Not covered: schedules left by a private member
+  that ended before the upgrade (its owner can delete them from another
+  private side chat of hers; where a shared member has since taken such a
+  name, other agents may already have been shown them); a private member of
+  a mob that an agent created; a member that a private side chat spawned on
+  a role whose profile declares `durable = true`; a long-term agent private
+  to a person, whose schedules follow the agent's own lifecycle; a respawn
+  of such a member that fails, which leaves its schedules aimed at a name no
+  member holds; a schedule the ending member itself makes in the last
+  moments of its turn, after its end was accepted; a deferred Console send
+  on a Console whose host registered the runtime under an identity namespace
+  of its own (the gateways as shipped use none); and a host that runs Meta
+  on a mob event store of its own, or stops within moments of such an end
+  during its start. Where the schedules of an ended member cannot be
+  deleted, the gateway logs `the schedules that target an ended member
+  private to a person could not all be deleted` and they stay. (By tests and
+  by ten runs on this release's code; the deferred Console send by a test of
+  the deleting step, not end to end; 0.9.11 through 0.9.14 read from the
+  source.)
+
+- The `memory` tool's reply after a `forget`, and the gateway's WARN line
+  when a session is marked as tainted, named a respawn as a fresh-context
+  boundary. For an agent it is not one: its respawn keeps the session and
+  its transcript, so it neither takes forgotten text out of the agent's
+  context nor clears the session's taint; a reset does both. Both texts now
+  name a reset. Behaviour is unchanged; the texts were wrong in every Meta
+  release (read from the source; the behaviour by runs on the published
+  0.9.14).
+
 ### Known limitations
 
+- `meta/compact_member` still answers an error on a conversation its
+  compaction cannot make smaller, which is usual for a young agent: with no
+  more turns than the retained-turn budget plus one (five at the default)
+  the compaction folds only the oldest turn into a summary that can be
+  longer than the turn, and Meerkat ends a turn whose compaction left the
+  request no smaller ("compaction is irreducible at the configured
+  retention"; seen in a run, and by the source the same check applies for
+  every client that reports the request's size). The member's threshold is
+  restored; the rewrite stays in the conversation, as does the maintenance
+  turn's input. Call again when the conversation is longer.
+- A member can still be left with the temporary threshold of
+  `meta/compact_member` when no restoring rebuild ran: the gateway stopped
+  between the call's two rebuilds, the maintenance turn's end could not be
+  proved or could not be read, or the restoring rebuild failed (and a member
+  0.9.9 through 0.9.14 left with it keeps it). The threshold survives a
+  restart and does not end by itself. A second `meta/compact_member` that
+  completes clears it, for every agent (after a gateway restart, which ends
+  the busy refusal). For an agent the host's configuration declares,
+  `meta/respawn` clears it too and keeps the conversation; for an agent
+  created at run time a respawn does not clear it (read from the source,
+  and seen in a run and in a test run before this fix). `meta/reset` clears
+  it and ends the conversation. For an identity that created mobs each of
+  these steps has a cost: on 0.9.9 through 0.9.14 a stop or restart after a
+  respawn, before the identity has woken on the same session, is followed
+  by the loss of the mobs its session owns; and on 0.9.9 through 0.9.14,
+  after a respawn has completed the identity no longer lists a
+  mob it created, and the calls tried that name the mob were refused, while
+  the mob's members can go on running; the mobs' stores stay. A completed
+  `meta/compact_member` has the same cost on those releases (the RPC
+  reference's `meta/compact_member` section). From this release a respawn
+  of a served member keeps the identity's management of the mobs it created
+  (confirmed by tests and by a run; see Fixed), and a completed
+  `meta/compact_member` of a member the same-session step serves keeps it
+  too (one run); a call that times out, and one that completes without
+  compacting, rebuild the member by the same step (read from the source;
+  not run). A reset: it ends the identity's
+  session, and the mobs that session
+  owns end with it, no later than the gateway's next start (read from the
+  source, not run). A `meta/compact_member` that failed has rebuilt the
+  identity once before its maintenance turn, so on 0.9.9 through 0.9.14 the
+  identity has probably paid that cost already (read from the source, not
+  run): check whether it still lists the mobs it created. If it does and
+  must go on managing them, weigh that against the failing messages before
+  you respawn: on 0.9.9 through 0.9.14 none of the three steps is known to
+  keep it; and before the
+  respawn have it retire the members of, or destroy, a mob it created whose
+  members act on their own (not run).
 - An update cannot hand an agent's runtime mode back to its profile: to
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered
   in this release.
+- A tool named `ask_user` from an MCP server of a member's profile and the
+  stock tool `ask_user` are offered by neither: the member has no tool of
+  that name, and each such build logs a warning that names the tool, its
+  two sources and the member (see Breaking). No setting keeps the server's
+  tool under that name; the profile can give it another one (`tool_names`
+  on the server's entry). The same holds for a server attached to a
+  member's live session. Not in this release: the member's own tool
+  winning the name. That needs the host's tools composed after the build
+  has waited for its MCP servers, and is planned as a follow-up.
+
+- The loss of an identity's mobs after a respawn (see Fixed) remains for
+  a member the fix does not serve whose session a store keeps. A member
+  the fix does not serve is retired and then woken, as in 0.9.14, and
+  each time one line is logged that begins "no same-session successor
+  serves the identity's member, so it is retired and then woken" and
+  carries the identity, its session, the step and a `cause` field. The
+  rest of the line differs by cause, as below. A cause is marked
+  "confirmed by a test" where a test confirms that the member is retired
+  and the line is logged at that level with that cause, and "read from
+  the source" otherwise.
+  - Exposed. The line is a warning that goes on: "until the wake succeeds
+    its session reads archived, and a restart in between ends the mobs
+    the session owns. Do not stop this process before the identity has
+    woken". It is logged for a host's own session bridge that lacks an
+    answer or the step, and for every refusal of Core's same-session
+    step. The list is open; for example:
+    - `its session bridge does not say whether the session outlives its
+      member (...)`: an identity served through a host's own
+      `SessionBridge` without that answer (confirmed by a test);
+    - `this session bridge does not implement
+      respawn_member_on_own_session`: an identity served through a host's
+      own `SessionBridge` without the same-session step (confirmed by a
+      test);
+    - `session bridge mob error: unsupported for runtime mode ...`: Core
+      refused the step, and the text that follows is Core's reason. Among
+      its reasons: the creation the member's session recorded cannot be
+      read; no spawn row records the member's current continuity; the
+      member's session is lost or archived (the line for a refusal of
+      this kind: confirmed by a test, over a test bridge that answers a
+      refusal with the first reason's words; Core's reasons themselves:
+      read from the source).
+
+    The two session bridge causes are exposed when that host keeps
+    sessions and child mobs on disk. For the causes of this group, as in
+    0.9.14: do not respawn the identity while its provider is
+    unavailable; after a respawn, do not stop or restart the gateway until the
+    identity has woken on the same session (the call has answered without an
+    error and the identity has then answered one message); and if a respawn's
+    wake failed, wake the identity successfully, on the same session, before
+    any restart. One of Core's reasons names a member placed on
+    another host whose spec names no placement: its line is this warning,
+    and its exposure is not established, as for the next group.
+  - Not established. `its member is placed on another host`: the line is
+    a warning that goes on: "as in 0.9.14: whether a restart before the
+    wake succeeds ends the mobs its session owns is not established"
+    (confirmed by a test).
+  - Not exposed. `its session is kept in memory only` and `its member
+    holds no session`: the line is a debug line with nothing after its
+    beginning, and no warning is logged (both confirmed by a test). That
+    nothing is lost is read from the source: `meta/respawn` refuses a
+    member whose sessions are kept in memory only before anything ends,
+    the mobs of a session no store holds are held, not ended, at the next
+    start, and a member without a session owns no mobs through one.
+- A respawn of an identity whose configured profile differs from its
+  seated member's (a role move not yet carried out) can call
+  `customize_build` three times instead of two (read from the source, not
+  confirmed by a run).
 - Schedules of an archived agent: Meta's own doors (the agents' schedule
   tools, the Console) point no schedule at an archived agent. Meerkat's own
   schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
@@ -1633,6 +2954,20 @@ Security, Upgrade and Changed.
   the access controller it passes: they read no roster and no agent
   record.
 
+- An update of an agent's instructions that arrives while the agent's
+  first run is being started can answer `applies_at_next_run` although
+  that run, and the conversation it starts, use the earlier instructions
+  (read from the source; not seen in a run). It takes two callers at the
+  same moment: the first delivery to an agent that was created without a
+  first message, and an update of its instructions. The new text is in the
+  agent's record (`meta/identity/get`), and `meta/instruction_status` shows
+  no record and no slot for the agent, not a pending change: nothing was
+  recorded for the conversation. The change reaches the conversation at
+  the next change of the agent's instructions (another update), at a reset
+  of the agent, or at the agent's first delivery after the next gateway
+  start, as a change made while the gateway was down does. An agent created
+  with a first message is not affected: its create answers once its
+  conversation exists.
 - An agent whose instructions were edited while the gateway was down, whose
   conversation was built through 0.9.14 and that has no instruction record
   yet, may keep the text of its first prompt until the running gateway
@@ -1699,10 +3034,85 @@ Security, Upgrade and Changed.
 - Gating: an audit entry or pending request is decided by the agent that
   holds the name of its origin now. Only a host supplies an entry's origin.
 
+- A profile's `reasoning_effort` level and members that resume: on resume
+  Meta re-applies the `provider_params` of a profile that declares params,
+  and does not re-apply the level by itself. A member that resumes takes a
+  level its profile names (a new or changed level takes effect), and keeps
+  the level its session recorded when the profile names none: removing the
+  level from a profile does not remove it from a member that resumes. A
+  member turn with `reasoning_effort` `{"action":"clear"}` removes it.
+
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in
   either direction: it rests on the version requirements Connect 0.9.14
   published.
+
+- Agent memory: a session's taint is kept in the gateway's memory only.
+  While the gateway process runs, taint is sticky as documented. After a
+  gateway restart it is rebuilt only from the untrusted tool calls and
+  results that are still in the session's transcript, at that agent's next
+  model request: taint whose source a compaction has summarized away, and
+  taint that came from a tainted peer's message, is not restored, and until
+  that next request the session reads as untainted. The gateway also keeps
+  the taint of at most 4,096 sessions per process; once more sessions than
+  that have been tainted since its start, the session tainted earliest reads
+  as untainted again. In each of these cases the session's later
+  LLM-authored memory writes, and a distillation over the session, land
+  `active`, not `quarantined`. Where that matters, set
+  `agent_memory.llm_writes` to `"quarantined"`, which quarantines every
+  LLM-authored write pending review. Read from the source, not run; the
+  memory module is unchanged from 0.9.14.
+
+- The in-process event log (`event_log` with `storage = "memory"`) has no
+  size limit, though the reference and both SDK pages called it bounded: it
+  keeps every event until the gateway stops, and each `meta/query_events`
+  reads all of them, so a long-running gateway's memory grows with its
+  events. Where the events are not queried, declare `event_log` with
+  `storage = "null"`. Read from the source, not run.
+
+- A profile that lists `ask_user` in `tools.deny` cannot be used for a member
+  whose host decides the member's tool surface itself (a host that installs
+  a member registration hook, as Connect's native host does). Meta mounts no
+  `ask_user` on such a build, so the deny names a tool that is in none of
+  the profile's tool vocabularies, and the member's build is refused:
+  `profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`
+  (by a run on this release's code). Leave `ask_user` out of `tools.deny` in
+  a profile used for such members; they are not offered the tool. By a
+  reading of the source, not by a run: the same refusal meets a member whose
+  host supplies its own tool named `ask_user` among the build's external
+  tools. Where these notes and the upgrade guide advise the deny, they speak
+  of members of a Meta gateway and of a host's own Meta runtime, where it
+  works as described. A fix is planned for the next release.
+
+- Voice (GPT Live) through the Meta SDKs over the stdio gateway: only the
+  plain open works. Three kinds of live call fail there, on every gateway,
+  one built with GPT Live included:
+  - the WebRTC answer. The gateway takes the SDKs' `live/webrtc/answer`
+    request for a call to a module named `live` and answers `-32601`,
+    "Module 'live' not loaded". So `live_webrtc_answer` and
+    `live_webrtc_answer_pending` in the Python Meta SDK and
+    `liveWebrtcAnswer` and `liveWebrtcAnswerPending` in the TypeScript Meta
+    SDK fail, and no WebRTC live channel can be completed;
+  - the strict open: `live_open_typed` / `liveOpenTyped` called with an
+    execution identity. For a member of an identity-first launch it answers
+    `-32000`, "experimental live response requires a delivery-aware outer
+    RPC writer", and the channel it had opened is closed again; for any
+    other member it is refused, because it needs the identity authority;
+  - `live_connect` / `liveConnect`, which begins with the strict open.
+
+  Every live open over stdio takes the gateway's voice path first, which
+  ends a Console voice call in progress on that gateway; a strict open that
+  then fails has ended it and opened nothing (the first by runs, the second
+  read from the source).
+
+  Not affected: `live_open` / `liveOpen`, and the typed open without an
+  execution identity, which open a channel with a WebSocket transport, also
+  for a member of an identity-first launch. A voice call started in the
+  Console does not use these calls and works. Affects Meta 0.9.0 through
+  this release (by runs on this release's code for the answer, the strict
+  open and the plain open; `live_connect` and the typed open read from the
+  source; earlier versions read from the source). A fix is planned for the
+  next release.
 
 ## [0.9.14] - 2026-11-11
 

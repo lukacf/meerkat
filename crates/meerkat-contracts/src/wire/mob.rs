@@ -553,6 +553,9 @@ pub enum WireMobResumeOverrideField {
     Model,
     Provider,
     ProviderParams,
+    // The profile decides a resumed member's provider-neutral reasoning
+    // effort level: the level its `provider_params` name, or none.
+    ReasoningEffort,
 }
 
 /// Profile override for `mob/spawn`.
@@ -3013,6 +3016,13 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params:
         Option<WireTurnMetadataOverride<crate::wire::runtime::WireProviderParamsOverride>>,
+    /// Set, clear, or keep the member session's provider-neutral reasoning
+    /// effort level from this turn on, exactly as `turn/start` does: a level
+    /// sets it, `{"action":"clear"}` removes it, and omission keeps it.
+    /// Since 0.9.15; an older server refuses the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort:
+        Option<WireTurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<WireAuthBindingRef>>,
     /// Host-attached injected context for this turn. Each entry materializes
@@ -5150,6 +5160,83 @@ mod tests {
             err.to_string().contains("unknown field"),
             "unexpected error: {err}"
         );
+    }
+
+    /// `mob/turn_start` takes the provider-neutral `reasoning_effort`
+    /// tri-state exactly as `turn/start` does.
+    #[test]
+    fn mob_turn_start_params_read_the_reasoning_effort_tri_state() {
+        let parse = |reasoning_effort: serde_json::Value| {
+            serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
+                "mob_id": "mob-1",
+                "agent_identity": "worker",
+                "prompt": "continue",
+                "reasoning_effort": reasoning_effort,
+            }))
+        };
+        for (value, written) in [
+            (
+                serde_json::json!("low"),
+                serde_json::json!({"action": "set", "value": "low"}),
+            ),
+            (
+                serde_json::json!({"action": "clear"}),
+                serde_json::json!({"action": "clear"}),
+            ),
+        ] {
+            let params = parse(value.clone())
+                .unwrap_or_else(|error| panic!("turn_start reads {value}: {error}"));
+            assert_eq!(
+                serde_json::to_value(&params).expect("serialize")["reasoning_effort"],
+                written,
+                "{value}"
+            );
+        }
+        let absent = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "prompt": "continue",
+        }))
+        .expect("turn_start without a level");
+        assert!(
+            serde_json::to_value(&absent)
+                .expect("serialize")
+                .get("reasoning_effort")
+                .is_none()
+        );
+        let error = parse(serde_json::json!("x_high"))
+            .expect_err("`x_high` is not a level")
+            .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+    }
+
+    /// A wire profile's `resume_overrides` can claim the reasoning effort
+    /// level; the vocabulary stays closed.
+    #[test]
+    fn mob_resume_override_fields_include_the_reasoning_effort_level() {
+        let fields: Vec<WireMobResumeOverrideField> = serde_json::from_value(serde_json::json!([
+            "model",
+            "provider",
+            "provider_params",
+            "reasoning_effort"
+        ]))
+        .expect("the four resume override fields");
+        assert_eq!(
+            fields,
+            vec![
+                WireMobResumeOverrideField::Model,
+                WireMobResumeOverrideField::Provider,
+                WireMobResumeOverrideField::ProviderParams,
+                WireMobResumeOverrideField::ReasoningEffort,
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(WireMobResumeOverrideField::ReasoningEffort)
+                .expect("serialize the field"),
+            serde_json::json!("reasoning_effort")
+        );
+        serde_json::from_value::<WireMobResumeOverrideField>(serde_json::json!("everything"))
+            .expect_err("the vocabulary is closed");
     }
 
     #[test]

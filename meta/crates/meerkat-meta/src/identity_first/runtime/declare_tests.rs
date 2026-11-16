@@ -507,7 +507,9 @@ async fn door_declaration(
 ) -> Result<SeatOutcome, IdentityRuntimeError> {
     let lifecycle_lock = runtime.lifecycle_lock_for(keeper).await;
     let _lifecycle_guard = lifecycle_lock.lock().await;
-    runtime.declare_identity_locked(&spec(keeper), None).await
+    runtime
+        .declare_identity_locked(&spec(keeper), None, None)
+        .await
 }
 
 /// Whether `error` is the door's retryable refusal of a declaration Core left

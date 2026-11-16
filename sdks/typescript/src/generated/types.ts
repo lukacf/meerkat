@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.14
+// Contract version: 0.9.15
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.14";
+export const CONTRACT_VERSION = "0.9.15";
 
 export type Value = unknown;
 
@@ -117,6 +117,7 @@ export interface WireRunResult {
   structured_output?: unknown;
   extraction_error?: { last_output: string; attempts: number; reason: string };
   schema_warnings?: Array<{ provider: string; path: string; message: string }>;
+  reasoning_effort?: { requested: string; sent: Array<{ level: string; provider: string; model: string; route: { backend: string; api: string }; fields: string[]; facts: string; decided_by: string; requests: number }> };
 }
 
 export interface WireToolResult {
@@ -672,6 +673,27 @@ export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" 
 
 export type WireCompactionRequestOutcome = "requested" | "already_requested";
 
+export interface WireQueuedInputRecallAbandoned {
+  attempt_count?: number;
+  input_id: string;
+  outcome: "abandoned";
+}
+
+export interface WireQueuedInputRecallNotQueued {
+  input_id: string;
+  outcome: "not_queued";
+  phase: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  run_id?: string | null;
+}
+
+export interface WireQueuedInputRecallAlreadyTerminal {
+  input_id: string;
+  outcome: "already_terminal";
+  terminal: WireInputTerminalOutcome;
+}
+
+export type WireQueuedInputRecall = WireQueuedInputRecallAbandoned | WireQueuedInputRecallNotQueued | WireQueuedInputRecallAlreadyTerminal;
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }
@@ -1173,7 +1195,44 @@ export interface WirePresentationAudienceUnknown {
 
 export type WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown;
 
+export interface WireAskUserAnswerChoice {
+  choice_id: string;
+  kind: "choice";
+}
+
+export interface WireAskUserAnswerFreeText {
+  kind: "free_text";
+  text: string;
+}
+
+export interface WireAskUserAnswerUnanswered {
+  kind: "unanswered";
+}
+
+export interface WireAskUserAnswerUnknown {
+  kind: "unknown";
+}
+
+export type WireAskUserAnswer = WireAskUserAnswerChoice | WireAskUserAnswerFreeText | WireAskUserAnswerUnanswered | WireAskUserAnswerUnknown;
+
+export interface WireAskUserQuestionAnswer {
+  answer: WireAskUserAnswer;
+  question_id: string;
+}
+
+export interface WireDecisionAnswerAskUser {
+  answers: WireAskUserQuestionAnswer[];
+  kind: "ask_user";
+}
+
+export interface WireDecisionAnswerUnknown {
+  kind: "unknown";
+}
+
+export type WireDecisionAnswer = WireDecisionAnswerAskUser | WireDecisionAnswerUnknown;
+
 export interface WireDecisionEvidenceHuman {
+  answer?: WireDecisionAnswer | null;
   approve: boolean;
   approver_id: string;
   assurance: WireDecisionAssurance;
@@ -1555,6 +1614,7 @@ export interface HelpRequest {
 
 export interface HelpResponse {
   extraction_error?: Record<string, unknown> | null;
+  reasoning_effort?: Record<string, unknown> | null;
   request_usage?: Record<string, unknown>[];
   run_usage?: WireUsage | null;
   schema_warnings?: Record<string, unknown>[] | null;
@@ -1710,6 +1770,16 @@ export interface SessionInputStateSelector {
 
 export interface SessionInputStateResult {
   state?: Record<string, unknown> | null;
+}
+
+export interface RecallInputParams {
+  selector: SessionInputStateSelector;
+  session_id: string;
+}
+
+export interface RecallInputResult {
+  recall: WireQueuedInputRecall;
+  session_id: string;
 }
 
 export interface RealmIdParams {
@@ -3185,6 +3255,7 @@ export interface MobTurnStartParams {
   prompt: WireContentInput;
   provider?: string | null;
   provider_params?: Record<string, unknown> | null;
+  reasoning_effort?: Record<string, unknown> | null;
   self_hosted_server_id?: string | null;
   session_events?: boolean | null;
   skill_refs?: SkillKey[] | null;
@@ -3933,6 +4004,7 @@ export interface WireProviderParamsOverride {
   max_output_tokens?: number | null;
   provider_tag?: WireProviderTag | null;
   reasoning?: WireReasoningMode | null;
+  reasoning_effort?: unknown | null;
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;
@@ -4677,7 +4749,7 @@ export type WireMemberRef = string;
 
 export type WireMobBackendKind = "session" | "external";
 
-export type WireMobResumeOverrideField = "model" | "provider" | "provider_params";
+export type WireMobResumeOverrideField = "model" | "provider" | "provider_params" | "reasoning_effort";
 
 export interface WireRuntimeBindingSession {
   kind: "session";
@@ -7602,6 +7674,7 @@ export interface WireModelProfile {
   model_family: string;
   params_schema: unknown;
   realtime?: boolean;
+  reasoning_effort_levels?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
   release_stage?: "stable" | "experimental" | "operator_defined";
   supports_mid_conversation_system_messages?: boolean;
   supports_reasoning: boolean;

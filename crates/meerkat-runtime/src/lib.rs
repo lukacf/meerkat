@@ -81,6 +81,7 @@ pub use ::tokio;
 pub mod accept;
 #[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
 pub mod approval_grants;
+pub mod ask_user;
 pub mod auth_machine;
 pub mod bounded_submit;
 pub mod coalescing;
@@ -141,6 +142,8 @@ pub mod protocol_supervisor_trust_publish;
 #[allow(unused_imports)]
 #[path = "generated/protocol_supervisor_trust_revoke.rs"]
 pub mod protocol_supervisor_trust_revoke;
+pub mod queued_input_recall;
+pub mod queued_input_recall_wire;
 pub mod recovery;
 pub mod resumed_run_admission;
 pub mod retained_run;
@@ -734,6 +737,7 @@ pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
     RuntimeOpsLifecycleRegistry,
 };
+pub use queued_input_recall::QueuedInputRecall;
 pub use resumed_run_admission::{
     RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT, RESUMED_RUN_ADMISSION_ATTEMPTS,
     RESUMED_RUN_ADMISSION_RETRY_DELAY, ResumedRunAdmission, ResumedRunAdmissionDecision,

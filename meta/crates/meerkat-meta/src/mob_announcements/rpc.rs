@@ -5,26 +5,32 @@
 //! as the host; members announce through their own tools.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::declarations::{Declarations, PutRoleTemplate, RoleSelector};
-use super::escalations::EscalationSubject;
-use super::owner::{AnnouncementError, AnnouncementService};
+use super::declarations::{DeclarationRecordKind, Declarations, PutRoleTemplate, RoleSelector};
+use super::escalations::{EscalationSubject, MemberRead};
+use super::handling::BatchHandling;
+use super::owner::{AnnouncementError, AnnouncementService, HiddenMember};
 use super::sources::{
-    AdvanceSource, AnnouncementSource, AudienceGrant, AuditAction, AuditQuery, Coverage,
+    AdvanceSource, AnnouncementSource, AudienceGrant, AuditAction, AuditQuery, AuditRow, Coverage,
     ObservationCapability, Observed, Principal, PutSource, Rebaseline, RecordSourceFailure,
     SourceChange, SourceConfig, SourceConnection, SourceDelivery, SourceFailure,
     SourceHealthPolicy, SourceIdentity, SourceItem, SourcePage, SourceQuery, SourceRoute,
     SourceRunner, SourceStart, SourceState, StreamOnboarding,
 };
+use super::store::SubscriptionVerbOutcome;
 use super::types::{
-    AnnounceRequest, AnnouncementRef, AnnouncementStoreError, Announcer, BatchId, BatchQuery,
-    ChildMemberLimits, Member, MobId, OperationId, PutSubscription, Selector, SourceId, SourceKey,
-    StartFrontier, SubscriptionChange, SubscriptionDelivery, SubscriptionId, Topic,
+    AnnounceRequest, Announcement, AnnouncementRef, AnnouncementStoreError, Announcer, Batch,
+    BatchId, BatchQuery, ChildMemberLimits, MAX_ID_BYTES, MAX_PAGE, Member, MemberIdentity, MobId,
+    OperationId, PutSubscription, Selector, SourceId, SourceKey, StartFrontier, Subscription,
+    SubscriptionChange, SubscriptionDelivery, SubscriptionId, Topic,
 };
+use crate::access::AccessView;
+use crate::http_console::ConsoleAbsentNames;
 use crate::rpc::JsonRpcError;
 
 /// Mob announcements are not enabled on this host.
@@ -584,6 +590,286 @@ fn to_value(value: impl serde::Serialize) -> Result<Value, JsonRpcError> {
     serde_json::to_value(value).map_err(|error| JsonRpcError::new(-32000, error.to_string()))
 }
 
+/// The caller a request is answered for, as far as the members it may see
+/// go. The host's own surface has no view: its caller sees every member.
+///
+/// A member the caller's view hides ([`AccessView::hides_agent`]: it is
+/// private to another person) is that member's audience's alone, and so is
+/// every record of it. The method runs with a name no member holds in the
+/// place of such a member, and with an id nobody holds in the place of the
+/// id of a subscription or a delivery of such a member, and the answer is
+/// spelled back ([`Self::spelled_back`]): the method takes its own path for
+/// a name or an id that does not exist, whatever state the owner is in.
+/// Listings leave such a member's rows out, and answers about sources and
+/// escalations leave such a member out.
+///
+/// A member is judged as the agent the view speaks of when this gateway's
+/// runtime holds its mob, and every member is judged while that cannot be
+/// said. The view knows the agents of the mobs held here by their names.
+/// Only a member of a mob that is positively another gateway's (one the
+/// contact directory files a peer under, and this gateway's runtime does
+/// not hold) is another member under the same name, and is not judged. A
+/// refusal that carries a member of a record, not of the request, is
+/// answered without that member when the caller may not see it
+/// ([`Self::refused`]).
+struct Audience<'a> {
+    view: Option<&'a AccessView>,
+    /// The owner, which says whether a mob is a peer's.
+    owner: Option<&'a AnnouncementService>,
+    /// The mobs this gateway's runtime holds; `None` while that cannot be
+    /// said.
+    here: Option<BTreeSet<MobId>>,
+    absent: ConsoleAbsentNames,
+}
+
+impl<'a> Audience<'a> {
+    fn of(
+        view: Option<&'a AccessView>,
+        owner: Option<&'a AnnouncementService>,
+        here: Option<BTreeSet<MobId>>,
+    ) -> Self {
+        Self {
+            view,
+            owner,
+            here,
+            absent: if view.is_some() {
+                ConsoleAbsentNames::fresh()
+            } else {
+                ConsoleAbsentNames::default()
+            },
+        }
+    }
+
+    /// Whether the caller may not see `member`.
+    fn hides(&self, member: &Member) -> bool {
+        let Some(view) = self.view else {
+            return false;
+        };
+        let another_gateways = self
+            .here
+            .as_ref()
+            .is_some_and(|here| !here.contains(&member.mob_id))
+            && self
+                .owner
+                .is_some_and(|owner| owner.files_peer(&member.mob_id));
+        !another_gateways && view.hides_agent(member.identity.as_str())
+    }
+
+    /// Whether the caller may not see the member that made `announcement`:
+    /// a member announces into its own mob.
+    fn hides_announcer(&self, announcement: &Announcement) -> bool {
+        match &announcement.announced_by {
+            Announcer::Member { identity } => {
+                self.hides(&Member::new(announcement.mob_id.clone(), identity.clone()))
+            }
+            Announcer::Host | Announcer::Source { .. } => false,
+        }
+    }
+
+    /// The refusal as the caller receives it. A refusal that carries a
+    /// member of a record, where the request named none (the subscriber a
+    /// source's routes would reach twice, the member that announced under a
+    /// taken key), is answered in its bare form when the caller may not see
+    /// that member: the same kind, and neither the member nor the record.
+    /// Every other refusal is the owner's own.
+    fn refused(&self, error: AnnouncementError) -> JsonRpcError {
+        match error {
+            AnnouncementError::Store(AnnouncementStoreError::RouteOverlap {
+                source_id,
+                member,
+            }) if self.hides(&member) => typed(
+                ANNOUNCEMENTS_REFUSED_CODE,
+                "route_overlap",
+                route_overlap_without_member(&source_id),
+                json!({ "source_id": source_id }),
+            ),
+            AnnouncementError::Store(AnnouncementStoreError::AnnouncementConflict { existing })
+                if self.hides_announcer(&existing) =>
+            {
+                typed(
+                    ANNOUNCEMENTS_CONFLICT_CODE,
+                    "announcement_conflict",
+                    AnnouncementStoreError::AnnouncementConflict { existing },
+                    Value::Null,
+                )
+            }
+            other => rpc_error(other),
+        }
+    }
+
+    /// A name nobody holds that stands for `name`, within the bound of an
+    /// id. A name too long to carry the mark is stood for by the mark alone.
+    fn absent_name(&self, name: &str) -> String {
+        let absent = self.absent.absent_spelling(name);
+        if absent.len() <= MAX_ID_BYTES {
+            absent
+        } else {
+            self.absent.absent_spelling("absent")
+        }
+    }
+
+    /// `member` as the method is to take it: a member no mob holds in the
+    /// place of one the caller may not see.
+    fn member(&self, member: Member) -> Result<Member, JsonRpcError> {
+        if !self.hides(&member) {
+            return Ok(member);
+        }
+        let identity = MemberIdentity::new(self.absent_name(member.identity.as_str()))
+            .map_err(|error| rpc_error(error.into()))?;
+        Ok(Member::new(member.mob_id, identity))
+    }
+
+    /// The id a method on the subscription `id` is to take: an id nobody
+    /// holds in the place of one whose subscription is of a member the
+    /// caller may not see.
+    async fn subscription_id(
+        &self,
+        service: &AnnouncementService,
+        id: SubscriptionId,
+    ) -> Result<SubscriptionId, JsonRpcError> {
+        if self.view.is_none() {
+            return Ok(id);
+        }
+        match service.subscription(&id).await.map_err(rpc_error)? {
+            Some(found) if self.hides(&found.member) => {
+                SubscriptionId::new(self.absent_name(id.as_str()))
+                    .map_err(|error| rpc_error(error.into()))
+            }
+            _ => Ok(id),
+        }
+    }
+
+    /// The id a method on the delivery `id` is to take: an id nobody holds
+    /// in the place of one whose batch is of a member the caller may not
+    /// see.
+    async fn batch_id(
+        &self,
+        service: &AnnouncementService,
+        id: BatchId,
+    ) -> Result<BatchId, JsonRpcError> {
+        if self.view.is_none() {
+            return Ok(id);
+        }
+        match service.delivery(&id).await.map_err(rpc_error)? {
+            Some(found) if self.hides(&found.member) => {
+                BatchId::new(self.absent_name(id.as_str())).map_err(|error| rpc_error(error.into()))
+            }
+            _ => Ok(id),
+        }
+    }
+
+    /// Whether an escalation about `subject` is one of a member the caller
+    /// may not see: the member itself, a declared subscription of it, or a
+    /// role template's child made for it.
+    async fn hides_subject(
+        &self,
+        service: &AnnouncementService,
+        subject: &EscalationSubject,
+    ) -> Result<bool, JsonRpcError> {
+        if self.view.is_none() {
+            return Ok(false);
+        }
+        match subject {
+            EscalationSubject::Member { member } => Ok(self.hides(member)),
+            EscalationSubject::Declaration { record_kind, id } => match record_kind {
+                DeclarationRecordKind::Source => Ok(false),
+                DeclarationRecordKind::Subscription | DeclarationRecordKind::RoleChild => {
+                    Ok(service
+                        .declared_subscription_member(*record_kind, id)
+                        .await
+                        .map_err(rpc_error)?
+                        .is_some_and(|member| self.hides(&member)))
+                }
+            },
+            EscalationSubject::Source { .. } => Ok(false),
+        }
+    }
+
+    /// `source` as the caller may see it: without the audience grants and
+    /// the conversation members that name a member the caller may not see,
+    /// and without a triage route of such a member.
+    fn source(&self, mut source: AnnouncementSource) -> AnnouncementSource {
+        if self.view.is_none() {
+            return source;
+        }
+        let shown = |grant: &AudienceGrant| !matches!(grant, AudienceGrant::Member { member } if self.hides(member));
+        source.audience.retain(&shown);
+        source
+            .conversation_members
+            .retain(|member| !self.hides(member));
+        source.routes.retain_mut(|route| match route {
+            SourceRoute::Triage {
+                member,
+                forward_audience,
+                ..
+            } => {
+                if let Some(grants) = forward_audience {
+                    grants.retain(&shown);
+                }
+                !self.hides(member)
+            }
+            SourceRoute::Direct { .. } => true,
+        });
+        source
+    }
+
+    /// The answer as the caller receives it: every name and id the method
+    /// took in the place of another spelled back as the caller gave it.
+    fn spelled_back(&self, answer: Result<Value, JsonRpcError>) -> Result<Value, JsonRpcError> {
+        if self.view.is_none() {
+            return answer;
+        }
+        match answer {
+            Ok(result) => Ok(self.absent.restore(result)),
+            Err(mut error) => {
+                if let Value::String(message) = self
+                    .absent
+                    .restore(Value::String(std::mem::take(&mut error.message)))
+                {
+                    error.message = message;
+                }
+                error.data = error.data.map(|data| self.absent.restore(data));
+                Err(error)
+            }
+        }
+    }
+}
+
+/// One page of a listing as its caller may see it: the rows of members the
+/// caller may not see are left out and the listing is read on, so that
+/// such a row neither shows nor takes a place on the page. `read` reads a
+/// page after a cursor, `cursor` is a row's own, and `hidden` judges a row.
+/// Without a view the page is the owner's own.
+async fn seen_page<T, C, Fut>(
+    audience: &Audience<'_>,
+    limit: usize,
+    after: Option<C>,
+    cursor: impl Fn(&T) -> C,
+    hidden: impl Fn(&T) -> bool,
+    read: impl Fn(Option<C>, usize) -> Fut,
+) -> Result<Vec<T>, JsonRpcError>
+where
+    Fut: Future<Output = Result<Vec<T>, AnnouncementError>>,
+{
+    if audience.view.is_none() {
+        return read(after, limit).await.map_err(rpc_error);
+    }
+    let page = limit.clamp(1, MAX_PAGE);
+    let mut after = after;
+    let mut seen = Vec::new();
+    loop {
+        let rows = read(after.take(), limit).await.map_err(rpc_error)?;
+        let ended = rows.len() < page;
+        after = rows.last().map(&cursor);
+        seen.extend(rows.into_iter().filter(|row| !hidden(row)));
+        if ended || seen.len() >= page {
+            break;
+        }
+    }
+    seen.truncate(page);
+    Ok(seen)
+}
+
 /// `meta/mob_announcements/announce`: the host announces into a mob hosted
 /// here, this gateway's own by default.
 #[derive(Deserialize)]
@@ -925,12 +1211,67 @@ pub async fn handle_announcement_method(
     method: &str,
     raw: &Value,
 ) -> Result<Value, JsonRpcError> {
+    handle_announcement_method_seen_by(service, own_mob, None, method, raw).await
+}
+
+/// [`handle_announcement_method`] for a caller who is not the host: `view`
+/// is the caller's view of the mob's members, and the method answers for
+/// the members that view shows ([`Audience`]). Without a view the caller is
+/// the host, which sees every member.
+pub(crate) async fn handle_announcement_method_seen_by(
+    service: Option<&AnnouncementService>,
+    own_mob: &MobId,
+    view: Option<&AccessView>,
+    method: &str,
+    raw: &Value,
+) -> Result<Value, JsonRpcError> {
+    // The view speaks of the agents of the mobs this gateway's runtime
+    // holds: this host's own mob among them.
+    let here = match (view, service) {
+        (Some(_), Some(service)) => service.mobs_held_here().await.map(|mut here| {
+            here.insert(own_mob.clone());
+            here
+        }),
+        _ => None,
+    };
+    let audience = Audience::of(view, service, here);
+    let answer = answer_announcement_method(service, own_mob, &audience, method, raw).await;
+    audience.spelled_back(answer)
+}
+
+/// The text of a route overlap refusal that names no member: what a caller
+/// who may not see the subscriber is answered, and what a declared source's
+/// pending refusal shows such a caller.
+pub(super) fn route_overlap_without_member(source_id: &impl std::fmt::Display) -> String {
+    format!(
+        "a subscriber would be reachable both directly and through a forward of source \
+         {source_id}"
+    )
+}
+
+async fn answer_announcement_method(
+    service: Option<&AnnouncementService>,
+    own_mob: &MobId,
+    audience: &Audience<'_>,
+    method: &str,
+    raw: &Value,
+) -> Result<Value, JsonRpcError> {
     if !is_announcement_method(method) {
         return Err(JsonRpcError::new(-32601, "Method not found"));
     }
     let Some(service) = service else {
         return Err(announcements_unavailable_error());
     };
+    let hidden = |member: &Member| audience.hides(member);
+    // The judge the owner is handed where it keeps a hidden member's
+    // records as they are: none for the host.
+    let judge: Option<HiddenMember<'_>> = if audience.view.is_some() {
+        Some(&hidden)
+    } else {
+        None
+    };
+    // Every refusal of the owner goes to the caller through the audience.
+    let refused = |error: AnnouncementError| audience.refused(error);
     match method {
         "meta/mob_announcements/announce" => {
             let request: AnnounceParams = params(raw)?;
@@ -945,7 +1286,7 @@ pub async fn handle_announcement_method(
                     causes: request.causes,
                 })
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             to_value(AnnounceResult {
                 captured: outcome.captured_for.len(),
                 announcement: outcome.announcement,
@@ -954,10 +1295,13 @@ pub async fn handle_announcement_method(
         }
         "meta/mob_announcements/get" => {
             let request: GetAnnouncementParams = params(raw)?;
+            // An announcement a member the caller may not see made is
+            // answered as a key nothing was announced under.
             let announcement = service
                 .announcement(&request.mob_id, &request.source_key)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?
+                .filter(|announcement| !audience.hides_announcer(announcement));
             Ok(json!({ "announcement": to_value(announcement)? }))
         }
         "meta/mob_announcements/subscriptions/put" => {
@@ -966,7 +1310,7 @@ pub async fn handle_announcement_method(
                 .mobs
                 .unwrap_or_else(|| BTreeSet::from([own_mob.clone()]));
             let member = match (request.member, request.members) {
-                (Some(member), None) => member,
+                (Some(member), None) => audience.member(member)?,
                 (None, Some(members)) => {
                     // A template starts now: it never backfills.
                     if request.start != StartFrontier::Now {
@@ -987,7 +1331,7 @@ pub async fn handle_announcement_method(
                             },
                         )
                         .await
-                        .map_err(rpc_error)?;
+                        .map_err(refused)?;
                     return Ok(json!({ "subscription": to_value(template)? }));
                 }
                 _ => {
@@ -1015,7 +1359,7 @@ pub async fn handle_announcement_method(
                     },
                 )
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             Ok(json!({ "subscription": to_value(subscription)? }))
         }
         "meta/mob_announcements/subscriptions/pause"
@@ -1027,23 +1371,36 @@ pub async fn handle_announcement_method(
                 "meta/mob_announcements/subscriptions/resume" => SubscriptionChange::Resume,
                 _ => SubscriptionChange::Cancel,
             };
-            let outcome = service
+            let subscription_id = audience
+                .subscription_id(service, request.subscription_id)
+                .await?;
+            let mut outcome = service
                 .change_subscription_or_template(
                     &request.operation_id,
-                    &request.subscription_id,
+                    &subscription_id,
                     request.expected_revision,
                     change,
                 )
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
+            // A role template's change lists its children: none of a member
+            // the caller may not see.
+            if let SubscriptionVerbOutcome::Template(template) = &mut outcome {
+                template
+                    .children
+                    .retain(|child| !audience.hides(&child.member));
+            }
             to_value(outcome)
         }
         "meta/mob_announcements/subscriptions/get" => {
             let request: SubscriptionParams = params(raw)?;
+            let subscription_id = audience
+                .subscription_id(service, request.subscription_id)
+                .await?;
             let subscription = service
-                .subscription(&request.subscription_id)
+                .subscription(&subscription_id)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             // Why the member's deliveries wait now, if they do: a
             // projection of the owner's latest attempt, never stored.
             let marker = subscription
@@ -1056,9 +1413,9 @@ pub async fn handle_announcement_method(
             // A role template's id reads the template beside no subscription.
             if subscription.is_none()
                 && let Some(template) = service
-                    .role_template(&request.subscription_id)
+                    .role_template(&subscription_id)
                     .await
-                    .map_err(rpc_error)?
+                    .map_err(refused)?
             {
                 found["template"] = to_value(template)?;
             }
@@ -1066,27 +1423,48 @@ pub async fn handle_announcement_method(
         }
         "meta/mob_announcements/subscriptions/list" => {
             let request: ListSubscriptionsParams = params(raw)?;
-            let subscriptions = service
-                .subscriptions(
-                    request.member.as_ref(),
-                    request.after.as_ref(),
-                    request.limit.unwrap_or(DEFAULT_LIMIT),
-                )
-                .await
-                .map_err(rpc_error)?;
+            let member = request
+                .member
+                .map(|member| audience.member(member))
+                .transpose()?;
+            let subscriptions = seen_page(
+                audience,
+                request.limit.unwrap_or(DEFAULT_LIMIT),
+                request.after,
+                |row: &Subscription| row.id.clone(),
+                |row: &Subscription| audience.hides(&row.member),
+                |after: Option<SubscriptionId>, limit| {
+                    let member = member.as_ref();
+                    async move { service.subscriptions(member, after.as_ref(), limit).await }
+                },
+            )
+            .await?;
             Ok(json!({ "subscriptions": to_value(subscriptions)? }))
         }
         "meta/mob_announcements/deliveries/list" => {
             let request: ListDeliveriesParams = params(raw)?;
-            let batches = service
-                .deliveries_with_handling(&BatchQuery {
-                    member: request.member,
-                    subscription: request.subscription_id,
-                    after: request.after,
-                    limit: request.limit.unwrap_or(DEFAULT_LIMIT),
-                })
-                .await
-                .map_err(rpc_error)?;
+            let member = request
+                .member
+                .map(|member| audience.member(member))
+                .transpose()?;
+            let subscription = request.subscription_id;
+            let batches = seen_page(
+                audience,
+                request.limit.unwrap_or(DEFAULT_LIMIT),
+                request.after,
+                |row: &(Batch, Option<BatchHandling>)| row.0.id.clone(),
+                |row: &(Batch, Option<BatchHandling>)| audience.hides(&row.0.member),
+                |after: Option<BatchId>, limit| {
+                    let query = BatchQuery {
+                        member: member.clone(),
+                        subscription: subscription.clone(),
+                        after,
+                        limit,
+                    };
+                    async move { service.deliveries_with_handling(&query).await }
+                },
+            )
+            .await?;
             // Each batch with what became of its turn: null until admitted.
             let mut listed = Vec::with_capacity(batches.len());
             for (batch, handling) in batches {
@@ -1100,34 +1478,35 @@ pub async fn handle_announcement_method(
         }
         "meta/mob_announcements/deliveries/observe" => {
             let request: DeliveryParams = params(raw)?;
-            let observation = service
-                .observe_delivery(&request.batch_id)
-                .await
-                .map_err(rpc_error)?;
+            let batch_id = audience.batch_id(service, request.batch_id).await?;
+            let observation = service.observe_delivery(&batch_id).await.map_err(refused)?;
             to_value(observation)
         }
         "meta/mob_announcements/deliveries/reconcile" => {
             let request: DeliveryParams = params(raw)?;
+            let batch_id = audience.batch_id(service, request.batch_id).await?;
             let observation = service
-                .reconcile_delivery(&request.batch_id)
+                .reconcile_delivery(&batch_id)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             to_value(observation)
         }
         "meta/mob_announcements/deliveries/redeliver" => {
             let request: HeldDeliveryParams = params(raw)?;
+            let batch_id = audience.batch_id(service, request.batch_id).await?;
             let handling = service
-                .redeliver_held(&request.operation_id, &request.batch_id)
+                .redeliver_held(&request.operation_id, &batch_id)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             Ok(json!({ "handling": to_value(handling)? }))
         }
         "meta/mob_announcements/deliveries/dismiss" => {
             let request: HeldDeliveryParams = params(raw)?;
+            let batch_id = audience.batch_id(service, request.batch_id).await?;
             let handling = service
-                .dismiss_held(&request.operation_id, &request.batch_id)
+                .dismiss_held(&request.operation_id, &batch_id)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             Ok(json!({ "handling": to_value(handling)? }))
         }
         "meta/mob_announcements/sources/put" => {
@@ -1150,6 +1529,15 @@ pub async fn handle_announcement_method(
                 health_policy: request.health_policy.unwrap_or_default(),
                 runner: request.runner,
             };
+            // A caller who is not the host names only seated members it may
+            // see: any other name is one of an unknown member, whoever
+            // holds it.
+            if let Some(judge) = judge {
+                service
+                    .admit_source_members(&config, judge)
+                    .await
+                    .map_err(refused)?;
+            }
             let source = service
                 .put_source(
                     &request.operation_id,
@@ -1162,11 +1550,12 @@ pub async fn handle_announcement_method(
                     },
                 )
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             let affected_subscriptions = service
                 .source_bound_subscriptions(&source.mob_id, &source.source_id)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
+            let source = audience.source(source);
             let value = to_value(&source)?;
             Ok(json!({
                 "source": with_health(service, &source, value).await?,
@@ -1197,8 +1586,8 @@ pub async fn handle_announcement_method(
                     change,
                 )
                 .await
-                .map_err(rpc_error)?;
-            Ok(json!({ "source": to_value(source)? }))
+                .map_err(refused)?;
+            Ok(json!({ "source": to_value(audience.source(source))? }))
         }
         "meta/mob_announcements/sources/get" => {
             let request: SourceParams = params(raw)?;
@@ -1206,7 +1595,8 @@ pub async fn handle_announcement_method(
             let source = service
                 .source(&mob_id, &request.source_id)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?
+                .map(|source| audience.source(source));
             let value = to_value(&source)?;
             let value = match &source {
                 Some(found) => with_health(service, found, value).await?,
@@ -1217,14 +1607,14 @@ pub async fn handle_announcement_method(
                 let streams = service
                     .source_streams(&mob_id, &request.source_id)
                     .await
-                    .map_err(rpc_error)?;
+                    .map_err(refused)?;
                 answer["streams"] = to_value(streams)?;
             }
             Ok(answer)
         }
         "meta/mob_announcements/sources/advance" => {
             let request: AdvanceSourceParams = params(raw)?;
-            let advance = service
+            let mut advance = service
                 .advance_source(
                     &request.operation_id,
                     AdvanceSource {
@@ -1244,22 +1634,37 @@ pub async fn handle_announcement_method(
                     },
                 )
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
+            advance.source = audience.source(advance.source);
             to_value(advance)
         }
         "meta/mob_announcements/audit/list" => {
             let request: AuditListParams = params(raw)?;
-            let rows = service
-                .audit(&AuditQuery {
-                    mob_id: Some(request.mob_id.unwrap_or_else(|| own_mob.clone())),
-                    source_id: request.source_id,
-                    member: request.member,
-                    action: request.action,
-                    after: request.after,
-                    limit: request.limit.unwrap_or(DEFAULT_LIMIT),
-                })
-                .await
-                .map_err(rpc_error)?;
+            let mob_id = request.mob_id.unwrap_or_else(|| own_mob.clone());
+            let member = request
+                .member
+                .map(|member| audience.member(member))
+                .transpose()?;
+            let (source_id, action) = (request.source_id, request.action);
+            let rows = seen_page(
+                audience,
+                request.limit.unwrap_or(DEFAULT_LIMIT),
+                request.after,
+                |row: &AuditRow| row.id,
+                |row: &AuditRow| audience.hides(&row.member),
+                |after: Option<u64>, limit| {
+                    let query = AuditQuery {
+                        mob_id: Some(mob_id.clone()),
+                        source_id: source_id.clone(),
+                        member: member.clone(),
+                        action,
+                        after,
+                        limit,
+                    };
+                    async move { service.audit(&query).await }
+                },
+            )
+            .await?;
             Ok(json!({ "entries": to_value(rows)? }))
         }
         "meta/mob_announcements/sources/record_failure" => {
@@ -1277,8 +1682,8 @@ pub async fn handle_announcement_method(
                     },
                 )
                 .await
-                .map_err(rpc_error)?;
-            Ok(json!({ "source": to_value(source)? }))
+                .map_err(refused)?;
+            Ok(json!({ "source": to_value(audience.source(source))? }))
         }
         "meta/mob_announcements/sources/list" => {
             let request: ListSourcesParams = params(raw)?;
@@ -1301,13 +1706,14 @@ pub async fn handle_announcement_method(
                         limit,
                     })
                     .await
-                    .map_err(rpc_error)?;
+                    .map_err(refused)?;
                 let ended = sources.len() < limit;
                 after = sources
                     .last()
                     .map(|source| (source.mob_id.clone(), source.source_id.clone()));
-                for source in &sources {
-                    let value = with_health(service, source, listed_source(source)?).await?;
+                for source in sources {
+                    let source = audience.source(source);
+                    let value = with_health(service, &source, listed_source(&source)?).await?;
                     let escalated = value
                         .pointer("/health/escalations")
                         .and_then(Value::as_array)
@@ -1324,40 +1730,75 @@ pub async fn handle_announcement_method(
         }
         "meta/mob_announcements/members/get" => {
             let request: MemberGetParams = params(raw)?;
-            let read = service
-                .member_read(&request.member)
-                .await
-                .map_err(rpc_error)?;
+            let member = audience.member(request.member)?;
+            let read = service.member_read(&member).await.map_err(refused)?;
             to_value(read)
         }
         "meta/mob_announcements/members/list" => {
             let request: MembersListParams = params(raw)?;
-            let reads = service
-                .member_reads(
-                    request.after.as_ref(),
-                    request
-                        .limit
-                        .unwrap_or(DEFAULT_LIMIT)
-                        .clamp(1, super::types::MAX_PAGE),
-                    request.escalated,
-                )
-                .await
-                .map_err(rpc_error)?;
+            let escalated = request.escalated;
+            let reads = seen_page(
+                audience,
+                request
+                    .limit
+                    .unwrap_or(DEFAULT_LIMIT)
+                    .clamp(1, super::types::MAX_PAGE),
+                request.after,
+                |row: &MemberRead| row.member.clone(),
+                |row: &MemberRead| audience.hides(&row.member),
+                |after: Option<Member>, limit| async move {
+                    service.member_reads(after.as_ref(), limit, escalated).await
+                },
+            )
+            .await?;
             Ok(json!({ "members": to_value(reads)? }))
         }
         "meta/mob_announcements/escalations/list" => {
             let request: EscalationsListParams = params(raw)?;
             let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
             if request.open {
-                let next = service.last_escalation_cursor().await.map_err(rpc_error)?;
-                let open = service.open_escalations(None).await.map_err(rpc_error)?;
+                let next = service.last_escalation_cursor().await.map_err(refused)?;
+                let mut open = Vec::new();
+                for escalation in service.open_escalations(None).await.map_err(refused)? {
+                    if !audience.hides_subject(service, &escalation.subject).await? {
+                        open.push(escalation);
+                    }
+                }
                 Ok(json!({ "escalations": to_value(open)?, "next": next }))
-            } else {
+            } else if audience.view.is_none() {
                 let (events, next) = service
                     .escalation_events(request.after, limit)
                     .await
-                    .map_err(rpc_error)?;
+                    .map_err(refused)?;
                 Ok(json!({ "events": to_value(events)?, "next": next }))
+            } else {
+                // The events the caller may see, read on past the others
+                // until the page is full or the events end; `next` is where
+                // the caller reads on from.
+                let page = limit.clamp(1, MAX_PAGE);
+                let mut next = request.after;
+                let mut seen = Vec::new();
+                'pages: loop {
+                    let (events, read_to) = service
+                        .escalation_events(next, limit)
+                        .await
+                        .map_err(refused)?;
+                    let ended = events.len() < page;
+                    for event in events {
+                        if seen.len() >= page {
+                            break 'pages;
+                        }
+                        next = event.cursor;
+                        if !audience.hides_subject(service, &event.subject).await? {
+                            seen.push(event);
+                        }
+                    }
+                    next = read_to;
+                    if ended || seen.len() >= page {
+                        break;
+                    }
+                }
+                Ok(json!({ "events": to_value(seen)?, "next": next }))
             }
         }
         "meta/mob_announcements/declarations/apply" => {
@@ -1382,14 +1823,14 @@ pub async fn handle_announcement_method(
                 }
             };
             let view = service
-                .apply_declarations(declarations)
+                .apply_declarations_seen_by(declarations, judge)
                 .await
-                .map_err(rpc_error)?;
+                .map_err(refused)?;
             to_value(view)
         }
         "meta/mob_announcements/declarations/get" => {
             let _: EmptyParams = params(raw)?;
-            to_value(service.declarations().await.map_err(rpc_error)?)
+            to_value(service.declarations_seen_by(judge).await.map_err(refused)?)
         }
         _ => Err(JsonRpcError::new(-32601, "Method not found")),
     }

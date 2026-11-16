@@ -336,6 +336,7 @@ impl McpScheduleContext {
                     schedule_tools: None,
                     workgraph_tools: None,
                     workgraph_namespace_grant: None,
+                    host_tools: None,
                     mob_tool_authority_context: None,
                     preload_skills: materialized_preload_skills(&create.preload_skills),
                     realm_id,
@@ -742,6 +743,7 @@ async fn deliver_scheduled_prompt(
         transcript_identity: Default::default(),
         request_reasoning: None,
         request_reasoning_disposition: None,
+        reasoning_effort: None,
     };
     let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
     prompt_input.header.source = InputOrigin::System;

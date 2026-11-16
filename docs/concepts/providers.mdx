@@ -36,9 +36,9 @@ entitlement of a particular API organization, ChatGPT workspace, cloud
 deployment, or OAuth account. If `gpt-6-astra` is unavailable to the active
 OpenAI account, explicitly select `gpt-5.5` or set a compatible binding
 `default_model`. `gemini-4-argon` is served only on paid Gemini API tiers; on
-the free tier, select `gemini-3.8-flash` explicitly (`--model
-gemini-3.8-flash`) or keep it as the Gemini default with
-`[models] gemini = "gemini-3.8-flash"` in config.
+the free tier, select `gemini-3.8-flash` or, from 0.9.15,
+`gemini-4-hydrogen` explicitly (`--model gemini-3.8-flash`) or keep one as
+the Gemini default with `[models] gemini = "gemini-3.8-flash"` in config.
 Catalog-default changes alone do not rewrite configured models, binding
 defaults, or the model an existing session recorded (a resumed session keeps
 its recorded model). The CLI has a separate, narrow built-in OAuth repair.
@@ -147,6 +147,7 @@ Use `rkat models` for every supported ID and its current limits.
     |-------|---------|------------|-------------|
     | `gemini-4-carbon` | 1M (shared by input, thinking, and output) | 64K | Google's strongest Gemini 4 reasoning model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
     | `gemini-4-argon` | 1M (shared by input, thinking, and output) | 64K | Default Gemini model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
+    | `gemini-4-hydrogen` | 1M (shared by input, thinking, and output) | 64K | Google's fast Gemini 4 model, in the catalog from 0.9.15; on the free tier and the paid Gemini API tiers; thinking levels `low`/`medium`/`high` (Google's default for it is `high`) |
     | `gemini-3.8-flash` | 1M | 64K | Recommended Flash model; also available on the free tier |
     | `gemini-3.7-flash` | 1M | 64K | Deprecated upstream; Google serves it with `gemini-3.8-flash` |
     | `gemini-3.6-flash` | 1M | 64K | Supported previous Flash generation |
@@ -336,11 +337,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.14", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.15", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.14", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.15", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -363,6 +364,226 @@ format:
 
 The transcript itself is not rewritten merely because a different provider
 wire has stricter placement rules.
+
+## Reasoning Effort
+
+`reasoning_effort` is one provider-neutral setting for how much reasoning a
+model spends: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`
+(one spelling each; `x_high` is not accepted here). Meerkat checks the level
+against the selected model on the route that serves the request, writes the
+provider's own field, and reports what it sent.
+
+```bash
+rkat run --model gpt-5.5 --reasoning-effort high "Plan the migration"
+```
+
+| Surface | Where |
+|---|---|
+| CLI | `rkat run --reasoning-effort <LEVEL>`; with `--resume` also `--no-reasoning-effort` to remove the session's level |
+| JSON-RPC | `reasoning_effort` on `session/create`, `turn/start` and `mob/turn_start` |
+| REST | `reasoning_effort` on `POST /sessions` and `POST /sessions/{id}/messages` |
+| MCP | `reasoning_effort` on `meerkat_run` and `meerkat_resume` |
+| Python and TypeScript SDKs | `reasoning_effort` / `reasoningEffort` on session create, turns and mob member turns |
+| Web SDK | `SessionConfig.reasoningEffort` |
+| Mob profiles | the `reasoning_effort` key of the profile's `provider_params` |
+| Schedules | not on schedules in 0.9.15: a `reasoning_effort` key written in a schedule's `create` spec (directly or in its `provider_params`) or on its prompt action is refused; see [Scheduling](/guides/scheduling#session-targets) |
+| Rust | `AgentBuildConfig.provider_params.reasoning_effort` |
+
+The setting lives in the session's provider params, so
+`provider_params.reasoning_effort` is the same setting wherever provider
+params are accepted (`--param reasoning_effort=high` on the CLI), except in a
+schedule's `create` spec, which does not take it in 0.9.15. A request
+that gives both must give the same level in both, or it is refused as invalid
+params.
+
+From 0.9.15, a level in a mob profile is a one-way step for a rollback. A
+mob whose definition holds a level in any profile, even a profile no member
+ever used, cannot be read by 0.9.14: after a rollback 0.9.14 quarantines the
+whole mob (its content is kept, and the mob is whole again on 0.9.15).
+On Meerkat Meta it reaches further: a Meta gateway on 0.9.14 does not start
+on a state directory that holds such a mob, so nothing stored in that
+directory can be used there. Removing the level from the definition
+afterwards does not help; the only way back is to destroy the mob on 0.9.15
+and create it anew, which loses its members, their conversations and its
+history. Where a rollback
+must stay possible, set the level
+on a session or a turn and clear it before rolling back; see
+[Rolling back to 0.9.14](/guides/upgrading#rolling-back-to-0-9-14).
+
+**On a session.** The level is part of the session's LLM identity: it is
+stored with the session and survives recovery, a resumed build, a hot swap of
+the model, and a model fallback switch. A create request sets it. A turn (or
+a resume input) changes it with a tri-state of its own: a level sets it for
+that turn and the turns after it, `{"action": "clear"}` removes it, and
+leaving the field out keeps it. It is independent of the other provider
+params: a turn that replaces or clears `provider_params` keeps the level
+unless it also names `reasoning_effort` (or its new params name the nested
+key). The level applies to the session's own model requests; requests to a
+bound controller do not carry it.
+
+**What Meerkat writes.** The level is translated to the field of the route
+that serves the request:
+
+| Route | Field |
+|---|---|
+| OpenAI Responses | `reasoning.effort` |
+| Chat Completions (self-hosted and GitHub Copilot routes) | `reasoning_effort` and `reasoning.effort` |
+| Anthropic Messages | `output_config.effort` (on the GitHub Copilot Messages route together with `thinking: {"type": "adaptive"}`) |
+| Gemini | `generationConfig.thinkingConfig.thinkingLevel` |
+
+**Where the supported levels come from.** A route states its levels from
+exactly one source:
+
+- the model catalog, on routes that forward to the provider's own API and
+  validation (the OpenAI, Anthropic and Gemini APIs and the cloud routes that
+  serve them); the levels a model's catalog row lists;
+- the account's model list, on GitHub Copilot: the levels the account's list
+  states for the model. Meerkat reads the list it already fetched for the
+  account and ships no table of its own, so the same model can accept
+  different levels on different accounts, and the catalog row of a model is
+  never used for a Copilot route;
+- the operator's configuration, for a self-hosted model: its
+  `reasoning_effort_levels` (see
+  [Self-hosting models](/guides/self-hosting-models)).
+
+**Refusal.** Meerkat never lowers a level, changes the model, moves to another
+route or applies a provider-specific parameter in the level's place. A request
+it cannot honour is refused before any provider request with
+`INVALID_PARAMS` and typed data:
+
+```json
+{
+  "kind": "reasoning_effort_refused",
+  "retryable": false,
+  "reasoning_effort_refusal": {
+    "requested": "max",
+    "provider": "anthropic",
+    "model": "claude-opus-4-5",
+    "route": { "backend": "anthropic_api", "api": "messages" },
+    "reason": "unsupported_level",
+    "supported": ["low", "medium", "high"],
+    "facts": "catalog"
+  }
+}
+```
+
+| `reason` | Meaning |
+|---|---|
+| `unsupported_level` | The route's source states its levels and the requested one is not among them. `supported` lists them; an empty list means the route or the model takes no level. |
+| `supported_levels_unknown` | No source states the levels: a model id with no catalog row, a Copilot model whose list entry states none, a self-hosted model with none declared. `supported` and `facts` are `null`. |
+| `supported_levels_unavailable` | The source exists and cannot be read now: the Copilot account's model list is not loaded yet. The one transient reason: `retryable` is `true`, and the same request can succeed later with no configuration change. |
+| `conflicting_provider_effort` | The request also sets a provider-specific effort with another level (`conflicting_param`, `conflicting_level`). An equal one is accepted. |
+| `conflicting_thinking_budget` | The request also sets a thinking budget: a budget and a level are two controls. |
+| `conflicting_thinking_type` | The request also sets a thinking type the model does not accept with the level on that route. |
+| `conflicting_reasoning_body` | The request also carries a raw provider reasoning body, which may carry an effort of its own. |
+| `conflicting_reasoning_mode` | The request also turns reasoning off. |
+
+`route` names the endpoint as `backend` (for example `openai_api`,
+`anthropic_api`, `bedrock`, `vertex`, `google_genai`, `copilot`,
+`self_hosted`) and `api` (`responses`, `chat_completions`, `messages`,
+`generate_content`, `realtime`). `route`, `supported` and `facts` are always
+present, never left out: `route` is `null` when the client that serves the
+request reports no route, and `supported` and `facts` are `null` when no
+source states the levels or the source cannot be read now. `facts` is the
+source of `supported`: `catalog`,
+`account` or `operator`. The reason vocabulary is closed. The route names and
+`facts` may grow, so a client keeps a value it does not know. Read the fields,
+never the message text.
+
+The refusal has the same shape wherever it is raised: when the session is
+created or resumed, on a turn that changes the level or the model, and before
+a provider request inside a turn (a Copilot account's list can change between
+turns). One case is not recognisable by its data kind: a `meerkat_resume` of, or
+a `meerkat_comms_send` to, the session of a mob member that is not live, whose
+own build is refused for the level in its profile, is answered the generic agent
+error (`-32013`) with a message and no `reasoning_effort_refused` data.
+From 0.9.15, over JSON-RPC a turn that names a refused level is answered when it
+is asked, also while another turn of the session runs and for a stored
+session that is not loaded: it changes nothing, and the running turn and
+what is queued behind it go on. A turn that would change the session's
+model settings beside a provider-neutral level is taken when the session has
+no unfinished work: on a session that holds a level that is every turn that changes the
+model, the provider, the provider params, the auth binding or the level
+itself (setting, changing or clearing it; a level inside `provider_params`
+counts even when it equals the held one), and on a session that holds none
+a turn that sets one. While the session has unfinished work such a turn is
+answered `SESSION_BUSY` (send it again when the session has no unfinished
+work; data kind `reasoning_effort_change_needs_idle_session`, the same kind when the
+request only changed the model) and changes nothing: wait for the running
+turn's answer, then send it again. If nothing is running, an event queued on the
+session counts: send a plain turn first (an autonomous mob member apart: see
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+That answer is not a level refusal.
+Plain turns and turns that repeat the session's level with
+`reasoning_effort` queue, and a session that holds no provider-neutral
+level queues its turns as before, a model change, a clear and a provider's
+own effort parameter (`provider_tag`) included (the JSON-RPC reference has
+the list). REST answers such a message for a session it holds live with
+`session is busy`. A run refused inside a turn fails with `run_failed` reason
+`reasoning_effort_refused`. It is never retried and never triggers a model
+fallback. A provider-specific parameter the caller writes itself
+(`provider_params.provider_tag`) stays available on every route, including
+routes whose levels no source states.
+
+**Reports.** A request that carries the level is reported; requests without
+it report nothing new.
+
+- `run_started` and `run_resumed` carry `reasoning_effort`: the resolution
+  against the session's route at the start of the run.
+- `request_reasoning_effort_resolved` is emitted once per request handed to
+  the provider client with the level (turn requests, structured-output
+  extraction, compaction summaries, fallback attempts), after the call
+  settled. A call that failed after the hand-over is counted even when
+  nothing reached the provider.
+- The run result carries `reasoning_effort`: the level requested and each
+  distinct resolution of those requests (`sent`), in first-use order, with
+  a request count.
+
+```json
+"reasoning_effort": {
+  "requested": "high",
+  "sent": [
+    {
+      "level": "high",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "route": { "backend": "openai_api", "api": "responses" },
+      "fields": ["reasoning.effort"],
+      "facts": "catalog",
+      "decided_by": "request",
+      "requests": 3
+    }
+  ]
+}
+```
+
+**Model fallback.** A fallback target receives the session's level. A target
+whose route does not accept it is skipped with the reason
+`reasoning_effort_unsupported` in `model_fallback_skipped`.
+
+**Finding the levels beforehand.** `models/catalog` lists
+`reasoning_effort_levels` in a model's profile: the levels of the model's
+direct provider route. Levels that depend on an account or an operator
+setting (a GitHub Copilot account's list, a self-hosted model) are not in the
+catalog; a caller learns them from the refusal's `supported` and `facts`, and
+sees the level that was applied in the run-start, per-request and result
+reports.
+
+**Mob profiles.** A profile sets the level of its members in its provider
+params:
+
+```toml
+[profiles.analyst]
+model = "claude-opus-4-8"
+provider_params = { reasoning_effort = "high" }
+```
+
+A resumed member keeps the level its session recorded, unless
+`provider_params` is in the profile's `resume_overrides` and the profile's
+params name a level, which is then seated with them. Add
+`"reasoning_effort"` to the profile's `resume_overrides` to make the profile
+decide it on resume in every case: the level its `provider_params` name, or
+none.
 
 ## Provider Parameters
 
@@ -527,10 +748,22 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
 
     Consult `rkat models` for the selected model's effective parameter schema.
     The catalog records the thinking levels each model accepts. A level the
-    selected model refuses, such as `minimal` on `gemini-4-argon`,
-    `gemini-3.8-flash` or `gemini-3.1-pro-preview`, is refused with a typed
-    error before any request is sent (when the agent is built, for build
-    parameters).
+    selected model's catalog row does not list, such as `minimal` on
+    `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-3.8-flash` or
+    `gemini-3.1-pro-preview`, is refused with a typed error before any
+    request is sent (when the agent is built, for build parameters). A
+    request that names no level carries none, so the model thinks at
+    Google's default for it: `medium` on `gemini-4-carbon` and
+    `gemini-4-argon`, `high` on `gemini-4-hydrogen`.
+
+    Google also documents a fourth level, `xhigh`, for `gemini-4-hydrogen`.
+    Meerkat does not send it in 0.9.15: a `reasoning_effort` of `xhigh` on
+    that model is [refused](#reasoning-effort) as `unsupported_level` with
+    `supported` `low`, `medium` and `high`, wherever a level is checked
+    (when the session is created or resumed, on a turn that changes the
+    level or the model, and before a provider request), and the Gemini
+    `provider_tag` has no such value, so a request whose tag names it is
+    rejected when it is read.
   </Tab>
 </Tabs>
 
@@ -735,7 +968,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.14", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.15", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

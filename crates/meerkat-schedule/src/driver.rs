@@ -262,11 +262,40 @@ impl Default for ScheduleDriverConfig {
     }
 }
 
+/// What a tick saw when the store's firing lease is held under this driver
+/// incarnation's own executor owner id while the driver holds no witness for
+/// it: the driver is locked out behind a lease nobody can renew or release.
+///
+/// A reply the driver never received leaves this behind: the store committed
+/// an acquisition or a renewal and the driver saw an error, or its tick was
+/// dropped while that call was in flight, or a release failed after the
+/// driver gave its witness up. The driver cannot claim until
+/// the lease expires. This is an observation of one store answer; nothing is
+/// taken back, and a lease another executor holds is never reported here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ScheduleExecutorLockout {
+    /// This driver incarnation's own executor owner id, as the store names
+    /// the holder.
+    pub holder_owner_id: String,
+    /// When the store says that lease was acquired. `None` when the store's
+    /// non-authorizing lease view cannot be read or no longer shows the lease.
+    pub held_since_utc: Option<DateTime<Utc>>,
+    /// When the lease expires and the lockout ends.
+    pub expires_at_utc: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ScheduleTickReport {
     /// True only when this tick held the store-issued singular firing lease.
-    /// A false report is a healthy standby observation, not progress.
+    /// A false report with no [`Self::executor_lockout`] is a healthy standby
+    /// observation, not progress.
     pub executor_authorized: bool,
+    /// Set when this tick found the driver locked out behind its own lease.
+    /// Always `None` on an authorized tick and while another executor holds
+    /// the lease.
+    pub executor_lockout: Option<ScheduleExecutorLockout>,
     pub planned_occurrences: usize,
     pub claimed_occurrences: usize,
     pub terminalized_occurrences: usize,
@@ -418,6 +447,28 @@ enum TerminalizeOutcome {
     StaleClaim,
 }
 
+/// How far [`ScheduleDriver::start_claimed_dispatch`] took a claimed
+/// occurrence.
+enum ClaimedDispatchStart {
+    /// The dispatch start is recorded.
+    Started {
+        dispatch_commit: crate::OccurrenceTransitionCommit,
+        delivery_identity: ScheduleDeliveryIdentity,
+    },
+    /// The occurrence ended, or left this claim's hands, before any dispatch.
+    Ended { terminalized: bool },
+}
+
+/// How the executor lease step of one tick ended.
+enum ExecutorLeaseStep {
+    /// This tick holds the store-issued firing lease.
+    Held(ScheduleExecutorLease),
+    /// The lease is held elsewhere and the tick is a standby. `Some` when the
+    /// store names this driver incarnation's own executor owner id as the
+    /// holder.
+    Standby(Option<ScheduleExecutorLockout>),
+}
+
 pub struct ScheduleDriver {
     service: ScheduleService,
     store: Arc<dyn ScheduleStore>,
@@ -455,7 +506,7 @@ impl ScheduleDriver {
 
     async fn acquire_or_renew_executor_lease(
         &self,
-    ) -> Result<Option<ScheduleExecutorLease>, ScheduleDomainError> {
+    ) -> Result<ExecutorLeaseStep, ScheduleDomainError> {
         let lease_duration = self.config.lease_duration.max(Duration::seconds(15));
         let mut slot = self.executor_lease.lock().await;
         if let Some(current) = slot.clone() {
@@ -469,7 +520,7 @@ impl ScheduleDriver {
             {
                 RenewScheduleExecutorLeaseOutcome::Renewed(renewed) => {
                     *slot = Some(renewed.clone());
-                    return Ok(Some(renewed));
+                    return Ok(ExecutorLeaseStep::Held(renewed));
                 }
                 RenewScheduleExecutorLeaseOutcome::Stale => *slot = None,
             }
@@ -484,9 +535,48 @@ impl ScheduleDriver {
         {
             AcquireScheduleExecutorLeaseOutcome::Acquired(lease) => {
                 *slot = Some(lease.clone());
-                Ok(Some(lease))
+                Ok(ExecutorLeaseStep::Held(lease))
             }
-            AcquireScheduleExecutorLeaseOutcome::Busy { .. } => Ok(None),
+            AcquireScheduleExecutorLeaseOutcome::Busy {
+                current_owner_id,
+                expires_at_utc,
+            } => {
+                // The driver asks to acquire only while it holds no witness,
+                // and its executor owner id is minted once per incarnation: a
+                // holder with that id is a lease this driver can neither
+                // renew nor release. Any other holder is another executor,
+                // and nothing about it leaves this answer.
+                if current_owner_id != self.executor_owner_id {
+                    return Ok(ExecutorLeaseStep::Standby(None));
+                }
+                let held_since_utc = self.own_executor_lease_acquired_at().await;
+                Ok(ExecutorLeaseStep::Standby(Some(ScheduleExecutorLockout {
+                    holder_owner_id: current_owner_id,
+                    held_since_utc,
+                    expires_at_utc,
+                })))
+            }
+        }
+    }
+
+    /// When the store says the lease held under this driver's own executor
+    /// owner id was acquired. It only completes the lockout report and
+    /// decides nothing: a store without the non-authorizing lease view, a
+    /// failed read, or a view that no longer shows that lease all answer
+    /// `None`.
+    async fn own_executor_lease_acquired_at(&self) -> Option<DateTime<Utc>> {
+        match self.store.observe_executor_lease().await {
+            Ok(observation) => observation
+                .active
+                .filter(|active| active.owner_id == self.executor_owner_id)
+                .map(|active| active.acquired_at_utc),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "executor lease view unreadable while reporting a lockout behind the driver's own lease"
+                );
+                None
+            }
         }
     }
 
@@ -514,8 +604,12 @@ impl ScheduleDriver {
         // witness another tick is about to present to the claim transaction.
         let _tick = self.tick_gate.lock().await;
         let mut report = ScheduleTickReport::default();
-        let Some(executor_lease) = self.acquire_or_renew_executor_lease().await? else {
-            return Ok(report);
+        let executor_lease = match self.acquire_or_renew_executor_lease().await? {
+            ExecutorLeaseStep::Held(lease) => lease,
+            ExecutorLeaseStep::Standby(lockout) => {
+                report.executor_lockout = lockout;
+                return Ok(report);
+            }
         };
         report.executor_authorized = true;
         self.tick_once_authorized(report, executor_lease).await
@@ -537,8 +631,12 @@ impl ScheduleDriver {
     {
         let _tick = self.tick_gate.lock().await;
         let mut report = ScheduleTickReport::default();
-        let Some(executor_lease) = self.acquire_or_renew_executor_lease().await? else {
-            return Ok(Some(report));
+        let executor_lease = match self.acquire_or_renew_executor_lease().await? {
+            ExecutorLeaseStep::Held(lease) => lease,
+            ExecutorLeaseStep::Standby(lockout) => {
+                report.executor_lockout = lockout;
+                return Ok(Some(report));
+            }
         };
         report.executor_authorized = true;
         crate::tokio::pin!(cancellation);
@@ -707,6 +805,122 @@ impl ScheduleDriver {
         store_now_utc: chrono::DateTime<Utc>,
         existing: Option<ExistingDelivery>,
     ) -> Result<bool, ScheduleDomainError> {
+        let (occurrence_id, attempt, claim_token) = (
+            occurrence.occurrence_id.clone(),
+            occurrence.attempt_count,
+            occurrence.claim_token(),
+        );
+        match self
+            .start_claimed_dispatch(occurrence, store_now_utc, existing)
+            .await
+        {
+            Ok(ClaimedDispatchStart::Started {
+                dispatch_commit,
+                delivery_identity,
+            }) => {
+                self.deliver_started_dispatch(
+                    dispatch_commit,
+                    delivery_identity,
+                    store_now_utc,
+                    existing,
+                )
+                .await
+            }
+            Ok(ClaimedDispatchStart::Ended { terminalized }) => Ok(terminalized),
+            Err(fault) => Err(self
+                .release_claim_before_dispatch(
+                    &occurrence_id,
+                    attempt,
+                    claim_token,
+                    store_now_utc,
+                    fault,
+                )
+                .await),
+        }
+    }
+
+    /// Give a claimed occurrence back when the driver stops handling it
+    /// before its dispatch start is recorded, and return the fault that
+    /// stopped it.
+    ///
+    /// The row is claimed with nothing in flight. Left alone it waits out its
+    /// claim lease, and under the shipped defaults (a 60 s lease, a 30 s
+    /// `skip` grace) that always ends past the misfire deadline: one
+    /// transient fault would cost the occurrence. The occurrence machine
+    /// admits the release from `Claimed` only (`ReleaseClaimBeforeDispatch`);
+    /// the next scan then claims the occurrence again inside its misfire
+    /// window, or ends it misfired past it. The window is not widened.
+    ///
+    /// Only a claim with no recorded dispatch is given back. The release
+    /// carries what the receipt history proves about earlier attempts, read
+    /// the way the claim scan reads it, and the machine refuses it for an
+    /// occurrence whose earlier attempt recorded its dispatch: that claim
+    /// lapses with its lease, so the attempts such an occurrence has past
+    /// its deadline are spent one per claim lease, never one per failed tick.
+    ///
+    /// One attempt, and nothing is remembered: when the receipt history
+    /// cannot be read or the release cannot be written (the store is still
+    /// down), or the machine refuses the release, that is logged and the row
+    /// takes the lapse path it took before. So one transient fault is
+    /// covered, not two in a row.
+    ///
+    /// An occurrence that fails before dispatch on every tick is given back
+    /// on every tick while its window is open. Each release leaves one
+    /// `lease_expired` receipt, and each claim that follows counts an
+    /// attempt. The host's failure backoff paces those ticks.
+    async fn release_claim_before_dispatch(
+        &self,
+        occurrence_id: &OccurrenceId,
+        attempt: u32,
+        claim_token: Option<uuid::Uuid>,
+        store_now_utc: DateTime<Utc>,
+        fault: ScheduleDomainError,
+    ) -> ScheduleDomainError {
+        let released = match self.store.list_receipts(occurrence_id).await {
+            Ok(receipts) => {
+                let admission_evidence = AdmissionEvidence::from_receipt_stages(
+                    receipts.iter().map(|receipt| receipt.stage),
+                );
+                // `Ok(None)`: the claim is no longer this attempt's to give
+                // back.
+                self.store
+                    .transition_occurrence_with_receipt_if_current(
+                        occurrence_id,
+                        attempt,
+                        claim_token,
+                        OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch {
+                            admission_evidence,
+                            at_utc: store_now_utc,
+                        },
+                        None,
+                    )
+                    .await
+                    .map(|_| ())
+            }
+            Err(read_error) => Err(read_error),
+        };
+        if let Err(release_error) = released {
+            tracing::warn!(
+                %occurrence_id,
+                attempt,
+                %fault,
+                %release_error,
+                "a claimed occurrence was not given back before dispatch: the store failed, or the occurrence machine refused the release (an earlier attempt recorded its dispatch, this attempt's dispatch start is recorded, or the occurrence has ended); what its claim lease decides stands"
+            );
+        }
+        fault
+    }
+
+    /// Everything the driver does with a claimed occurrence up to the write
+    /// that records its dispatch start. Until that write commits nothing is
+    /// in flight, so an error from here leaves a claim that
+    /// [`Self::release_claim_before_dispatch`] gives back.
+    async fn start_claimed_dispatch(
+        &self,
+        occurrence: Occurrence,
+        store_now_utc: chrono::DateTime<Utc>,
+        existing: Option<ExistingDelivery>,
+    ) -> Result<ClaimedDispatchStart, ScheduleDomainError> {
         let frozen_occurrence = occurrence.clone();
         let occurrence = match self
             .reconcile_claimed_occurrence_before_dispatch(occurrence)
@@ -727,7 +941,9 @@ impl ScheduleDriver {
                     )
                     .await?
                 else {
-                    return Ok(false);
+                    return Ok(ClaimedDispatchStart::Ended {
+                        terminalized: false,
+                    });
                 };
                 if commit.successor().phase != OccurrencePhase::Pending
                     || !commit
@@ -740,7 +956,9 @@ impl ScheduleDriver {
                             .to_string(),
                     ));
                 }
-                return Ok(false);
+                return Ok(ClaimedDispatchStart::Ended {
+                    terminalized: false,
+                });
             }
             ClaimedOccurrenceDispatchState::Supersede {
                 occurrence,
@@ -755,7 +973,7 @@ impl ScheduleDriver {
                     None,
                 )
                 .await?;
-                return Ok(true);
+                return Ok(ClaimedDispatchStart::Ended { terminalized: true });
             }
         };
 
@@ -764,8 +982,14 @@ impl ScheduleDriver {
             .await?
         {
             TargetProbeResolution::Continue(occurrence) => *occurrence,
-            TargetProbeResolution::Terminalized => return Ok(true),
-            TargetProbeResolution::StaleClaim => return Ok(false),
+            TargetProbeResolution::Terminalized => {
+                return Ok(ClaimedDispatchStart::Ended { terminalized: true });
+            }
+            TargetProbeResolution::StaleClaim => {
+                return Ok(ClaimedDispatchStart::Ended {
+                    terminalized: false,
+                });
+            }
         };
 
         let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
@@ -789,8 +1013,25 @@ impl ScheduleDriver {
             )
             .await?
         else {
-            return Ok(false);
+            return Ok(ClaimedDispatchStart::Ended {
+                terminalized: false,
+            });
         };
+        Ok(ClaimedDispatchStart::Started {
+            dispatch_commit,
+            delivery_identity,
+        })
+    }
+
+    /// The dispatch start is durable: admit the delivery at the target and
+    /// follow it to its completion waiter.
+    async fn deliver_started_dispatch(
+        &self,
+        dispatch_commit: crate::OccurrenceTransitionCommit,
+        delivery_identity: ScheduleDeliveryIdentity,
+        store_now_utc: chrono::DateTime<Utc>,
+        existing: Option<ExistingDelivery>,
+    ) -> Result<bool, ScheduleDomainError> {
         if !dispatch_commit
             .effects()
             .iter()
@@ -2253,6 +2494,586 @@ mod tests {
                 .expect("released executor lease should remain observable")
                 .active
                 .is_none()
+        );
+    }
+
+    /// What the wrapped store's non-authorizing lease view answers.
+    #[derive(Clone, Copy)]
+    enum LeaseView {
+        Store,
+        Unsupported,
+        AnotherHolder,
+    }
+
+    /// Wrapper store that loses executor-lease replies the way a dropped
+    /// connection does: the inner store commits and the caller sees a
+    /// transport error. A release, a schedule read and chosen occurrence
+    /// writes can be made to fail before they reach the inner store.
+    struct ReplyLossStore {
+        inner: Arc<dyn ScheduleStore>,
+        lose_next_acquire_reply: std::sync::atomic::AtomicBool,
+        lose_next_renew_reply: std::sync::atomic::AtomicBool,
+        fail_next_release: std::sync::atomic::AtomicBool,
+        lease_view: std::sync::Mutex<LeaseView>,
+        /// The lease the inner store committed and the caller never saw.
+        orphaned: Mutex<Option<ScheduleExecutorLease>>,
+        /// Fail the next occurrence write that records a dispatch start.
+        fail_next_dispatch_start_write: std::sync::atomic::AtomicBool,
+        /// Fail this many occurrence writes that record anything else.
+        fail_other_transition_writes: AtomicUsize,
+        /// Fail the next schedule read.
+        fail_next_schedule_read: std::sync::atomic::AtomicBool,
+        /// Fail the next read of an occurrence's receipt history.
+        fail_next_receipt_read: std::sync::atomic::AtomicBool,
+        /// How many occurrence writes asked to give a claim back.
+        release_writes: AtomicUsize,
+    }
+
+    impl ReplyLossStore {
+        fn new(inner: Arc<dyn ScheduleStore>) -> Self {
+            Self {
+                inner,
+                lose_next_acquire_reply: std::sync::atomic::AtomicBool::new(false),
+                lose_next_renew_reply: std::sync::atomic::AtomicBool::new(false),
+                fail_next_release: std::sync::atomic::AtomicBool::new(false),
+                lease_view: std::sync::Mutex::new(LeaseView::Store),
+                orphaned: Mutex::new(None),
+                fail_next_dispatch_start_write: std::sync::atomic::AtomicBool::new(false),
+                fail_other_transition_writes: AtomicUsize::new(0),
+                fail_next_schedule_read: std::sync::atomic::AtomicBool::new(false),
+                fail_next_receipt_read: std::sync::atomic::AtomicBool::new(false),
+                release_writes: AtomicUsize::new(0),
+            }
+        }
+
+        fn set_lease_view(&self, view: LeaseView) {
+            *self.lease_view.lock().expect("lease view lock") = view;
+        }
+
+        /// End the orphaned lease as its expiry would.
+        async fn end_orphaned_lease(&self) {
+            let lease = self
+                .orphaned
+                .lock()
+                .await
+                .take()
+                .expect("a reply was lost and left a lease behind");
+            self.inner
+                .release_executor_lease(lease)
+                .await
+                .expect("end the orphaned lease");
+        }
+    }
+
+    #[async_trait]
+    impl ScheduleStore for ReplyLossStore {
+        fn kind(&self) -> crate::ScheduleStoreKind {
+            self.inner.kind()
+        }
+
+        fn wake_mode(&self) -> crate::ScheduleStoreWakeMode {
+            self.inner.wake_mode()
+        }
+
+        async fn wait_for_durable_wake(&self) -> Result<(), ScheduleStoreError> {
+            self.inner.wait_for_durable_wake().await
+        }
+
+        async fn acquire_executor_lease(
+            &self,
+            request: crate::AcquireScheduleExecutorLeaseRequest,
+        ) -> Result<crate::AcquireScheduleExecutorLeaseOutcome, ScheduleStoreError> {
+            let outcome = self.inner.acquire_executor_lease(request).await?;
+            if self.lose_next_acquire_reply.swap(false, Ordering::SeqCst) {
+                if let AcquireScheduleExecutorLeaseOutcome::Acquired(lease) = outcome {
+                    *self.orphaned.lock().await = Some(lease);
+                }
+                return Err(ScheduleStoreError::Transient(
+                    "injected: acquire reply lost".to_string(),
+                ));
+            }
+            Ok(outcome)
+        }
+
+        async fn renew_executor_lease(
+            &self,
+            request: crate::RenewScheduleExecutorLeaseRequest,
+        ) -> Result<crate::RenewScheduleExecutorLeaseOutcome, ScheduleStoreError> {
+            let outcome = self.inner.renew_executor_lease(request).await?;
+            if self.lose_next_renew_reply.swap(false, Ordering::SeqCst) {
+                if let RenewScheduleExecutorLeaseOutcome::Renewed(lease) = outcome {
+                    *self.orphaned.lock().await = Some(lease);
+                }
+                return Err(ScheduleStoreError::Transient(
+                    "injected: renew reply lost".to_string(),
+                ));
+            }
+            Ok(outcome)
+        }
+
+        async fn release_executor_lease(
+            &self,
+            lease: crate::ScheduleExecutorLease,
+        ) -> Result<(), ScheduleStoreError> {
+            if self.fail_next_release.swap(false, Ordering::SeqCst) {
+                *self.orphaned.lock().await = Some(lease);
+                return Err(ScheduleStoreError::Transient(
+                    "injected: release failed".to_string(),
+                ));
+            }
+            self.inner.release_executor_lease(lease).await
+        }
+
+        async fn observe_executor_lease(
+            &self,
+        ) -> Result<crate::ScheduleExecutorLeaseObservation, ScheduleStoreError> {
+            let view = *self.lease_view.lock().expect("lease view lock");
+            match view {
+                LeaseView::Store => self.inner.observe_executor_lease().await,
+                LeaseView::Unsupported => Err(ScheduleStoreError::Internal(
+                    "injected: lease view unsupported".to_string(),
+                )),
+                LeaseView::AnotherHolder => {
+                    let mut observation = self.inner.observe_executor_lease().await?;
+                    if let Some(active) = observation.active.as_mut() {
+                        active.owner_id = "another-executor:took-over".to_string();
+                        active.acquired_at_utc += Duration::seconds(1);
+                    }
+                    Ok(observation)
+                }
+            }
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn next_action_time_utc(
+            &self,
+        ) -> Result<crate::ScheduleStoreActionTime, ScheduleStoreError> {
+            self.inner.next_action_time_utc().await
+        }
+
+        async fn read_due_refill_candidates(
+            &self,
+            limit: usize,
+        ) -> Result<crate::ScheduleRefillBatch, ScheduleStoreError> {
+            self.inner.read_due_refill_candidates(limit).await
+        }
+
+        async fn commit_schedule_write(
+            &self,
+            write: crate::AuthorizedScheduleWrite,
+        ) -> Result<crate::ScheduleTransitionCommit, ScheduleStoreError> {
+            self.inner.commit_schedule_write(write).await
+        }
+
+        async fn get_schedule(
+            &self,
+            schedule_id: &crate::ScheduleId,
+        ) -> Result<Option<crate::Schedule>, ScheduleStoreError> {
+            if self.fail_next_schedule_read.swap(false, Ordering::SeqCst) {
+                return Err(ScheduleStoreError::Transient(
+                    "injected: schedule read failed".to_string(),
+                ));
+            }
+            self.inner.get_schedule(schedule_id).await
+        }
+
+        async fn list_schedules(
+            &self,
+            filter: crate::ScheduleFilter,
+        ) -> Result<Vec<crate::Schedule>, ScheduleStoreError> {
+            self.inner.list_schedules(filter).await
+        }
+
+        async fn commit_occurrence_write(
+            &self,
+            write: crate::AuthorizedOccurrenceWrite,
+        ) -> Result<crate::OccurrenceTransitionCommit, ScheduleStoreError> {
+            self.inner.commit_occurrence_write(write).await
+        }
+
+        async fn commit_occurrence_writes(
+            &self,
+            writes: Vec<crate::AuthorizedOccurrenceWrite>,
+        ) -> Result<Vec<crate::OccurrenceTransitionCommit>, ScheduleStoreError> {
+            self.inner.commit_occurrence_writes(writes).await
+        }
+
+        async fn commit_schedule_mutation(
+            &self,
+            schedule: crate::AuthorizedScheduleWrite,
+            occurrences: Vec<crate::AuthorizedOccurrenceWrite>,
+        ) -> Result<crate::ScheduleMutationCommit, ScheduleStoreError> {
+            self.inner
+                .commit_schedule_mutation(schedule, occurrences)
+                .await
+        }
+
+        async fn commit_schedule_refill(
+            &self,
+            schedule: crate::AuthorizedScheduleWrite,
+            occurrences: Vec<crate::AuthorizedOccurrenceWrite>,
+            next_refill_at_utc: Option<DateTime<Utc>>,
+        ) -> Result<crate::ScheduleMutationCommit, ScheduleStoreError> {
+            self.inner
+                .commit_schedule_refill(schedule, occurrences, next_refill_at_utc)
+                .await
+        }
+
+        async fn record_refill_deadline_if_current(
+            &self,
+            schedule_id: &crate::ScheduleId,
+            expected_revision: crate::ScheduleRevision,
+            expected_refill_at_utc: DateTime<Utc>,
+            next_refill_at_utc: Option<DateTime<Utc>>,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner
+                .record_refill_deadline_if_current(
+                    schedule_id,
+                    expected_revision,
+                    expected_refill_at_utc,
+                    next_refill_at_utc,
+                )
+                .await
+        }
+
+        async fn get_occurrence(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+        ) -> Result<Option<Occurrence>, ScheduleStoreError> {
+            self.inner.get_occurrence(occurrence_id).await
+        }
+
+        async fn list_occurrences(
+            &self,
+            filter: crate::OccurrenceFilter,
+        ) -> Result<Vec<Occurrence>, ScheduleStoreError> {
+            self.inner.list_occurrences(filter).await
+        }
+
+        async fn list_receipts(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+        ) -> Result<Vec<DeliveryReceipt>, ScheduleStoreError> {
+            if self.fail_next_receipt_read.swap(false, Ordering::SeqCst) {
+                return Err(ScheduleStoreError::Transient(
+                    "injected: receipt read failed".to_string(),
+                ));
+            }
+            self.inner.list_receipts(occurrence_id).await
+        }
+
+        async fn claim_due_occurrences(
+            &self,
+            lease: &crate::ScheduleExecutorLease,
+            request: ClaimDueRequest,
+        ) -> Result<crate::ClaimDueResult, ScheduleStoreError> {
+            self.inner.claim_due_occurrences(lease, request).await
+        }
+
+        async fn renew_occurrence_lease_if_current(
+            &self,
+            request: crate::RenewOccurrenceLeaseRequest,
+        ) -> Result<crate::RenewOccurrenceLeaseResult, ScheduleStoreError> {
+            self.inner.renew_occurrence_lease_if_current(request).await
+        }
+
+        async fn transition_occurrence_if_current(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+        ) -> Result<Option<crate::OccurrenceTransitionCommit>, ScheduleStoreError> {
+            self.inner
+                .transition_occurrence_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                )
+                .await
+        }
+
+        async fn transition_occurrence_with_receipt_if_current(
+            &self,
+            occurrence_id: &crate::OccurrenceId,
+            expected_attempt: u32,
+            expected_claim_token: Option<Uuid>,
+            transition: OccurrenceLifecycleInput,
+            runtime_outcome: Option<RuntimeDeliveryOutcome>,
+        ) -> Result<Option<crate::OccurrenceTransitionCommit>, ScheduleStoreError> {
+            if matches!(
+                transition,
+                OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch { .. }
+            ) {
+                self.release_writes.fetch_add(1, Ordering::SeqCst);
+            }
+            if matches!(transition, OccurrenceLifecycleInput::DispatchStarted { .. }) {
+                if self
+                    .fail_next_dispatch_start_write
+                    .swap(false, Ordering::SeqCst)
+                {
+                    return Err(ScheduleStoreError::Transient(
+                        "injected: dispatch start write failed".to_string(),
+                    ));
+                }
+            } else if self
+                .fail_other_transition_writes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ScheduleStoreError::Transient(
+                    "injected: occurrence write failed".to_string(),
+                ));
+            }
+            self.inner
+                .transition_occurrence_with_receipt_if_current(
+                    occurrence_id,
+                    expected_attempt,
+                    expected_claim_token,
+                    transition,
+                    runtime_outcome,
+                )
+                .await
+        }
+    }
+
+    fn executor_lease_test_driver(store: Arc<dyn ScheduleStore>, owner_id: &str) -> ScheduleDriver {
+        ScheduleDriver::new(
+            ScheduleService::new(Arc::clone(&store)),
+            store,
+            Arc::new(ReadyProbe),
+            Arc::new(CompletingDelivery::default()),
+            owner_id,
+            ScheduleDriverConfig {
+                claim_limit: 1,
+                lease_duration: Duration::seconds(30),
+            },
+        )
+    }
+
+    /// The lease the store holds, as its non-authorizing view shows it.
+    async fn held_executor_lease(store: &Arc<dyn ScheduleStore>) -> crate::ActiveScheduleExecutor {
+        store
+            .observe_executor_lease()
+            .await
+            .expect("the executor lease view reads")
+            .active
+            .expect("the store holds an executor lease")
+    }
+
+    /// The report of a tick that found the driver locked out behind its own
+    /// lease: a standby that moved nothing, naming the lease the store holds
+    /// under the driver's own executor owner id.
+    async fn expect_lockout_behind_own_lease(
+        report: &ScheduleTickReport,
+        store: &Arc<dyn ScheduleStore>,
+        driver_owner_id: &str,
+    ) {
+        assert!(
+            !report.executor_authorized,
+            "a locked-out tick holds no firing lease"
+        );
+        assert!(!report.made_progress(), "a locked-out tick moves no work");
+        assert_eq!(report.fault_count(), 0, "a lockout is not a row fault");
+        let held = held_executor_lease(store).await;
+        assert!(
+            held.owner_id.starts_with(&format!("{driver_owner_id}:")),
+            "the store's lease is this driver's own: {}",
+            held.owner_id
+        );
+        let lockout = report
+            .executor_lockout
+            .as_ref()
+            .expect("the tick reports the lockout behind the driver's own lease");
+        assert_eq!(lockout.holder_owner_id, held.owner_id);
+        assert_eq!(lockout.held_since_utc, Some(held.acquired_at_utc));
+        assert_eq!(lockout.expires_at_utc, held.expires_at_utc);
+    }
+
+    /// The store committed the acquisition and the reply never reached the
+    /// driver: every later tick finds the lease held under the driver's own
+    /// id, and says so instead of reporting a healthy standby.
+    #[tokio::test]
+    async fn a_lost_acquire_reply_is_reported_as_a_lockout_behind_the_drivers_own_lease() {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let driver = executor_lease_test_driver(store.clone(), "lockout-driver");
+
+        store.lose_next_acquire_reply.store(true, Ordering::SeqCst);
+        let lost = driver.tick_once().await;
+        assert!(
+            matches!(&lost, Err(error) if error.to_string().contains("acquire reply lost")),
+            "the tick that loses the reply fails with the transport error: {lost:?}"
+        );
+
+        let report = driver
+            .tick_once()
+            .await
+            .expect("a locked-out tick is not an error");
+        expect_lockout_behind_own_lease(&report, &inner, "lockout-driver").await;
+
+        // The host's cancellable entry point reports the same.
+        let report = driver
+            .tick_once_until_cancelled(std::future::pending::<()>())
+            .await
+            .expect("a locked-out tick is not an error")
+            .expect("the tick was not cancelled");
+        expect_lockout_behind_own_lease(&report, &inner, "lockout-driver").await;
+
+        // Once the orphaned lease is gone the driver acquires again and the
+        // report carries no lockout.
+        store.end_orphaned_lease().await;
+        let report = driver
+            .tick_once()
+            .await
+            .expect("the tick after the lockout");
+        assert!(report.executor_authorized);
+        assert!(report.executor_lockout.is_none());
+    }
+
+    /// The store committed a renewal and the reply never reached the driver:
+    /// the driver's witness is stale, and the lease it then asks for is held
+    /// under its own id.
+    #[tokio::test]
+    async fn a_lost_renew_reply_is_reported_as_a_lockout_behind_the_drivers_own_lease() {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let driver = executor_lease_test_driver(store.clone(), "lockout-driver");
+
+        let report = driver.tick_once().await.expect("the first tick acquires");
+        assert!(report.executor_authorized);
+        assert!(report.executor_lockout.is_none());
+
+        store.lose_next_renew_reply.store(true, Ordering::SeqCst);
+        let lost = driver.tick_once().await;
+        assert!(
+            matches!(&lost, Err(error) if error.to_string().contains("renew reply lost")),
+            "the tick that loses the reply fails with the transport error: {lost:?}"
+        );
+
+        let report = driver
+            .tick_once()
+            .await
+            .expect("a locked-out tick is not an error");
+        expect_lockout_behind_own_lease(&report, &inner, "lockout-driver").await;
+    }
+
+    /// A release that fails after the driver gave its witness up leaves the
+    /// same orphan.
+    #[tokio::test]
+    async fn a_failed_release_is_reported_as_a_lockout_behind_the_drivers_own_lease() {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let driver = executor_lease_test_driver(store.clone(), "lockout-driver");
+
+        let report = driver.tick_once().await.expect("the first tick acquires");
+        assert!(report.executor_authorized);
+
+        store.fail_next_release.store(true, Ordering::SeqCst);
+        let released = driver.release_executor_lease().await;
+        assert!(
+            matches!(&released, Err(error) if error.to_string().contains("release failed")),
+            "the release fails: {released:?}"
+        );
+
+        let report = driver
+            .tick_once()
+            .await
+            .expect("a locked-out tick is not an error");
+        expect_lockout_behind_own_lease(&report, &inner, "lockout-driver").await;
+    }
+
+    /// The acquisition time is read from the store's non-authorizing lease
+    /// view. A store without that view, or a view that no longer shows the
+    /// driver's own lease, leaves the time out; the lockout is reported all
+    /// the same, and names nobody but the driver itself.
+    #[tokio::test]
+    async fn a_lockout_is_reported_without_its_start_when_the_lease_view_does_not_show_it() {
+        for view in [LeaseView::Unsupported, LeaseView::AnotherHolder] {
+            let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+            let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+            let driver = executor_lease_test_driver(store.clone(), "lockout-driver");
+
+            store.lose_next_acquire_reply.store(true, Ordering::SeqCst);
+            driver
+                .tick_once()
+                .await
+                .expect_err("the tick that loses the reply fails");
+            store.set_lease_view(view);
+
+            let report = driver
+                .tick_once()
+                .await
+                .expect("a locked-out tick is not an error");
+            assert!(!report.executor_authorized);
+            let held = held_executor_lease(&inner).await;
+            let lockout = report
+                .executor_lockout
+                .as_ref()
+                .expect("the tick reports the lockout behind the driver's own lease");
+            assert_eq!(lockout.holder_owner_id, held.owner_id);
+            assert!(lockout.holder_owner_id.starts_with("lockout-driver:"));
+            assert_eq!(lockout.held_since_utc, None);
+            assert_eq!(lockout.expires_at_utc, held.expires_at_utc);
+        }
+    }
+
+    /// A second driver behind another driver's lease is the plain standby it
+    /// always was: no lockout, and nothing about the holder.
+    #[tokio::test]
+    async fn a_lease_held_by_another_driver_is_a_plain_standby() {
+        let store: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let holder = executor_lease_test_driver(Arc::clone(&store), "first-driver");
+        let standby = executor_lease_test_driver(Arc::clone(&store), "second-driver");
+
+        let report = holder.tick_once().await.expect("the holder's tick");
+        assert!(report.executor_authorized);
+
+        let report = standby.tick_once().await.expect("the standby's tick");
+        assert!(!report.executor_authorized);
+        assert!(
+            report.executor_lockout.is_none(),
+            "another driver's lease is not a lockout: {report:?}"
+        );
+        let report = standby
+            .tick_once_until_cancelled(std::future::pending::<()>())
+            .await
+            .expect("the standby's tick")
+            .expect("the tick was not cancelled");
+        assert!(!report.executor_authorized);
+        assert!(report.executor_lockout.is_none());
+    }
+
+    /// A restarted host is a new incarnation with a new executor owner id.
+    /// Behind the lease its previous incarnation left it is a plain standby,
+    /// although both carry the same host owner id.
+    #[tokio::test]
+    async fn a_restarted_host_behind_its_previous_incarnations_lease_is_a_plain_standby() {
+        let store: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let previous = executor_lease_test_driver(Arc::clone(&store), "same-host");
+        let report = previous.tick_once().await.expect("the first incarnation");
+        assert!(report.executor_authorized);
+        let left_behind = held_executor_lease(&store).await;
+        // The process dies without releasing.
+        drop(previous);
+
+        let restarted = executor_lease_test_driver(Arc::clone(&store), "same-host");
+        let report = restarted.tick_once().await.expect("the restarted host");
+        assert!(!report.executor_authorized);
+        assert!(
+            report.executor_lockout.is_none(),
+            "the previous incarnation's lease is not this incarnation's lockout: {report:?}"
+        );
+        assert_eq!(
+            held_executor_lease(&store).await,
+            left_behind,
+            "the standby took nothing over"
         );
     }
 
@@ -6121,6 +6942,496 @@ mod tests {
                 .iter()
                 .any(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired),
             "pause should release the claim immediately"
+        );
+        Ok(())
+    }
+
+    /// The receipt detail the occurrence machine writes for a claim given back
+    /// before its dispatch start was recorded.
+    const CLAIM_RELEASE_DETAIL: &str = "claim released because dispatch could not start";
+
+    /// A one-shot schedule under the default `skip` policy (30 s grace) that
+    /// came due `overdue` ago.
+    fn skip_once_request(name: &str, overdue: Duration) -> CreateScheduleRequest {
+        CreateScheduleRequest {
+            name: Some(name.into()),
+            description: None,
+            trigger: TriggerSpec::Once {
+                due_at_utc: Utc::now() - overdue,
+            },
+            target: materialize_on_demand_target("scheduled prompt"),
+            misfire_policy: MisfirePolicy::Skip,
+            overlap_policy: OverlapPolicy::AllowConcurrent,
+            missing_target_policy: MissingTargetPolicy::MarkMisfired,
+            labels: BTreeMap::new(),
+            planning_horizon_days: Some(1),
+            planning_horizon_occurrences: Some(1),
+        }
+    }
+
+    /// A driver with the shipped defaults: a 60 s claim lease, which outlasts
+    /// the 30 s `skip` grace.
+    fn default_config_driver(
+        service: &ScheduleService,
+        store: Arc<dyn ScheduleStore>,
+        probe: Arc<dyn ScheduleTargetProbe>,
+        delivery: Arc<dyn ScheduleTargetDelivery>,
+    ) -> ScheduleDriver {
+        ScheduleDriver::new(
+            service.clone(),
+            store,
+            probe,
+            delivery,
+            "driver-owner",
+            ScheduleDriverConfig::default(),
+        )
+    }
+
+    async fn only_occurrence(
+        service: &ScheduleService,
+        schedule_id: &crate::ScheduleId,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        let mut occurrences = service.list_occurrences(schedule_id).await?;
+        assert_eq!(occurrences.len(), 1, "one occurrence was planned");
+        Ok(occurrences.remove(0))
+    }
+
+    /// The receipts of stage `lease_expired`: a lapse, or a claim given back.
+    async fn lease_expired_receipts(
+        store: &Arc<dyn ScheduleStore>,
+        occurrence_id: &crate::OccurrenceId,
+    ) -> Result<Vec<DeliveryReceipt>, ScheduleDomainError> {
+        Ok(store
+            .list_receipts(occurrence_id)
+            .await?
+            .into_iter()
+            .filter(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired)
+            .collect())
+    }
+
+    /// The occurrence was given back once: it is pending again after its
+    /// first attempt, with the one receipt that says why, and nothing was
+    /// delivered.
+    async fn expect_claim_given_back(
+        service: &ScheduleService,
+        store: &Arc<dyn ScheduleStore>,
+        schedule_id: &crate::ScheduleId,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        let given_back = only_occurrence(service, schedule_id).await?;
+        assert_eq!(
+            given_back.phase,
+            OccurrencePhase::Pending,
+            "the claim is given back instead of outlasting the misfire window"
+        );
+        assert_eq!(given_back.attempt_count, 1);
+        let released = lease_expired_receipts(store, &given_back.occurrence_id).await?;
+        assert_eq!(released.len(), 1, "one receipt records the release");
+        assert_eq!(released[0].detail.as_deref(), Some(CLAIM_RELEASE_DETAIL));
+        assert_eq!(
+            released[0].failure_class,
+            Some(OccurrenceFailureClass::LeaseLost)
+        );
+        Ok(given_back)
+    }
+
+    /// The occurrence was delivered exactly once, by the claim that followed
+    /// the release, and never misfired.
+    async fn expect_delivered_by_the_second_claim(
+        service: &ScheduleService,
+        store: &Arc<dyn ScheduleStore>,
+        schedule_id: &crate::ScheduleId,
+        delivery: &CompletingDelivery,
+    ) -> Result<(), ScheduleDomainError> {
+        let completed =
+            wait_for_occurrence_phase(service, schedule_id, OccurrencePhase::Completed).await?;
+        assert_eq!(
+            completed.attempt_count, 2,
+            "delivered by the claim that followed the release"
+        );
+        assert_eq!(
+            delivery.dispatched_occurrences.lock().await.as_slice(),
+            std::slice::from_ref(&completed.occurrence_id),
+            "delivered exactly once"
+        );
+        let receipts = store.list_receipts(&completed.occurrence_id).await?;
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.stage != DeliveryReceiptStage::Misfired),
+            "the occurrence never misfired: {receipts:?}"
+        );
+        Ok(())
+    }
+
+    /// Under the shipped defaults a claim that lapses is always past its
+    /// misfire deadline (60 s lease, 30 s `skip` grace). One transient store
+    /// fault on the write that records the dispatch start must not cost the
+    /// occurrence: the driver gives the claim back, and the next tick inside
+    /// the window claims and delivers it.
+    #[tokio::test]
+    async fn a_failed_dispatch_start_write_gives_the_claim_back_inside_the_misfire_window()
+    -> Result<(), ScheduleDomainError> {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request(
+                "dispatch-start-fault",
+                Duration::seconds(1),
+            ))
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+        );
+
+        store
+            .fail_next_dispatch_start_write
+            .store(true, Ordering::SeqCst);
+        let failed = driver.tick_once().await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("dispatch start write failed")),
+            "the tick reports the store fault: {failed:?}"
+        );
+        expect_claim_given_back(&service, &inner, &schedule.schedule_id).await?;
+        assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+
+        driver.tick_once().await?;
+        expect_delivered_by_the_second_claim(&service, &inner, &schedule.schedule_id, &delivery)
+            .await
+    }
+
+    /// A probe that fails once and then finds the target ready.
+    #[derive(Default)]
+    struct FailsOnceProbe {
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl ScheduleTargetProbe for FailsOnceProbe {
+        async fn probe_target(
+            &self,
+            _occurrence: &Occurrence,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            if self.failed.swap(true, Ordering::SeqCst) {
+                Ok(TargetProbeOutcome::Ready)
+            } else {
+                Err(ScheduleDomainError::Internal(
+                    "injected: target probe failed".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// The same rule when the target probe fails: the row is claimed with
+    /// nothing in flight, so the claim is given back.
+    #[tokio::test]
+    async fn a_failed_target_probe_gives_the_claim_back_inside_the_misfire_window()
+    -> Result<(), ScheduleDomainError> {
+        let store: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request("probe-fault", Duration::seconds(1)))
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(FailsOnceProbe::default()),
+            delivery.clone(),
+        );
+
+        let failed = driver.tick_once().await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("target probe failed")),
+            "the tick reports the probe fault: {failed:?}"
+        );
+        expect_claim_given_back(&service, &store, &schedule.schedule_id).await?;
+        assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+
+        driver.tick_once().await?;
+        expect_delivered_by_the_second_claim(&service, &store, &schedule.schedule_id, &delivery)
+            .await
+    }
+
+    /// The same rule when the schedule cannot be read before dispatch.
+    #[tokio::test]
+    async fn a_failed_schedule_read_before_dispatch_gives_the_claim_back()
+    -> Result<(), ScheduleDomainError> {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request(
+                "schedule-read-fault",
+                Duration::seconds(1),
+            ))
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+        );
+        let executor_lease = test_executor_lease(&inner).await;
+        let claimed = inner
+            .claim_due_occurrences(
+                &executor_lease,
+                ClaimDueRequest {
+                    owner_id: "driver-owner".into(),
+                    limit: 1,
+                    lease_duration: ScheduleDriverConfig::default().lease_duration,
+                },
+            )
+            .await?;
+        inner.release_executor_lease(executor_lease).await?;
+        let occurrence = claimed
+            .transitions
+            .into_iter()
+            .next()
+            .expect("claimed occurrence")
+            .successor()
+            .clone();
+
+        store.fail_next_schedule_read.store(true, Ordering::SeqCst);
+        let failed = driver
+            .handle_claimed_occurrence(occurrence, claimed.store_now_utc, None)
+            .await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("schedule read failed")),
+            "the driver reports the store fault: {failed:?}"
+        );
+        expect_claim_given_back(&service, &inner, &schedule.schedule_id).await?;
+        assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+
+        driver.tick_once().await?;
+        expect_delivered_by_the_second_claim(&service, &inner, &schedule.schedule_id, &delivery)
+            .await
+    }
+
+    /// The store is still down when the driver gives the claim back: the
+    /// driver tries once, reports the first fault, and leaves the row to its
+    /// lease. It remembers nothing and retries nothing.
+    #[tokio::test]
+    async fn a_release_that_fails_too_reports_the_first_fault_and_leaves_the_claim_to_its_lease()
+    -> Result<(), ScheduleDomainError> {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request("release-fault", Duration::seconds(1)))
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+        );
+
+        store
+            .fail_next_dispatch_start_write
+            .store(true, Ordering::SeqCst);
+        store
+            .fail_other_transition_writes
+            .store(1, Ordering::SeqCst);
+        let failed = driver.tick_once().await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("dispatch start write failed")),
+            "the tick reports the first fault, not the failed release: {failed:?}"
+        );
+        assert_eq!(
+            store.fail_other_transition_writes.load(Ordering::SeqCst),
+            0,
+            "the driver tried to give the claim back"
+        );
+        let claimed = only_occurrence(&service, &schedule.schedule_id).await?;
+        assert_eq!(
+            claimed.phase,
+            OccurrencePhase::Claimed,
+            "the claim stays and lapses with its lease"
+        );
+        assert_eq!(claimed.attempt_count, 1);
+        assert!(
+            lease_expired_receipts(&inner, &claimed.occurrence_id)
+                .await?
+                .is_empty()
+        );
+
+        // Nothing is retried: the next tick finds a live claim and leaves it.
+        driver.tick_once().await?;
+        assert_eq!(
+            only_occurrence(&service, &schedule.schedule_id)
+                .await?
+                .phase,
+            OccurrencePhase::Claimed
+        );
+        assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+        Ok(())
+    }
+
+    /// The release carries what the receipt history proves, so a history
+    /// that cannot be read proves nothing: the driver sends no release (a
+    /// failed read is never taken for an empty history), reports the first
+    /// fault, and leaves the claim to its lease.
+    #[tokio::test]
+    async fn a_failed_receipt_read_sends_no_release_and_leaves_the_claim_to_its_lease()
+    -> Result<(), ScheduleDomainError> {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request(
+                "receipt-read-fault",
+                Duration::seconds(1),
+            ))
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(FailsOnceProbe::default()),
+            delivery.clone(),
+        );
+
+        store.fail_next_receipt_read.store(true, Ordering::SeqCst);
+        let failed = driver.tick_once().await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("target probe failed")),
+            "the tick reports the probe fault, not the failed read: {failed:?}"
+        );
+        assert!(
+            !store.fail_next_receipt_read.load(Ordering::SeqCst),
+            "the driver read the receipt history before it would give the claim back"
+        );
+        assert_eq!(
+            store.release_writes.load(Ordering::SeqCst),
+            0,
+            "no release is sent on a receipt history that could not be read"
+        );
+        let claimed = only_occurrence(&service, &schedule.schedule_id).await?;
+        assert_eq!(
+            claimed.phase,
+            OccurrencePhase::Claimed,
+            "the claim stays and lapses with its lease"
+        );
+        assert_eq!(claimed.attempt_count, 1);
+        assert!(
+            lease_expired_receipts(&inner, &claimed.occurrence_id)
+                .await?
+                .is_empty()
+        );
+        assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+        Ok(())
+    }
+
+    /// Giving a claim back is for a claim with nothing recorded. A reclaim of
+    /// an occurrence whose earlier attempt recorded its dispatch keeps its
+    /// claim when its dispatch cannot start: its attempts are spent one per
+    /// claim lease, as before, never one per failed tick.
+    #[tokio::test]
+    async fn a_reclaim_of_a_recorded_dispatch_keeps_its_claim_when_its_dispatch_cannot_start()
+    -> Result<(), ScheduleDomainError> {
+        let store: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request(
+                "recorded-dispatch-fault",
+                Duration::seconds(1),
+            ))
+            .await?;
+        // The first attempt records its dispatch start and loses its executor.
+        let intent =
+            claim_and_start_dispatch_without_waiter(&store, Duration::milliseconds(25)).await?;
+        assert_eq!(intent.attempt_count, 1);
+        sleep(std::time::Duration::from_millis(35)).await;
+
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(FailsOnceProbe::default()),
+            delivery.clone(),
+        );
+        // The reclaim (attempt 2) fails before its dispatch start.
+        let failed = driver.tick_once().await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("target probe failed")),
+            "the tick reports the probe fault: {failed:?}"
+        );
+        let kept = only_occurrence(&service, &schedule.schedule_id).await?;
+        assert_eq!(
+            kept.phase,
+            OccurrencePhase::Claimed,
+            "a reclaim of a recorded dispatch is not given back"
+        );
+        assert_eq!(kept.attempt_count, 2);
+
+        // Later ticks find a live claim: no attempt is spent at tick pace.
+        driver.tick_once().await?;
+        driver.tick_once().await?;
+        let kept = only_occurrence(&service, &schedule.schedule_id).await?;
+        assert_eq!(kept.phase, OccurrencePhase::Claimed);
+        assert_eq!(kept.attempt_count, 2, "attempts follow the claim lease");
+        assert!(delivery.dispatched_occurrences.lock().await.is_empty());
+        let lapses = lease_expired_receipts(&store, &kept.occurrence_id).await?;
+        assert_eq!(
+            lapses.len(),
+            1,
+            "only the first attempt's lapse: {lapses:?}"
+        );
+        assert_ne!(lapses[0].detail.as_deref(), Some(CLAIM_RELEASE_DETAIL));
+        Ok(())
+    }
+
+    /// Once the dispatch start is recorded nothing gives the claim back: a
+    /// fault after it leaves the occurrence dispatching, for the expiry and
+    /// reclaim rules.
+    #[tokio::test]
+    async fn a_fault_after_the_dispatch_start_gives_no_claim_back()
+    -> Result<(), ScheduleDomainError> {
+        let inner: Arc<dyn ScheduleStore> = Arc::new(MemoryScheduleStore::new());
+        let store = Arc::new(ReplyLossStore::new(Arc::clone(&inner)));
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(skip_once_request(
+                "fault-after-dispatch-start",
+                Duration::seconds(1),
+            ))
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = default_config_driver(
+            &service,
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+        );
+
+        // The dispatch start commits; the write that records the admission fails.
+        store
+            .fail_other_transition_writes
+            .store(1, Ordering::SeqCst);
+        let failed = driver.tick_once().await;
+        assert!(
+            matches!(&failed, Err(error) if error.to_string().contains("occurrence write failed")),
+            "the tick reports the store fault: {failed:?}"
+        );
+        assert_eq!(
+            store.release_writes.load(Ordering::SeqCst),
+            0,
+            "no release is sent once the dispatch start is recorded"
+        );
+        let dispatching = only_occurrence(&service, &schedule.schedule_id).await?;
+        assert_eq!(dispatching.phase, OccurrencePhase::Dispatching);
+        assert_eq!(dispatching.attempt_count, 1);
+        assert!(
+            lease_expired_receipts(&inner, &dispatching.occurrence_id)
+                .await?
+                .is_empty()
         );
         Ok(())
     }

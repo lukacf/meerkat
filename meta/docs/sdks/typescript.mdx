@@ -84,6 +84,63 @@ to this SDK, so keep them as they are. These replace
 `activateMemberInstruction` (`meta/member_activate_instruction`, deprecated
 since 0.9.11). See [Operator instructions](/api/rpc#operator-instructions).
 
+## Compacting a member's conversation
+
+From 0.9.15. `compactMember` compacts a member's conversation now: the member
+runs one maintenance turn in which the older turns are summarized and the
+most recent ones are kept. It costs one model turn and two in-place rebuilds
+of the member, one before that turn and one after it, on the same
+conversation.
+A `meta/compact_member` call that is admitted rebuilds the identity, whether
+it then compacts, compacts nothing or fails. On a 0.9.15 gateway a completed
+call keeps an identity's listing and management of the mobs it created with
+its own tools (one run; a call that times out, or completes without
+compacting, rebuilds by the same step: read from the source, not run), unless
+the same-session step does not serve its member (see Known limitations in
+Meta's changelog, the entry on the loss of an identity's mobs after a
+respawn); against a gateway on 0.9.9 through 0.9.14 the call costs it that,
+and upgrading does not give it back (see the `meta/compact_member` section of
+the RPC reference). Where the cost applies, have the identity destroy a mob
+it created before the call if it must not be left running unmanaged.
+Call it against a 0.9.15 gateway: on 0.9.9 through 0.9.14 a call that fails
+leaves the agent with the call's low compaction threshold.
+It is a host method only (`meta/compact_member`): the Console's RPC route
+does not forward it.
+
+```typescript
+const result = await rt.compactMember("triage:main");
+result.compaction_applied; // check it: false means not compacted
+result.messages_before, result.messages_after;
+
+// A lower threshold for a shorter conversation, a longer watch for a long turn.
+// A conversation of only a few turns may not get smaller whatever the floor,
+// and the call can then fail with compact_member_completion_failed.
+await rt.compactMember("triage:main", { floorTokens: 256, timeoutMs: 180_000 });
+```
+
+A changed instruction that waits for a compaction takes effect with it: an
+update whose `instructions` outcome is `applies_after_compaction`, because
+the member's model takes a system instruction only ahead of the
+conversation.
+
+`floorTokens` is the member's compaction threshold for that one turn (gateway
+default 1024 tokens). A conversation shorter than the floor is left as it is,
+so always check the result's `compaction_applied`: `false` means the
+conversation holds no fewer messages than before the call. `timeoutMs`
+(gateway default 60000) is how long the gateway watches the maintenance turn;
+past it the call rejects even if the compaction completes later. The gateway
+holds the call for longer than `timeoutMs`, so the call waits for the reply
+for `timeoutMs` plus 30 seconds, whatever the transport's own request timeout
+is.
+
+The result is the gateway's, as it is: `identity`, `session_id`,
+`floor_tokens`, `messages_before`, `messages_after`, `compaction_applied`,
+`head_revision` and `last_rewrite_reason`. A failure rejects with an RPC
+error whose `data.kind` names it, for example `compact_member_busy`,
+`compact_member_timeout` or `compact_member_completion_failed`, with
+`data.stage` and `data.operation_id`. See
+[`meta/compact_member`](/api/rpc#meta%2Fcompact_member).
+
 ## Fork instruction policy
 
 A member forked with `fork_off`, a delegation fork or a council does not run
@@ -162,7 +219,7 @@ materializes when it starts; it is sent as `runtime_options.member_restore`:
 ```typescript
 const rt = await Meta.builder()
   .mob("config/mob.toml")
-  .roster(roster)
+  .rosterProvider(roster)
   .memberRestore("on_demand_verified")
   .build();
 ```
@@ -308,8 +365,6 @@ identity); both are advisory. Every refusal rejects with
 
 ## Long-term agents
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 `runtime.identities` reads and changes the mob's long-term agents, one call
 per `meta/identity/*` host method. Every agent is read and changed the same
 way, whoever asked for it and by whatever route it came to exist. The
@@ -352,6 +407,10 @@ const state = await identities.operation({ requestId: "adopt-scout-1" });
 | `directory({ query?, after? })` | | `AgentDirectoryPage` |
 | `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
 
+An `archive` or a `remove` of an agent that still owns mobs it created is
+refused `owns_mobs`: have the agent destroy them first (see
+[`meta/identity/archive`](/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)).
+
 Options and answers are camelCase; the SDK spells the wire's names. A change
 needs your `requestId`: the same id and request return the same state and
 commit at most once. `expectedSpecDigest` is the agent's `specDigest` as you
@@ -366,7 +425,13 @@ poll: read `operation` when you want the state; it also resolves `refused`
 agent's `specDigest` afterwards, a create's `seat` (`seated` or `owed`) and
 an update's `instructions` (`applies_at_next_run`,
 `applies_after_compaction`, `applies_at_next_session` with a `reason`, or
-`unchanged`).
+`unchanged`). `applies_after_compaction` is a change that waits: the
+agent's model takes a system instruction only ahead of the conversation, and
+a short conversation may never reach the compaction that brings it into
+effect. `rt.reset(name)` does, and gives the agent's conversation up.
+`rt.instructionStatus` is the authority for whether a change is in
+effect; see
+[Changing an agent's instructions](/concepts/roster#changing-an-agent%E2%80%99s-instructions).
 
 The first answer of an `archive`, an `unarchive` and a `remove` also carries
 the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
@@ -411,7 +476,11 @@ empty when nothing is open.
 Every refusal of every call rejects with `IdentityRefusedError` (`-32058`);
 its kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`
 (`IdentityRefusalKind`). A kind newer than the SDK is the same error with
-`knownKind` false. Only `operation` resolves a refusal as a value. A
+`knownKind` false. Only `operation` resolves a refusal as a value. An
+`archive` or a `remove` of an agent that still owns mobs it created is
+refused `owns_mobs`, and nothing is changed: `details` holds `count` (how
+many mobs) and `mobs` (their ids, given to this host), and the remedy is to
+have the agent destroy its mobs first, or to keep the agent. A
 candidate launch refuses a change with the gateway-wide
 `AnnouncementRefusedError` (`kind` `candidate_launch`). `field` and the keys
 of `details` are in the wire's names (`agents[1].name`, `current_digest`).
@@ -581,11 +650,56 @@ compatibility with existing TypeScript objects; parsed responses use `null` when
 a field is absent or malformed. Unknown outcome strings are preserved.
 `nextPendingId` identifies an escalation successor; the SDK does not automatically
 retry or execute the action. See [Gating](/concepts/gating) for decision semantics.
+`gatingDecide` reads the result of a gated action. From 0.9.15
+`meta/gating/decide` answers a question set's `pending_id` with another
+result, which carries `kind: "question_set"` and no `action_id`: decide a
+question set with `gatingAnswer` or `gatingDismiss`, which read it.
 
 `handle.gatingWithdraw(pendingId, reason?)` withdraws a pending request this host
 minted, with no decision: it returns `pendingId`, `actionId`, `actorId`,
 `outcome` (`safe_draft`), `withdrawnAtMs`, `withdrawnBy` and `reason`. A request
 that was already decided, timed out or withdrawn is refused as an unknown id.
+
+From 0.9.15. `handle.gatingQuestions()` lists the open
+[question sets](/concepts/gating#question-sets) agents asked with `ask_user`
+(they are not part of `gatingPending()`). Each `GatingQuestionSet` carries the
+`pendingId` a decision takes, the asking agent as `origin`, a `title` (or
+`null`), its `questions` (`id`, `prompt`, `choices`, `allowFreeText`,
+`recommended`), `createdAtMs`, `deadlineAtMs` and the `subjectDigest` a
+decision sends back. Both decisions go through `meta/gating/decide`, so the
+host names the approver:
+
+```ts
+for (const set of await handle.gatingQuestions()) {
+  const result = await handle.gatingAnswer(set.pendingId, {
+    approverId: "operator",
+    presentedDigest: set.subjectDigest,
+    answers: [
+      { questionId: "region", answer: { kind: "choice", choiceId: "eu" } },
+      { questionId: "start", answer: { kind: "free_text", text: "After the 16:00 freeze" } },
+    ],
+  });
+  // result.outcome === "answered"
+}
+```
+
+At least one answer is needed (`gatingAnswer` throws otherwise, before
+anything is sent); a question left out reaches the agent as `unanswered`, and
+free text is allowed only where the question sets `allowFreeText`.
+`handle.gatingDismiss(pendingId, { approverId, presentedDigest })` tells the
+agent no answer is coming. Both return a `GatingQuestionSetResult`
+(`pendingId`, `kind`, `outcome`: `answered` or `dismissed`, `decidedAtMs`). The
+gateway refuses an invalid answer set as invalid params (`-32602`). A set that
+itself refuses the decide (it is no longer open, or `presentedDigest` is not
+its digest) is refused `-32602` with the typed refusal in the error's data:
+`data.kind = "decision_refused"` and `data.decision_refusal.kind` (`not_open`,
+`subject_changed`, `expired` or `not_eligible`); see
+[Answering a question set](/api/rpc#answering-a-question-set).
+
+There is no Meta SDK for the browser: the browser client of these methods is
+the Console's own `@console-core` package (`normalizeQuestionSet`,
+`createQuestionSetResource` and the `listQuestionSets` command), and the Core
+Web SDK (`@rkat/web`) has no Meta surface.
 
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.
@@ -867,8 +981,6 @@ The gateway binds `127.0.0.1` on an ephemeral port by default. `httpListen("0.0.
 
 `meerkatConfig(path)` forwards a Meerkat host `config.toml` as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. The Python twin is `.meerkat_config(path)`. See [Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 `memberCommsTcp(address = "127.0.0.1:0")` gives the locally hosted mob members signed TCP comms endpoints (`runtime_options.member_comms_address`): each member binds a port on `address`. From 0.9.15 `MobHandle.peerInfo` reports it as `dialable_address`, and the rest of this note, on wiring members of two gateways and on what a wire survives, applies from 0.9.15. `MobHandle.wireCrossMob(localMemberId, remoteMemberId, remoteHandle)` wires a member of this mob and a member of another mob to each other, so the two agents can send each other ordinary peer messages. Every runtime starts its own gateway process, so two mob handles are normally two processes: call `memberCommsTcp()` on both builders. `peerInfo` answers `member_id`, `mob_id`, `comms_name`, `peer_id`, `address` (the in-process address), `pubkey_b64` (the member's own transport key) and, only for a member with a socket endpoint, `dialable_address`. When both answers carry `dialable_address`, each side is wired to the other by that address and the member's key (never the gateway key of `peerPubkey()`); otherwise each side is wired by the in-process address with no key, which works when one process hosts both mobs, and a member that process does not have is refused in plain words with nothing wired. A refused second side undoes the first, unless that side was wired before the call. Calling the helper again for a pair that is already wired with the same endpoints changes nothing. A wire is never replaced: when a side is already wired to that peer with another endpoint (another address, or another key after a respawn), its `wireLocal` is refused in plain words and nothing changes; call `unwireLocal` on both sides, each with the other member's current `peerInfo`, then wire again. A member of a stopped mob still accepts a message through a wire and is handed it when its mob resumes. The Python twins are `.member_comms_tcp(address)` and `wire_cross_mob(...)`.
 
 Between two gateways, a wire survives a gateway restart on persistent state only when each wired member's `dialable_address` is the same after the restart. With `memberCommsTcp()`'s default address (port `0`, a port the system picks at each start) it is not: the restarted member binds another port, is restored `broken`, and its wires are dead. Give a mob with persistent state a fixed address (`memberCommsTcp("host:port")`). To wire a member again after its address changed: `respawnMember` the broken member (it comes back active with its new address, and on a fresh conversation: a respawn starts the member on a new session); `unwireLocal` on the other gateway, with the respawned member's current `peerInfo`; `unwireLocal` on the restarted gateway, with the other member's current `peerInfo`; then `wireCrossMob` again. With member socket endpoints, run one member per gateway today.
@@ -891,7 +1003,7 @@ const runtime = await Meta.builder()
   .persistentState("state/meta")
   // Declare an in-memory runtime store (sessions do not survive restart).
   .runtimeStore(runtimeStore.memory())
-  // Declare a bounded queryable in-process event log — or eventLog.nullStore().
+  // Declare a queryable in-process event log (it has no size limit) — or eventLog.nullStore().
   .eventLog(eventLog.memory({ batchSize: 64 }))
   .gateway("/path/to/rpc_gateway")
   .build();

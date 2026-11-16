@@ -1,6 +1,46 @@
 {
   "CatalogModelEntry": {
     "$defs": {
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
         "properties": {
@@ -63,6 +103,16 @@
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
+          },
+          "reasoning_effort_levels": {
+            "description": "The levels the provider-neutral `reasoning_effort` option accepts for\nthis model on its provider's own API (the direct route), lowest\nfirst. Empty when the model takes no level there. Absent when no\nsource states them: a self-hosted model (the operator declares its\nlevels) or a model with no catalog row. A route that answers for\nitself (a GitHub Copilot account's model list) can accept other\nlevels than these; a refused request names that route's own.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "release_stage": {
             "$ref": "#/$defs/WireModelReleaseStage",
@@ -306,6 +356,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "ProviderCatalog": {
         "description": "Provider-level grouping in the catalog response.",
         "properties": {
@@ -394,6 +484,16 @@
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
+          },
+          "reasoning_effort_levels": {
+            "description": "The levels the provider-neutral `reasoning_effort` option accepts for\nthis model on its provider's own API (the direct route), lowest\nfirst. Empty when the model takes no level there. Absent when no\nsource states them: a self-hosted model (the operator declares its\nlevels) or a model with no catalog row. A route that answers for\nitself (a GitHub Copilot account's model list) can accept other\nlevels than these; a refused request names that route's own.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "release_stage": {
             "$ref": "#/$defs/WireModelReleaseStage",
@@ -559,6 +659,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
         "properties": {
@@ -621,6 +761,16 @@
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
+          },
+          "reasoning_effort_levels": {
+            "description": "The levels the provider-neutral `reasoning_effort` option accepts for\nthis model on its provider's own API (the direct route), lowest\nfirst. Empty when the model takes no level there. Absent when no\nsource states them: a self-hosted model (the operator declares its\nlevels) or a model with no catalog row. A route that answers for\nitself (a GitHub Copilot account's model list) can accept other\nlevels than these; a refused request names that route's own.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "release_stage": {
             "$ref": "#/$defs/WireModelReleaseStage",
@@ -718,6 +868,46 @@
   },
   "WireModelProfile": {
     "$defs": {
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
         "properties": {
@@ -790,6 +980,16 @@
         "default": false,
         "description": "Whether the model supports realtime bidirectional transport.",
         "type": "boolean"
+      },
+      "reasoning_effort_levels": {
+        "description": "The levels the provider-neutral `reasoning_effort` option accepts for\nthis model on its provider's own API (the direct route), lowest\nfirst. Empty when the model takes no level there. Absent when no\nsource states them: a self-hosted model (the operator declares its\nlevels) or a model with no catalog row. A route that answers for\nitself (a GitHub Copilot account's model list) can accept other\nlevels than these; a refused request names that route's own.",
+        "items": {
+          "$ref": "#/$defs/EffortLevel"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
       },
       "release_stage": {
         "$ref": "#/$defs/WireModelReleaseStage",

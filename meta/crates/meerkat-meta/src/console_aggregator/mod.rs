@@ -8,6 +8,7 @@ mod tool_application_projection;
 mod assistant_message_identity_tests;
 #[cfg(test)]
 mod conflict_signal_replay_tests;
+mod council;
 mod delta_compaction;
 #[cfg(test)]
 mod delta_compaction_tests;
@@ -468,6 +469,10 @@ struct ResolvedConsoleMember {
     member: MobMemberListEntry,
     source_mob_id: String,
     runtime_identity: String,
+    /// Whether the member sits in a temporary council's own mob
+    /// ([`council::council_owns_mob`]): a participant, which no policy
+    /// lists, resolves or serves.
+    council_participant: bool,
 }
 
 /// What a classic send's replay needs to dispatch it again.
@@ -1077,11 +1082,12 @@ fn raw_resolved_member_visible(
     resolved: &ResolvedConsoleMember,
     record: &ConsoleIdentityRecord,
 ) -> bool {
-    (resolved
-        .entry
-        .visibility_policy
-        .include_implicit_delegate_members()
-        || *resolved.entry.runtime.handle().mob_id() == resolved.source_mob_id)
+    !resolved.council_participant
+        && (resolved
+            .entry
+            .visibility_policy
+            .include_implicit_delegate_members()
+            || *resolved.entry.runtime.handle().mob_id() == resolved.source_mob_id)
         && resolved.entry.visibility_policy.identity_visible(record)
         && resolved
             .entry
@@ -2028,6 +2034,22 @@ impl MetaConsoleAggregator {
             true,
         ))
         .await
+    }
+
+    /// Test seam: whether a council of `runtime_key`'s runtime owns the mob
+    /// of `incarnation` listed under `mob_id`, as the member listing decides
+    /// it for a mob handle it listed. `None` without that runtime or its
+    /// mob tool state.
+    #[cfg(test)]
+    pub(crate) async fn council_owns_mob_for_test(
+        &self,
+        runtime_key: &str,
+        mob_id: &str,
+        incarnation: meerkat_core::service::MobIncarnationId,
+    ) -> Option<bool> {
+        let entry = self.inner.runtimes.read().ok()?.get(runtime_key).cloned()?;
+        let state = entry.runtime.agent_mob_mcp_state()?;
+        Some(Box::pin(council::council_owns_mob(&state, mob_id, incarnation)).await)
     }
 
     #[cfg(test)]
@@ -5422,7 +5444,14 @@ async fn member_sources_for_entry_with_hidden(
 ) -> Vec<ResolvedConsoleMember> {
     let mut resolved = Box::pin(primary_member_sources(entry)).await;
     if include_hidden || entry.visibility_policy.include_implicit_delegate_members() {
-        resolved.extend(Box::pin(delegate_member_sources(entry)).await);
+        // A council participant is listed only with the hidden members, on
+        // every policy (see `council`).
+        resolved.extend(
+            Box::pin(delegate_member_sources(entry))
+                .await
+                .into_iter()
+                .filter(|member| include_hidden || !member.council_participant),
+        );
     }
     resolved
 }
@@ -5450,6 +5479,7 @@ async fn primary_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMemb
             )
             .into_owned(),
             source_mob_id: primary_mob_id.clone(),
+            council_participant: false,
             member,
         })
         .collect()
@@ -5475,7 +5505,18 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
         if mob_id.as_str() == primary_mob_id {
             continue;
         }
-        for member in handle.list_members_observation_snapshot().await {
+        // Decided once per mob, from the council's own record, which is
+        // read after the members are listed: a council's record is durable
+        // before its seating, so the seats of a council admitted over the
+        // mob meanwhile are never listed against the record's absence.
+        let members = handle.list_members_observation_snapshot().await;
+        let council_participant = Box::pin(council::council_owns_mob(
+            &state,
+            mob_id.as_str(),
+            handle.incarnation(),
+        ))
+        .await;
+        for member in members {
             resolved.push(ResolvedConsoleMember {
                 entry: entry.clone(),
                 handle: handle.clone(),
@@ -5486,6 +5527,7 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
                 )
                 .into_owned(),
                 source_mob_id: mob_id.to_string(),
+                council_participant,
                 member,
             });
         }
@@ -10699,10 +10741,14 @@ async fn frame_is_visible_cached(
         };
         entry.clone()
     };
-    if let Some(provenance) = &frame.source.member_provenance
-        && !retained_member_visible(entry.visibility_policy.as_ref(), provenance)
-    {
-        return Ok(false);
+    if let Some(provenance) = &frame.source.member_provenance {
+        if !retained_member_visible(entry.visibility_policy.as_ref(), provenance) {
+            return Ok(false);
+        }
+        // A frame a council participant wrote is served on no policy.
+        if read.council_wrote_frame(&entry, frame, provenance).await {
+            return Ok(false);
+        }
     }
     // Runtime-plane frames aren't agent frames: `__console__` (synthetic
     // gap markers) and `_system` (ConsoleMemoryEventSink attributes

@@ -57,8 +57,6 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 
 ## Upgrading to 0.9.15
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 This section is for systems running 0.9.14 or 0.9.13. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
@@ -178,6 +176,47 @@ older file had. The flag is described under
 The descriptor file of `rkat mob host --descriptor-out` is owner-only in
 the same way.
 
+### The Web SDK's provider proxy listens on loopback and compares origins
+
+The standalone proxy of `@rkat/web` (`npx @rkat/web proxy`, `startProxy`)
+listens on the loopback interface (`127.0.0.1`) by default; through 0.9.14
+it bound every interface. The proxy, and a `createProxyHandler` embedded in
+your own server, now compare a request's `Origin` header before the
+provider is called and answer 403 when the origin is not allowed: loopback
+origins by default (`localhost`, any `127.x.x.x` address and `[::1]`, http
+or https, any port), the one origin `--cors-origin <origin>` (`allowOrigin`)
+names, or any origin with `*`. Through 0.9.14 every origin was allowed by
+default and the option set the response header only. A request without an
+`Origin` header is forwarded as before, except one a browser marks
+`Sec-Fetch-Site: cross-site`, which only `*` allows: the proxy does not
+check who calls it. See
+[the proxy example](/examples/wasm).
+
+Nothing changes for a page served from a loopback origin that calls a proxy
+on the same machine, or for a local tool that sends no `Origin` header.
+
+**Do**, where one of these applies:
+
+- The proxy is reached from another machine or through a container's
+  published port: pass `--host <address>` (`0.0.0.0` for every interface).
+  On such an address a caller on the network that sends no `Origin` header
+  is forwarded with no check, so put the proxy behind your own
+  authentication.
+- The page that calls the proxy is not on a loopback origin: pass
+  `--cors-origin https://app.example.com`. `--cors-origin '*'` allows every
+  origin and is the only setting that serves a page opened from a file or a
+  sandboxed frame (`Origin: null`).
+- Your server embeds `createProxyHandler` without `allowOrigin`: the handler
+  now serves loopback origins only, and that refuses your site's own pages
+  too, because a page sends an `Origin` on its POSTs to its own server. Pass
+  the site's origin as `allowOrigin` (one origin, as a string), or
+  `allowOrigin: '*'` for the earlier behaviour. An `allowOrigin` it already
+  passes is now compared with each request. A dependency range such as
+  `^0.9.14` takes 0.9.15 at the next install.
+- A client reaches a loopback-bound standalone proxy under another host
+  name (a hosts-file alias, a local reverse proxy that keeps the original
+  `Host`): it gets 403, so call the proxy as `localhost` or `127.0.0.1`.
+
 ### `rkat run --output json`: a failed run prints a failure document
 
 A failed `rkat run --output json` (or `--json`, with or without `--resume`)
@@ -240,6 +279,39 @@ the schedules of the targets that take deliveries again and are still
 paused. The loss is on the safe side: such a schedule never fires at a
 target that takes no delivery.
 
+### Schedule tick reports are non-exhaustive (Rust)
+
+`meerkat_schedule::ScheduleTickReport` gains the field `executor_lockout`
+and is now `#[non_exhaustive]`. Code outside the crate that builds a report
+with a struct literal starts from `ScheduleTickReport::default()` and assigns
+the fields it needs, and a pattern that names its fields ends with `..`.
+Code that only reads a report needs no change. The field is set when a
+schedule driver finds itself locked out behind its own executor lease; see
+[Executor Lease And Crash Recovery](/guides/scheduling#executor-lease-and-crash-recovery).
+
+### The occurrence lifecycle machine gains an input (Rust)
+
+The occurrence machine gains the input `ReleaseClaimBeforeDispatch`, which
+the schedule driver sends to give a claim back when its dispatch cannot
+start. In `meerkat-schedule` it is
+`OccurrenceLifecycleInput::ReleaseClaimBeforeDispatch { admission_evidence,
+at_utc }`: `admission_evidence` is what the occurrence's receipt history
+proves about earlier attempts (the machine admits the release only when no
+dispatch was recorded), and `at_utc` is the store's time of the release.
+Exhaustive matches on these enums need the new arms:
+`OccurrenceLifecycleInput` in `meerkat-schedule`; `OccurrenceLifecycleInput`
+and `OccurrenceLifecycleInputVariant` in `meerkat-machine-schema`
+(`catalog::dsl::occurrence_lifecycle`); `Input`, `InputKind`,
+`OccurrenceLifecycleInputVariant` and `TransitionId`
+(`ReleaseClaimBeforeDispatchFromClaimed` and
+`ReleaseClaimBeforeDispatchAfterSupersession`) in `meerkat-machine-kernels`
+(`generated::occurrence_lifecycle`). Every new variant is appended last, so
+no existing variant's implicit discriminant moves. No stored occurrence or
+receipt changes shape, so there is nothing to migrate and an earlier release
+reads the same rows (read from the source): a claim given back is recorded
+as a `lease_expired` receipt with the detail `claim released because
+dispatch could not start`.
+
 ### Store-owned agents: seats an earlier release recorded
 
 A store-owned identity is an agent whose record is its row in the mob's
@@ -271,13 +343,56 @@ owed restamp, so no start and no build of 0.9.15 moves the seat's labels.
 before the host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a
 spawn customizer that sets labels. Respawn the member with its row's labels
 (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`),
-or update the identity while its member is idle: any update then makes the
-seat equal the row. A host that answers such a member's seat from its row
+or update the identity: any update then records the restamp its seat row
+is owed, and the member's builds are compared with the row's labels from
+then on. A host that answers such a member's seat from its row
 is otherwise refused the member's build, with a refusal that names the
 label keys that differ. A seat whose owed restamp 0.9.15 recorded itself
 (see [Rolling back to 0.9.14](#rolling-back-to-0-9-14)) is counted in
 `seats_stale` too and needs no step here: its builds are compared with the
 row's labels.
+
+### Temporary council mob ids and records
+
+No action is needed to upgrade, unless a mob definition of yours has an id
+that starts with `council--`.
+
+**Mob ids of the council form.** From 0.9.15 a create under an id that
+starts with `council--` is refused as an invalid definition (diagnostic
+`reserved_system_identifier` at `id`): by the agent tool `mob_create`,
+`mob/create`, `meerkat_mob_create`, the Web runtime's `mob_create`,
+`rkat mob run`, `rkat mob deploy` and the Rust create entries of the mob
+state. The form belongs to the mob a
+[temporary council](/guides/temporary-councils#real-temporary-mobs) creates
+for itself. 0.9.14 and earlier releases refused no mob id of this form, so
+a deployment may hold such a mob. It keeps loading and working: it is
+restored, listed and managed as before, its members run, and it can be
+stopped, resumed and destroyed; the mob state logs one warning that names
+it. Once that mob is destroyed no mob can be created under its id again,
+and while it exists a temporary council whose council id matches it ends at
+seating and leaves the mob untouched. A pack whose definition has such an id
+can no longer be deployed with `rkat mob deploy`, which builds its mob anew
+each time.
+
+**Do:** give a mob definition whose id starts with `council--` another id
+before its next create.
+
+**The council record.** The stored record of a temporary council gains two
+optional keys. `temporary_mob_custody` says whether the council issued the
+create of its mob and names the incarnation that create made
+(`{"state": "not_created"}`, `{"state": "creating"}`, or
+`{"state": "created", "incarnation": "..."}`). `convener` names the session
+whose `council` tool call convened the council (`{"session_id": "..."}`);
+a council a host runs directly has none. Nothing is migrated and no other
+key of the record changes. A record that 0.9.14 or an earlier release wrote
+has neither key, and 0.9.15 reads it as a council with no convener that
+names no mob of its own: recovery seals and cleans up such a council and
+does not run it again, its cleanup finds its mob by id under the guards
+[Temporary councils](/guides/temporary-councils#real-temporary-mobs)
+describes, and a host's create hook is told no convener for it. 0.9.15
+reads `temporary_mob_custody` strictly: a record whose custody holds a
+state it does not know does not decode, and the council's recovery cannot
+read it. 0.9.15 writes the three states above.
 
 ### Operator instruction limits bound a member's snapshot
 
@@ -348,6 +463,209 @@ store:
   lineage. Write the records again, at a new revision, with
   `include_forks`; they then select the forks seated from then on.
 
+### Ending one queued request ends only that request; `session/recall_input`
+
+- **Rust hosts.** The exhaustive enums named under Breaking in the changelog
+  gain variants, appended last: the MeerkatMachine's `MeerkatMachineInput`,
+  `MeerkatMachineEffect` and their variant enums,
+  `MeerkatMachineRuntimeInternalInput`, the kernel's `Input`, `InputKind`,
+  `Effect`, `EffectKind` and `TransitionId`,
+  `RuntimeCompletionCleanupAction`, and the code generator's
+  `MachineKernelRenderError`. An exhaustive match on one of them needs the
+  new arms, or a wildcard arm.
+  `RuntimeCompletionCleanupAuthority::requires_runtime_cleanup()` is
+  removed: match the authority's `action`, or hand it to
+  `RuntimeCleanupScope::of_completion_action`.
+- **Every client.** A request cancelled while its turn is queued behind a
+  running turn (the JSON-RPC cancel notification, a connection closed with a
+  turn still queued on a shared runtime, REST `POST /requests/{id}/cancel`)
+  now ends only that request. On 0.9.14 the running turn's request and the
+  session's other queued requests were answered an internal error (`-32603`;
+  REST `500`) and were not completed, and the cancelled REST request was
+  answered only once the running turn had ended. A client that relied on
+  those answers, or on that order, now sees the running turn and the other
+  queued requests answered their results, and the cancelled REST request
+  answered at once.
+- **The new call.** `session/recall_input`, and the SDK methods over it,
+  need a 0.9.15 server. A 0.9.14 server answers method not found (`-32601`)
+  and changes nothing; the Python and TypeScript methods surface that as
+  `MeerkatError` with the code `"-32601"` and read nothing of the server
+  first.
+
+### Reasoning effort is one setting for every provider
+
+0.9.15 adds the provider-neutral `reasoning_effort` option (see
+[Reasoning effort](/concepts/providers#reasoning-effort)). A caller who
+sets no level gets 0.9.14's behavior on every route: the same requests,
+the same defaults, and provider-specific parameters
+(`provider_params.provider_tag`) work as before. Two things such a caller
+can still see: the models catalog read lists `reasoning_effort_levels` for
+each catalogued model (an added member), and a turn's reasoning preference
+(set by a host, for example by a GPT Live channel for its delegated member
+turns) is judged by the route of the client that serves the request where
+that route states levels itself, a GitHub Copilot account or a self-hosted
+route (the four differences are listed under Changed in the changelog).
+
+- **Moving from a provider-specific effort.** Replace the raw effort
+  (`provider_tag.reasoning_effort` for OpenAI, `provider_tag.effort` for
+  Claude, `provider_tag.thinking_level` for Gemini) with `reasoning_effort`,
+  or keep the raw parameter. Setting both is accepted when they name the
+  same level and refused as a typed conflict when they differ.
+- **Strictness.** A raw effort the model does not accept can be dropped or
+  refused by the provider. The neutral level is checked first: a level the
+  model or its route does not accept is refused before any provider request
+  with `INVALID_PARAMS` and `reasoning_effort_refused` data, and Meerkat
+  never lowers it, changes the model or moves to another route. On a GitHub
+  Copilot route the levels are the ones the account's model list states for
+  the model, which can be fewer than the provider's own API accepts.
+- **Spelling.** The neutral level is `xhigh` only. The Claude-specific
+  effort keeps accepting `xhigh` and `x_high`.
+- **The price of holding a level (JSON-RPC).** From 0.9.15, on a session
+  that holds a provider-neutral level, anything that changes the model
+  identity (the
+  model, the provider, the self-hosted server, the provider params, the
+  auth binding, or the level itself: set, change, clear)
+  needs a session with no unfinished work:
+  sent while another turn of the session runs or is queued, such
+  a `turn/start` or `mob/turn_start` is not queued, it is answered
+  `-32002` (`SESSION_BUSY`) with the data
+  `{"kind": "reasoning_effort_change_needs_idle_session"}` at once and
+  stores nothing. So a client that sets a level once and then varies
+  `provider_params` per turn (a temperature, say) is answered busy
+  whenever another turn runs or is queued: wait for the running turn's
+  answer, then send the request again. Naming a field counts as changing
+  it, also with the value the session already has. Plain turns and
+  repeats of the level with the field `reasoning_effort` queue, and that
+  is the only repeat: a level named inside `provider_params` is never
+  one. A mob member built from a profile
+  whose `provider_params` carry a level holds that level. A session that
+  holds no provider-neutral level queues everything as on 0.9.14, except
+  a turn that sets a level. On an autonomous mob member (the default
+  runtime mode) the unfinished work can be the member's own: a turn it
+  started for its kickoff or on what its peers sent it, or a peer input
+  queued on it. The caller cannot know when such a member is idle, and
+  neither waiting for your own turn's answer nor a plain turn first helps
+  against the member's own turns: send the request again (in two runs it
+  was taken after 5 s and after 21 s; a member whose peers keep sending
+  may stay busy for longer), or set the level in the member's profile or
+  at its spawn, which does not depend on the member's traffic.
+  `is_active: false` from `session/read` does not promise the change is
+  taken. The request there is `turn/start` with the member's session id:
+  `mob/turn_start` is only valid for `turn_driven` members. The table is
+  in the [JSON-RPC reference](/api/rpc#model-settings-on-a-busy-session).
+  A later release is planned to queue these turns.
+- **Older servers.** A server before 0.9.15 refuses the `reasoning_effort`
+  field on `turn/start` and `mob/turn_start` and ignores it on
+  `session/create` and in REST bodies. The nested key
+  `provider_params.reasoning_effort` is refused by `session/create`,
+  `turn/start`, the MCP tools and a mob definition read from a TOML file or
+  a mobpack, and ignored in a REST `POST /sessions` body, on
+  `mob/turn_start` and in a mob profile sent to `mob/create`. The
+  `resume_overrides` value `reasoning_effort` is refused in every mob
+  profile. The Python and TypeScript SDKs therefore refuse to send the
+  field to a server whose contract is below 0.9.15
+  (`CapabilityUnavailableError`).
+- **Member hosts.** A member host that runs 0.9.14 refuses a member spec
+  that carries a level: it fails closed with a spec digest mismatch and
+  does not ignore the level. Upgrade member hosts before a profile sets a
+  level.
+- **SDKs.** Upgrade the SDK before setting a level. A session that carries
+  a level emits the event `request_reasoning_effort_resolved`, and a Python
+  or TypeScript SDK older than 0.9.15 raises `UNKNOWN_EVENT_TYPE` on it,
+  wherever the level was set: on a request, by another client or in a mob
+  profile. A session without a level emits no such event.
+- **The flat key: check before upgrading.** From 0.9.15,
+  `provider_params.reasoning_effort` on the wire is read as the
+  provider-neutral level and judged. On 0.9.14 the key did nothing in
+  five places, where it was accepted and dropped: a mob profile sent to
+  `mob/create`, `mob/spawn`'s `override_profile`, a `mob/turn_start`
+  request, a REST `POST /sessions` body, and a profile or definition an
+  agent's mob tools write (by a run on the published 0.9.14 binaries for
+  `mob/create`, `mob/spawn`'s `override_profile`, `mob/turn_start`, REST
+  `POST /sessions` and the `mob_create` tool; the agents' other mob tools:
+  not run, by reading the source; the CLI's mob verbs: not determined). A
+  Meta 0.9.14 gateway refuses a `mob.toml` profile with the key when it
+  starts, so Meta definition files are not a sixth place. Before
+  upgrading, look for the key in those five places. Nothing a 0.9.14
+  server keeps shows the key for the first four: it was dropped when the
+  request was read, so no stored mob, session, history or log holds it.
+  Search what sends those requests: your client's code, your mob
+  definition files and the SDK calls that pass `provider_params`. For the
+  fifth, read the transcripts of agents that have mob tools: the tool call
+  and its arguments are in the calling agent's history. From 0.9.15 it
+  sets a level there:
+  either remove it, or accept the level and the busy rule for those
+  members. If it stays: a value that is no level is refused when the
+  request is read; a profile that carries the key beside a different
+  provider effort, a thinking budget, a thinking type the model does not
+  accept with the level, a raw reasoning body or reasoning turned off, or
+  for a model whose route does not take the level, fails that member's
+  build; a `mob/turn_start` that carries the key, sent to a busy member,
+  is answered `-32002` (`SESSION_BUSY`) where 0.9.14 ignored the key and
+  queued the turn; and the members built from such a profile hold a
+  level, so a change of their model identity sent while they are busy is
+  answered busy where 0.9.14 queued it (see "The price of holding a
+  level" above). A mob already stored by 0.9.14 keeps no level: only a
+  definition or request sent again sets one. A level in a profile is
+  also the stored form that the rollback passage of this page warns about
+  (the passage that begins "To keep the option of rolling back").
+  A schedule's session settings do not take the
+  key in 0.9.15: a schedule whose `create` spec carries it is refused when
+  it is created or updated (0.9.14 refused it there as an unknown field).
+  A `reasoning_effort` written directly in a schedule's `create` spec or on
+  its prompt action, which 0.9.14 read as an unknown member and dropped, is
+  refused the same way from 0.9.15: remove it from the request.
+- **CLI scripts.** `rkat run --reasoning-effort <LEVEL>` exits 2 when the
+  level is refused; with `--output json` stdout then ends with a failure
+  document (`{"error": {...}}`) instead of a run result, so a script that
+  reads stdout as a result checks the exit status or the `error` key first.
+- **Rolling back.** Before rolling back to 0.9.14, let every turn that
+  carries a reasoning effort level finish, then clear the level from
+  every session that holds one (`rkat run --resume
+  <SESSION> --no-reasoning-effort "<PROMPT>"`, or a turn with
+  `reasoning_effort` `{"action":"clear"}`).
+  The clear is one turn on the model per session; queries that list the
+  unfinished turns and the sessions that hold a level are in the item
+  named below.
+  Replacing or clearing `provider_params` does not remove the level. On
+  0.9.14 a turn on a session that still holds a level, and a read of it,
+  do not return. A session that used a level and was cleared works there,
+  except that its event replay (`events/list_since`) fails. A mob is
+  different:
+  a level in any profile of a mob's definition, even a profile no member
+  ever used, is a one-way step. 0.9.14 quarantines the whole mob, and a
+  Meta gateway on 0.9.14 does not start on a state directory that holds
+  such a mob; the only way back is to destroy the mob on 0.9.15 and
+  create it anew without the level. A realm profile that stores a level
+  is replaced or deleted on 0.9.15 before the rollback. To keep the
+  option of rolling back, set the level on a session or a turn, not in a
+  mob definition, a member profile or a realm profile, and clear it
+  before rolling back. Do not use a level on a member placed on another
+  host if you may ever go back to 0.9.14. What 0.9.14 does in each case,
+  the calls that
+  fail, what was confirmed by a run and what was read from the source
+  are in the item "A stored reasoning effort level" under
+  [Rolling back to 0.9.14](#rolling-back-to-0-9-14).
+
+### A catalog model you had defined yourself: `gemini-4-hydrogen`
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and 0.9.15 adds `gemini-4-hydrogen` to the catalog. A
+realm or project configuration, or a mob definition, that has
+`[models.gemini-4-hydrogen]` (for example because you ran the model before
+the catalog listed it) is refused with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
+a configuration by configuration validation, a mob definition when one of
+its members is built (the mob definition case was read from the source, not
+run).
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and thinking levels (`low`, `medium`, `high`; see
+[Providers](/concepts/providers)). After a rollback to 0.9.14 the catalog
+has no such row again: there, a session or configuration that names the
+model does not resolve it until the entry is back (read from the 0.9.14
+source, not run).
+
 ### Meta 0.9.15
 
 Meta 0.9.15 pins Core `=0.9.15`. The full list is in `meta/CHANGELOG.md`
@@ -393,6 +711,98 @@ under `## [0.9.15]`.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves. **Do:** a host of that kind calls one of them after its
   bootstrap.
+- Question sets (`ask_user`): mob members get the stock tool `ask_user`, and
+  `meta/gating/questions` lists what they asked a person. Every member of a
+  Meta runtime is offered the tool from this release on, with the three
+  exceptions named in this item and the next (a member that is denied it,
+  one whose host supplies its own, one whose MCP server offers the name),
+  so each other member's
+  tool list gains one tool at the upgrade, also on a runtime where no
+  person can be asked (no Console, or one nobody can decide on): a call
+  there answers `no_human_surface`. A profile that lists the tool in
+  `tools.deny` (`deny = ["ask_user"]`) keeps it from its members (not in a
+  profile used for members whose host decides their tool surface: see Known
+  limitations in the Meta changelog): their
+  model is not offered it, and a call it makes anyway is refused as not
+  allowed by policy; a spawn's deny policy does the same for one member. A
+  member whose host already supplies a tool named `ask_user` among its
+  build's external tools keeps its own; a tool of that name from a profile
+  MCP server is lost (the next item). The tool holds a
+  durable decision of the new kind `ask_user.questions` in the decision
+  store the gateway already keeps; no store schema changes, and a decision
+  recorded without a typed answer keeps its bytes and its digest. A 0.9.14
+  gateway has no `meta/gating/questions` (it answers method not found). A
+  0.9.14 Console or SDK against a 0.9.15 gateway does not list a question
+  set as a question or as an approval (sets are not part of
+  `meta/gating/pending`): it meets the set only as a durable decision of a
+  kind it does not know. A 0.9.14 Console shows it, to a caller who may see
+  the decision, as a read-only card among the open decisions, which cannot
+  be answered there (read from the 0.9.14 source, not run). So a set nobody
+  answers on a Console that reads question sets ends `timed_out` at its
+  deadline. **Do:** upgrade the gateway before a Console
+  or an SDK that reads question sets; before a rollback see the question
+  sets item under "Rolling back to 0.9.14".
+- Breaking (behaviour): a profile MCP server that offers a tool named
+  `ask_user`. A member whose profile configures such a server loses that
+  tool at the upgrade: the server's tool and the stock tool share the name,
+  a tool name two parts of a member's build list is offered by neither, and
+  the member's model is offered no tool named `ask_user`, neither the
+  server's nor the stock one. Such a member also has no stock `ask_user`:
+  it cannot put a question to a person until its server's tool has another
+  name. The member builds and runs, and its other
+  tools are offered. On 0.9.15 no setting keeps a profile server's tool
+  under the name `ask_user` on a Meta member, and
+  `tools.deny = ["ask_user"]` (not in a profile used for members whose host
+  decides their tool surface: see Known limitations in the Meta changelog)
+  is no way out: it
+  hides the name whatever
+  offers it, and does not bring the server's tool back. It is not silent:
+  once the server has connected, each build of such a member logs one
+  warning on the gateway's stderr, at the default log filter, with the
+  target `meerkat::tools::shared_name`, the text "more than one part of a
+  tool surface lists this tool name: it is offered by none of them" and
+  the fields `tool` (`ask_user`), `listed_by` (the two sources, as
+  `Mcp:<server name>, Builtin:ask_user`) and `tools_of` (the member's
+  session and comms name). **Check before upgrading:** the check is the
+  configuration. A member is affected when an MCP server of its profile
+  (`[[profiles.<name>.tools.mcp_servers]]`), or one attached to its live
+  session, offers a tool named `ask_user` and the server's entry maps that
+  tool to no other name (`tool_names`): ask the server for its tool list,
+  or read its documentation. The member's tool list does not answer the
+  question: on 0.9.14 `meta/identity/resolved_tools` does not list the
+  tools of a profile's server (the list then holds `tool_catalog_search`
+  and `tool_catalog_load`, through which the member reaches them), so a
+  list without the name proves nothing. A member whose host supplies a
+  tool named `ask_user` among its build's external tools keeps it.
+  **Do:** give the
+  server's tool another name before the upgrade: map it in the profile, on
+  the server's entry (`tool_names = { ask_user = "ask_operator" }`), or
+  rename it on the server. The member then has the server's tool under the
+  new name and, after the upgrade, the stock `ask_user`. The price: the
+  member's prompts and instructions that name the tool must name the new
+  one.
+- Decision reads with question sets. Core gains three wire types,
+  `WireDecisionAnswer`, `WireAskUserQuestionAnswer` and `WireAskUserAnswer`,
+  and the human evidence of a decision (`WireDecisionEvidence`) gains the
+  optional member `answer`, which carries them and is written only for an
+  answered question set. That is additive: the 0.9.14 Python and TypeScript
+  SDKs return a decision as the gateway wrote it, and the 0.9.14 Rust wire
+  type ignores a member it does not know. `meta/decisions/list` keeps its
+  form (`decisions`, `statuses`, `unreadable`, `next_after`) and is followed
+  with `next_after` as before; it now also lists decisions of the kind
+  `ask_user.questions`. On the stdio gateway, which the SDKs call, nothing
+  else changes. On the Console a page now holds only decisions its caller
+  may see, up to its limit, and `unreadable` is filled for an access
+  administrator only (a caller allowed `decisions.admin` who is a person
+  listed under `admins`, or any caller allowed it on a Console that
+  identifies no person; on 0.9.14 every caller allowed `decisions.admin`):
+  the same form with other rows for some callers, not a new member. A
+  question set is read on the Console only by a caller who may view its
+  asking agent. **Do:** nothing for a client that follows `next_after`; a
+  Rust client that matches `WireDecisionEvidence::Human` field by field adds
+  `answer` or `..`; a person who is allowed `decisions.admin` by a rule and
+  is not listed under `admins` no longer sees `unreadable`: list that
+  person under `admins`.
 - Rust: `identity_creation::ChangeClass` gains the variants `Archive` (an
   archive and an unarchive) and `Adopt`. **Do:** add both arms to each
   exhaustive match on it.
@@ -433,14 +843,58 @@ under `## [0.9.15]`.
   The methods for agents created at run time (meta/identity) need a 0.9.15
   gateway: upgrade the gateway before the SDKs that call them. **Do:**
   upgrade the SDKs with the gateway.
+- Console: `meta/mob_announcements/declarations/apply` and
+  `meta/mob_announcements/sources/put` refuse a declared subscription of
+  one member, and a source, that names a member that is not seated or is
+  private to another person (`-32047` `unknown_member`, nothing applied or
+  written), and refuse for now while the member's check cannot be read
+  (`-32047` `native_unavailable`; the same request can be made again
+  later). 0.9.14 accepted a member that was not seated. What the applied
+  declarations already hold unchanged is carried as it is, and the stdio
+  gateway keeps such a subscription pending and stores such a source, as
+  before. **Do:** a client that applies announcement declarations or puts
+  an announcement source through the Console seats the member first, or
+  applies them over the stdio gateway.
+- **Required host step.** After upgrading, on every gateway that serves mob
+  announcements, review every live mob announcement subscription the host
+  cannot account for from its own records, as the Upgrade section of
+  `meta/CHANGELOG.md` says. At each start such a gateway logs one WARN line
+  (target `meerkat_meta::mob_announcements::private_member_subscriptions`)
+  while live subscriptions deliver into agents private to a person; the line
+  is an aid, not the condition: a gateway that logs none does the review
+  too.
+- Console: for a short time after a gateway start, `meta/schedule/list`
+  answers an empty list, and `update`, `pause`, `resume` and `delete` answer
+  `schedule_not_found`, for a member that ended before the start, to every
+  caller who is not an access administrator. **Do:** a client that reads
+  schedules at start asks again before it treats the list as empty.
+- `meta/attach_existing_session` and `meta/ensure_member` with
+  `resume_session_id`: from 0.9.15 a member seated on the stored session of
+  a private side chat is private to the side chat's owner (see Security and
+  Changed). **Do:** retire every member that 0.9.11 through 0.9.14 seated on
+  such a session, and do not build on a shared member coming back from one.
+- `meta/compact_member`: a call whose maintenance turn ended for good
+  without completing (`completion_type` `abandoned`,
+  `abandoned_with_error`, `cancelled` or `completed_without_result`) now
+  restores the member's compaction threshold before it answers, and its
+  error carries `error.data.stage: "profile_restored"`. 0.9.14 answered
+  `stage: "terminal"` and left the temporary threshold on the member. The
+  `kind` (`compact_member_completion_failed`), the `completion_type` and
+  the typed error are unchanged; `stage: "terminal"` remains for an outcome
+  that does not prove the turn ended, where nothing is restored; a
+  restoring rebuild that fails answers `compact_member_rebuild_failed` at
+  stage `profile_restore`. **Do:** a host that matches on
+  `stage: "terminal"` to learn that the call failed matches on the `kind`
+  instead, or takes both stages.
 
 ### Rolling back to 0.9.14
 
 What this subsection says an earlier release does was established by reading
-the 0.9.14 source, except where an item says it was confirmed by a run. Such a
-run was made with a 0.9.14 gateway built from the release tag, over state
-written by a gateway built from the development source for 0.9.15 (main on 13
-November), with a scripted model in place of a provider.
+the 0.9.14 source, except where an item says it was confirmed by a run. Unless
+an item names the builds of its own run, such a run was made with a 0.9.14
+gateway built from the release tag, over state written by a gateway built from
+the development source for 0.9.15 (main on 13 November), with a scripted model
+in place of a provider.
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
 refusal. The items below are where a rollback differs: configurations that
@@ -457,6 +911,12 @@ line says otherwise.
 - For a mob kept in a host store, list the records written with
   `include_forks`.
 - End every change of an agent that waits for approval.
+- Let every member respawn that is under way complete: wait until its call
+  (`meta/respawn`, the Console's respawn or `meta/compact_member`) has
+  answered without an error, and for a member the respawn fix does not serve
+  (a warning names it at the respawn) until the identity has then answered one
+  message; after a crash during a respawn, start 0.9.15 once more so that it
+  finishes the rotation.
 - Remove the new agent actions from the access rules, and `archive` and
   `adopt` from the identity policy.
 - Unarchive, settle or remove each agent that must not stay as it is.
@@ -467,13 +927,39 @@ line says otherwise.
   label keeps from someone, or add a deny rule that names it.
 - While rolled back, send no message from the Console to an agent created at
   run time.
+- Let every turn that carries a reasoning effort level finish (a turn the
+  host interrupted is recovered at the session's next use after the
+  restart: use the session and let it finish too), then clear the level
+  from every session that holds one, a mob member's session included. The
+  clear is one turn on the model per session; the item "A stored
+  reasoning effort level" below has queries that list the unfinished
+  turns and the sessions that hold a level.
+- Destroy every mob whose definition or a member profile ever stored a
+  reasoning effort level, or listed `reasoning_effort` in `resume_overrides`,
+  and create it anew without them (its members, their conversations and
+  its history are not kept): to
+  find them, page each mob's stored events with `rkat mob logs <MOB> --json`
+  and search for `reasoning_effort`; no `rkat storage doctor` finding lists
+  them yet.
+- Replace or delete every realm profile that holds
+  `provider_params.reasoning_effort` or lists `reasoning_effort` in
+  `resume_overrides`: list them with `mob/profile/list`, then send
+  `mob/profile/update` with the whole profile without them, or
+  `mob/profile/delete`, each with the listed revision as
+  `expected_revision`.
 
 Each item below says what an earlier release does and what to do.
 
 **A created agent's row that records an owed label restamp.** The row of a
 store-owned identity carries the key `label_restamp_owed` while an update
 of the agent has committed labels that its seated member's seat row does
-not carry yet: the member held work at the update, say. The row lets the
+not carry yet. A label update of a created agent never seats the agent
+again, so its row carries the key from the update until the agent's next
+seat (a respawn, a profile or runtime-mode change, a rotation or a reset);
+a retry of the update and a later update of other fields do not settle it.
+No turn, wake, build or restart of the agent settles it either: the key
+stays until one of the steps below.
+The row lets the
 key go once a seat row carries the row's labels, and an archive or a
 removal drops it. A row that owes none carries no such key and reads on
 earlier releases as before.
@@ -494,18 +980,80 @@ Before a rollback, on 0.9.15, read `MobHandle::identity_record_census()`
 file or `MobStorage::identity_record_rows` for a storage). While
 `label_restamps_owed` is above zero, settle each owed restamp:
 
-- retry the update, or update the agent again
-  (`MobHandle::update_store_owned_identity`), while its member is idle;
-- or respawn its member with the row's labels (`MobHandle::respawn_member`
-  with `MemberRespawn::new().with_labels(..)`);
+- respawn its member with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`). The respawn seats the agent
+  again on the same conversation and cancels a turn in flight; an agent
+  that created mobs with its own tools goes on listing and managing them
+  on 0.9.15. While an earlier release runs it does not: 0.9.9 through
+  0.9.14 give that management only to the member generation that created
+  the mob, so an agent seated again since lists and manages none of its
+  mobs until the return to 0.9.15, which restores it with no call; the mobs
+  go on running meanwhile.
+  An agent you leave unsettled is out of service while rolled back, and
+  nothing of it is lost;
+- a profile move or a runtime-mode change of the agent
+  (`MobHandle::update_store_owned_identity`) seats it again and settles it
+  too;
+- or set the agent's labels back to the labels it was seated with (an
+  update, `MobHandle::update_store_owned_identity`, whose labels are the
+  ones its seat row carries) and apply the label change again after the
+  return. For an agent that is idle, that update lets the key go without
+  seating the agent again, so the agent keeps the mobs it created; the
+  price is the label change until after the rollback. An agent that holds
+  work at that update is not released: the update is answered `deferred`
+  and the key stays, until the same update is sent again once the agent
+  is idle. Read the count again afterwards;
 - a member no same-session successor can serve (a placed member, a member
   wired to a placed member, a member on a session service that keeps no
   durable sessions) is settled by none of these: rotate it
-  (`MobHandle::rotate_member`), or archive or remove its agent.
+  (`MobHandle::rotate_member`), or archive or remove its agent. A rotation
+  does not keep the mobs the agent created with its own tools: it takes a
+  fresh session, so the agent no longer manages them, and the mobs of a
+  session its mob archived are removed at the host's next start. An archive
+  or a removal through Meta is refused `owns_mobs` while the agent still
+  owns mobs it created. Either way, have the agent destroy them first.
 
 `rkat storage doctor` and Meta's storage doctor do not report this count,
 and a host that uses only the SDKs has no read for it in 0.9.15: the Rust
-calls above are the read.
+calls above are the read. The count says how many rows owe a restamp, not
+which agents. To list them, read the mob's SQLite store read-only (the
+database of the state directory that holds the table
+`mob_identity_intents`), with the host stopped or beside it:
+
+```bash
+sqlite3 -readonly <store> "SELECT mob_id, agent_identity FROM mob_identity_intents WHERE json_extract(CAST(record_json AS TEXT), '$.schema_version') = 2 AND json_extract(CAST(record_json AS TEXT), '$.label_restamp_owed') = 1;"
+```
+
+It prints one line per agent whose row carries the key (`<mob>|<agent>`),
+and nothing when none does. A Meta host settles one with `meta/respawn` of
+that agent, at the cost named above, or with a `meta/identity/update` that
+sets its labels back to the ones it was seated with. If the agent held
+work at that update the key stays, and Meta's answer does not say so: run
+the query again, and for an agent it still lists send another update once
+the agent is idle. That must be a new request that changes something (its
+display name, for example): the same request sent again only reads back
+its first answer, and a request that sets the labels the agent already
+has is refused as empty.
+
+**Agents that created mobs and were seated again on 0.9.15.** From 0.9.15 an
+agent that created mobs with its own tools goes on listing and managing them
+when it is seated again on its conversation (a respawn, a profile move, a
+runtime-mode change). 0.9.9 through 0.9.14 give that management only to the
+member generation that created the mob. While an earlier release runs, an
+agent seated again since lists and manages none of the mobs it created; the
+mobs and their members go on running. The return to 0.9.15 restores its
+management with no call (one run). An agent that an earlier release
+retires and seats again while rolled back (a respawn through a Meta
+gateway on 0.9.9 through 0.9.14 does so, and so does each rebuild of its
+`meta/compact_member`; read from the source at each tag) is not restored
+by the return (for the respawn, by a run of it on 0.9.14 followed by
+0.9.15; for a completed compact call, by one run of it on 0.9.14
+followed by 0.9.15; neither was run after a rollback), and a respawn on
+0.9.15 does not restore it either (run).
+
+**Do:** no step before the rollback. While rolled back, do not respawn or
+compact such an agent through Meta; have it manage its mobs before the
+rollback or after the return.
 
 **Operator instruction records past an earlier release's totals.** An
 earlier release bounds the mob as a whole at 64
@@ -626,6 +1174,24 @@ fork scope; a host store was not run). Forks of the agent seated before the
 rollback keep no lineage root on a host store and are not selected by the
 rewritten record, as in the `include_forks` item (read from the source).
 
+**Temporary council records.** 0.9.14 reads a council record that 0.9.15
+wrote: its record type refuses no key it does not know, so it ignores
+`temporary_mob_custody` and `convener` and reads the rest as stored. When
+0.9.14 writes such a record again (it seals an interrupted council, or
+records a cleanup), it writes it without the two keys and changes nothing
+else. Back on 0.9.15 that council has no convener and names no mob of its
+own, like a record an earlier release wrote (see
+[Temporary council mob ids and records](#temporary-council-mob-ids-and-records)).
+A record that 0.9.14 does not write again keeps both keys. What is lost
+with `temporary_mob_custody` is the fence. While rolled back, 0.9.14 does
+not refuse a create under a `council--` id, and a council's seating and
+cleanup find the council's mob by id alone, as before 0.9.15: a council can
+again retire seats in, and destroy, another mob that holds its mob id.
+After the return, a record that 0.9.14 wrote again is cleaned up by id
+under the two guards, so it can still destroy a mob with no members that
+took the id. Losing `convener` changes nothing Meerkat does itself; a host
+that reads the record sees no convener. No step is needed.
+
 **Changes of agents that wait for approval.** A change of an agent that the
 identity policy holds for approval is a pending decision of kind
 `identity.create`, `identity.update`, `identity.archive`,
@@ -647,6 +1213,35 @@ of these kinds that are `open` or `approved` (`meta/decisions/list` with
 `meta/decisions/withdraw` as the host). While rolled back, decide none of
 them.
 
+**Question sets agents asked (`ask_user`).** A question set is a decision of
+kind `ask_user.questions` in the gateway's decision store
+(`approval_decisions.sqlite3` in its state directory), in the row form every
+decision has. A 0.9.14 gateway does not know the kind and neither refuses
+nor skips it: a decision's kind is a string, the row is read and listed like
+any other (`meta/decisions/list`), and no executor claims it. It has no
+`ask_user` tool and no `meta/gating/questions`, so an open set cannot be
+answered there, and its asking agent is told nothing while rolled back. An
+open set stays as it is until its deadline; a 0.9.14 gateway records a
+decision of any kind as expired when that decision is read by itself
+(`meta/decisions/get`) after its deadline, so a set whose deadline passes
+while rolled back can end there. A
+set that was answered on 0.9.15 keeps the person's answers in the
+decision's evidence, a member 0.9.14 does not know. A 0.9.14 gateway reads
+past that member, as the wire type does, but it also checks the stored
+evidence against the digest the decision binds, and evidence read without
+the answers does not match it: it reports
+that one decision unreadable (on the stdio gateway, and on the Console to
+a caller allowed `decisions.admin`, it is listed as unreadable; nothing
+executes it) and reads every other decision as before; it does not change
+the row, which reads again after the return to 0.9.15. A set that was
+dismissed, withdrawn or timed out carries no answers and is read as any
+ended decision. All of this was read from the 0.9.14 source, not run.
+**Do:** before a rollback, have each open set answered or dismissed
+(`meta/gating/questions` lists them), or withdraw it
+(`meta/decisions/withdraw` as the host), so that no agent waits for an
+answer while rolled back; a set left open needs a deadline beyond the time
+spent rolled back.
+
 **Access rules for changes of agents.** 0.9.15 adds the actions
 `agent.identity.create`, `agent.identity.manage` and `agent.identity.remove`.
 A 0.9.14 gateway refuses an access configuration in which a rule names one of
@@ -664,6 +1259,11 @@ enabled policy and under `approval.timeouts_ms` of a disabled one; the other
 combinations and `adopt` were read from the source). **Do:** before a
 rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
+
+**A recalled input.** An input withdrawn with `session/recall_input` is
+stored as a cancelled input: the stored row and completion record a
+cancelled queued request has left since 0.8.0. 0.9.14 reads it as it reads
+any cancelled input (read from the 0.9.14 source, not run).
 
 **Agents created at run time.** A 0.9.14 gateway starts on a state that holds
 agents created on 0.9.15, and a send through the gateway (`meta/send`) reaches
@@ -763,6 +1363,19 @@ either.
 label keeps from someone, or add a deny rule that names it (confirmed by a
 run).
 
+**A member rotation in flight.** A member rotation that a 0.9.15 process
+started and did not finish (a respawn interrupted by a crash) is finished by
+the 0.9.15 process that restarts (read from the source). Restarting on 0.9.14
+in that state has not been run, and whether 0.9.14 finishes it is not
+established.
+
+**Do:** before a rollback, on 0.9.15, let every member respawn that is under
+way complete: a respawn whose call has answered without an error is complete
+for a member the fix serves; for one it does not serve, see Known limitations
+in the Meta changelog: do not stop the process before the identity has
+answered one message. After a crash during a respawn, start 0.9.15 once more
+so that it finishes the rotation.
+
 **A schedule paused for its target.** Nothing is refused, and the pause is
 not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads
 the schedule as paused, so the schedule stays paused while rolled back, and
@@ -774,6 +1387,327 @@ did not write keeps the mark. After the return to 0.9.15 a schedule that
 kept its mark is resumed with its target, and one whose mark was dropped
 stays paused when its target comes back, until it is resumed by name. See
 [Schedules paused for their target and a rollback](#schedules-paused-for-their-target-and-a-rollback).
+
+**A stored reasoning effort level.** 0.9.14 has no `reasoning_effort`
+field. What a rollback costs depends on where a level is stored and
+whether it was used (the note beside the change is under
+[Reasoning effort is one setting for every provider](#reasoning-effort-is-one-setting-for-every-provider)).
+Unless a sentence says otherwise, the runs this item names were made with
+the released 0.9.14 `rkat-rpc` binary over SQLite stores that a
+development build of 0.9.15 wrote; "read from the source" marks
+what no run covers.
+
+Before rolling back, on 0.9.15:
+
+- **Let every turn that carries a level finish first.** 0.9.14 neither
+  runs nor finishes such a turn (below). A turn that was interrupted,
+  because the host stopped while it ran, is recovered at the session's
+  next use after the restart, not by the restart alone: use the session
+  once on 0.9.15 and let that turn finish too (confirmed by a run). A
+  read-only query lists the stored inputs that carry a level and have not
+  finished. Run it on `sessions.sqlite3` in a SQLite realm's directory
+  (the same table is in `runtime.sqlite3` of a JSONL realm, read from the
+  source, not run; a realm with an external storage provider was not
+  established):
+
+  ```sql
+  SELECT runtime_id, input_id,
+    json_extract(CAST(state_json AS TEXT), '$.current_state') AS state
+  FROM runtime_input_states
+  WHERE (json_extract(CAST(state_json AS TEXT),
+           '$.persisted_input.turn_metadata.reasoning_effort') IS NOT NULL
+      OR json_extract(CAST(state_json AS TEXT),
+           '$.persisted_input.turn_metadata.provider_params.value.reasoning_effort')
+           IS NOT NULL)
+    AND state NOT IN ('consumed', 'abandoned', 'superseded', 'coalesced');
+  ```
+
+  The query's places and the four finished states are read from the
+  source. It is confirmed by a run for the first place: one row on each
+  of three stores with an unfinished level turn, none on three stores
+  without one; the second place is read from the source.
+- **Then clear the level from every session that holds one**, a mob
+  member's session included:
+  `rkat run --resume <SESSION> --no-reasoning-effort "<PROMPT>"`, or a
+  turn with `reasoning_effort` `{"action":"clear"}`. The clear is a turn:
+  both forms run a prompt on the model, once per session. It does not
+  matter whether the session was created with the level or a turn set
+  it, nor whether its model was changed while it held the level, by a
+  turn that named a model or by the run's own `brain_swap`: after the
+  clear, 0.9.14 takes a turn, a read and the history of each (confirmed
+  by a run). Replacing or clearing `provider_params` does not remove the
+  level (read from the source). No command or call lists the sessions
+  that hold a level, or shows a session's stored level, in this release:
+  `rkat session list`, `rkat session show <ID>`, `session/list` and
+  `session/read` say nothing about it (confirmed by a run). A read-only
+  query on `sessions.sqlite3` in a SQLite realm's directory finds them
+  (confirmed by a run: no row before any level was set, one row after a
+  turn set one, no row right after the clear and after later turns, on a
+  store of five sessions exactly the one that was not cleared, and no row
+  on a store that 0.9.14 wrote). The two places of a model fallback
+  record are from the source, where the level stands beside the first;
+  no run had a level in those places alone. The query does not cover the
+  sessions of a JSONL realm or of a realm with an external storage
+  provider (not established), nor a stored session that has no head row:
+
+  ```sql
+  SELECT cur.session_id,
+    COALESCE(
+      json_extract(CAST(cell.metadata_json AS TEXT),
+        '$.provider_params.reasoning_effort'),
+      json_extract(CAST(cell.metadata_json AS TEXT),
+        '$.model_fallback.previous.provider_params.reasoning_effort'),
+      json_extract(CAST(cell.metadata_json AS TEXT),
+        '$.model_fallback.target.provider_params.reasoning_effort')
+    ) AS level
+  FROM session_head_metadata_current cur
+  JOIN session_head_metadata_cells cell
+    ON cell.session_id = cur.session_id
+   AND cell.metadata_key = cur.metadata_key
+   AND cell.exact_value_digest = cur.exact_value_digest
+  WHERE cur.metadata_key = 'session_metadata' AND level IS NOT NULL;
+  ```
+
+  After the clear the store
+  still keeps the previous version of the session's settings, level
+  included, as the retry witness of that one step, until the settings
+  change again. 0.9.14 took turns, reads and the history of cleared
+  sessions (confirmed by a run). It reads the kept version only as
+  bytes, on a recovery path (read from the source). One case was not
+  established: a recovery on 0.9.14 after a crash of 0.9.15 that left
+  the runtime behind the clear.
+- **Replace or delete every realm profile** that holds a level or lists
+  `reasoning_effort` in `resume_overrides` (below).
+- **Destroy every mob whose definition holds a level in any profile**, and
+  create it anew without the level. This costs the mob with its events,
+  its members and their conversations (below).
+
+On 0.9.14 after the rollback:
+
+- **A session that still holds a level does not return.** A turn on it and
+  `session/read` do not return: no answer and no error comes back (the
+  runs waited 30, 45, 60 and 300 seconds). The reason is only in the
+  server's log:
+  ``generated authority rejected durable restore authority="session-metadata" error=unknown field `reasoning_effort` ``.
+  The session's history, `session/list` and `session/archive` answer, and
+  other sessions are untouched. A turn sent on 0.9.14 to such a session
+  is not stored and is absent after the return. Going back to 0.9.15 and
+  clearing the level ends it (confirmed by a run). `events/snapshot`
+  reads the session too, so for a session that still holds a level it
+  does not return either (read from the source).
+- **A session that used a level and was cleared works**: turns,
+  `session/read`, the history, `session/list`, `events/latest_cursor`,
+  `events/snapshot` and `session/archive` answer (confirmed by a run). One
+  thing does not come back on 0.9.14, the session's event replay:
+  `events/list_since` for that session fails as a whole, from any
+  position, also from a cursor that 0.9.14 has just returned, with
+  ``unknown variant `request_reasoning_effort_resolved` `` (confirmed by a
+  run). Every request that was sent with a level stored that event, so
+  every session that ran a turn with a level is affected. The stored log
+  can hold three more things 0.9.14 does not know: a `run_failed` with the
+  reason `reasoning_effort_refused`, a `model_fallback_skipped` with the
+  reason `reasoning_effort_unsupported`, and model fallback events whose
+  recorded identity holds the level (read from the source). At each use
+  of such a session, cleared too, 0.9.14 also logs that the session's
+  derived `.rkat/` view is degraded ("projected event rows remain
+  available for replay"; confirmed by a run). That view is the files
+  `events.jsonl` and `summary.txt` under `.rkat/sessions/<SESSION>/`,
+  written for people and tools that read them from disk, for example as
+  an audit log. Nothing in Meerkat reads them, and a failed update of
+  them is only logged: degraded means that these files can stop
+  following the session while it runs on 0.9.14 (read from the source).
+  What is lost on 0.9.14: a client cannot replay that session's events
+  from a cursor. What still works: the session, its transcript and new
+  turns. No step ends it on 0.9.14; 0.9.15 reads the log again.
+  The number an event's envelope carries (`seq`) orders events within
+  one stream only: after a rollback it can repeat or go back across
+  process restarts, on both versions, and on 0.9.14 the numbers a stream
+  carries for such a session can start again at 1. To hold a position
+  across restarts, use the cursor that `events/list_since` returns: on
+  0.9.15 it stays unique and rising across the rollback, and a read from
+  it returns exactly the later events (confirmed by a run); on 0.9.14
+  `events/list_since` fails for such a session from any position.
+- **A mob member whose session holds a level** that a turn set (the
+  mob's definition and its profiles hold none). Cleared before the
+  rollback, the member works on 0.9.14: it is listed, it takes turns, its
+  flows complete and the mob's events are read; only its session's
+  `events/list_since` fails, with the warning above. Not cleared, the
+  member is marked broken on 0.9.14 and a flow step routed to its role
+  fails; the failure names the cause ("member ... failed to restore
+  session ... unknown field `reasoning_effort`"). `mob/turn_start` for it
+  answers an error at once ("could not be woken"), while a call on its
+  session alone does not return. After a restart of 0.9.14 the member
+  reads as active until the next flow touches it. Going back to 0.9.15
+  ends it (all of this confirmed by a run): clear the level on every
+  member's session before the rollback.
+  One case reaches further (read from the source, not run): a mob member
+  that is placed on another host, served there by an `rkat mob host`
+  process, and whose session used a level, cleared or not. The
+  controlling mob follows a placed member from its session's stored
+  events. So on 0.9.14 its observation of that member, and the tracking
+  of a turn or a flow step delivered to that member, fail while the
+  events 0.9.14 does not know lie in the stretch of the log it reads.
+  Other members, the membership, and members that run in the mob's own
+  host are untouched. No step on 0.9.14 ends it. On a member host that
+  has gone back to 0.9.14, retiring a placed member (or archiving its
+  session) while a tracked flow step or tracked delivery for it is still
+  unsettled can fail (read from the source, not run). Going forward does
+  not end all of it: after such a member's host has run 0.9.14 and returned,
+  the controlling host can skip events when that member's event stream
+  is resumed from a cursor, and a wait for the completion of its run can
+  time out; the stored events are complete (read from the source, not
+  run). For a placed member the condition ends when the controller
+  process restarts or the member's residency changes (its host re-binds,
+  the member moves to another host, gets a new session or a new member
+  generation, or is retired) (read from the source). Which operation
+  changes the residency in a given setup, and whether a host that was
+  rolled back re-binds by itself, is not established.
+- **The status of a turn that ran with a level** (`session/input_status`)
+  answers on 0.9.14, with one exception: an input that was admitted and
+  then refused for its level (a turn on a session whose model does not
+  support the level; below). The status call for such an input fails on
+  0.9.14, also after the level is cleared (confirmed by a run); the
+  session's other calls answer. For every other finished turn the stored
+  record verifies on a release that does not know the level's report
+  (confirmed by a run and by a test).
+- **A turn that carries a level and has not finished** is neither run nor
+  refused by 0.9.14: its status call fails there, and the input waits
+  unchanged and runs again at the session's next turn on 0.9.15
+  (confirmed by a run). Its session still holds the level, so it does not
+  return on 0.9.14 either way. Read from the source and not seen in a
+  run: where the session itself holds no level (the unfinished turn is
+  the one that sets the level, or one that clears it), 0.9.14 stops the
+  recovery of that session's runtime on the row, so a turn, a resume and
+  an archive of that session answer an internal error ("Runtime recovery
+  is repair-blocked") until 0.9.15 has finished the turn, while reads and
+  the session list work.
+
+Stored places whose step costs something:
+
+- **A mob whose definition holds a level in any profile**, even a profile
+  no member ever used, or the `resume_overrides` value `reasoning_effort`.
+  This is a one-way step. 0.9.14 quarantines the whole mob when it starts
+  (log: "quarantining a persisted mob store", class `store_unreadable`):
+  `mob/list` shows it as quarantined (not retryable, content retained),
+  and `mob/status`, `mob/members`, `mob/flows`, `mob/flow_status`,
+  `mob/events`, `mob/turn_start` (also for a member without a level) and
+  `mob/flow_run` each answer `-32603` "mob ... is quarantined
+  (store_unreadable)". The host starts and serves its other mobs: one
+  mob's quarantine does not take another mob with it. Nothing is written
+  to the quarantined mob's store, and back on 0.9.15 the mob is whole
+  (confirmed by a run, for a level in the definition and for a level in a
+  spawned member's profile). A Meta gateway on 0.9.14 does not start on
+  the state directory of such a mob (confirmed by a run with development
+  builds of both releases; no published binary was used). The mob's
+  creation event records the definition, so removing the level
+  afterwards, or a reset, does not help (read from the source, not run).
+  The way back is to destroy the mob on 0.9.15 before the rollback
+  (`mob/lifecycle` with the action `destroy`) and to create it anew
+  without the level. Confirmed by a run with the released 0.9.14 binary,
+  within these limits: one run, on a Core host (`rkat-rpc`), with a mob
+  created over JSON-RPC; a Meta gateway was not run. After the destroy,
+  0.9.14 listed no quarantined mob and logged no quarantine, the
+  destroyed mob was not found there, and the mob created anew without the
+  level ran on 0.9.14 and again on 0.9.15. What the destroy costs: the
+  mob with its events, its members and their conversations; the new mob
+  is a new mob. After the destroy a member's session is not found by its
+  id, on 0.9.15 too (`session/read` answers "Session not found"), while
+  the statuses of its stored inputs still answer (confirmed by a run). An
+  earlier run found the destroyed member's session row, with its level,
+  still in the sessions store, so the query for sessions that hold a
+  level can list such a session. No call that takes a session id reaches it, and no step for it
+  is known; whether anything else on 0.9.14 reads that row was not
+  established.
+- **A realm profile that holds a level,** or the `resume_overrides` value
+  `reasoning_effort`. While a profile holds either, the realm's whole
+  profile list (`mob/profile/list`) fails on 0.9.14
+  (``unknown field `reasoning_effort` ``) and `mob/profile/get` of such a
+  profile fails the same way (for the override:
+  ``unknown variant `reasoning_effort` ``); a get of a plain profile
+  answers. The sure step is the one before the rollback: replace the
+  profile on 0.9.15 with one
+  that holds neither (`mob/profile/update` with the whole profile), or
+  delete it (`mob/profile/delete`): a profile keeps no history, so the
+  replaced row is all 0.9.14 reads, and 0.9.14 then lists and reads every
+  profile. Where that was not done before the rollback: on 0.9.14 a
+  `mob/profile/update` of such a profile with the whole profile without
+  them succeeds, and the list answers once every such profile is
+  updated. You need the profile's name; a wrong `expected_revision` is
+  refused with the actual one. A delete of such a profile fails on
+  0.9.14. All of this is confirmed by runs. A member that was spawned
+  from the profile while it held a level is the mob case above.
+
+What no step removes (beside the event replay above):
+
+- **The record of a turn that was admitted and then refused for its
+  level.** A turn that asks for a level its route refuses stores nothing
+  0.9.14 cannot read: it is refused when a session is created, or before
+  the turn's input is stored, on a live session and on a stored one; a
+  turn judged only at its start is refused there, and its stored input
+  ends as abandoned with the reason `stopped` (confirmed by a run).
+  The record is another case: a turn is admitted, and its request is then
+  refused, before anything is sent to the model, because the session
+  holds a level that its model does not support. The shape that was run:
+  a run switches the session to such a model (`brain_swap`), and the next
+  turn is refused (`-32602`, `reasoning_effort_refused`, reason
+  `unsupported_level`), and so is every turn after it until the level is
+  cleared (confirmed by a run, within these limits: one run, self-hosted
+  models behind a scripted endpoint, over JSON-RPC; not run: REST, the
+  CLI, a mob member). Two more ways in are read from the source: a route
+  whose levels cannot be read when the request is made (an account's
+  model list that is not loaded), and a refusal that the provider client
+  returns. Not ways in: a compaction that is refused for the level, after
+  which the run goes on; a mob flow, whose failed step is recorded as
+  text only; and a model fallback, where a target that does not take the
+  level is skipped and the skip's reason is stored in the event log only
+  (the last: confirmed by a test and by a run with the
+  released 0.9.14 binary). The stored input of that turn is finished
+  (`consumed`) and keeps the typed failure, and 0.9.14 does not know the
+  reason, so the row does not decode there. On 0.9.14
+  `session/input_status` for that input fails ("input state read failed:
+  ... unknown variant `reasoning_effort_refused`"), also after the level
+  is cleared, while the session's other inputs answer and
+  `session/list`, `session/read`, `session/history` and a turn work
+  (confirmed by a run). Read from the source and not called in a run:
+  the delivery status a consent delivery or Meerkat Meta's delivery to a
+  mob's runtime asks for when it is this input's; Meerkat Connect's
+  continuity check for the session and the settlement it runs when it
+  takes the session over cold; and, in a governed realm, revoking a
+  controller grant and releasing a credential lease, which read the
+  inputs of every session in the store. The row stays stored, 0.9.15
+  reads it again, and no step removes it. A read-only query finds such
+  rows, on `sessions.sqlite3` in the realm's directory (`runtime.sqlite3`
+  for a JSONL realm, not run). It was run on a store with two such rows
+  and returned both (confirmed by a run):
+
+  ```sql
+  SELECT runtime_id, input_id FROM runtime_input_states
+  WHERE CAST(state_json AS TEXT)
+    LIKE '%"reason_type":"reasoning_effort_refused"%';
+  ```
+
+To keep the option of rolling back, set the level on a session or a turn,
+not in a mob definition, a member profile or a realm profile, and before
+rolling back let the turns that carry it finish and clear it. Do not use
+a level on a member placed on another host if you may ever go back to
+0.9.14: what a rollback leaves there does not end with the return (read
+from the source, not run). What the option still costs: on 0.9.14
+the event replay of every session that ran a turn with a level fails, and
+the record of a turn that was admitted and then refused for its level
+stays where it was written. There is no `rkat storage doctor` finding or count for stored
+levels yet. To find affected mobs before rolling back, take the mob ids
+from JSON-RPC `mob/list` (`rkat` has no command that lists mobs), page
+each mob's stored events with `rkat mob logs <MOB_ID> --json` (100 events
+a call) and search them for `reasoning_effort`: a level in the definition
+shows in the creation event (after a rollback that was tried and taken
+back, the text of a failed flow step names it too). List the realm
+profiles with JSON-RPC `mob/profile/list` and search them the same way (an
+empty `resume_overrides` list is left out of the answer). Both searches
+are confirmed by a run, for a level in a mob's definition and for a
+profile that holds a level or lists `reasoning_effort` in
+`resume_overrides`; not run: a level that arrives in a later event of a
+long mob. Sessions and mobs that never carried a level are written
+exactly as before and read on either release.
 
 ## Upgrading to 0.9.14
 
@@ -1854,13 +2788,64 @@ compiling. A Meta probe that must keep the earlier rule checks
   SDK changes. `meta_gateway identity-census --json` adds
   `identity_store_rows`. **Do:** before a rollback to Meta 0.9.7 or earlier,
   run the doctor instead of the queries in the 0.9.9 notes.
-- **Known limitation: `meta/compact_member` after a failed turn.** When the
-  forced maintenance turn ends in a definite failure (a provider error, a
-  rate limit, or a request that compaction could not shrink), the temporary
-  compaction threshold (1024 tokens by default) stays on the member,
-  durably, and every later `compact_member` on that identity is refused as
-  busy until the gateway restarts. **Do:** after a failed `compact_member`,
-  call `meta/respawn` for the identity, then restart the gateway.
+- **Known limitation: `meta/compact_member` after a failed turn (Meta 0.9.9
+  through 0.9.14).** When the forced maintenance turn ends in a definite
+  failure (a provider error, a rate limit, or a request that compaction
+  could not shrink, which is usual on a conversation of a few short
+  messages), the temporary compaction threshold (1024 tokens by default)
+  stays on the member, durably: it survives a gateway restart and does not
+  end by itself. The member then compacts again every third model request,
+  an ordinary turn whose compaction cannot shrink the request fails
+  ("compaction is irreducible at the configured retention"), and every
+  later `compact_member` on that identity is refused as busy until the
+  gateway restarts. A restart alone does not clear it. **Do:** after a
+  failed `compact_member`, restart the gateway (this ends the busy
+  refusal), then call `meta/respawn` for the identity while its provider is
+  available, and do not stop or restart the gateway again until the
+  respawn has answered without an error and the identity has then answered
+  one message: the respawn seats the member without the threshold and keeps
+  its conversation. On these releases a
+  stop or restart after a respawn, before the identity has woken on the
+  same session, is followed by the loss of the mobs its session owns. After
+  the restart a second `compact_member` that completes clears the threshold
+  too, whether or not it compacts (a `floor_tokens` above the conversation's
+  size completes without compacting), and `meta/reset` clears it and ends
+  the conversation. The respawn has a cost of its own for an identity that
+  created mobs, on 0.9.9 through 0.9.14: after it has completed,
+  the identity no longer lists a mob it created, and the calls tried that
+  name the mob were refused, while the mob's members can go on running; the
+  mobs' stores stay. A completed `compact_member` has the same cost on
+  those releases (see the `meta/compact_member` section of Meta's RPC
+  reference). From 0.9.15 a respawn of a member the same-session step
+  serves (every member but a placed one, one wired to a placed member, and
+  one on a session service that keeps no durable sessions) keeps the
+  identity's management of the mobs it created (confirmed by tests and by a
+  run), and a completed `compact_member` of a member the same-session step
+  serves keeps it too (one run); a call that times out,
+  and one that completes without compacting, rebuild the member by the
+  same step (read from the source; not run). A management lost on 0.9.9
+  through 0.9.14 is not brought back.
+  A reset: it ends the identity's
+  session, and the mobs that session owns end with it, no later than the
+  gateway's next start (read from the source, not run). A
+  `meta/compact_member` that failed has rebuilt the identity once before
+  its maintenance turn, so on 0.9.9 through 0.9.14 the identity has
+  probably paid that cost already (read from the source, not run): check
+  whether it still lists the mobs it created. If it does and must go on
+  managing them, weigh that against the failing messages before you
+  respawn: on 0.9.9 through 0.9.14 none of the three steps (a respawn,
+  a second call that completes, a reset) is known to keep it; and before
+  the respawn have it retire the members of, or destroy, a mob it created
+  whose members act on their own (not run). **From 0.9.15** the call
+  restores the member's threshold before it answers such a failure
+  (`error.data.stage` is `profile_restored`) and a second call is taken at
+  once; the call still answers the failure. The upgrade repairs nothing
+  stored: a member that 0.9.9 through 0.9.14 left with the threshold keeps
+  it on 0.9.15 until one of the steps above clears it. On 0.9.15 an agent
+  created at run time can be left with the threshold too, in the cases the
+  `meta/compact_member` section of Meta's RPC reference names, and a
+  respawn does not clear it for such an agent: after a gateway restart a
+  second `compact_member` that completes does, and so does `meta/reset`.
 - **Meta Forge 0.3.1** installs the matched Meta 0.9.10, Connect 0.9.10 and
   `meerkat-toolkit` 0.9.10 set on Linux x86_64 and macOS arm64. It is the
   first Forge release from this repository (tag `meta-installer-v0.3.1`);
@@ -2273,8 +3258,6 @@ without them no longer compiles:
   `live_session_own_operator_instruction_entry_placement`, which says where
   the operator-instruction entry rows a live session wrote itself stand.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 Forward these new methods too. They have defaults, so a wrapper without them
 compiles, but the default disables what they carry:
 
@@ -2615,8 +3598,6 @@ different: 0.9.8 decodes a mob's identity intents as a whole and does not
 open the mob's storage while one of them is a created entry's row. Before a
 downgrade, a mob on a host store must hold no created identity entry.
 
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
-
 A removal writes a row of the same schema for either custody (a removed
 roster-owned identity's tombstone included), and so do an archive and a
 store-owned identity's pending preparation, so the paragraph above applies to
@@ -2633,22 +3614,19 @@ preparation (`preparations_open`), the held constructions
 last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
 rebuilds such a member from its seat row; a respawn with the row's labels,
 `MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
-From 0.9.15 a label update restamps its idle member
-itself, so only a seat an earlier release left behind, or one whose member
-was not restamped at its update (it held work, say), counts here. From
-that release on, an update that leaves its member's restamp owed records
-it in the identity's row (`label_restamps_owed` counts those rows): the
+From 0.9.15 a label update keeps its member's seat and records the restamp
+its seat row is owed in the identity's row (`label_restamps_owed` counts
+those rows), so such a seat counts here until its next seat row: the
 mob's roster reads the row's labels from the update's commit and from each
 start on (a host's own respawn of the member with other labels in between
 keeps those on its roster entry until the next start or the restamp, while
 its builds carry the row's), the member's builds are compared with them,
-and a retry of the
-update, the identity's next update while the member is idle, or a respawn
-with the row's labels settles it. Such a seat needs no step before its
+and a respawn with the row's labels, a profile or runtime-mode change, a
+rotation or a reset settles it. Such a seat needs no step before its
 host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a spawn
 customizer that sets labels. A seat an earlier release left behind carries
-no such record: respawn it with its row's labels, or update the identity
-while its member is idle, before the host adopts either, since no start
+no such record: respawn it with its row's labels, or update the identity,
+before the host adopts either, since no start
 and no build moves its labels and a host that answers such a seat from its
 row is refused the member's build. Releases 0.9.9 through 0.9.14 read a row
 that records an owed restamp as unreadable, for that identity alone:
@@ -2658,8 +3636,6 @@ The count names the seat rows a downgrade would read: step 3 of the
 downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store
@@ -3978,9 +4954,10 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   before 0.9.4 gets its incarnation at its first resume (provenance
   `Unrecorded`). After a restart, the session that created a mob with the
   agent mob tools manages it again (the grant is re-derived from the creation
-  record); a member that created a mob and was then reset to a later
-  generation over the same session does not (known limitation; an operator
-  grant restores manage).
+  record); a member that created a mob and was then seated at a later
+  generation does not, unless that generation is its same-session successor
+  (through 0.9.14 no later generation did: known limitation there; an
+  operator grant restores manage).
 - **Member delivery scopes name the incarnation** and are written at version
   2. A version-1 scope still decodes and is honoured only by a mob whose
   incarnation was assigned to a store from before 0.9.4; 0.9.3 refuses a

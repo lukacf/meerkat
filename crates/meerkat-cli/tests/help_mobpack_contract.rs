@@ -325,3 +325,442 @@ fn embedded_help_mobpack_examples_match_typed_authoring_contracts()
 
     Ok(())
 }
+
+/// `rkat mob pack <dir> -o <output> --sign <key>` packs neither the signing
+/// key nor its own output file, however the three paths are written. Every
+/// spelling packs twice, so the second run finds the first run's output in
+/// the mob directory.
+#[test]
+fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    // Throwaway signing key: 32 bytes made up here, as 64 hex digits.
+    let key_hex: String = (0u8..32)
+        .map(|index| index.wrapping_mul(7).wrapping_add(11))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect();
+    assert_eq!(key_hex.len(), 64);
+
+    // (typed inside the mob directory, directory, key, output, where the key
+    // file is in the mob directory); `{mob}` is the mob directory's absolute
+    // path.
+    let spellings = [
+        (true, ".", "key.hex", "out.mobpack", "key.hex"),
+        (true, ".", "./key.hex", "./out.mobpack", "key.hex"),
+        (false, "mob", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (false, "./mob", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (
+            false,
+            "mob",
+            "./mob/key.hex",
+            "./mob/out.mobpack",
+            "key.hex",
+        ),
+        (false, "{mob}", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (
+            false,
+            "{mob}",
+            "{mob}/key.hex",
+            "{mob}/out.mobpack",
+            "key.hex",
+        ),
+        // A trailing separator, as shell completion writes a directory.
+        (false, "mob/", "mob/key.hex", "mob/out.mobpack", "key.hex"),
+        (
+            false,
+            "mob",
+            "{mob}/key.hex",
+            "{mob}/out.mobpack",
+            "key.hex",
+        ),
+        (
+            false,
+            "mob",
+            "mob/../mob/key.hex",
+            "mob/../mob/out.mobpack",
+            "key.hex",
+        ),
+        // The key in a subdirectory of the mob directory.
+        (
+            false,
+            "./mob",
+            "mob/keys/sign.key",
+            "mob/out.mobpack",
+            "keys/sign.key",
+        ),
+        // The key inside, the output outside.
+        (true, ".", "key.hex", "../x.mobpack", "key.hex"),
+    ];
+
+    let mut packed_by_spelling = Vec::new();
+    for (inside_mob, dir, key, output, key_file) in spellings {
+        let temp = tempfile::tempdir()?;
+        let mob = temp.path().join("mob");
+        std::fs::create_dir_all(mob.join("keys"))?;
+        std::fs::write(
+            mob.join("manifest.toml"),
+            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+        )?;
+        std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+        std::fs::write(mob.join(key_file), &key_hex)?;
+
+        let absolute = mob.display().to_string();
+        let dir = dir.replace("{mob}", &absolute);
+        let key = key.replace("{mob}", &absolute);
+        let output = output.replace("{mob}", &absolute);
+        let current = if inside_mob {
+            mob.as_path()
+        } else {
+            temp.path()
+        };
+        let spelling = format!("rkat mob pack {dir} -o {output} --sign {key}");
+
+        for run in ["first", "second"] {
+            let packed = Command::new(&rkat)
+                .current_dir(current)
+                .env("HOME", temp.path())
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .env_remove("RKAT_TRUST_POLICY")
+                .args(["mob", "pack", &dir, "-o", &output, "--sign", &key])
+                .args(["--signer-id", "team@example.com"])
+                .output()?;
+            assert!(
+                packed.status.success(),
+                "{spelling}: {run} mob pack failed: {}",
+                output_text(&packed)
+            );
+        }
+
+        let inspected = Command::new(&rkat)
+            .current_dir(current)
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["mob", "inspect", &output])
+            .output()?;
+        assert!(
+            inspected.status.success(),
+            "{spelling}: mob inspect failed: {}",
+            output_text(&inspected)
+        );
+        let stdout = String::from_utf8_lossy(&inspected.stdout);
+        let files: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("file\t"))
+            .collect();
+        if files != ["definition.json", "manifest.toml", "signature.toml"] {
+            packed_by_spelling.push(format!("{spelling} packed {files:?}"));
+        }
+    }
+
+    assert!(
+        packed_by_spelling.is_empty(),
+        "only the sources and the signature are packed; not so for:\n{}",
+        packed_by_spelling.join("\n")
+    );
+    Ok(())
+}
+
+/// A path to leave out whose real path cannot be resolved, for another reason
+/// than that it names no file, refuses the pack: no pack is written, and the
+/// error names the path. The command is typed inside the mob directory, whose
+/// parent loses its search permission before `rkat` starts.
+#[cfg(unix)]
+#[test]
+fn mob_pack_refuses_when_a_path_to_leave_out_cannot_be_resolved()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    let temp = tempfile::tempdir()?;
+    let guard = temp.path().join("guard");
+    let mob = guard.join("mob");
+    std::fs::create_dir_all(mob.join("skills"))?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    // Throwaway signing key: 32 bytes made up here, as 64 hex digits.
+    let key_hex: String = (0u8..32)
+        .map(|index| index.wrapping_mul(5).wrapping_add(3))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect();
+    std::fs::write(mob.join("key.hex"), key_hex)?;
+
+    // An account that passes every permission check (root) cannot build the
+    // setting: the row has nothing to say there.
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o000))?;
+    let unsearchable = std::fs::metadata(&mob).is_err();
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o755))?;
+    if !unsearchable {
+        return Ok(());
+    }
+
+    // The shell enters the mob directory, takes the search permission from
+    // its parent and becomes `rkat` (`$0`). The realm state is kept outside
+    // the tree (`$1`), so that the command gets as far as the pack.
+    let packed = Command::new("/bin/sh")
+        .current_dir(&mob)
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .arg("-c")
+        .arg(
+            "chmod 000 .. && exec \"$0\" --state-root \"$1\" mob pack . \
+             -o skills/../new.mobpack --sign skills/../key.hex --signer-id team@example.com",
+        )
+        .arg(&rkat)
+        .arg(temp.path().join("state"))
+        .output();
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o755))?;
+    let packed = packed?;
+
+    let written: Vec<String> = std::fs::read_dir(&mob)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".mobpack"))
+        .collect();
+    assert!(
+        !packed.status.success() && written.is_empty(),
+        "the pack must be refused and nothing written; wrote {written:?}: {}",
+        output_text(&packed)
+    );
+    // What a script sees: the exit status, nothing on standard output, and a
+    // message whose part before the system's own error text is fixed.
+    assert_eq!(packed.status.code(), Some(1), "{}", output_text(&packed));
+    assert_eq!(String::from_utf8_lossy(&packed.stdout), "");
+    let stderr = String::from_utf8_lossy(&packed.stderr);
+    assert!(
+        stderr.starts_with(
+            "Error: mob pack failed: I/O error: cannot resolve 'skills/../new.mobpack', a file \
+             the pack must leave out: Permission denied"
+        ),
+        "the refusal names the path and the reason: {}",
+        output_text(&packed)
+    );
+    Ok(())
+}
+
+/// `--sign` with a path that names no file refuses the pack before the mob
+/// directory is read: the exit status and the message are the same whatever
+/// the directory argument holds, and no output file is written.
+#[test]
+fn mob_pack_refuses_a_key_path_that_names_no_file_before_the_directory_is_read()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    let temp = tempfile::tempdir()?;
+    let mob = temp.path().join("mob");
+    std::fs::create_dir_all(&mob)?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    let no_manifest = temp.path().join("no-manifest");
+    std::fs::create_dir_all(&no_manifest)?;
+    std::fs::write(no_manifest.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    std::fs::write(temp.path().join("a-file"), "not a mob directory\n")?;
+
+    let missing_key = temp.path().join("no-such.key");
+    let system_error = match std::fs::File::open(&missing_key) {
+        Err(err) => err.to_string(),
+        Ok(_) => return Err("the key path must name no file".into()),
+    };
+    let refusal = format!("Error: mob pack failed: I/O error: {system_error}");
+
+    let mut not_so = Vec::new();
+    for (case, dir) in [
+        ("a mob directory that packs", "mob"),
+        ("a mob directory without a manifest", "no-manifest"),
+        ("a directory argument that cannot be read", "a-file"),
+    ] {
+        let output = temp.path().join(format!("{dir}.mobpack"));
+        let packed = Command::new(&rkat)
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env_remove("RKAT_TRUST_POLICY")
+            .args(["mob", "pack", dir, "-o"])
+            .arg(&output)
+            .arg("--sign")
+            .arg(&missing_key)
+            .args(["--signer-id", "team@example.com"])
+            .output()?;
+        let stderr = String::from_utf8_lossy(&packed.stderr);
+        if packed.status.code() != Some(1)
+            || !packed.stdout.is_empty()
+            || stderr.trim_end() != refusal
+            || output.exists()
+        {
+            not_so.push(format!(
+                "{case}: status {:?}, output file written: {}, {}",
+                packed.status.code(),
+                output.exists(),
+                output_text(&packed)
+            ));
+        }
+    }
+    assert!(
+        not_so.is_empty(),
+        "expected exit status 1, `{refusal}` alone on standard error and no output file; not so \
+         for:\n{}",
+        not_so.join("\n")
+    );
+    Ok(())
+}
+
+/// A signing key that is read through a pipe signs the pack: `--sign
+/// /dev/stdin` with the key on standard input. Such a key is no file of any
+/// directory, so the pack holds the sources and its signature.
+#[cfg(target_os = "linux")]
+#[test]
+fn mob_pack_signs_with_a_key_read_through_a_pipe() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    let temp = tempfile::tempdir()?;
+    let mob = temp.path().join("mob");
+    std::fs::create_dir_all(&mob)?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    // Throwaway signing key: 32 bytes made up here, as 64 hex digits.
+    let key_hex: String = (0u8..32)
+        .map(|index| index.wrapping_mul(3).wrapping_add(17))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect();
+    assert_eq!(key_hex.len(), 64);
+    let output = temp.path().join("piped.mobpack");
+
+    let mut child = Command::new(&rkat)
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .args(["mob", "pack", "mob", "-o"])
+        .arg(&output)
+        .args(["--sign", "/dev/stdin", "--signer-id", "team@example.com"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // The pipe is closed when the write is done, so the key ends there.
+    let fed = child
+        .stdin
+        .take()
+        .ok_or("the child has a piped standard input")?
+        .write_all(key_hex.as_bytes());
+    let packed = child.wait_with_output()?;
+    assert!(
+        packed.status.success(),
+        "mob pack with the key on standard input failed (key written: {fed:?}): {}",
+        output_text(&packed)
+    );
+
+    let inspected = Command::new(&rkat)
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["mob", "inspect"])
+        .arg(&output)
+        .output()?;
+    assert!(
+        inspected.status.success(),
+        "mob inspect failed: {}",
+        output_text(&inspected)
+    );
+    let stdout = String::from_utf8_lossy(&inspected.stdout);
+    let files: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("file\t"))
+        .collect();
+    assert_eq!(
+        files,
+        ["definition.json", "manifest.toml", "signature.toml"]
+    );
+    Ok(())
+}
+
+/// A signing key on standard input from a file that has no name any more
+/// signs the pack: `--sign /dev/stdin` with standard input opened on a file
+/// that was then removed, as some shells give a here-string. The pack holds
+/// the sources and its signature.
+#[cfg(target_os = "linux")]
+#[test]
+fn mob_pack_signs_with_a_key_on_standard_input_from_a_file_without_a_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Stdio;
+
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    let temp = tempfile::tempdir()?;
+    let mob = temp.path().join("mob");
+    std::fs::create_dir_all(&mob)?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    // Throwaway signing key: 32 bytes made up here, as 64 hex digits.
+    let key_hex: String = (0u8..32)
+        .map(|index| index.wrapping_mul(9).wrapping_add(5))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect();
+    assert_eq!(key_hex.len(), 64);
+    // The key file is opened, then removed: the open file has no name.
+    let key_file = temp.path().join("here-string");
+    std::fs::write(&key_file, &key_hex)?;
+    let key_on_stdin = std::fs::File::open(&key_file)?;
+    std::fs::remove_file(&key_file)?;
+    let output = temp.path().join("unnamed.mobpack");
+
+    let packed = Command::new(&rkat)
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .args(["mob", "pack", "mob", "-o"])
+        .arg(&output)
+        .args(["--sign", "/dev/stdin", "--signer-id", "team@example.com"])
+        .stdin(Stdio::from(key_on_stdin))
+        .output()?;
+    assert!(
+        packed.status.success(),
+        "mob pack with the key on standard input from a file without a name failed: {}",
+        output_text(&packed)
+    );
+
+    let inspected = Command::new(&rkat)
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["mob", "inspect"])
+        .arg(&output)
+        .output()?;
+    assert!(
+        inspected.status.success(),
+        "mob inspect failed: {}",
+        output_text(&inspected)
+    );
+    let stdout = String::from_utf8_lossy(&inspected.stdout);
+    let files: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("file\t"))
+        .collect();
+    assert_eq!(
+        files,
+        ["definition.json", "manifest.toml", "signature.toml"]
+    );
+    Ok(())
+}

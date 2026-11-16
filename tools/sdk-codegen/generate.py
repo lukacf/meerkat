@@ -457,6 +457,8 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "SessionInputStateParams",
     "SessionInputStateSelector",
     "SessionInputStateResult",
+    "RecallInputParams",
+    "RecallInputResult",
     "RealmIdParams",
     "RestoreSessionTranscriptRevisionParams",
     "RewriteSessionTranscriptParams",
@@ -517,6 +519,10 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireCanonicalPart",
     "WirePresentationLink",
     "WirePresentationRecord",
+    # One question's answer in a decision's typed answer. The alias that
+    # names it (`WireDecisionAnswer`) is emitted before this roster, so it is
+    # emitted with that alias (PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES).
+    "WireAskUserQuestionAnswer",
     "WireDecisionOutcome",
     "WireDecisionEffect",
     "WireDecision",
@@ -555,6 +561,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireRunStopCompletion",
     "WireInputTerminalOutcome",
     "WireCompactionRequestOutcome",
+    "WireQueuedInputRecall",
     "WireDeviceCompleteResult",
     "AuthLogoutParams",
     "AuthStatusParams",
@@ -610,10 +617,28 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireDecisionAssurance",
     "WireDecisionReviewVerdict",
     "WirePresentationAudience",
+    # The typed answer a human decision's evidence can carry, and the answer
+    # to one question in it: both tolerant, both before the evidence.
+    "WireAskUserAnswer",
+    "WireDecisionAnswer",
     "WireDecisionEvidence",
     "WireDecisionRefusal",
     "WireDecisionErrorData",
 ]
+
+# Objects that an alias of PUBLIC_RPC_CATALOG_ALIAS_TYPES names. The aliases
+# are emitted before the object roster, and an alias keeps a reference by
+# name only to a type that is already emitted: one emitted later is widened
+# to `Record<string, unknown>` / `dict[str, Any]`. Each object listed here
+# is emitted just before its alias, after the aliases before it in the
+# roster (which the object may name itself), so the alias names it. The
+# object stays in PUBLIC_RPC_CATALOG_OBJECT_TYPES, where it is then skipped
+# as already emitted.
+PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES = {
+    # `WireDecisionAnswer::AskUser.answers` is a list of this object, which
+    # names the alias `WireAskUserAnswer`.
+    "WireDecisionAnswer": ["WireAskUserQuestionAnswer"],
+}
 
 # Request unions whose schemas live in the params roster rather than the wire
 # roster: the auth ones are serde-untagged with flattened targets.
@@ -1188,6 +1213,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         # A compaction request's outcome stays named inside
         # `CompactSessionResult` / `MobCompactMemberResult`.
         "WireCompactionRequestOutcome",
+        # The queued-input recall's typed answer stays a named union inside
+        # `RecallInputResult`.
+        "WireQueuedInputRecall",
     }
 
 
@@ -3611,7 +3639,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    structured_output: Optional[Any] = None\n"
     types_content += "    extraction_error: Optional[dict[str, Any]] = None\n"
     types_content += "    schema_warnings: Optional[list[Any]] = None\n"
-    types_content += "    skill_diagnostics: Optional[dict] = None\n\n\n"
+    types_content += "    skill_diagnostics: Optional[dict] = None\n"
+    types_content += "    reasoning_effort: Optional[dict[str, Any]] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireToolResult:\n"
     types_content += '    """Tool result transcript item."""\n'
@@ -4072,6 +4101,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireAuthErrorData", wire_schema, "error.data of an auth RPC error.")
     append_python_dataclass("WireAuthErrorBody", wire_schema, "Body of a REST auth endpoint error.")
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
+        for dependency in PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES.get(name, ()):
+            append_python_contract_dataclass(dependency)
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_python_alias(name, alias_root, f"Wire payload for {name}.")
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
@@ -4659,6 +4690,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  structured_output?: unknown;\n"
     types_content += "  extraction_error?: { last_output: string; attempts: number; reason: string };\n"
     types_content += "  schema_warnings?: Array<{ provider: string; path: string; message: string }>;\n"
+    types_content += (
+        "  reasoning_effort?: { requested: string; sent: Array<{ level: string; provider: string; "
+        "model: string; route: { backend: string; api: string }; fields: string[]; facts: string; "
+        "decided_by: string; requests: number }> };\n"
+    )
     types_content += "}\n\n"
 
     types_content += "export interface WireToolResult {\n"
@@ -4943,6 +4979,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireAuthErrorData", wire_schema)
     append_typescript_interface("WireAuthErrorBody", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
+        for dependency in PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES.get(name, ()):
+            append_typescript_contract_interface(dependency)
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_typescript_alias(name, alias_root)
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
@@ -6182,6 +6220,13 @@ export interface SessionConfig {
   additionalInstructions?: string[];
   /** Opaque application context. */
   appContext?: unknown;
+  /**
+   * The session's provider-neutral reasoning effort level. Meerkat checks it
+   * against the model on the route that serves the request and writes the
+   * provider's own field; a level the model or route does not accept is
+   * refused before any provider request.
+   */
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 /** Fail-closed parse guard for WASM `init_runtime*` output (K19/K21).
@@ -6236,7 +6281,7 @@ def generate_web_session_types(schemas: dict, output_dir: Path) -> None:
     wire = schemas["wire-types"]
     definitions: dict[str, Any] = {}
     roots: dict[str, Any] = {}
-    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt"):
+    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt", "WireQueuedInputRecall"):
         schema = _lookup_named_schema(wire, name)
         if not schema:
             raise KeyError(f"canonical {name} schema is missing")

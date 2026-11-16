@@ -2562,6 +2562,55 @@ default_binding = "local"
             .expect("a verified callback is accepted");
     }
 
+    /// The builder every gateway branch gives its session service
+    /// (`for_gateway`) tells how a model takes an appended system
+    /// instruction, as the factory builder it wraps does: a session's
+    /// instruction read states the lowering from this answer, and the
+    /// answer of an instructions update is taken from that read. A builder
+    /// that cannot tell (the trait's default) would state none for every
+    /// model.
+    #[tokio::test]
+    async fn the_gateway_callback_builder_tells_each_models_instruction_lowering() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let (stdout_tx, _stdout_rx) = mpsc::channel(1);
+        let builder = StdioCallbackAgentBuilder::for_gateway(
+            FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+            StdioCallbackBridge::new(stdout_tx),
+            true,
+            None,
+            None,
+            &GatewayRuntimeOptions::default(),
+            None,
+        );
+        let identity = |provider, model: &str| meerkat_core::SessionLlmIdentity {
+            model: model.to_string(),
+            provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let told = [
+            identity(meerkat_core::Provider::Anthropic, "claude-sonnet-4-6"),
+            identity(meerkat_core::Provider::OpenAI, "gpt-5.5"),
+        ];
+        let mut lowerings = Vec::new();
+        for identity in &told {
+            lowerings.push(
+                SessionAgentBuilder::instruction_lowering_for_identity(&builder, identity).await,
+            );
+        }
+        assert_eq!(
+            lowerings,
+            [
+                Some(meerkat_core::InstructionLowering::LeadingPrefixOnly),
+                Some(meerkat_core::InstructionLowering::MidConversation),
+            ],
+            "the gateway's builder answers each model's lowering as its inner factory builder \
+             does: a model that takes a system instruction only ahead of the conversation, and \
+             one that takes it after conversation rows"
+        );
+    }
+
     /// Under a member auth binding the SDK build callback's answer is checked
     /// as the session services checked the request: a `resume_session_id`
     /// answer that seats the build on a stored session whose recorded tooling
@@ -10519,8 +10568,8 @@ fn gateway_event_log_slot(
         crate::storage_health::StorageSlotSummary::declared_ephemeral(
             "event_log",
             "in-process store",
-            "declared via runtime_options.event_log ('memory' retains a bounded queryable \
-             buffer; 'null' drops events explicitly)",
+            "declared via runtime_options.event_log ('memory' retains a queryable \
+             buffer with no size limit; 'null' drops events explicitly)",
         )
     } else {
         crate::storage_health::StorageSlotSummary::declared_ephemeral(
@@ -15766,6 +15815,20 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
     // under the root this reports.
     fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
         self.inner.session_comms_identity_root()
+    }
+
+    // Forwarded: the inner factory builder answers from the model registry
+    // of the config a build reads. This wrapper adds SDK callbacks around
+    // agent construction and knows no model. The trait's default answers
+    // "cannot tell" for every model, and an instruction read of a member's
+    // session then states no lowering: an update of an agent's
+    // instructions would say when the change applies without knowing how
+    // the agent's model takes it.
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        self.inner.instruction_lowering_for_identity(identity).await
     }
 
     async fn abort_absent_session_compaction_stages(
@@ -21200,7 +21263,14 @@ external_addressable = true
              materialized every member"
         );
     }
-    let init_result = json!({
+    // The members the mob holds broken at this moment, as `meta/status`
+    // names them: the start tried to build or verify each and could not.
+    // Read from the roster and the machine state the mob's actor last
+    // published, so it builds no member and never waits on the mob actor. A
+    // member that breaks later is in `meta/status` only.
+    let broken_members =
+        crate::mob_handle_runtime::broken_member_facts_of(&runtime.mob_handle()).await;
+    let mut init_result = json!({
         "http_base_url": http_base_url,
         // Proxy-facing base the launch advertised through
         // runtime_options.http_public_base_url; null when none was
@@ -21228,6 +21298,13 @@ external_addressable = true
         // unknown result fields.
         "control_listen_address": control_listen_address,
     });
+    // Present only when the mob holds a member broken, as in `meta/status`:
+    // a start that left none broken writes the result it always wrote.
+    // Wire-additive.
+    if !broken_members.is_empty() {
+        init_result["broken_members"] =
+            crate::unified_runtime::http::broken_members_json(&broken_members);
+    }
     if shutdown_requested.load(Ordering::Acquire) {
         let (request, report) = abort_init_for_shutdown(
             Some(runtime.as_ref()),
@@ -21240,6 +21317,17 @@ external_addressable = true
         resources.init_abort_report = report;
         resources.init_aborted_for_shutdown = true;
         return Ok(());
+    }
+    // Written only for an init that goes on to report ready: an init aborted
+    // for shutdown sends no init result, so its log must not point at one.
+    if !broken_members.is_empty() {
+        tracing::warn!(
+            broken_member_count = broken_members.len(),
+            members = %crate::unified_runtime::http::broken_member_names_for_log(&broken_members),
+            "the mob's start left members broken: they serve nothing until they are repaired \
+             (`broken_members` in the init result and in `meta/status` names each with its \
+             reason)"
+        );
     }
     // The dispatch loop's one SIGINT/SIGTERM listener, registered before any
     // work is admitted and held across every admission below. A signal that

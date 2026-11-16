@@ -3456,7 +3456,8 @@ pub enum ConsoleSendGateRefusal {
     /// validation message.
     InvalidTarget(String),
     /// The Console's access policy does not let the caller send to the
-    /// target (`agent.send`).
+    /// target (`agent.send`), or, where the target is a member the caller
+    /// may not know of, to a name no member holds.
     AccessDenied,
     /// The target is a member the caller may not know of: it is private to
     /// another person ([`crate::access::PRIVATE_TO_LABEL`]). Answered as a
@@ -3499,12 +3500,16 @@ impl ConsoleSendGateRefusal {
     }
 }
 
-/// The Console's stock send gate, the one implementation `/console/send` and
-/// [`ConsoleSendPrecheck`] run: the Console is writable, the target is a
+/// The Console's stock send gate, the one implementation its four runners
+/// share: `/console/send`, `/console/send/recover`, [`ConsoleSendPrecheck`]
+/// and a console schedule's fire (`crate::console_schedules`, as the
+/// schedule's sender). The Console is writable, the target is a
 /// valid public member alias, it is no member the caller may not know of
-/// ([`AccessView::hides_agent`], answered as a name no member holds is,
-/// enforced access or not: by the access rules where they refuse the caller
-/// a send to such a name, and as an unknown member otherwise), and the
+/// ([`AccessView::hides_agent`], answered as the caller's view answers a
+/// name no member holds, enforced access or not: the view is asked about
+/// such a name, so a rule that names the member itself is not asked, and
+/// the answer is the rules' refusal where they refuse the caller a send to
+/// such a name, and an unknown member otherwise), and the
 /// caller's access view allows `agent.send` to it,
 /// decided after the attribute cache is primed from the live roster: the
 /// local runtime's, else the runtimes of the Console's aggregator, each in

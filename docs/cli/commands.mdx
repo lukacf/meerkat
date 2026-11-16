@@ -486,6 +486,10 @@ grant it (`realm grant --mcp`): a grant for a server that is not one of the
 realm's own installations is refused. Both steps work when the realm is
 already governed.
 
+In a script, check the exit code of each `rkat realm` command: after a failed
+`realm govern` the realm is not governed, and the commands that follow run
+against an ordinary realm.
+
 `realm revoke-grant` revokes the grant selected for one target and exits
 successfully only when it is revoked. Use the global `--as-agent` to run as a
 granted agent. `realm govern`, `grant` and `revoke-grant` take the realm's

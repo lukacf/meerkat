@@ -13037,6 +13037,14 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
+                        // Caller labels and context pass the shared public
+                        // metadata rule first, as on the JSON-RPC spawn
+                        // methods and the public spawn tools.
+                        meerkat::surface::validate_public_surface_metadata(
+                            spec.labels.as_ref(),
+                            spec.context.as_ref(),
+                        )
+                        .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity)
                             .with_creation_source(
                                 meerkat_mob::MemberCreationSourceWitness::unavailable(),

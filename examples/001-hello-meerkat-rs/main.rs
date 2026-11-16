@@ -57,7 +57,7 @@ async fn run() -> Result<(), ExampleError> {
     let result = service
         .create_session(CreateSessionRequest {
             injected_context: Vec::new(),
-            model: "claude-sonnet-4-6".into(),
+            model: "claude-sonnet-5-5".into(),
             prompt: "What makes Rust's ownership model unique? Answer in two sentences.".into(),
             system_prompt: meerkat::SystemPromptOverride::Set(
                 "You are a helpful assistant. Be concise.".into(),

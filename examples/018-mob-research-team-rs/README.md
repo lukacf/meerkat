@@ -29,9 +29,9 @@ mob lifecycle events do not satisfy the response wait.
 ## Profiles
 | Profile | Model | Role |
 |---------|-------|------|
-| lead-analyst | claude-opus-4-8 | Coordinates research, synthesizes findings |
-| market-researcher | claude-sonnet-4-6 | Competitive analysis, market sizing |
-| tech-researcher | claude-sonnet-4-6 | Technical feasibility |
+| lead-analyst | claude-opus-5-5 | Coordinates research, synthesizes findings |
+| market-researcher | claude-sonnet-5-5 | Competitive analysis, market sizing |
+| tech-researcher | claude-sonnet-5-5 | Technical feasibility |
 
 ## Run
 ```bash

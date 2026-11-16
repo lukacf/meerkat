@@ -60,7 +60,7 @@ async fn run_with_client(
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-5-5").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -78,7 +78,7 @@ async fn run_with_client(
     memory_session.set_session_metadata(meerkat_core::SessionMetadata {
         model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         max_tokens: 1024,
         structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
@@ -169,7 +169,7 @@ async fn run_with_client(
 
     let mut agent = AgentBuilder::new()
         .with_factory(factory)
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .system_prompt(
             "You are a helpful assistant with access to a semantic memory store.\n\n\
              You have a `memory_search` tool that searches indexed memory.\n\
@@ -268,7 +268,7 @@ mod tests {
                 requests.len()
             };
             let mut events = Vec::new();
-            assert_eq!(request.model, "claude-sonnet-4-6");
+            assert_eq!(request.model, "claude-sonnet-5-5");
             assert!(
                 request
                     .tools

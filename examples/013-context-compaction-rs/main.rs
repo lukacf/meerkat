@@ -37,7 +37,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-5-5").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -70,7 +70,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     session.set_session_metadata(meerkat_core::SessionMetadata {
         model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         max_tokens: 1024,
         structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
@@ -96,7 +96,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut agent = AgentBuilder::new()
         .with_factory(factory)
         .with_config(config)
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .system_prompt(
             "You are a patient tutor. Build on previous conversation context. \
              Always reference earlier topics when relevant. Give thorough, \

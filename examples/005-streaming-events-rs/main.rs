@@ -60,7 +60,7 @@ async fn process_events(
     Ok(())
 }
 
-const MODEL: &str = "claude-sonnet-4-6";
+const MODEL: &str = "claude-sonnet-5-5";
 
 /// Runs one prompt and sends every event of the run to `event_tx`.
 ///

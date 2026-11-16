@@ -884,8 +884,8 @@ in place of a provider.
 This subsection describes a rollback to 0.9.14, and what it says of an
 earlier release was established for 0.9.14, as the paragraph above says. The
 words "an earlier release" and "0.9.14 and earlier releases" reach further
-back as follows, by a reading of the source at the release tags; no rollback
-from 0.9.15 to a release older than 0.9.14 was run.
+back as follows, by a reading of the source at the release tags unless an
+entry names a run.
 
 - **Core, 0.9.11 to 0.9.13.** Core reads these stored forms with the same
   code as 0.9.14, so these items hold there too: a created agent's row that
@@ -902,12 +902,26 @@ from 0.9.15 to a release older than 0.9.14 was run.
 - **Meta, 0.9.12 and 0.9.13.** They are Meta 0.9.14 without the fix named
   under "Meta 0.9.14" below, so what the items say of a 0.9.14 gateway and
   its Console holds for them.
-- **Meta, 0.9.11.** Not read against every item. Two differences are known.
-  A 0.9.11 gateway does not serve agents created at run time, and what it
-  does with the records of agents created on 0.9.15 is not stated here. A
-  `meta_gateway` launched with `persistent_sessions: true` keeps its
-  metadata and its console log in memory (see "Rolling back to 0.9.11"
-  below).
+- **Meta, 0.9.11.** Not read against every item. Three differences are
+  known.
+  - A 0.9.11 gateway refuses to start (`-32602`) on a launch that carries a
+    0.9.15 identity policy whose rules name change classes it does not know
+    (`archive`, `adopt`); the stores are as they were after the refusal.
+    Before going back to 0.9.11, take the identity policy out of the launch
+    options, or reduce it to the change classes 0.9.11 knows.
+  - A 0.9.11 gateway does not serve agents created at run time, and it
+    leaves them as they are. Its roster pass retires none of them, a send to
+    one answers `-32001` (unknown identity), and nothing of theirs changes
+    in the stores. After the return to 0.9.15 they are listed with the same
+    records, sessions and peers, and a send to one that had a conversation
+    appends to that conversation. This is by a run of `rpc_gateway` built
+    from the two releases' tags, with one mob and two created agents that
+    were dormant, and 0.9.11 up for one roster pass. Not run: `meta_gateway`;
+    archived, removed, adopted or held agents; schedules; memory; nested
+    mobs; a peer message to a created agent while 0.9.11 runs.
+  - A `meta_gateway` launched with `persistent_sessions: true` keeps its
+    metadata and its console log in memory (see "Rolling back to 0.9.11"
+    below).
 - **Before 0.9.11:** not read.
 
 An item that names other releases (0.9.9 through 0.9.14, for example) says

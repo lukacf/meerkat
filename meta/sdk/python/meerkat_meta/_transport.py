@@ -252,8 +252,9 @@ class TransportTermination:
     #: ``"retained_until_exit"`` (cleanup completes only with the process
     #: exit), ``"refused"`` (an error or non-attesting answer),
     #: ``"unanswered"`` (no answer: a timeout, a failed reader or a gone
-    #: process), or ``"not_negotiated"`` (the gateway offered no shutdown
-    #: handshake, so the stop only closed its stdin).
+    #: process), or ``"not_negotiated"`` (no shutdown request was made, so the
+    #: stop only closed its stdin: the gateway offered no shutdown handshake,
+    #: or its init settled ``failed``).
     native_shutdown: Literal[
         "acknowledged", "retained_until_exit", "refused", "unanswered", "not_negotiated"
     ]

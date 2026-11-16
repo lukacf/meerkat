@@ -11,13 +11,15 @@ usage:
 
 Regeneration writes only what differs: the copies of changed pages, the manifest
 docs/connect/_source.json (page count, link and fenced block counts, a source and a
-rendered SHA-256 per page, and the Git tree id of the source directory), and the Connect
-navigation and redirects in docs/docs.json, taken from the source site's docs.json with
-the connect/ prefix. A copy whose source page is gone is removed. The manifest's other
-fields are kept as they are.
+rendered SHA-256 per page, the Git tree id of the source directory, and Connect's
+version as its crates state it), and the Connect navigation and redirects in
+docs/docs.json, taken from the source site's docs.json with the connect/ prefix. A copy
+whose source page is gone is removed. The manifest's descriptive fields are kept as they
+are. It records no source commit: a tool that reads working files cannot know one, and
+the tree id is what binds the copies to their source.
 
---site, --mirror and --nav name other directories and files; the tests use them.
-Standard library only.
+--site, --mirror, --nav and --crates name other directories and files; the tests use
+them. Standard library only.
 """
 
 from __future__ import annotations
@@ -35,12 +37,37 @@ ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "connect" / "docs" / "site"
 MIRROR = ROOT / "docs" / "connect"
 NAV = ROOT / "docs" / "docs.json"
+CRATES = ROOT / "connect" / "crates"
 MANIFEST = "_source.json"
 PREFIX = "/connect"
-COMPUTED = ("source_docs_tree", "pages", "fenced_blocks_preserved", "namespaced_links", "files")
+COMPUTED = ("source_docs_tree", "connect_source_version", "pages", "fenced_blocks_preserved", "namespaced_links", "files")
+# Earlier manifests named a source commit and a tree of the whole product; neither can be
+# read from working files, so they are not carried over.
+DROPPED = ("connect_source_commit", "connect_source_tree")
 
 MD_LINK = re.compile(r"(\]\()(/)(?!/)")
 HREF = re.compile(r"""(href\s*=\s*["'])(/)(?!/)""")
+PACKAGE_VERSION = re.compile(r'(?m)^version\s*=\s*"([^"]+)"\s*$')
+
+
+def product_version(crates: Path) -> str:
+    """Connect's version: the package.version every crate under the directory states."""
+    versions = {}
+    for manifest in sorted(crates.glob("*/Cargo.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        start = text.find("[package]")
+        if start < 0:
+            continue
+        end = text.find("\n[", start + 1)
+        found = PACKAGE_VERSION.search(text[start : end if end >= 0 else len(text)])
+        if found is None:
+            raise ValueError(f"{manifest.parent.name} states no literal package.version")
+        versions[manifest.parent.name] = found.group(1)
+    if not versions:
+        raise ValueError(f"no crate under {crates.name} states a version")
+    if len(set(versions.values())) != 1:
+        raise ValueError("the crates state different versions: " + ", ".join(f"{name} {value}" for name, value in versions.items()))
+    return next(iter(versions.values()))
 
 
 def render(text: str) -> tuple[str, int, int]:
@@ -133,7 +160,7 @@ def navigation(site: Path, nav: Path) -> tuple[str | None, str | None]:
     return dump(document, False), None
 
 
-def plan(site: Path, mirror: Path, nav: Path | None) -> tuple[dict[str, bytes], list[str], str, list[str]]:
+def plan(site: Path, mirror: Path, nav: Path | None, crates: Path) -> tuple[dict[str, bytes], list[str], str, list[str]]:
     """What the mirror should hold: page bytes, stale copies, the manifest text, notes."""
     wanted: dict[str, bytes] = {}
     files = []
@@ -149,13 +176,17 @@ def plan(site: Path, mirror: Path, nav: Path | None) -> tuple[dict[str, bytes], 
     stale = [page for page in pages(mirror) if page not in wanted]
     manifest_path = mirror / MANIFEST
     kept = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+    tree, version = git_tree(site).hex(), product_version(crates)
     manifest = {}
     for key, value in kept.items():
         if key == "source_docs_tree":
-            manifest[key] = git_tree(site).hex()
-        elif key not in COMPUTED:
+            manifest[key] = tree
+        elif key == "connect_source_version":
+            manifest[key] = version
+        elif key not in COMPUTED and key not in DROPPED:
             manifest[key] = value
-    manifest.setdefault("source_docs_tree", git_tree(site).hex())
+    manifest.setdefault("source_docs_tree", tree)
+    manifest.setdefault("connect_source_version", version)
     manifest.update({"pages": len(wanted), "fenced_blocks_preserved": fences, "namespaced_links": links, "files": files})
     notes = []
     if nav is not None and not nav.is_file():
@@ -169,12 +200,17 @@ def main() -> int:
     parser.add_argument("--site", type=Path, default=SITE, help="the source pages (default: connect/docs/site)")
     parser.add_argument("--mirror", type=Path, default=MIRROR, help="the published copies (default: docs/connect)")
     parser.add_argument("--nav", type=Path, default=NAV, help="the site's docs.json (default: docs/docs.json)")
+    parser.add_argument("--crates", type=Path, default=CRATES, help="Connect's crates (default: connect/crates)")
     args = parser.parse_args()
     site, mirror, nav = args.site, args.mirror, args.nav
     if not site.is_dir():
         print(f"render-docs-mirror: no source directory {site}", file=sys.stderr)
         return 2
-    wanted, stale, manifest, notes = plan(site, mirror, nav)
+    try:
+        wanted, stale, manifest, notes = plan(site, mirror, nav, args.crates)
+    except ValueError as refusal:
+        print(f"render-docs-mirror: Connect's version cannot be read: {refusal}", file=sys.stderr)
+        return 2
     changed = []
     for page, data in wanted.items():
         target = mirror / page

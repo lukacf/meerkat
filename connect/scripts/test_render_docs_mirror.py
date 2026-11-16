@@ -40,15 +40,45 @@ class RenderDocsMirrorTests(unittest.TestCase):
         (self.site / "guides" / "two.mdx").write_text("# Two\n\n[one](/one)\n", encoding="utf-8")
         (self.site / "docs.json").write_text(dump(SITE_NAV), encoding="utf-8")
         self.nav.write_text(dump(NAV), encoding="utf-8")
+        self.crates = root / "crates"
+        for name in ("first", "second"):
+            (self.crates / name).mkdir(parents=True)
+            (self.crates / name / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "1.2.3"\n\n[dependencies]\nother = {{ version = "9.9.9" }}\n', encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
 
     def run_tool(self, *arguments):
         return subprocess.run(
-            [sys.executable, "-B", str(TOOL), "--site", str(self.site), "--mirror", str(self.mirror), "--nav", str(self.nav), *arguments],
+            [sys.executable, "-B", str(TOOL), "--site", str(self.site), "--mirror", str(self.mirror), "--nav", str(self.nav),
+             "--crates", str(self.crates), *arguments],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False,
         )
+
+    def test_the_manifest_states_the_crates_version_and_no_source_commit(self):
+        self.assertEqual(self.run_tool().returncode, 0)
+        path = self.mirror / "_source.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["connect_source_version"], "1.2.3")
+        stale = {"connect_source_commit": "0" * 40, "connect_source_tree": "1" * 40, **manifest, "connect_source_version": "0.0.1"}
+        path.write_text(json.dumps(stale, indent=2) + "\n", encoding="utf-8")
+        done = self.run_tool("--check")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("differs _source.json", done.stdout)
+        self.assertEqual(self.run_tool().returncode, 0)
+        after = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(after["connect_source_version"], "1.2.3")
+        self.assertNotIn("connect_source_commit", after)
+        self.assertNotIn("connect_source_tree", after)
+        self.assertEqual(self.run_tool("--check").returncode, 0)
+
+    def test_crates_that_state_different_versions_are_refused(self):
+        (self.crates / "second" / "Cargo.toml").write_text('[package]\nname = "second"\nversion = "1.2.4"\n', encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("different versions", done.stderr)
+        self.assertFalse((self.mirror / "_source.json").exists())
 
     def test_renders_links_outside_fences_and_records_the_manifest(self):
         done = self.run_tool()

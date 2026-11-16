@@ -5,11 +5,9 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "65aebe08d7ee2baa1c8019d8013dc490345608dc",
-  "connect_source_commit": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
-  "connect_source_tree": "245cf826ee78d6f60c098dc9d8856b100448fa23",
+  "source_docs_tree": "3f406715407fadae1472e14632f5d025ac9a04af",
   "connect_source_state": "monorepo_sync",
-  "connect_source_version": "0.9.10",
+  "connect_source_version": "0.9.15",
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
@@ -66,8 +64,8 @@
     },
     {
       "path": "contributing/validation.mdx",
-      "source_sha256": "8cc54058862ee0e1481a62d14c489a250b742b8cca5c1b48062c7e533554cdbf",
-      "rendered_sha256": "21e1d513d7828437cb32876f071ea2dc5d4623ad7f8ddb473b7fd65c40f73997"
+      "source_sha256": "de463c23721541447eb7d3f63df98def193caa34de7391d4611b4bb8c4ff2c6e",
+      "rendered_sha256": "ed3a392b335c4c9eac7c06b44d6d73aa2271ee28107d41d623606a0adbfc7341"
     },
     {
       "path": "examples/device-extension.mdx",

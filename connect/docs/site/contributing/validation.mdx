@@ -104,6 +104,8 @@ python3 scripts/render-docs-mirror.py --check
 
 The first command rewrites the copies that differ, removes a copy whose source page is gone, updates the manifest `docs/connect/_source.json`, and sets the Connect navigation and redirects of the site's `docs/docs.json` from `docs/site/docs.json`, so a new or removed page needs no other step. The second command changes nothing and exits non-zero when a copy, the manifest or the navigation would change. Do not edit a published copy by hand. Both use the standard library only.
 
+The manifest binds the copies to their source by `source_docs_tree`, the Git tree id of `docs/site`, and states Connect's version as its crates state it. It records no source commit: the tree id is the binding.
+
 ## Update claims with changes
 
 When changing an operation, update the corresponding SDK reference and examples. When changing a recipe, update its version and evidence, compiled registration if intended, and [catalog inventory](/reference/catalog). When changing readiness or native composition, recheck [availability](/availability), [readiness](/concepts/readiness) and the affected host guides.

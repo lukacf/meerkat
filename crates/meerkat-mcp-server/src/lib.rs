@@ -10997,6 +10997,169 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    // Caller labels and application context on `meerkat_run`. A session's
+    // top-level `labels` and `app_context` pass the shared metadata rule of
+    // `meerkat_core::surface_metadata`, as on the JSON-RPC and REST session
+    // create: a key Meerkat reserves for its own runtime facts is invalid
+    // params with the rule's message, and no session is created.
+
+    async fn run_metadata_state() -> (MeerkatMcpState, Arc<dyn SessionStore>) {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+        )
+        .await;
+        (state, store)
+    }
+
+    /// The labels `meerkat_read` shows for the session a run result names.
+    async fn run_session_labels(state: &MeerkatMcpState, run_payload: &Value) -> Value {
+        let session_id = run_payload["session_id"]
+            .as_str()
+            .expect("run result names its session");
+        let read = Box::pin(handle_tools_call(
+            state,
+            "meerkat_read",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("read the run's session");
+        unwrap_payload(read)["state"]["labels"].clone()
+    }
+
+    fn run_metadata_with_key(key: &str) -> Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("org".to_string(), json!("acme"));
+        metadata.insert(key.to_string(), json!("caller-value"));
+        Value::Object(metadata)
+    }
+
+    /// Each `(member, key, message)` case is a `meerkat_run` whose `member`
+    /// (`labels` or `app_context`) carries `key`: every one is refused as
+    /// invalid params with exactly `message`, and afterwards no session is
+    /// listed or stored.
+    async fn assert_run_metadata_refused(cases: Vec<(&str, &str, String)>) {
+        let (state, store) = run_metadata_state().await;
+        let mut wrong = Vec::new();
+        for (member, key, message) in cases {
+            let mut input = json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "enable_builtins": false
+            });
+            input[member] = run_metadata_with_key(key);
+            match Box::pin(handle_tools_call(&state, "meerkat_run", &input)).await {
+                Err(err) if err.code == -32602 && err.message == message => {}
+                Err(err) => wrong.push(format!(
+                    "{member} key '{key}': answered {} '{}', wanted -32602 '{message}'",
+                    err.code, err.message
+                )),
+                Ok(result) => {
+                    let labels = run_session_labels(&state, &unwrap_payload(result)).await;
+                    wrong.push(format!(
+                        "{member} key '{key}': the run was accepted (wanted -32602 '{message}'); its session's labels read {labels}"
+                    ));
+                }
+            }
+        }
+        let listed = Box::pin(handle_tools_call(&state, "meerkat_sessions", &json!({})))
+            .await
+            .expect("sessions list call should succeed");
+        let listed = unwrap_payload(listed);
+        assert!(
+            wrong.is_empty(),
+            "runs with a reserved key were not refused as the rule answers:\n{}",
+            wrong.join("\n")
+        );
+        assert_eq!(
+            listed["sessions"],
+            json!([]),
+            "a refused run leaves no session listed"
+        );
+        let stored = store
+            .list(meerkat::SessionFilter::default())
+            .await
+            .expect("list the stored sessions");
+        assert!(
+            stored.is_empty(),
+            "a refused run stores no session: {} stored",
+            stored.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_meerkat_run_refuses_reserved_label_keys_and_creates_no_session() {
+        // The four mob discovery names, the Meerkat namespace, and the forms
+        // the rule covers beyond them: another letter case, the bare token.
+        let cases = [
+            "mob_id",
+            "role",
+            "meerkat_id",
+            "agent_identity",
+            "meerkat.runtime_id",
+            "Role",
+            "MOB_ID",
+            "meerkat",
+        ]
+        .into_iter()
+        .map(|key| {
+            (
+                "labels",
+                key,
+                format!("metadata label key '{key}' is reserved for Meerkat-owned runtime facts"),
+            )
+        })
+        .collect();
+        assert_run_metadata_refused(cases).await;
+    }
+
+    #[tokio::test]
+    async fn test_meerkat_run_refuses_reserved_app_context_keys_and_creates_no_session() {
+        let cases = ["meerkat.runtime_id", "MEERKAT.runtime_id", "meerkat"]
+            .into_iter()
+            .map(|key| {
+                (
+                    "app_context",
+                    key,
+                    format!("app_context key '{key}' is reserved for Meerkat-owned runtime facts"),
+                )
+            })
+            .collect();
+        assert_run_metadata_refused(cases).await;
+    }
+
+    /// Ordinary labels and application context are taken as before: the run
+    /// completes and its session is listed under the caller's labels. The
+    /// mob discovery names are reserved as label keys only, so an
+    /// application context may use them as top-level keys.
+    #[tokio::test]
+    async fn test_meerkat_run_keeps_ordinary_labels_and_app_context() {
+        let (state, _store) = run_metadata_state().await;
+        let result = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_run",
+            &json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "enable_builtins": false,
+                "labels": {"org": "acme", "tier": "gold"},
+                "app_context": {"client_ref": {"view": "compact"}, "role": "reviewer"}
+            }),
+        ))
+        .await
+        .unwrap_or_else(|err| panic!("a run with ordinary labels completes: {}", err.message));
+        assert_eq!(
+            run_session_labels(&state, &unwrap_payload(result)).await,
+            json!({"org": "acme", "tier": "gold"}),
+            "the session carries the caller's labels"
+        );
+    }
+
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_keep_alive_requires_comms_name() {

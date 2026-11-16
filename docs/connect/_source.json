@@ -5,7 +5,7 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "9ab67aa5b0fdd5c6ccb0f068ca946533fa66b965",
+  "source_docs_tree": "4c0c9fb59bdf1e607bdff3a1420f5982a3407033",
   "connect_source_commit": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
   "connect_source_tree": "245cf826ee78d6f60c098dc9d8856b100448fa23",
   "connect_source_state": "monorepo_sync",
@@ -13,11 +13,10 @@
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
-    "The source pages already use neutral names (the connect/ sync); rendering adds the /connect prefix to root-relative links outside fenced code blocks.",
-    "The architecture diagram (reference/architecture.mdx) names the composition layer Meta, the product's current name, where the source uses its former name."
+    "The source pages already use neutral names (the connect/ sync); rendering adds the /connect prefix to root-relative links outside fenced code blocks."
   ],
   "pages": 52,
-  "fenced_blocks_preserved": 72,
+  "fenced_blocks_preserved": 71,
   "namespaced_links": 203,
   "files": [
     {
@@ -37,8 +36,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "ca950f3fce2e79de38bf49bd726ef9cfb7b0ca8bab1dc7a6b149df08de06c5c6",
-      "rendered_sha256": "b93dc418e8c46a96bb9d042c2803fe32e69eb0ca307c7e22f673e9e615d9bf6a"
+      "source_sha256": "2294a2ca13507643426da1d852b522ed4b58d50ac5e652d35d47efc937e351ff",
+      "rendered_sha256": "5d540333fc9043bdd481bd3f19258fdb3cd241757d96665549f9a8fe775ca7bd"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -162,8 +161,8 @@
     },
     {
       "path": "library/local-install.mdx",
-      "source_sha256": "e88cf021a72e38f3ff5b010de94a076f8949d0d884baa339aa3625bace807a53",
-      "rendered_sha256": "d0f21aac9e3916819ce01655ecf9380d5ddfb401c569ca955edb7ea5d3cbb728"
+      "source_sha256": "0e907f9862ea60363ad1f29e7f6c3cdcacc02d67b5ff02f4f8499a61ec4ff6ff",
+      "rendered_sha256": "6be9142a7f47be820370aede67b249d3569c28ea8e13a7782e5b84c50c7e692b"
     },
     {
       "path": "library/playwright.mdx",
@@ -187,8 +186,8 @@
     },
     {
       "path": "quickstart.mdx",
-      "source_sha256": "64a3df64978e7b1fe3fb7c719058ef51dff089939e8ad074332dc5b59f54cb55",
-      "rendered_sha256": "0751670c0c09a08885ec809acc86ae415d4f56317f9e31036d8d141207b2f428"
+      "source_sha256": "360217e502bc85072f35c7e3e4b71d881656719d6852f721d10e508fb0109106",
+      "rendered_sha256": "efd8e32f4ac973eb6bb4e117a669f546645f8431419a60d29a9aaa91281d0e4f"
     },
     {
       "path": "reference/access-control.mdx",
@@ -197,7 +196,7 @@
     },
     {
       "path": "reference/architecture.mdx",
-      "source_sha256": "1c4c5636a7edaa27907dd5b91c8f04511fa5bed3026995e4d4cde3b6a515fcb5",
+      "source_sha256": "af0c81f2c7d69abdce3e38fcc516a75670111ee1e25c69cd26f0489b300fd469",
       "rendered_sha256": "a1ed56e8f5c2b640105b91c7a5f96e45c8fa9c7408d25d6c80c860df1a2aa15c"
     },
     {

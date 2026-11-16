@@ -32,8 +32,7 @@ library and setup resources; you do not need to install those separately.
     curl -fLO "$release/$archive.sha256"
     ```
 
-    On macOS, verify it with `shasum -a 256 -c "$archive.sha256"`; on Linux,
-    use `sha256sum -c "$archive.sha256"`. Continue only when it reports success:
+    Verify it with `sha256sum -c "$archive.sha256"`. Continue only when it reports success:
 
     ```sh
     tar -xpf "$archive"
@@ -48,11 +47,6 @@ library and setup resources; you do not need to install those separately.
       <Tab title="Linux x86_64">
         ```sh
         ./meerkat-connect-linux-x86_64/bin/meerkat-connect
-        ```
-      </Tab>
-      <Tab title="Apple Silicon macOS">
-        ```sh
-        ./meerkat-connect-macos-arm64/bin/meerkat-connect
         ```
       </Tab>
     </Tabs>

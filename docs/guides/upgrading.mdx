@@ -901,7 +901,28 @@ entry names a run.
   them, as its item says of 0.9.14.
 - **Meta, 0.9.12 and 0.9.13.** They are Meta 0.9.14 without the fix named
   under "Meta 0.9.14" below, so what the items say of a 0.9.14 gateway and
-  its Console holds for them.
+  its Console holds for them. A rollback to 0.9.13 was also run, for agents
+  created at run time:
+  - The start is as on 0.9.11. A 0.9.13 gateway refuses the unchanged 0.9.15
+    launch at init, naming `archive` (or `adopt`, where a rule names only
+    that). The remedy that was run is taking the values `archive` and
+    `adopt` out of the rules' `change`, or removing the whole
+    `identity_creation` option.
+  - A 0.9.13 gateway serves the agents created on 0.9.15: both were
+    registered, a send to one was accepted and its turn completed.
+  - The return to 0.9.15 finds the same records, sessions and peers. A turn
+    made on 0.9.13 is kept, and later messages append to the same session.
+  - One difference while rolled back: a created agent runs with 0.9.13's
+    tools, so it has no `ask_user`. Its first turn after the return has it
+    again.
+  - 0.9.12 was not built. Between the Meta tags of 0.9.12 and 0.9.13 the
+    only change in the Rust source is the version number, so the run stands
+    for 0.9.12's code.
+  - As run: the stdio `rpc_gateway`, one mob, two created agents, the
+    gateway up for seconds, turns answered by a test client so that no tool
+    was called. Not run: `meta_gateway`; archived, removed, adopted, held or
+    updated agents; schedules; memory; nested mobs; a peer message; a held
+    question before the rollback; a turn in flight at the stop.
 - **Meta, 0.9.11.** Not read against every item. Three differences are
   known.
   - A 0.9.11 gateway refuses to start (`-32602`) on a launch that carries a
@@ -928,8 +949,7 @@ entry names a run.
     roster pass). Not run: `meta_gateway`; archived, removed, adopted or
     held agents; an agent changed after its creation; schedules; memory;
     nested mobs; a peer message to a created agent, or a turn of a
-    configured agent, while 0.9.11 runs. These runs say nothing of a
-    rollback to 0.9.12 or 0.9.13.
+    configured agent, while 0.9.11 runs.
   - A `meta_gateway` launched with `persistent_sessions: true` keeps its
     metadata and its console log in memory (see "Rolling back to 0.9.11"
     below).

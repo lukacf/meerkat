@@ -4579,13 +4579,15 @@ them.
   '<path>' is not readable: No such file or directory (os error 2)`, where
   `<path>` is that directory. The server does not create it, and neither the
   directory the server is started from nor the XDG variables cure it. Create
-  the directory the message names before the start
-  (`mkdir -p ~/.local/share/meerkat/rest`), or start the server with
+  the directory the message names (`mkdir -p ~/.local/share/meerkat/rest`; a
+  running server need not be restarted), or start the server with
   `--context-root <an existing directory>`. A request that carries a
   `system_prompt` is not affected. Run on the released Linux x86_64
-  `rkat-rest` 0.9.15 with an empty home directory; the released 0.9.14 does
-  the same. Earlier releases, `rkat-rpc`, the `rkat` command, macOS and
-  Windows were not run.
+  `rkat-rest` with an empty home directory: 0.8.28, 0.8.52, 0.9.0, 0.9.13,
+  0.9.14 and 0.9.15 all do it; releases older than 0.8.28 were not run.
+  `rkat-rpc`, the server the Python and TypeScript SDKs start, is not
+  affected (run on 0.9.14 and 0.9.15). The `rkat` command, macOS and Windows
+  were not run.
 
 ## [0.9.14] - 2026-11-11
 

@@ -35,6 +35,14 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `meerkat-core`: a turn that uses up `max_tokens` while thinking, before
+  any answer, now fails with a hint that works on every model (raise
+  `max_tokens`, or lower the reasoning effort or the thinking budget where
+  the model takes one) in place of the advice to set a thinking budget,
+  which a model that takes none answers with a second error.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

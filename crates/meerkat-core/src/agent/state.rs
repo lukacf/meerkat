@@ -10052,7 +10052,7 @@ where
         if llm_response_exhausted_during_thinking(&result) {
             let error = AgentError::MaxTokensReached {
                 turn: ctx.turn_count,
-                partial: "turn exhausted max_tokens during thinking; raise max_tokens or set a thinking budget"
+                partial: "turn exhausted max_tokens while thinking, before any answer; raise max_tokens, or lower the reasoning effort or the thinking budget where the model takes one"
                     .to_string(),
             };
             // Usage above is intentionally retained, but no empty assistant

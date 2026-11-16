@@ -454,6 +454,52 @@ Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
 That option does not configure unrelated HTTP or library entrypoints.
 
+### Decisions held for a person
+
+A change that a host rule holds for a person's decision shows under
+**Approvals** as a card of its own kind: a created agent under a
+`require_approval` rule of the
+[identity policy](/reference/identity-policy#approval-rules) is the common
+one. The card shows what is asked, its approver, who asked, the deadline and
+where the decision was shown (**Presented in**), and an open one reads
+"Decide where it was presented." It is shown to the holders of the
+decision's approver id in the approver map, to the person who asked and,
+while access control is enforced, to a caller granted `decisions.admin`;
+other callers see nothing of it, and a Console that signs nobody in shows
+none.
+
+In 0.9.15 the Console shows such a decision and does not decide it. The card
+has no Approve or Reject for anyone, and the Console's own RPC does not
+serve `meta/decisions/decide`. **Withdraw request**, where the card offers
+it, takes the request back.
+
+The decision is taken through the host that started the gateway, with
+`meta/decisions/decide` on its stdio connection (`decisions_decide` in the
+Python SDK, `decisionsDecide` in the TypeScript SDK), in one of two ways:
+
+- **The stdio operator decides.** The gateway presents an open decision to
+  the operator on that connection (a `presented` notice) where the approver
+  map lists the operator for the decision's approver id. The operator then
+  decides with the decision's `subject_digest` as `presented_digest`,
+  without an attestation.
+- **A person the host authenticated decides.** The host passes an
+  attestation of the person, from a channel of its own such as a chat. This
+  needs the channel declared as an ingress in `runtime_options.decisions`,
+  the person listed for the approver id under `ingress_subjects` in the
+  approver map, a presentation of the decision to the approver, and the
+  decision's `subject_digest` as `presented_digest`. The gateway works out
+  who decided from the attestation; the request names no approver.
+
+The approver map is the `[approvers]` part of the launch's access file (see
+[Approver identities](/concepts/access-control#approver-identities)). Where
+it lists neither the operator nor a person on a declared ingress for the
+approver id, nobody can decide: the change stays held until it is withdrawn
+or its deadline passes. A person cannot approve their own request. The call,
+its attestation and the fields of a presentation are under
+[`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide); the SDK pages
+have a sample each ([Python](/sdks/python#durable-decisions),
+[TypeScript](/sdks/typescript#durable-decisions)).
+
 ### Question sets
 
 From 0.9.15. An agent can ask a person a set of multiple-choice questions with the

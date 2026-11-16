@@ -220,7 +220,11 @@ or lapses at its deadline, when its operation answers `refused` with
 `decision_closed` and the change has to be asked again. Until then a change
 held that way can still be decided: start the gateway again with an access
 file whose binding for the approver id lists the stdio operator or a person
-a declared ingress attests.
+a declared ingress attests. In 0.9.15 the decision itself is taken through
+the host (`meta/decisions/decide` on its stdio connection), by the operator
+or with the host's attestation of a person; the Console shows a held change
+and does not decide it (see
+[Decisions held for a person](/guides/console#decisions-held-for-a-person)).
 
 A person's approval is evidence, never authority over the policy. When an
 approved change is carried out, the policy the launch has then is asked

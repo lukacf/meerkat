@@ -17245,6 +17245,169 @@ mod tests {
         .await;
     }
 
+    // Caller labels and context on the raw dispatcher's `mob_spawn_member`:
+    // each spec passes the shared metadata rule of
+    // `meerkat_core::surface_metadata`, as on the JSON-RPC spawn methods and
+    // the public spawn tools.
+
+    /// A dispatcher over a fresh state with one mob of a `worker` profile.
+    async fn raw_spawn_metadata_mob(mob_id: &str) -> MobMcpDispatcher {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(
+            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
+                .expect("construct runtime authority"),
+        );
+        let d = MobMcpDispatcher::new(state);
+        call_tool(
+            &d,
+            "mob_create",
+            json!({"definition":{"id": mob_id,"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+        )
+        .await;
+        d
+    }
+
+    /// `mob_spawn_member` arguments: a spec with no labels and no context
+    /// first, then the spec that carries them.
+    fn raw_spawn_metadata_arguments(
+        mob_id: &str,
+        labels: serde_json::Value,
+        context: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "mob_id": mob_id,
+            "specs": [
+                {"profile": "worker", "agent_identity": "w-plain", "runtime_mode": "turn_driven"},
+                {
+                    "profile": "worker",
+                    "agent_identity": "w-labelled",
+                    "runtime_mode": "turn_driven",
+                    "labels": labels,
+                    "context": context,
+                },
+            ],
+        })
+    }
+
+    fn raw_spawn_metadata_with_key(key: &str) -> serde_json::Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("org".to_string(), json!("acme"));
+        metadata.insert(key.to_string(), json!("caller-value"));
+        serde_json::Value::Object(metadata)
+    }
+
+    /// The call is refused as the tool's invalid arguments with exactly
+    /// `reason`, and the mob seats none of the call's specs.
+    async fn assert_raw_spawn_metadata_refused(
+        d: &MobMcpDispatcher,
+        mob_id: &str,
+        labels: serde_json::Value,
+        context: serde_json::Value,
+        reason: String,
+    ) {
+        let args = raw_spawn_metadata_arguments(mob_id, labels, context);
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        let outcome = d.dispatch(mk_call("mob_spawn_member", &raw)).await;
+        let listed = call_tool(d, "mob_list_members", json!({"mob_id": mob_id})).await;
+        match outcome {
+            Err(ToolError::InvalidArguments {
+                name,
+                reason: answered,
+            }) => {
+                assert_eq!(name, "mob_spawn_member");
+                assert_eq!(answered, reason);
+            }
+            Err(other) => panic!("mob_spawn_member answered {other:?}, wanted '{reason}'"),
+            Ok(out) => panic!(
+                "mob_spawn_member accepted the call and answered {}; the mob lists {}",
+                out.result.text_content(),
+                listed["members"]
+            ),
+        }
+        assert_eq!(
+            listed["members"].as_array().map(std::vec::Vec::len),
+            Some(0),
+            "a refused mob_spawn_member seats no member: {}",
+            listed["members"]
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_mob_spawn_member_refuses_reserved_label_keys() {
+        let mob_id = "raw_spawn_metadata_labels";
+        let d = raw_spawn_metadata_mob(mob_id).await;
+        // The four mob discovery names, the Meerkat namespace, and the forms
+        // the rule covers beyond them: another letter case, the bare token.
+        for key in [
+            "mob_id",
+            "role",
+            "meerkat_id",
+            "agent_identity",
+            "meerkat.runtime_id",
+            "Role",
+            "MOB_ID",
+            "meerkat",
+        ] {
+            assert_raw_spawn_metadata_refused(
+                &d,
+                mob_id,
+                raw_spawn_metadata_with_key(key),
+                serde_json::Value::Null,
+                format!("metadata label key '{key}' is reserved for Meerkat-owned runtime facts"),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_mob_spawn_member_refuses_reserved_context_keys() {
+        let mob_id = "raw_spawn_metadata_context";
+        let d = raw_spawn_metadata_mob(mob_id).await;
+        for key in ["meerkat.runtime_id", "MEERKAT.runtime_id", "meerkat"] {
+            assert_raw_spawn_metadata_refused(
+                &d,
+                mob_id,
+                serde_json::Value::Null,
+                raw_spawn_metadata_with_key(key),
+                format!("app_context key '{key}' is reserved for Meerkat-owned runtime facts"),
+            )
+            .await;
+        }
+    }
+
+    /// Ordinary labels and context are taken as before, and the member's
+    /// row carries the caller's labels. The mob discovery names are reserved
+    /// as label keys only: a context may use them as top-level keys.
+    #[tokio::test]
+    async fn raw_mob_spawn_member_keeps_ordinary_labels_and_context() {
+        let mob_id = "raw_spawn_metadata_plain";
+        let d = raw_spawn_metadata_mob(mob_id).await;
+        let spawned = call_tool(
+            &d,
+            "mob_spawn_member",
+            raw_spawn_metadata_arguments(
+                mob_id,
+                json!({"org": "acme", "tier": "gold"}),
+                json!({"client_ref": {"view": "compact"}, "role": "reviewer"}),
+            ),
+        )
+        .await;
+        assert_eq!(spawned["results"][0]["status"], "spawned", "{spawned}");
+        assert_eq!(spawned["results"][1]["status"], "spawned", "{spawned}");
+        let listed = call_tool(&d, "mob_list_members", json!({"mob_id": mob_id})).await;
+        let labelled = listed["members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .find(|member| member["agent_identity"] == "w-labelled")
+            .unwrap_or_else(|| panic!("the labelled member is listed: {listed}"));
+        assert_eq!(
+            labelled["labels"],
+            json!({"org": "acme", "tier": "gold"}),
+            "{listed}"
+        );
+    }
+
     #[tokio::test]
     async fn test_mcp_e2e_flow_and_destroy_removes_mob() {
         let svc = Arc::new(MockSessionSvc::new());

@@ -28,8 +28,8 @@ use meerkat_store::FsBlobStore;
 use serde_json::json;
 
 use super::{
-    DurableShellJobRuntime, JobId, JobManager, ShellConfig, ShellJobCancelTool,
-    ShellJobDeliveryProjector, ShellJobStatusTool, ShellJobsListTool,
+    DurableShellJobRuntime, JobId, JobManager, MonitorStartOptions, ShellConfig,
+    ShellJobCancelTool, ShellJobDeliveryProjector, ShellJobStatusTool, ShellJobsListTool,
 };
 use crate::builtin::{BuiltinTool, ToolOutput};
 
@@ -807,6 +807,55 @@ async fn a_members_successor_session_reads_its_predecessors_jobs_as_unknown_jobs
         &running,
     )
     .await;
+}
+
+/// A monitor a session started itself is a job of its shell manager: the
+/// session reads, lists and cancels it, from the tools that started it and
+/// from tools built again for the session, and another session does not.
+#[tokio::test]
+async fn a_session_reads_and_cancels_its_own_monitor() {
+    let host = Host::new();
+    let owner_session = SessionId::new();
+    let owner = host.seat(PLAIN_REALM, &owner_session);
+    let other = host.seat(PLAIN_REALM, &SessionId::new());
+    let monitor = owner
+        .manager
+        .spawn_monitor_for_call(
+            "sleep 30",
+            None,
+            60,
+            "monitor-1",
+            MonitorStartOptions::default(),
+        )
+        .await
+        .expect("a monitor")
+        .to_string();
+
+    for door in DOORS {
+        other
+            .assert_reads_as_unknown(door, &monitor, &["sleep"])
+            .await;
+    }
+    host.assert_untouched(&monitor).await;
+
+    let rebuilt = host.seat(PLAIN_REALM, &owner_session);
+    for seat in [&owner, &rebuilt] {
+        assert_eq!(seat.listed().await, BTreeSet::from([monitor.clone()]));
+        let read = seat
+            .ask(Door::Status, &monitor)
+            .await
+            .expect("the session reads its own monitor");
+        assert!(read.contains("\"running\""), "{read}");
+    }
+    let cancelled = rebuilt
+        .ask(Door::Cancel, &monitor)
+        .await
+        .expect("the session cancels its own monitor");
+    assert!(cancelled.contains(&monitor), "{cancelled}");
+    assert_eq!(
+        host.ended(&monitor).await.terminal_result,
+        Some(meerkat_jobs::JobTerminalResult::Cancelled)
+    );
 }
 
 /// Controls: each session reads, lists and cancels exactly its own jobs.

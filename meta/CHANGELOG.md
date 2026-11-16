@@ -276,8 +276,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-- Adopted agents on a host with an agent customizer or agent memory (added
-  2026-11-16). On a host that registers an agent customizer or configures
+- Adopted agents on a host with an agent customizer or agent memory. On a
+  host that registers an agent customizer or configures
   agent memory, an agent that is configured in the roster and adopted into the
   identity store (`meta/identity/adopt`) is refused the next time it is built:
   after a restart, or when a message, a peer send or a scheduled prompt
@@ -298,7 +298,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   0.9.15 source; the remedy for a refused agent by a host's run on the
   published 0.9.15 gateway; the update right after an adoption by reading.)
 
-- Side chats and the memory tool after a restart (added 2026-11-16). With
+- Side chats and the memory tool after a restart. With
   agent memory on and the `memory` tool in the agent's profile, a side chat is
   not offered the `memory` tool after a gateway restart until its source agent
   has taken a turn in the new process. A call to the tool meanwhile answers

@@ -4652,6 +4652,13 @@ async fn handle_meerkat_run_with_help_tools(
     )>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The session's top-level labels and application context pass the shared
+    // public metadata rule, as on the JSON-RPC and REST session create.
+    meerkat::surface::validate_public_surface_metadata(
+        input.labels.as_ref(),
+        input.app_context.as_ref(),
+    )
+    .map_err(ToolCallError::invalid_params)?;
     // The level has one home, the build's provider params: both spellings
     // of it must agree before anything is built.
     let build_provider_params = run_build_provider_params(&input)?;

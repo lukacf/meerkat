@@ -9,6 +9,7 @@ const after = Number(process.argv[4] || 60) * 1000;
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   const calls = {}, bad = [], errors = [], models = {};
+  let aborted = 0;
   page.on("request", (request) => {
     if (!/\/(anthropic|openai|gemini)\//.test(request.url())) return;
     let model = null;
@@ -22,6 +23,16 @@ const after = Number(process.argv[4] || 60) * 1000;
     const key = match[1] + " " + response.status();
     calls[key] = (calls[key] || 0) + 1;
     if (response.status() >= 400 && bad.length < 5) response.text().then((t) => bad.push(match[1] + " " + response.status() + " " + t.slice(0, 300))).catch(() => {});
+  });
+  // A provider request that never got a response (a network error) raises
+  // this event and no response event, so it joins the same list. A request
+  // the page cancelled itself is not a failure of the provider.
+  page.on("requestfailed", (request) => {
+    const match = /\/(anthropic|openai|gemini)\//.exec(request.url());
+    if (!match) return;
+    const reason = (request.failure() || {}).errorText || "request failed";
+    if (reason === "net::ERR_ABORTED") { aborted += 1; return; }
+    if (bad.length < 5) bad.push(match[1] + " " + reason);
   });
   page.on("pageerror", (error) => errors.push(error.message.slice(0, 200)));
   const seen = [];
@@ -63,11 +74,13 @@ const after = Number(process.argv[4] || 60) * 1000;
   console.log("OUTCOME:", outcome, "| provider 200 responses:", ok);
   console.log("provider responses (provider status: count):", JSON.stringify(calls));
   console.log("models named in requests:", JSON.stringify(models));
-  console.log("failed responses:", JSON.stringify(bad));
+  console.log("failed responses and requests:", JSON.stringify(bad), "| requests the page cancelled:", aborted);
   console.log("page errors:", JSON.stringify(errors));
   console.log("log sample:", JSON.stringify(log));
+  // Decide before the pause and the close: both cancel what is still open.
+  const passed = outcome === "scenario ran" && ok > 0 && bad.length === 0;
   await page.click("#pauseBtn").catch(() => {});
   await page.waitForTimeout(1500);
   await browser.close();
-  process.exit(outcome === "scenario ran" && ok > 0 && bad.length === 0 ? 0 : 1);
+  process.exit(passed ? 0 : 1);
 })();

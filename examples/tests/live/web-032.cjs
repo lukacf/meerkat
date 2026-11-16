@@ -9,6 +9,7 @@ const after = Number(process.argv[4] || 150) * 1000;
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   const calls = {}, bad = [], errors = [], models = {};
+  let aborted = 0;
   page.on("request", (request) => {
     if (!/\/(anthropic|openai|gemini)\//.test(request.url())) return;
     let model = null;
@@ -22,6 +23,16 @@ const after = Number(process.argv[4] || 150) * 1000;
     const key = match[1] + " " + response.status();
     calls[key] = (calls[key] || 0) + 1;
     if (response.status() >= 400 && bad.length < 5) response.text().then((t) => bad.push(match[1] + " " + response.status() + " " + t.slice(0, 300))).catch(() => {});
+  });
+  // A provider request that never got a response (a network error) raises
+  // this event and no response event, so it joins the same list. A request
+  // the page cancelled itself is not a failure of the provider.
+  page.on("requestfailed", (request) => {
+    const match = /\/(anthropic|openai|gemini)\//.exec(request.url());
+    if (!match) return;
+    const reason = (request.failure() || {}).errorText || "request failed";
+    if (reason === "net::ERR_ABORTED") { aborted += 1; return; }
+    if (bad.length < 5) bad.push(match[1] + " " + reason);
   });
   page.on("pageerror", (error) => errors.push(error.message.slice(0, 200)));
   await page.goto(url);
@@ -43,13 +54,16 @@ const after = Number(process.argv[4] || 150) * 1000;
     await page.fill("#prompt", "Ask the planner for a two-step plan, have the coder write hello.sh that prints hello and run it in the VM, and have the reviewer check the output. Keep every message short.");
     await page.press("#prompt", "Enter");
     const t1 = Date.now();
-    const seen = {};
+    const seen = {}, first = {};
     while (Date.now() - t1 < after) {
       for (const role of ["orchestrator", "planner", "coder", "reviewer"]) {
         const s = ((await page.locator("#status-" + role).textContent().catch(() => "")) || "").trim();
+        if (!(role in first)) first[role] = s;
         if (seen[role] !== s) { seen[role] = s; console.log(new Date().toISOString().slice(11, 19), role + ":", s.slice(0, 60)); }
       }
-      if (Object.keys(models).length >= 4 && Date.now() - t1 > 60000) break;
+      // Enough once every role has left the status it had when the prompt was sent.
+      const moved = Object.keys(first).filter((role) => seen[role] !== first[role]).length;
+      if (moved >= 4 && Date.now() - t1 > 60000) break;
       await page.waitForTimeout(1000);
     }
     outcome = "prompt ran";
@@ -59,9 +73,11 @@ const after = Number(process.argv[4] || 150) * 1000;
   console.log("OUTCOME:", outcome, "| provider 200 responses:", ok);
   console.log("provider responses (provider status: count):", JSON.stringify(calls));
   console.log("models named in requests:", JSON.stringify(models));
-  console.log("failed responses:", JSON.stringify(bad));
+  console.log("failed responses and requests:", JSON.stringify(bad), "| requests the page cancelled:", aborted);
   console.log("page errors:", JSON.stringify(errors));
   console.log("end of the main stream:", JSON.stringify(main));
+  // Decide before the browser closes: closing cancels what is still open.
+  const passed = outcome === "prompt ran" && ok > 0 && bad.length === 0;
   await browser.close();
-  process.exit(outcome === "prompt ran" && ok > 0 && bad.length === 0 ? 0 : 1);
+  process.exit(passed ? 0 : 1);
 })();

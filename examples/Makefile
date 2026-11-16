@@ -85,8 +85,9 @@ realtime: browsers hosts
 # set. The run refuses to start when its estimate is above LIVE_MAX_CALLS
 # (600 by default). `make live-dry` lists what would run and what would be
 # skipped, and calls nothing. LIVE_ONLY="001 036" runs a selection.
-# It builds nothing: run `make hosts sdk live-build` first, and `make web
-# realtime` for the browser and realtime examples. See tests/live/run.sh.
+# It builds no host, SDK or Rust example: run `make hosts sdk live-build`
+# first, and `make web realtime` for the browser and realtime examples (the
+# entries of 031 and 033 build their own web bundles). See tests/live/run.sh.
 RKAT_REST ?= $(RKAT_TARGET)/debug/rkat-rest
 LIVE_ENV = RKAT="$(RKAT)" RKAT_RPC="$(RKAT_RPC)" RKAT_REST="$(RKAT_REST)" \
 	RKAT_TARGET="$(RKAT_TARGET)" PYTHON="$(PYTHON)"

@@ -150,7 +150,8 @@ is absent is skipped, so one key is enough for most of the set. Each example
 runs in a fresh home directory with only the keys it needs; logs go to a
 temporary directory (or `LIVE_LOG_DIR`), never into the repository.
 
-The target builds nothing. Build first what you want it to cover:
+The target builds no host, SDK or Rust example (the entries of 031 and 033
+build their own web bundles). Build first what you want it to cover:
 `make -C examples hosts sdk live-build` for the SDK, CLI and Rust examples,
 and `make -C examples web realtime` for the browser and realtime examples
 (example 032 also needs the WebCM files and the runtime package that its

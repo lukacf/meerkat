@@ -606,28 +606,39 @@ async def run_text_probe(
         "stop": stop_event,
     }
     # Input sent before the adapter reports `ready` can be lost with the
-    # channel, so wait for that observation first.
-    await wait_for_first_event({"adapter ready": signals.adapter_ready, **ends}, timeout_s=timeout_s)
-    await connection.send_input(
-        {
-            "kind": "text",
-            "text": (
-                "This is a text probe for the live channel. Say one short sentence, "
-                "then call voice_session_note with 'text probe completed'."
-            ),
-        }
+    # channel, so wait for that observation first. A stop, a failure or a
+    # close can win this wait: then nothing is sent, and the checks at the end
+    # of the function report which of them it was.
+    first = await wait_for_first_event(
+        {"adapter ready": signals.adapter_ready, **ends}, timeout_s=timeout_s
     )
-    await channel.commit_input()
-    printer.status("text probe sent; waiting for a tool request or turn completion event")
-    await wait_for_first_event(
-        {"tool request": signals.tool_requested, "turn completion": signals.turn_completed, **ends},
-        timeout_s=timeout_s,
-    )
-    if signals.tool_requested.is_set() and not any(event.is_set() for event in ends.values()):
-        # The request alone proves little: wait until the callback has run, so
-        # that the probe covers the tool round trip.
-        printer.status("text probe observed tool request; waiting for the callback")
-        await wait_for_first_event({"note saved": state.note_saved, **ends}, timeout_s=timeout_s)
+    if first == "adapter ready" and not any(event.is_set() for event in ends.values()):
+        await connection.send_input(
+            {
+                "kind": "text",
+                "text": (
+                    "This is a text probe for the live channel. Say one short sentence, "
+                    "then call voice_session_note with 'text probe completed'."
+                ),
+            }
+        )
+        await channel.commit_input()
+        printer.status("text probe sent; waiting for a tool request or turn completion event")
+        await wait_for_first_event(
+            {
+                "tool request": signals.tool_requested,
+                "turn completion": signals.turn_completed,
+                **ends,
+            },
+            timeout_s=timeout_s,
+        )
+        if signals.tool_requested.is_set() and not any(event.is_set() for event in ends.values()):
+            # The request alone proves little: wait until the callback has run,
+            # so that the probe covers the tool round trip.
+            printer.status("text probe observed tool request; waiting for the callback")
+            await wait_for_first_event(
+                {"note saved": state.note_saved, **ends}, timeout_s=timeout_s
+            )
     # Several events can be set by now; the most telling one decides.
     if signals.turn_failed.is_set():
         raise RuntimeError("text probe response failed; see the response failed status line")

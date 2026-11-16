@@ -35,8 +35,10 @@ npm --prefix examples ci
 
 Installing only `examples/` does not install the console's build tools.
 The packs build their Rust binaries through the wrapper at the repository
-root (`scripts/repo-cargo`), into the build directory every other build of
-the checkout uses, so a gateway that is already built is not built again.
+root (`scripts/repo-cargo`), into the wrapper's build directory. The wrapper
+keeps one build directory per lane (`RUST_LANE_ID`; pack 001's topology
+script sets a lane of its own), so a pack reuses a gateway that its lane has
+already built.
 The structural `--smoke` modes in packs 002 and 003 exit before the console
 build; they only need the example JavaScript dependencies.
 

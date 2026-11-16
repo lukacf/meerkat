@@ -39203,7 +39203,7 @@ default_model = "gpt-5.4"
     }
 
     /// The durable external-delivery record a first attempt leaves in mob
-    /// `ops`: its Begin under the occurrence's stable identity, then its
+    /// `ops-redelivery`: its Begin under the occurrence's stable identity, then its
     /// completed terminal.
     #[cfg(all(feature = "mob", feature = "session-store"))]
     async fn record_completed_cli_ops_delivery(
@@ -39212,7 +39212,7 @@ default_model = "gpt-5.4"
         canonical_action: &str,
     ) {
         let intent = meerkat_mob::MobExternalDeliveryIntent::new(
-            meerkat_mob::MobId::from("ops"),
+            meerkat_mob::MobId::from("ops-redelivery"),
             meerkat_mob::MobExternalDeliveryIdentity::new(
                 identity.idempotency_key.clone(),
                 identity.correlation_id.clone(),
@@ -39272,7 +39272,7 @@ default_model = "gpt-5.4"
         .expect("compose the CLI runtime-backed service");
         let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
         let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
-            "id": "ops",
+            "id": "ops-redelivery",
             "profiles": {
                 "worker": {
                     "model": "gpt-5.4",
@@ -39299,7 +39299,7 @@ default_model = "gpt-5.4"
         );
 
         let mob_target = meerkat::MobTargetBinding::Member {
-            mob_id: "ops".to_string(),
+            mob_id: "ops-redelivery".to_string(),
             member_id: "deploy-monitor".to_string(),
             action: meerkat::ScheduledMobAction::Send {
                 content: "Check deploy state.".to_string().into(),
@@ -39338,7 +39338,7 @@ default_model = "gpt-5.4"
 
         let identity_target = meerkat::IdentityTargetBinding::resumable(
             meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
-                mob_id: "ops".to_string(),
+                mob_id: "ops-redelivery".to_string(),
                 role: "worker".to_string(),
                 member: "deploy-monitor".to_string(),
             }),

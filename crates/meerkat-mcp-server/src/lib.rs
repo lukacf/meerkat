@@ -12628,6 +12628,86 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// The realm profile tools take the public profile input: a profile
+    /// field outside it is an argument error naming the field, and nothing is
+    /// stored or changed.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_profile_tools_take_the_public_profile_input() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let with = |key: &str, value: Value| {
+            let mut profile = json!({ "model": "claude-sonnet-4-6", "tools": { "comms": true } });
+            if key == "auth_binding" {
+                profile[key] = value;
+            } else {
+                profile["tools"][key] = value;
+            }
+            profile
+        };
+        let outside = [
+            ("mcp_servers", json!([])),
+            ("rust_bundles", json!(["internal-only"])),
+            (
+                "auth_binding",
+                json!({ "realm": "global", "binding": "some-binding" }),
+            ),
+        ];
+
+        for (field, value) in &outside {
+            let err = Box::pin(handle_tools_call(
+                &state,
+                "meerkat_mob_profile_create",
+                &json!({ "name": "worker", "profile": with(field, value.clone()) }),
+            ))
+            .await
+            .expect_err("a profile field outside the public input is refused");
+            assert_eq!(err.code, -32602, "{field}: {}", err.message);
+            assert!(err.message.contains(field), "{field}: {}", err.message);
+        }
+        let absent = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_get",
+            &json!({ "name": "worker" }),
+        ))
+        .await
+        .expect("profile get should succeed");
+        assert_eq!(unwrap_tool_payload_json(absent)["not_found"], true);
+
+        let created = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_create",
+            &json!({ "name": "worker", "profile": with("comms", json!(true)) }),
+        ))
+        .await
+        .expect("a public profile is stored");
+        assert_eq!(unwrap_tool_payload_json(created)["revision"], 1);
+
+        for (field, value) in &outside {
+            let err = Box::pin(handle_tools_call(
+                &state,
+                "meerkat_mob_profile_update",
+                &json!({
+                    "name": "worker",
+                    "profile": with(field, value.clone()),
+                    "expected_revision": 1,
+                }),
+            ))
+            .await
+            .expect_err("a profile field outside the public input is refused");
+            assert_eq!(err.code, -32602, "{field}: {}", err.message);
+            assert!(err.message.contains(field), "{field}: {}", err.message);
+        }
+        let kept = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_get",
+            &json!({ "name": "worker" }),
+        ))
+        .await
+        .expect("profile get should succeed");
+        assert_eq!(unwrap_tool_payload_json(kept)["revision"], 1);
+    }
+
     #[tokio::test]
     async fn test_mcp_handlers_sessions_read_list_interrupt_archive() {
         let (state, session_id) = state_with_persisted_session().await;

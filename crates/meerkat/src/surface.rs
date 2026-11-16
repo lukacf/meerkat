@@ -515,12 +515,72 @@ fn mob_agent_owner_key_parts(owner_id: &str) -> Option<(&str, &str)> {
 /// An overlay that carries a WorkGraph attention projection allows the
 /// tools of the binding's mode. The binding does not know what its target
 /// was built with, and a turn whose allow-list names a tool the session
-/// lacks is refused whole.
+/// lacks is refused whole. So the attention's own allow names, recomputed
+/// from the projection the overlay carries, are dropped from the allow-list
+/// and from the deferred-tool authorities where the session lacks them:
+///
+/// - a session with some of the mode's tools gets the list narrowed to
+///   those it has;
+/// - a session with none of them, when the allow-list is exactly the
+///   attention's own (no other overlay of the turn narrowed it), gets no
+///   allow-list: it takes an ordinary turn with its own tools;
+/// - when another overlay of the turn narrowed the list, names are only
+///   dropped, so that overlay's restriction stays, also if no tool is left.
+///
+/// Nothing is marked in the overlay and nothing is stored: an overlay kept
+/// with an input before this rule existed is read the same way. A name no
+/// attention projection accounts for is not touched and meets the tool
+/// scope's own check. An allow-list that another overlay happened to narrow
+/// to exactly the attention's own names cannot be told from one that stands
+/// alone.
 pub(crate) fn workgraph_attention_overlay_for_session_tools(
-    overlay: meerkat_core::service::TurnToolOverlay,
+    mut overlay: meerkat_core::service::TurnToolOverlay,
     known: &[meerkat_core::types::ToolName],
 ) -> meerkat_core::service::TurnToolOverlay {
-    let _ = known;
+    // No projection, or one that does not decode or lower: the overlay goes
+    // on as it is, to whoever judges it next.
+    let Ok(Some(projection)) = crate::workgraph_attention_projection_from_overlay(Some(&overlay))
+    else {
+        return overlay;
+    };
+    let Ok(attention) =
+        crate::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection)
+    else {
+        return overlay;
+    };
+    let own: std::collections::BTreeSet<meerkat_core::types::ToolName> = attention
+        .allowed_tools
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let known: std::collections::BTreeSet<&meerkat_core::types::ToolName> = known.iter().collect();
+    let lacks = |name: &meerkat_core::types::ToolName| own.contains(name) && !known.contains(name);
+
+    if let Some(allowed) = overlay.allowed_tools.take() {
+        let stands_alone =
+            allowed.len() == own.len() && allowed.iter().all(|name| own.contains(name));
+        let kept: Vec<meerkat_core::types::ToolName> =
+            allowed.into_iter().filter(|name| !lacks(name)).collect();
+        overlay.allowed_tools = if stands_alone && kept.is_empty() {
+            None
+        } else {
+            Some(kept)
+        };
+    }
+    if let Some(value) = overlay
+        .dispatch_context
+        .get_mut(meerkat_core::service::TURN_DEFERRED_TOOL_AUTHORITIES_CONTEXT_KEY)
+        && let Ok(mut authorities) =
+            serde_json::from_value::<Vec<meerkat_core::DeferredToolLoadAuthority>>(value.clone())
+    {
+        let before = authorities.len();
+        authorities.retain(|authority| !lacks(&authority.name));
+        if authorities.len() != before
+            && let Ok(narrowed) = serde_json::to_value(&authorities)
+        {
+            *value = narrowed;
+        }
+    }
     overlay
 }
 

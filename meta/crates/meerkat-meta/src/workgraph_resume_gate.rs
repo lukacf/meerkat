@@ -1029,6 +1029,25 @@ mod tests {
         );
     }
 
+    /// A backend without a WorkGraph holds no item and no claim, and every
+    /// read of it fails. A launch over it binds no gate, as a launch without
+    /// a WorkGraph service binds none, and a durable worker's run resumes
+    /// unchecked.
+    #[test]
+    fn a_launch_with_a_disabled_workgraph_backend_binds_no_resume_gate() {
+        use crate::mob_composition_manifest::CompositionAuthority;
+
+        let disabled = WorkGraphService::with_scope(
+            Arc::new(DisabledWorkGraphStore),
+            mob_realm(),
+            WorkNamespace::default(),
+        );
+        assert!(
+            launch_resume_gate(Some(disabled), CompositionAuthority::Authoritative).is_none(),
+            "a backend without a WorkGraph leaves nothing to check"
+        );
+    }
+
     /// Meerkat drops an attempt that outlasts its timeout and asks again. An
     /// attempt dropped after it committed the lapsed lease's expiry leaves the
     /// item unclaimed and never returns its answer, and the next attempt of

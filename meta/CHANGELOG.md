@@ -3114,6 +3114,32 @@ Security, Upgrade and Changed.
   source; earlier versions read from the source). A fix is planned for the
   next release.
 
+- Added 2026-11-16, after the release. Approvals: a change that a rule holds
+  for approval can be decided only by a person whom the approver map of the
+  gateway's access file binds to the rule's approver id as the stdio
+  operator or as a person a declared ingress attests. A binding that lists
+  only Console subjects or groups lets nobody decide: the Console serves no
+  `meta/decisions/decide`. The map is read whether or not the access file
+  has `enabled = true`. When the gateway was started with no access file, or
+  with a map whose binding for the rule's approver id lists neither the
+  stdio operator nor a person a declared ingress attests, the change is
+  held, a decide is refused (`-32602`, `decision_refused`, `not_eligible`),
+  and nobody can decide it. Until its deadline nothing is lost: start the
+  gateway again before the deadline with an access file whose approver map
+  binds the id to the stdio operator or to a person a declared ingress
+  attests, and the held change is presented and can be decided. Left
+  undecided, it ends at its deadline: the operation is refused
+  (`decision_closed`), nothing is changed, and the change has to be asked
+  again. Run on the released 0.9.15 gateway for a host's create under a rule
+  that requires approval, decided by the stdio operator, with no access file
+  and with a map that binds another id only, and for the deadline with that
+  rule's decision timeout set to five seconds; a binding that lists only
+  Console subjects is read from the gateway's tests at the tag, not run on
+  the released gateway; not run: a decide attested by another declared
+  ingress, a held change of another kind, and an edit of the map without a
+  restart. See
+  [Approval rules](docs/reference/identity-policy.mdx#approval-rules).
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

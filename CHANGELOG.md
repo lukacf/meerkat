@@ -3055,23 +3055,23 @@ them.
 - Windows: `rkat-rpc`, `rkat-rest`, `rkat-mcp` and `rkat` failed with "IO
   error: Access is denied. (os error 5)" the first time a realm was used.
   After writing a new realm's manifest the store opened the realm directory
-  as a file to sync it, which Windows refuses. `rkat-rpc`, `rkat-rest` and
-  `rkat-mcp` started without `--realm` use a new realm at every start, so
-  they failed at every start; `rkat` failed once in each new workspace, in
-  the commands that open a realm (`run`, `resume`, sessions, mobs,
-  `realm create`), and worked from the second use on. The same step after
-  each write of a session's event-log head failed too: the head was written,
-  a warning was logged at every append, and a transcript rewrite reported an
-  error. Both directory syncs now run on Unix only, as the store's other
-  ones already did. On Windows no directory sync follows these renames:
-  after a power loss right after the write, a new realm's manifest or the
-  newest head can be missing; the realm is then created again at the next
-  start and the head is rebuilt from the event log (read from the source).
-  Linux and macOS are unchanged. Found by a check added to this release's
-  build, the first to start a Windows binary against a state directory.
-  Affected: every Windows binary from 0.3.4 through 0.9.14. A first use of
-  the same new realm by several processes at once can still fail once: see
-  Known limitations.
+  as a file to sync it, which Windows refuses. `rkat-rpc` started without
+  `--realm` uses a new realm at every start, so it failed at every start
+  (by runs on a Windows runner). By the source the same holds for
+  `rkat-rest` and `rkat-mcp`, and `rkat` failed in the commands that open a
+  realm (`run`, `resume`, sessions, mobs, `realm create`) the first time in
+  a new workspace. The same step after each write of a session's event-log
+  head failed too: the head was written, a warning was logged at every
+  append, and a transcript rewrite reported an error. Both directory syncs
+  now run on Unix only, as the store's other ones already did. On Windows
+  no directory sync follows these renames: after a power loss right after
+  the write, a new realm's manifest or the newest head can be missing; the
+  realm is then created again at the next start and the head is rebuilt
+  from the event log (read from the source). Linux and macOS are unchanged.
+  Found by a check added to this release's build, the first to start a
+  Windows binary against a state directory. A first use of the same new
+  realm by several processes at once can still fail once: see Known
+  limitations. Affected: every Windows binary from 0.3.4 through 0.9.14.
 
 ### Security
 

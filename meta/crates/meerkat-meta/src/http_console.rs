@@ -4210,6 +4210,10 @@ mod console_frame_witness_tests;
 mod console_kept_apart_tests;
 
 #[cfg(test)]
+#[path = "console_access_save_refusal_tests.rs"]
+mod console_access_save_refusal_tests;
+
+#[cfg(test)]
 #[path = "console_stored_session_seat_tests.rs"]
 mod console_stored_session_seat_tests;
 
@@ -9632,6 +9636,31 @@ fn access_revision_required_rpc_error(response_id: Value) -> Value {
     )
 }
 
+/// The keys no field reads in the configuration, rule or group that a
+/// checked access write carries (`checked_v1`). None for any other request,
+/// and for a write whose envelope names no such table: that one is refused
+/// as the malformed request it is.
+fn checked_access_unknown_keys(
+    method: &str,
+    params: &Value,
+) -> Vec<crate::access::unknown_keys::UnknownAccessKey> {
+    use crate::access::unknown_keys::{unknown_config_keys, unknown_group_keys, unknown_rule_keys};
+    let Some(inner) = params.get("checked_v1") else {
+        return Vec::new();
+    };
+    match method {
+        "meta/access/set" => inner.get("config").map(unknown_config_keys),
+        "meta/access/rules/upsert" => inner.get("rule").map(unknown_rule_keys),
+        "meta/access/groups/set" => inner
+            .get("name")
+            .and_then(Value::as_str)
+            .zip(inner.get("group"))
+            .map(|(name, group)| unknown_group_keys(name, group)),
+        _ => None,
+    }
+    .unwrap_or_default()
+}
+
 /// `None` for a request with no checked-version key: a read, or a write the
 /// caller refuses as `revision_required`. Any malformed, mixed or unknown
 /// checked envelope is terminal invalid params.
@@ -9786,6 +9815,18 @@ fn handle_access_admin_rpc(
     // Every write names the owner instance and the revision it was made
     // against (`checked_v1`); a write without them is refused, never applied
     // over an edit its client did not see.
+    // A write that carries a key no field reads is refused whole, with every
+    // such key and its table named: nothing of it is saved.
+    let unknown = checked_access_unknown_keys(&request.method, &request.params);
+    if !unknown.is_empty() {
+        return Some(invalid_params(
+            response_id,
+            format!(
+                "Invalid checked access request: {}.",
+                crate::access::unknown_keys::unknown_access_keys_text(&unknown)
+            ),
+        ));
+    }
     match checked_access_mutation(&request.method, &request.params) {
         Ok(Some((expected, mutation))) => {
             return Some(

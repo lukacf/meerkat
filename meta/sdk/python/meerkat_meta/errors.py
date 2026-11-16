@@ -372,12 +372,22 @@ class GatewayStartupCleanupError(TransportError):
         self.startup_error = startup_error
         self.cleanup_error = cleanup_error
         self.cleanup = cleanup
-        # A fixed message: formatting either failure can itself raise (a
-        # failing ``__str__``) and would lose the cleanup this error carries.
+        # A fixed message but for the startup failure's type name:
+        # formatting either failure can itself raise (a failing ``__str__``)
+        # and would lose the cleanup this error carries.
         super().__init__(
-            "gateway startup failed and the stop of its gateway transport failed "
-            "(see startup_error and cleanup_error)"
+            f"gateway startup failed ({_type_name(startup_error)}) and the stop "
+            "of its gateway transport failed (see startup_error and cleanup_error)"
         )
+
+
+def _type_name(failure: BaseException) -> str:
+    """The name of ``failure``'s class, read without formatting ``failure``."""
+    try:
+        name = type(failure).__name__
+    except Exception:
+        return "an unnamed type"
+    return name if isinstance(name, str) else "an unnamed type"
 
 
 class GatewayChildPendingError(TransportError):

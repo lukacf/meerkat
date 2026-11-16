@@ -8,6 +8,10 @@ All notable changes to the Python SDK are documented here.
   refusal's own typed error (`CompositionProvenanceError`,
   `StorageResolutionError` or the typed RPC error) instead of
   `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+- `GatewayStartupCleanupError`'s message names the type of the startup
+  failure it wraps ("gateway startup failed (CompositionProvenanceError) and
+  the stop of its gateway transport ..."); it still formats nothing of the
+  failure itself.
 
 ## 0.9.15
 

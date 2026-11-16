@@ -163,16 +163,33 @@ export class GatewayStartupCleanupError extends TransportError {
     readonly cleanupError: unknown,
     readonly cleanup: GatewayCleanup,
   ) {
-    // A fixed message: formatting either failure can itself throw (an object
-    // without a prototype, a throwing `message` getter) and would lose the
-    // cleanup this error carries.
+    // A fixed message but for the startup failure's type name: formatting
+    // either failure can itself throw (an object without a prototype, a
+    // throwing `message` getter) and would lose the cleanup this error
+    // carries.
     super(
-      "gateway startup failed and the stop of its gateway transport was rejected " +
-        "(see startupError and cleanupError)",
+      `gateway startup failed (${failureTypeName(startupError)}) and the stop of its ` +
+        "gateway transport was rejected (see startupError and cleanupError)",
       { cause: startupError },
     );
     this.name = "GatewayStartupCleanupError";
   }
+}
+
+/**
+ * The name of a failure's type, read without formatting the failure: an
+ * Error's `name`, and the `typeof` of any other value or of an Error whose
+ * `name` cannot be read.
+ */
+function failureTypeName(failure: unknown): string {
+  try {
+    if (failure instanceof Error && typeof failure.name === "string" && failure.name !== "") {
+      return failure.name;
+    }
+  } catch {
+    // An unreadable name: the kind of value is named instead.
+  }
+  return typeof failure;
 }
 
 // -- RPC errors -----------------------------------------------------------

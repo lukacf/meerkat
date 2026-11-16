@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-16
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): the answers to a request that

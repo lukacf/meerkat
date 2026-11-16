@@ -305,6 +305,22 @@ them.
   that the host started is answered as unknown to a member whose build carries
   another realm tag.
 
+- `rkat realm govern` can fail on the realm's manifest lock shortly after the
+  realm was made. `rkat realm create`, and the first command that opens a new
+  realm, take a lock file and now and then leave it behind when the command
+  ends. `rkat realm govern` on that realm then waits five seconds and fails
+  with `Error: timed out acquiring realm manifest lock for '<realm>'`, exit
+  code 1, until the leftover file is more than 30 seconds old, and the realm
+  is not governed (`rkat realm show` reads `governance: ungoverned`). Seen
+  with `rkat realm govern` run within 30 seconds of the `rkat realm create`
+  that made the realm. In a script, check each command's exit code; a script
+  that goes on after a failed `realm govern` works on a realm that is not
+  governed. Run again at once, the command fails the same way; after a failed
+  command, wait until more than 30 seconds have passed since it was started,
+  and run it again. (The failure, its exit code, the ungoverned realm and the
+  retry by runs on the released 0.9.15 `rkat`; the cause by reading, in the
+  same lines in every release from 0.9.0, where `realm govern` first shipped.)
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking
@@ -4879,6 +4895,22 @@ them.
   session, or a respawn with the row's labels (`MobHandle::respawn_member`
   with `MemberRespawn::new().with_labels(..)`). By reading; not run for an
   adopted identity.
+- `rkat realm govern` can fail on the realm's manifest lock shortly after the
+  realm was made. (added 2026-11-16) `rkat realm create`, and the first
+  command that opens a new realm, take a lock file and now and then leave it
+  behind when the command ends. `rkat realm govern` on that realm then waits
+  five seconds and fails with
+  `Error: timed out acquiring realm manifest lock for '<realm>'`, exit code 1,
+  until the leftover file is more than 30 seconds old, and the realm is not
+  governed (`rkat realm show` reads `governance: ungoverned`). Seen with
+  `rkat realm govern` run within 30 seconds of the `rkat realm create` that
+  made the realm. In a script, check each command's exit code; a script that
+  goes on after a failed `realm govern` works on a realm that is not governed.
+  Run again at once, the command fails the same way; after a failed command,
+  wait until more than 30 seconds have passed since it was started, and run it
+  again. (The failure, its exit code, the ungoverned realm and the retry by
+  runs on the released 0.9.15 `rkat`; the cause by reading, in the same lines
+  in every release from 0.9.0, where `realm govern` first shipped.)
 
 ## [0.9.14] - 2026-11-11
 

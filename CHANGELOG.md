@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-16
+
 ### Breaking
 
 - Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
@@ -53047,7 +53049,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.15...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.16...HEAD
+[0.9.16]: https://github.com/lukacf/meerkat/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13

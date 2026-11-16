@@ -6599,6 +6599,54 @@ mod tests {
             .expect("a dial reaches the later listener");
     }
 
+    /// A path is this process's own only while its listener is open. Once
+    /// the listener is closed, a later start on the path dials it again: it
+    /// takes over the socket file the closed listener left, and it is
+    /// refused when a listener outside the comms runtime holds the path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_path_is_not_this_process_own_after_its_listener_is_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("member.sock");
+        let start = |name: &'static str| {
+            let mut config = test_runtime_config(name, &tmp);
+            config.listen_uds = Some(path.clone());
+            async move {
+                let mut runtime =
+                    CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+                        .await
+                        .unwrap();
+                let started = runtime.start_listeners().await;
+                (runtime, started)
+            }
+        };
+
+        let (first, started) = start("socket-closed-first").await;
+        match started {
+            Ok(()) => {}
+            Err(CommsRuntimeError::ListenerError(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                return;
+            }
+            Err(error) => panic!("start listeners: {error}"),
+        }
+        first.stop_listeners_for_rebind().await;
+        assert!(path.exists(), "the closed listener left its socket file");
+
+        // The file no listener holds is taken over.
+        let (second, started) = start("socket-closed-second").await;
+        started.expect("a start over the closed listener's socket file");
+        second.stop_listeners_for_rebind().await;
+
+        // A listener outside the comms runtime now holds the path.
+        std::fs::remove_file(&path).expect("remove the closed listener's socket file");
+        let held = outside_listener(&path).expect("bind outside the comms runtime");
+        let (_third, started) = start("socket-closed-third").await;
+        assert_refused_for_live_listener(started, &path);
+        assert_dial_reaches(&path, &held).await;
+    }
+
     #[tokio::test]
     async fn pairing_password_installs_trusted_peer_and_returns_binding() {
         let tmp = tempfile::TempDir::new().unwrap();

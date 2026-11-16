@@ -372,16 +372,6 @@ impl Drop for RealmLeaseGuard {
     }
 }
 
-fn remove_file_nonblocking_on_drop(path: PathBuf) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        std::mem::drop(handle.spawn(async move {
-            let _ = tokio::fs::remove_file(path).await;
-        }));
-    } else {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 /// Write `payload` to `file`, which this caller just created at `path`, and
 /// sync it. On a failure the file is removed again, so a failed write leaves
 /// neither an empty file under a name that means something (a lock, a
@@ -1016,10 +1006,14 @@ impl FirstStartReservation {
 
 impl Drop for FirstStartReservation {
     fn drop(&mut self) {
-        // Crash-safety net for early-return paths; the normal paths release
-        // explicitly. Markers left by a hard kill age out via staleness.
+        // The net for the early returns (an error or a cancellation while
+        // markers are held); the normal paths release explicitly and leave
+        // nothing here. The markers are removed synchronously, like the
+        // manifest lock's file: a removal handed to a spawned task is lost
+        // when the runtime is dropped before it polls the task. Markers
+        // left by a hard kill age out via staleness.
         for path in std::mem::take(&mut self.markers) {
-            remove_file_nonblocking_on_drop(path);
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -3303,10 +3297,11 @@ mod tests {
 
         const REALM: &str = "team";
 
-        /// Run `future` to its end, then wait until the manifest lock of the
-        /// realm under `root` is gone: a lock guard removes its file on a
-        /// task of the runtime, which a current-thread runtime runs only
-        /// while it is driven.
+        /// Run `future` to its end, then wait (bounded) until the manifest
+        /// lock of the realm under `root` is gone. A lock guard removes its
+        /// file when it drops, so the lock is gone when `future` returns
+        /// and the wait ends at once; the rows below list the realm's
+        /// files and must not see a lock file.
         fn settled<T>(root: &Path, future: impl std::future::Future<Output = T>) -> T {
             runtime().block_on(async {
                 let output = future.await;
@@ -3599,7 +3594,7 @@ mod tests {
                     let runtime = runtime();
                     let acquired = runtime.block_on(ManifestLockGuard::acquire(&lock_path, REALM));
                     let error = acquired.as_ref().err().map(ToString::to_string);
-                    // A guard removes its file on a task of the runtime.
+                    // A guard that was acquired removes its file here.
                     drop(acquired);
                     assert!(
                         error.is_some(),

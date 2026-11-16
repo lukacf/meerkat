@@ -911,8 +911,9 @@ An item that names other releases (0.9.9 through 0.9.14, for example) says
 so for that item only. The rollback subsections of the older releases below
 ("Rolling back to 0.9.13", "Rolling back to 0.9.11") each describe a rollback
 from the releases their own section names, not from 0.9.15. The path that
-holds without such conditions is the backup of the state root taken before
-the upgrade (step 2 of "How to upgrade").
+holds without such conditions is the backup taken before the upgrade (step 2
+of "How to upgrade"): of the realm state root and, for a Meta gateway, of its
+state directory.
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
 refusal. The items below are where a rollback differs: configurations that
@@ -2042,9 +2043,13 @@ differ:
 
 The comparison covers the store versions, the table definitions, the
 serialized types that changed between the releases and the stores each
-gateway opens. It is not an audit of every value a later release can store. The path that holds without that
-condition is the backup of the state root taken before the upgrade (step 2
-of "How to upgrade"): restoring it returns the state as it was then.
+gateway opens. It is not an audit of every value a later release can store,
+of state kept outside these stores (a Forge folder, for example), or of the
+SQLite build of 0.9.11 opening files that the newer build of 0.9.12 wrote
+(see "rusqlite 0.41" above). The path that holds without those conditions is
+the backup taken before the upgrade (step 2 of "How to upgrade"): of the
+realm state root and, for a Meta gateway, of its state directory. Restoring
+it returns the state as it was then.
 
 ## Upgrading to 0.9.11
 

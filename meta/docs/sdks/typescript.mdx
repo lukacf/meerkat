@@ -179,16 +179,22 @@ and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
 attestation})`. Each resolves to the gateway's result object.
 
 ```typescript
+import { Meta } from "@rkat/meta-sdk";
+
 const rt = await Meta.builder()
   .mob("config/mob.toml")
   .persistentState("./state")
   .accessControl("config/access.toml")
   .decisionIngresses([{ ingress: "chat", attests: "person", maxClockSkewMs: 5000 }])
   .build();
+const mob = rt.mobHandle();
+
+// The methods answer the gateway's result object, untyped.
+type OpenDecision = { decision_id: string; subject_digest: string; approver_id: string };
 
 rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
 const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
-const decision = page.decisions[0];
+const decision = (page.decisions as OpenDecision[])[0];
 const decisionId = decision.decision_id;
 const subjectDigest = decision.subject_digest;
 
@@ -221,11 +227,13 @@ await mob.decisionsDecide(decisionId, {
 The approver map of `config/access.toml` lists `U123` on the `chat` ingress
 for the decision's approver id. An attested decide is accepted only for a
 decision that was presented to its approver: by the `presentation` the
-attestation carries, as here, or by one recorded before with
-`decisionsPresent(decisionId, presentation)`, which takes the same object.
-With neither, the decide is refused `presentation_incomplete`. The keys of a
-presentation are the gateway's own (snake_case) and are listed under
-[`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
+attestation carries, as here; by one recorded before with
+`decisionsPresent(decisionId, presentation)`, which takes the same object;
+or by the gateway's own showing to the stdio operator (its `presented`
+notice), where the approver map lists the operator for that approver id.
+With none of these, the decide is refused `presentation_incomplete`. The
+keys of a presentation are the gateway's own (snake_case) and are listed
+under [`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.

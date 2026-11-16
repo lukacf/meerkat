@@ -1977,9 +1977,11 @@ await mob.decisions_decide(
 The `chat` ingress is declared at launch with `.decision_ingresses(...)`,
 and the approver map lists `U123` on it for the decision's approver id. An
 attested decide is accepted only for a decision that was presented to its
-approver: by the `presentation` the attestation carries, as here, or by one
+approver: by the `presentation` the attestation carries, as here; by one
 recorded before with `decisions_present(decision_id, presentation)`, which
-takes the same mapping. With neither, the decide is refused
+takes the same mapping; or by the gateway's own showing to the stdio
+operator (its `presented` notice), where the approver map lists the operator
+for that approver id. With none of these, the decide is refused
 `presentation_incomplete`. The fields of a presentation are listed under
 [`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
 

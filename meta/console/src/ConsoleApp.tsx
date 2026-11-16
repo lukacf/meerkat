@@ -283,6 +283,7 @@ import { QuoteContextChips } from "../../packages/console-components/src/convers
 import { ApprovalViewerProvider, HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { QuestionSetsProvider } from "../../packages/console-components/src/conversation/question-set-card";
 import { useQuestionSets } from "./lib/use-question-sets";
+import { consoleBundleIsStale, runningConsoleBundle, servedConsoleBundle } from "./lib/console-bundle";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
 import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
@@ -1339,6 +1340,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // experience names the scope nothing is kept. A gateway that names no
   // scope keeps the host's namespace alone, as before.
   const serverStorageScope = experience?.storage_scope?.trim() ? experience.storage_scope : undefined;
+  // The gateway serves another console bundle than this page runs: the page
+  // was opened before the gateway was upgraded, or its application mounts
+  // another console than the gateway's. One notice says to reload.
+  const runningBundle = React.useMemo(() => runningConsoleBundle(), []);
+  const bundleIsStale = consoleBundleIsStale(runningBundle, servedConsoleBundle(experience));
   const hostStorageNamespace = storageNamespace?.trim() || null;
   const persistentSendScope = serverStorageScope
     ? JSON.stringify([hostStorageNamespace ?? baseUrl, serverStorageScope])
@@ -7027,6 +7033,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       {panelState.errors.length > 0 ? <div className="meta-action-error" role="alert">
         Custom panels could not load: {panelState.errors.join("; ")}
       </div> : null}
+      {bundleIsStale ? (
+        <div className="meta-update-notice" data-testid="console-bundle-notice" role="status">
+          <span>This Console was updated. Reload the page to use the new version.</span>
+          <button type="button" className="cc-btn cc-btn--sm" onClick={() => window.location.reload()}>Reload</button>
+        </div>
+      ) : null}
       {actionError && (
         <div className="meta-action-error" data-testid="console-action-error" role="alert">
           <span>{actionError}</span>

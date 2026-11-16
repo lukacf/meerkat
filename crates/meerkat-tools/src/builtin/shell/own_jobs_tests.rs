@@ -317,13 +317,14 @@ async fn a_cancel_of_another_sessions_job_answers_as_an_unknown_job_and_requests
     let completed = owner.start_completed("owner-output", "call-1").await;
     let running = owner.start_running("call-2").await;
 
+    other
+        .assert_reads_as_unknown(Door::Cancel, &running, &["cancel"])
+        .await;
+    host.assert_untouched(&running).await;
     // A completed job of this session would answer "not running"; another
     // session's answers as unknown.
     other
         .assert_reads_as_unknown(Door::Cancel, &completed, &["running"])
-        .await;
-    other
-        .assert_reads_as_unknown(Door::Cancel, &running, &["cancel"])
         .await;
     host.assert_untouched(&running).await;
 
@@ -401,16 +402,16 @@ async fn a_cancel_of_a_job_under_another_realm_tag_answers_as_an_unknown_job_and
         let plain_running = plain.start_running("call-2").await;
 
         plain
-            .assert_reads_as_unknown(Door::Cancel, &member_completed, &["running"])
-            .await;
-        plain
             .assert_reads_as_unknown(Door::Cancel, &member_running, &["cancel"])
             .await;
         member
-            .assert_reads_as_unknown(Door::Cancel, &plain_completed, &["running"])
+            .assert_reads_as_unknown(Door::Cancel, &plain_running, &["cancel"])
+            .await;
+        plain
+            .assert_reads_as_unknown(Door::Cancel, &member_completed, &["running"])
             .await;
         member
-            .assert_reads_as_unknown(Door::Cancel, &plain_running, &["cancel"])
+            .assert_reads_as_unknown(Door::Cancel, &plain_completed, &["running"])
             .await;
         host.assert_untouched(&member_running).await;
         host.assert_untouched(&plain_running).await;

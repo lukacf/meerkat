@@ -129,14 +129,14 @@ CRUD for user-created mob definitions. Saved to `.codemob-mcp/mobs/` and immedia
 
 | Pack | Agents | Pattern | Default Models |
 |------|--------|---------|---------------|
-| **advisor** | 1 | Single opinion | GPT-5.5 |
-| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Opus |
-| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-5.5, Gemini 3.1 Pro |
-| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Opus |
-| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.1 Flash Lite, GPT-5.5, Opus |
-| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-5.5, Gemini 3.1 Pro, GPT-5.5 Pro, Gemini 3.1 Flash Lite, Sonnet |
-| **implement** | 2 | Implement once, then emit one reviewer gate verdict | Sonnet, GPT-5.5 |
-| **panel** | 5 | Moderator brief, 4 parallel viewpoints, moderator synthesis | Opus, Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Sonnet |
+| **advisor** | 1 | Single opinion | GPT-6 Astra |
+| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Opus |
+| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-6 Astra, Gemini 4 Argon |
+| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Opus |
+| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.5 Flash Lite, GPT-6 Astra, Opus |
+| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-6 Astra, Gemini 4 Argon, GPT-6.1 Sol, Gemini 3.5 Flash Lite, Sonnet |
+| **implement** | 2 | Implement once, then emit one reviewer gate verdict | Sonnet, GPT-6 Astra |
+| **panel** | 5 | Moderator brief, 4 parallel viewpoints, moderator synthesis | Opus, Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Sonnet |
 
 Each pack uses a diverse set of models by default so its roles can contribute
 different perspectives.

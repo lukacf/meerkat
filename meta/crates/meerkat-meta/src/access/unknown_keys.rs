@@ -558,15 +558,15 @@ subjects = ["dave"]
         assert_eq!(
             texts,
             [
-                "the configuration: unknown key `enable`",
-                "rule \"ops-send-lead\": unknown key `agent`",
-                "rule #3 (no id): unknown key `role`",
-                "the rule (no id): unknown key `role`",
-                "group \"ops\": unknown key `member`",
-                "approver \"release\": unknown key `subject`",
-                "approver \"release\", person #2: unknown key `email`",
-                "approver \"release\", ingress subject #1: unknown key `name`",
-                "approver \"release\", person #2, ingress subject #1: unknown key `name`",
+                "the configuration: unknown key \"enable\"",
+                "rule \"ops-send-lead\": unknown key \"agent\"",
+                "rule #3 (no id): unknown key \"role\"",
+                "the rule (no id): unknown key \"role\"",
+                "group \"ops\": unknown key \"member\"",
+                "approver \"release\": unknown key \"subject\"",
+                "approver \"release\", person #2: unknown key \"email\"",
+                "approver \"release\", ingress subject #1: unknown key \"name\"",
+                "approver \"release\", person #2, ingress subject #1: unknown key \"name\"",
             ]
         );
         assert_eq!(
@@ -574,9 +574,27 @@ subjects = ["dave"]
                 at(AccessKeyPlace::Config, "enable"),
                 rule("ops-send-lead", 2, "agent"),
             ]),
-            "the configuration: unknown key `enable`; rule \"ops-send-lead\": unknown key `agent`"
+            "the configuration: unknown key \"enable\"; rule \"ops-send-lead\": unknown key \"agent\""
         );
         assert_eq!(unknown_access_keys_text(&[]), "");
+    }
+
+    /// A key is written quoted, as the table names are: one that holds a
+    /// line break, a control character or a quote does not stand raw in the
+    /// text.
+    #[test]
+    fn a_key_is_written_quoted_as_the_table_names_are() {
+        let found = unknown_rule_keys(&json!({
+            "id": "ops-send-lead",
+            "actions": ["agent.send"],
+            "agent\nadmins = [\"x\"]\u{1b}[31m`": ["ops-lead"],
+        }));
+        let text = unknown_access_keys_text(&found);
+        assert_eq!(
+            text,
+            "rule \"ops-send-lead\": unknown key \"agent\\nadmins = [\\\"x\\\"]\\u{1b}[31m`\""
+        );
+        assert!(!text.chars().any(char::is_control), "{text:?}");
     }
 
     /// A value of another shape than the structs expect is not walked: the

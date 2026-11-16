@@ -2521,6 +2521,117 @@ mod tests {
         }
     }
 
+    /// A realm lease is one record file per holder. A holder whose guard
+    /// has dropped has released the lease: its record is gone, so the realm
+    /// no longer reads as active, even when the holder's runtime (its
+    /// process) ends right after the drop.
+    ///
+    /// RED before, for the two rows about a dropped guard: inside a runtime
+    /// the guard only signalled its heartbeat task and spawned a wait for
+    /// it; removing the record was that task's last step. A current-thread
+    /// runtime polls the task only once the caller awaits again, so the
+    /// record was still there when the guard had dropped; a runtime dropped
+    /// at that point never polled it, the record stayed and read as a live
+    /// lease until thirty seconds after its last heartbeat.
+    ///
+    /// The control holds before and after: the record a killed holder
+    /// leaves reads active until that age and blocks, and reads stale after.
+    mod lease_release {
+        use super::manifest_lock::runtime;
+        use super::*;
+
+        const REALM: &str = "lab";
+
+        #[test]
+        fn a_dropped_lease_guard_has_removed_its_lease_record() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            runtime().block_on(async {
+                let guard = start_realm_lease_in(&realms_root, REALM, Some("server"), "rest")
+                    .await
+                    .expect("the lease");
+                let record = guard.lease_path().to_path_buf();
+                assert!(record.exists(), "a held lease has its record");
+                drop(guard);
+                // Nothing is awaited between the guard's drop and this.
+                assert!(
+                    !record.exists(),
+                    "the dropped guard removed its lease record"
+                );
+            });
+        }
+
+        /// What a server does at an ordinary end: its state, and the lease
+        /// guard in it, drops as its main future returns, and the runtime
+        /// is dropped next. Then another command asks whether the realm is
+        /// active.
+        #[test]
+        fn a_lease_guard_dropped_as_its_runtime_ends_leaves_no_lease_record() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let server = runtime();
+            let record = server.block_on(async {
+                let guard = start_realm_lease_in(&realms_root, REALM, Some("server"), "rest")
+                    .await
+                    .expect("the lease");
+                let record = guard.lease_path().to_path_buf();
+                drop(guard);
+                record
+            });
+            drop(server);
+
+            let status = runtime()
+                .block_on(inspect_realm_leases_in(&realms_root, REALM, false))
+                .expect("the lease status");
+            assert!(
+                !status.blocks_destructive_prune(),
+                "the ended holder's realm does not read as active: {status:?}"
+            );
+            assert!(status.stale.is_empty(), "no record is left: {status:?}");
+            assert!(!record.exists(), "the ended holder left no lease record");
+        }
+
+        /// What a killed holder leaves: its last record, which nobody
+        /// removes. It reads as a live lease until it is older than the
+        /// stale age, and as a stale one after.
+        #[test]
+        fn a_killed_holders_lease_record_reads_active_until_the_stale_age_and_blocks() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let record_path =
+                realm_lease_dir(&realm_paths_in(&realms_root, REALM)).join("server.json");
+            let record = |heartbeat_at: u64| RealmLeaseRecord {
+                realm_id: REALM.to_string(),
+                instance_id: "server".to_string(),
+                surface: "rest".to_string(),
+                pid: 7,
+                started_at: 1,
+                heartbeat_at,
+            };
+            let runtime = runtime();
+
+            runtime
+                .block_on(write_lease_record(&record_path, &record(now_unix_secs())))
+                .expect("the record of a holder killed just now");
+            let status = runtime
+                .block_on(inspect_realm_leases_in(&realms_root, REALM, true))
+                .expect("the lease status");
+            assert_eq!(status.active.len(), 1, "a young record is live: {status:?}");
+            assert!(status.blocks_destructive_prune());
+            assert!(record_path.exists(), "a live record is not cleaned up");
+
+            let old = now_unix_secs() - REALM_LEASE_STALE_TTL_SECS - 5;
+            runtime
+                .block_on(write_lease_record(&record_path, &record(old)))
+                .expect("the record of a holder killed a while ago");
+            let status = runtime
+                .block_on(inspect_realm_leases_in(&realms_root, REALM, false))
+                .expect("the lease status");
+            assert_eq!(status.stale.len(), 1, "an old record is stale: {status:?}");
+            assert!(!status.blocks_destructive_prune());
+        }
+    }
+
     mod first_start_reservation {
         use super::manifest_lock::{paused_runtime, runtime};
         use super::*;

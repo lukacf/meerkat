@@ -98,10 +98,10 @@ them.
 
 - Behaviour-only (not measured by the gate): `meerkat_mob_profile_create` and
   `meerkat_mob_profile_update` refuse a profile that carries
-  `tools.mcp_servers`, `tools.rust_bundles`, `tools.bundles`, `auth_binding`
-  or an undefined key (JSON-RPC error `-32602`, invalid params; the message
-  names the field). A client that set them through these tools uses the host
-  methods instead.
+  `tools.mcp_servers`, `tools.rust_bundles`, `tools.bundles` or any key other
+  than those of the public profile input and `auth_binding` (JSON-RPC error
+  `-32602`, invalid params; the message names the field). A client that set
+  them through these tools uses the host methods instead.
 
 - Behaviour-only (not measured by the gate): `meerkat_mob_spawn`,
   `meerkat_mob_spawn_many` and `meerkat_run` refuse a reserved key in `labels`
@@ -236,28 +236,30 @@ them.
   as an id that does not exist.
 
 - The MCP profile tools stored host-only profile fields (0.5.2 through 0.9.15;
-  a stored server from 0.7.19, a binding from 0.9.11).
-  `meerkat_mob_profile_create` and `meerkat_mob_profile_update`, served by
-  `rkat-mcp` and `rkat-mob-mcp`, accepted a profile in its raw form. A caller
-  of these tools, which can be a model, could store `tools.mcp_servers`,
-  `tools.rust_bundles` and `auth_binding` in a profile, and the read-back did
-  not show them. On `rkat-mcp`, when a mob's role named the profile, a stored
-  stdio server was started as a process on the host at the member's spawn, and
-  the binding was recorded in the member's session. The released Linux and
-  macOS archives start such a server (Linux x86_64 by a run, the others by
-  their build records); the released Windows archive, by its build record, has
-  no MCP client support and refuses the spawn. A Meta gateway, the Console and
-  the REST server do not serve these tools. From this release the tools take
-  the public profile input and refuse these fields, `tools.bundles` and any
-  key that input does not define; nothing is stored, and on an update the
-  stored profile is unchanged. The host methods `mob/profile/create` and
-  `mob/profile/update` are unchanged.
+  a stored server from 0.7.19). `meerkat_mob_profile_create` and
+  `meerkat_mob_profile_update`, served by `rkat-mcp` and `rkat-mob-mcp`,
+  accepted a profile in its raw form. A caller of these tools, which can be a
+  model, could store `tools.mcp_servers` and `tools.rust_bundles` in a
+  profile, and the read-back did not show them. On `rkat-mcp`, when a mob's
+  role named the profile, a stored stdio server was started as a process on
+  the host at the member's spawn. The released Linux and macOS archives start
+  such a server (Linux x86_64 by a run, the others by their build records);
+  the released Windows archive, by its build record, has no MCP client support
+  and refuses the spawn. A Meta gateway, the Console and the REST server do
+  not serve these tools. From this release the tools take the public profile
+  input and `auth_binding`, and refuse these fields, `tools.bundles` and any
+  other key; nothing is stored, and on an update the stored profile is
+  unchanged. The host methods `mob/profile/create` and `mob/profile/update`
+  are unchanged.
 
   Profiles stored before the upgrade keep such fields. Read each realm profile
   back through the profile tools (with its revision) and update it with
-  exactly what was read: the stored profile then holds none of them. Respawn
-  every member of the roles that use it. A member spawned before keeps its
-  recorded binding through a respawn: retire it and spawn it anew.
+  exactly what was read: the stored profile then holds no server and no
+  bundle. This step also removes a stored `auth_binding` (the tools have taken
+  one since 0.9.11), which the read-back does not show: a profile that is
+  meant to carry one needs it sent again in the same update. The same holds
+  for every later update through the tools. Respawn every member of the roles
+  that use the profile.
 
   Handing `rkat-mcp` to a model. An MCP client that lets a model call this
   server's tools should not offer it the following tools, unless that model

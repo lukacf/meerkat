@@ -2495,6 +2495,85 @@ mod tests {
             vec![a.to_path_buf(), b.to_path_buf()]
         }
 
+        fn refused() -> std::io::Error {
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        }
+
+        fn marker_files(root: &Path) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return Vec::new();
+            };
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        /// A marker that is being removed refuses a create of its name on
+        /// Windows: that is a first start still under way, so the caller
+        /// waits for the manifest as it does when the marker exists. The
+        /// platform is a parameter, so the row runs on every host.
+        #[tokio::test]
+        async fn a_refused_marker_create_on_windows_is_contention_and_releases_what_was_taken() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let mut creates = 0u32;
+            let reserved = FirstStartReservation::try_acquire_with(
+                &candidates(&root_a, &root_b),
+                "team",
+                true,
+                |marker_path| {
+                    creates += 1;
+                    let refuse = creates > 1;
+                    async move {
+                        if refuse {
+                            Err(refused())
+                        } else {
+                            create_first_start_marker(&marker_path, "team").await
+                        }
+                    }
+                },
+            )
+            .await;
+            assert!(
+                matches!(reserved, Ok(None)),
+                "a refused create is contention: {:?}",
+                reserved.as_ref().err()
+            );
+            assert_eq!(
+                creates, 2,
+                "the first root's marker was taken, the second refused"
+            );
+            assert_eq!(
+                marker_files(&root_a),
+                Vec::<String>::new(),
+                "the marker taken in the first root is released"
+            );
+            assert_eq!(marker_files(&root_b), Vec::<String>::new());
+        }
+
+        #[tokio::test]
+        async fn a_refused_marker_create_off_windows_is_an_error() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let reserved = FirstStartReservation::try_acquire_with(
+                &candidates(&root_a, &root_b),
+                "team",
+                false,
+                |_marker_path| async { Err(refused()) },
+            )
+            .await;
+            assert!(
+                matches!(
+                    reserved.as_ref().err(),
+                    Some(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::PermissionDenied
+                ),
+                "a refused permission is returned as it is: {:?}",
+                reserved.as_ref().err()
+            );
+        }
+
         #[tokio::test]
         async fn single_candidate_skips_reservation_entirely() {
             let temp = tempfile::tempdir().unwrap();

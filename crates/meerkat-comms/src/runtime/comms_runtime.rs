@@ -6678,6 +6678,46 @@ mod tests {
         assert_dial_reaches(&path, &held).await;
     }
 
+    /// A dial refused for permission keeps a path only when a file lies
+    /// there. In a directory this user may not search the dial is refused
+    /// for permission and no file is seen at the path: the start is not
+    /// refused as an address in use; it goes on and fails with the
+    /// permission kind, as before. (A user that may search any directory
+    /// finds no file and binds.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_listener_start_is_not_an_address_in_use_where_no_file_is_seen() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let closed = tmp.path().join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        let set_mode = |mode: u32| {
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(mode))
+                .expect("set the directory's mode");
+        };
+        let path = closed.join("member.sock");
+
+        let mut config = test_runtime_config("socket-no-file-seen", &tmp);
+        config.listen_uds = Some(path.clone());
+        let mut runtime = CommsRuntime::new_with_silent_intents(config, Arc::new(HashSet::new()))
+            .await
+            .unwrap();
+        set_mode(0o000);
+        let started = runtime.start_listeners().await;
+        set_mode(0o700);
+
+        match started {
+            Ok(()) => {}
+            Err(CommsRuntimeError::ListenerError(error)) => assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "the start fails with the permission kind, not as an address in use: {error}"
+            ),
+            Err(other) => panic!("start listeners: {other}"),
+        }
+    }
+
     #[tokio::test]
     async fn pairing_password_installs_trusted_peer_and_returns_binding() {
         let tmp = tempfile::TempDir::new().unwrap();

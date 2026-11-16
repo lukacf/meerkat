@@ -12,7 +12,7 @@
 
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -372,6 +372,50 @@ describe("init in progress refusal", () => {
       });
     } finally {
       await rt.shutdown();
+    }
+  });
+});
+
+describe("a refused start and the builder's convention files", () => {
+  it("says once which convention files the builder applied", async () => {
+    // A program that named no access file is refused for the one the
+    // builder found in the working directory: the SDK says that it applied
+    // it. A file the program named is no convention file: nothing is said.
+    const { bin } = gateway(`
+      emit({ jsonrpc: "2.0", id: init.id, error: { code: -32602,
+        message: "runtime_options.access_config_path is invalid: refused" } });
+    `);
+    const dir = mkdtempSync(join(tmpdir(), "meta-convention-refusal-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, "config"));
+    writeFileSync(join(dir, "config", "access.toml"), "enabled = true\n");
+    const previous = process.cwd();
+    const warned: string[] = [];
+    const warn = mock.method(console, "warn", (...args: unknown[]) => {
+      warned.push(args.map(String).join(" "));
+    });
+    const said = (): string[] => warned.filter((line) => line.includes("by convention"));
+    try {
+      process.chdir(dir);
+      const refused = await Meta.builder()
+        .gateway(bin)
+        .build()
+        .then(() => null, (error: unknown) => error);
+      assert.ok(isRpcError(refused), String(refused));
+      assert.equal(said().length, 1, warned.join("\n"));
+      assert.match(said()[0], /config\/access\.toml/);
+
+      warned.length = 0;
+      const named = await Meta.builder()
+        .gateway(bin)
+        .accessControl("config/access.toml")
+        .build()
+        .then(() => null, (error: unknown) => error);
+      assert.ok(isRpcError(named), String(named));
+      assert.deepEqual(said(), []);
+    } finally {
+      process.chdir(previous);
+      warn.mock.restore();
     }
   });
 });

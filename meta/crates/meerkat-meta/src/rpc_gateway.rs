@@ -5275,6 +5275,75 @@ actions = ["agent.view"]
         assert!(err.contains("access_config_path"), "{err}");
     }
 
+    /// A refusal of an access file's content names the file: a file that
+    /// does not parse, one that does not validate, and an approver map that
+    /// names an ingress the launch does not declare.
+    #[test]
+    fn gateway_runtime_options_name_the_refused_access_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for (name, content) in [
+            ("unparsed.toml", "enabled = ["),
+            ("no-admin.toml", "enabled = true"),
+            (
+                "undeclared-ingress.toml",
+                r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#,
+            ),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write access config");
+            let params = json!({
+                "runtime_options": { "access_config_path": path.to_string_lossy() }
+            });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("{name} must refuse initialization"),
+                Err(err) => err,
+            };
+            assert!(
+                err.starts_with("runtime_options.access_config_path is invalid: "),
+                "{name}: {err}"
+            );
+            assert!(
+                err.ends_with(&format!(" (file '{}')", path.display())),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    /// A refusal of a gating file's content names the file: a file that
+    /// does not parse and ones whose actions are not valid.
+    #[test]
+    fn gateway_runtime_options_name_the_refused_gating_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for (name, content) in [
+            ("unparsed.toml", "actions = ["),
+            ("unparsed.json", "{"),
+            ("no-actions.toml", "title = \"no actions\"\n"),
+            ("no-tier.toml", "[actions.deploy]\nnote = \"no tier\"\n"),
+            ("unknown-tier.toml", "[actions]\ndeploy = \"r9\"\n"),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write gating config");
+            let params = json!({
+                "runtime_options": { "gating_config_path": path.to_string_lossy() }
+            });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("{name} must refuse initialization"),
+                Err(err) => err,
+            };
+            assert!(err.contains("gating_config_path"), "{name}: {err}");
+            assert!(
+                err.ends_with(&format!(" (file '{}')", path.display())),
+                "{name}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn gateway_runtime_options_parse_mcp_accounts() {
         let params = json!({

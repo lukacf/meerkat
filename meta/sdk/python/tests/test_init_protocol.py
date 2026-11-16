@@ -666,3 +666,46 @@ async def test_a_short_gateway_init_timeout_ends_init_and_still_cleans_up(tmp_pa
     assert ("meta/init", 0.5) in transport.timeouts
     # The existing failed-bootstrap cleanup still stopped the gateway.
     assert not transport.is_running()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_says_which_convention_files_the_builder_applied(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    # A program that named no access file is refused for the one the builder
+    # found in the working directory: the SDK says once that it applied it.
+    script = _gateway(tmp_path, "refuses_the_access_file", """
+        emit({"jsonrpc": "2.0", "id": init["id"], "error": {
+            "code": -32602,
+            "message": "runtime_options.access_config_path is invalid: refused"}})
+    """)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "access.toml").write_text("enabled = true\n")
+    monkeypatch.chdir(tmp_path)
+
+    def said() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if "by convention" in record.getMessage()
+        ]
+
+    with caplog.at_level(logging.WARNING, logger="meerkat_meta"):
+        with pytest.raises(RpcError):
+            await Meta.builder().gateway(str(script)).build()
+    (line,) = said()
+    assert "config/access.toml" in line
+
+    # A file the program named is no convention file: nothing is said.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="meerkat_meta"):
+        with pytest.raises(RpcError):
+            await (
+                Meta.builder()
+                .gateway(str(script))
+                .access_control("config/access.toml")
+                .build()
+            )
+    assert said() == []

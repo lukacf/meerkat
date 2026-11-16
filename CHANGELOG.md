@@ -4572,15 +4572,17 @@ them.
   was not run. The same lines stand at every tag from 0.9.11 to 0.9.15;
   earlier releases were not read.
 - Added 2026-11-16, after the release. `rkat-rest`: where the server's
-  default context directory does not exist yet (by default
-  `~/.local/share/meerkat/rest`; a new machine or a new account), a
-  `POST /sessions` that carries no `system_prompt` is answered HTTP 500,
-  every time: `agent error: Build error: Config error: project AGENTS.md
-  '<path>' is not readable: No such file or directory (os error 2)`, where
-  `<path>` is that directory. The server does not create it, and neither the
-  directory the server is started from nor the XDG variables cure it. Create
-  the directory the message names (`mkdir -p ~/.local/share/meerkat/rest`; a
-  running server need not be restarted), or start the server with
+  default context directory does not exist yet (on Linux by default
+  `~/.local/share/meerkat/rest`, or `$XDG_DATA_HOME/meerkat/rest` when that
+  is set; a new machine or a new account), a `POST /sessions` that carries
+  no `system_prompt` is answered HTTP 500, every time: `agent error: Build
+  error: Config error: project AGENTS.md '<path>' is not readable: No such
+  file or directory (os error 2)`, where `<path>` is that directory. The
+  server does not create it; the directory the server is started from does
+  not matter, and setting XDG_DATA_HOME only moves the directory to
+  `$XDG_DATA_HOME/meerkat/rest`. Create the directory the message names (on
+  Linux by default `mkdir -p ~/.local/share/meerkat/rest`; a running server
+  need not be restarted), or start the server with
   `--context-root <an existing directory>`. A request that carries a
   `system_prompt` is not affected. Affects 0.7.9 through 0.9.15: the lines
   that cause it came with 0.7.9 and stand at every tag from 0.8.0 (read from

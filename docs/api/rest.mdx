@@ -26,11 +26,12 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
     ```
 
     On a new machine or a new account, first create the server's default
-    context directory (on Linux `mkdir -p ~/.local/share/meerkat/rest`) or
-    start the server with `--context-root <an existing directory>`: while
-    that directory is missing, a `POST /sessions` that carries no
-    `system_prompt`, such as the request in the next step, is answered HTTP
-    500 with an error that names the directory (see Known limitations of
+    context directory (on Linux, by default
+    `mkdir -p ~/.local/share/meerkat/rest`; the error names the directory on
+    every system) or start the server with
+    `--context-root <an existing directory>`: while that directory is
+    missing, a `POST /sessions` that carries no `system_prompt`, such as the
+    request in the next step, is answered HTTP 500 (see Known limitations of
     0.9.15 in the CHANGELOG).
   </Step>
   <Step title="Send a request">

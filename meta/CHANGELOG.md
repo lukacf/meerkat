@@ -3119,8 +3119,8 @@ Security, Upgrade and Changed.
   gateway's access file binds to the rule's approver id as the stdio
   operator or as a person a declared ingress attests. A binding that lists
   only Console subjects or groups lets nobody decide: the Console serves no
-  decide. The map is read whether or not the access file has
-  `enabled = true`. When the gateway was started with no access file, or
+  `meta/decisions/decide`. The map is read whether or not the access file
+  has `enabled = true`. When the gateway was started with no access file, or
   with a map whose binding for the rule's approver id lists neither the
   stdio operator nor a person a declared ingress attests, the change is
   held, a decide is refused (`-32602`, `decision_refused`, `not_eligible`),

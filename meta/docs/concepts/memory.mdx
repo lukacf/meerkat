@@ -183,7 +183,7 @@ select as follows:
 
 | `selection` | What it returns |
 | --- | --- |
-| `contextual` (default) | The records that match a word of the query in their tags, title or body, best match first. The words of the query are those of `query_text` and `query_terms` without common stopwords and without words shorter than three characters. A word of five characters or more also matches inside a longer word, which counts for less: one such match alone does not select a record. A record that matches no word is left out, however few records there are, and a recall whose query leaves no word (no query, or only stopwords and short words such as `AI`) returns nothing. |
+| `contextual` (default) | The records that match a word of the query in their tags, title or body, best match first. The words of the query are those of `query_text` and `query_terms` without common stopwords and without words shorter than three characters. A word is a run of ASCII letters, digits, `-` and `_`, so a query wholly in a non-Latin script leaves no word and returns nothing. A word of five characters or more also matches inside a longer word of the title or body, which counts for less: one such match alone does not select a record. A record that matches no word is left out, however few records there are, and a recall whose query leaves no word (no query, or only stopwords and short words such as `AI`) returns nothing. |
 | `always` | The most recently updated records, newest first, whatever the query. Over more than `max_entries` records it returns the newest `max_entries`, not all of them. |
 
 To enumerate an identity's memory, read its manifest.

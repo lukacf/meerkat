@@ -3226,6 +3226,51 @@ Security, Upgrade and Changed.
   source; earlier versions read from the source). A fix is planned for the
   next release.
 
+- Added 2026-11-16, after the release. Approvals: a change that a rule holds
+  for approval can be decided only by a person whom the approver map of the
+  gateway's access file binds to the rule's approver id as the stdio
+  operator or as a person a declared ingress attests. A binding that lists
+  only Console subjects or groups lets nobody decide: the Console serves no
+  `meta/decisions/decide`. The map is read whether or not the access file
+  has `enabled = true`. When the gateway was started with no access file, or
+  with a map whose binding for the rule's approver id lists neither the
+  stdio operator nor a person a declared ingress attests, the change is
+  held, a decide is refused (`-32602`, `decision_refused`, `not_eligible`),
+  and nobody can decide it. Until its deadline nothing is lost: start the
+  gateway again before the deadline with an access file whose approver map
+  binds the id to the stdio operator or to a person a declared ingress
+  attests, and the held change is presented and can be decided. Left
+  undecided, it ends at its deadline: the operation is refused
+  (`decision_closed`), nothing is changed, and the change has to be asked
+  again. Run on the released 0.9.15 gateway for a host's create under a rule
+  that requires approval, decided by the stdio operator, with no access file
+  and with a map that binds another id only, and for the deadline with that
+  rule's decision timeout set to five seconds; a binding that lists only
+  Console subjects is read from the gateway's tests at the tag, not run on
+  the released gateway; not run: a decide attested by another declared
+  ingress, a held change of another kind, and an edit of the map without a
+  restart. See
+  [Approval rules](docs/reference/identity-policy.mdx#approval-rules).
+
+- Added 2026-11-16, after the release. Agents created at run time: where a
+  rule requires approval for a create, a create under a name that is already
+  taken (an agent of the roster, an agent created earlier, the name of a
+  removed agent) is not refused at once. It is held for approval,
+  `meta/identity/plan` answers `require_approval` for it, and it is refused
+  only when the approved change is carried out: the operation then answers
+  `refused` with the kind `decision_closed`, and its text names `name_taken`
+  and says "ask again" although the refusal is not retryable
+  (`retryable: false`). Nothing is created and no agent is changed. The
+  pages said such a create is refused `name_taken` without this condition.
+  Before approving a create, check its name against `meta/identity/list`
+  with `include_archived`: an archived agent holds its name too. The list
+  does not show a removed agent's name, so a create under one is found only
+  when the approved change is carried out. Run on the released 0.9.15
+  gateway for the three kinds of name taken before the create, with the
+  approver bound to the stdio operator; a name taken between the hold and
+  the approval ends the same way, by a run on a build of this release's
+  source. A fix is planned for the next release.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

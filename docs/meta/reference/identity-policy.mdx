@@ -4,7 +4,7 @@ description: "The host's rules for changes of long-term agents: who may create, 
 icon: "id-card"
 ---
 
-*Mirrored from Meerkat Meta main at [d1ec9a391602](https://github.com/lukacf/meerkat/commit/d1ec9a391602d0e5045996fce2f2f9b3abeaab4a) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [faebf66ed0ec](https://github.com/lukacf/meerkat/commit/faebf66ed0ecb9c43446e73f77939afacdca1e9b) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -203,6 +203,26 @@ withdraws it with `meta/identity/withdraw`, and so does the host's operator
 on the stdio gateway. An agent that asked is told
 the outcome by a message to itself; host code and a person read
 `meta/identity/operation`.
+
+Who may decide a held change is not part of this policy. A rule names an
+approver id, directly or as the value of one of the requesting agent's
+authority labels, and the people who hold that id are the ones the launch's
+access file binds to it under `[approvers."<id>"]` (see
+[Approver identities](/meta/concepts/access-control#approver-identities)). The
+gateway reads that map from the access file whether or not the file's
+`enabled` is `true`: a host that keeps access control off still writes the
+file, with `enabled = false` and the bindings. With no access file, with a
+map that holds no binding for the rule's approver id, or with one whose
+binding lists neither the stdio operator nor a person a declared ingress
+attests, the change is held and nobody can decide it: `meta/decisions/list`
+notices it as `held` and not as `presented`, the stdio operator's
+`meta/decisions/decide` is refused `not_eligible`, and the change stays
+`pending_decision` until it is withdrawn
+or lapses at its deadline, when its operation answers `refused` with
+`decision_closed` and the change has to be asked again. Until then a change
+held that way can still be decided: start the gateway again with an access
+file whose binding for the approver id lists the stdio operator or a person
+a declared ingress attests.
 
 A person's approval is evidence, never authority over the policy. When an
 approved change is carried out, the policy the launch has then is asked

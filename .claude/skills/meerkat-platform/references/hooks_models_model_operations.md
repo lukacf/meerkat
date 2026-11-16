@@ -39,8 +39,9 @@ structured output, retries, timeouts, model fallback and model switching.
 - `turn/start` refuses `max_tokens`; REST `POST /sessions/{id}/messages`
   accepts it and rebuilds the agent.
 - A response that hits the cap with only reasoning fails the run with
-  `MaxTokensReached` ("turn exhausted max_tokens during thinking; raise
-  max_tokens or set a thinking budget").
+  `MaxTokensReached` ("turn exhausted max_tokens while thinking, before any
+  answer; raise max_tokens, or lower the reasoning effort or the thinking
+  budget where the model takes one").
 
 ## Budgets and turn limits
 

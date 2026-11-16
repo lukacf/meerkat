@@ -115,6 +115,14 @@ them.
   signature changes. Meerkat Meta declares its stock `ask_user` this way
   (see the Meta changelog).
 
+### Changed
+
+- `meerkat-core`: a turn that uses up `max_tokens` while thinking, before
+  any answer, now fails with a hint that works on every model (raise
+  `max_tokens`, or lower the reasoning effort or the thinking budget where
+  the model takes one) in place of the advice to set a thinking budget,
+  which a model that takes none answers with a second error.
+
 ### Fixed
 
 - `meerkat-runtime`: an `ask_user` call is held whatever the length of its

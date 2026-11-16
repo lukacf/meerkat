@@ -28303,9 +28303,9 @@ mod prompt_tests {
         build_config
     }
 
-    fn build_config_refusal(result: Result<DynAgent, BuildAgentError>) -> String {
+    fn build_config_refusal(result: Result<super::DynAgent, super::BuildAgentError>) -> String {
         match result {
-            Err(BuildAgentError::Config(text)) => text,
+            Err(super::BuildAgentError::Config(text)) => text,
             Err(other) => panic!("expected a configuration refusal, got {other:?}"),
             Ok(_) => panic!("expected a configuration refusal, and the agent was built"),
         }

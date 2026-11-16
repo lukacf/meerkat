@@ -3100,17 +3100,19 @@ Security, Upgrade and Changed.
     other member it is refused, because it needs the identity authority;
   - `live_connect` / `liveConnect`, which begins with the strict open.
 
-  Before it fails, a strict open over stdio takes the gateway's voice path,
-  which ends a Console voice call in progress on that gateway (read from the
-  source, not run).
+  Every live open over stdio takes the gateway's voice path first, which
+  ends a Console voice call in progress on that gateway; a strict open that
+  then fails has ended it and opened nothing (the first by runs, the second
+  read from the source).
 
   Not affected: `live_open` / `liveOpen`, and the typed open without an
   execution identity, which open a channel with a WebSocket transport, also
-  for a member of an identity-first launch; and the Console's own voice.
-  Affects Meta 0.9.0 through this release (by runs on this release's code
-  for the answer, the strict open and the plain open; `live_connect` and the
-  typed open read from the source; earlier versions read from the source). A
-  fix is planned for the next release.
+  for a member of an identity-first launch. A voice call started in the
+  Console does not use these calls and works. Affects Meta 0.9.0 through
+  this release (by runs on this release's code for the answer, the strict
+  open and the plain open; `live_connect` and the typed open read from the
+  source; earlier versions read from the source). A fix is planned for the
+  next release.
 
 ## [0.9.14] - 2026-11-11
 

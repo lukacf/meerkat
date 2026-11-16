@@ -3976,8 +3976,9 @@ fn deny_name_tools(built: &DenyNameBuilt, with_ask_user: bool) -> Vec<String> {
 /// The member built on the profile that denies `ask_user`. Its session
 /// lists its own tools for its model and no tool named `ask_user`, and
 /// records a policy that denies the name: the policy every call of the
-/// member is judged by, which refuses a call to a denied name whichever tool
-/// carries it, or none.
+/// member is judged by, which refuses a call to whichever tool of the build
+/// carries a denied name (a call to a name no tool of the build has is
+/// answered as not found, with the deny or without it).
 fn assert_built_with_ask_user_denied(
     built: Result<DenyNameBuilt, String>,
     case: &str,

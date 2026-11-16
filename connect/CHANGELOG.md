@@ -43,10 +43,18 @@ guides give the conditional wording for Connect 0.9.14.
   given no stock `ask_user`, and the deny named a tool no part of their
   build knew. Meerkat Meta now knows the stock name on every member build
   (see the Meta changelog), so a profile shared with a Meta gateway, where
-  the deny is the documented way to keep the tool from a member, builds on
-  the native host too. Its agents are still not offered the tool, with the
-  deny or without it. Affected: 0.9.15 only (0.9.14 has no stock
-  `ask_user`).
+  the deny is the documented way to keep the tool from a member, no longer
+  meets that refusal. What was run: rows on a Meta host that decides its
+  members' tool surface as the native host does (it installs a member
+  registration hook), where a member on a denying profile builds and is
+  not offered the tool. It was not run through Connect's native host. For
+  the native host the rest is read from the source: its registration
+  judges the tools a member's build holds and the ones it offers, and
+  reads neither the build's tool policy nor a profile's deny list, and a
+  deny of a name that no tool of the member has changes neither of those
+  lists, so the host is asked to decide the same surface as without the
+  deny. Its agents are still not offered the tool, with the deny or
+  without it. Affected: 0.9.15 only (0.9.14 has no stock `ask_user`).
 
 ## [0.9.15] - 2026-11-15
 

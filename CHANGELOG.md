@@ -47,6 +47,9 @@ them.
   which has the name, and on a build where another part of the surface has
   it, an external tool included, the deny hides that tool and refuses its
   calls, by name. `DeclaredToolUnknown` lists the source as `host tools`.
+  A name declared under this source is known to the grant gate too, as a
+  name of every other vocabulary is: a grant-gated one that the build does
+  not mount is refused as `tool_not_mounted`, not as `unknown_tool`.
   The enum is `#[non_exhaustive]`, and no existing variant, field or
   signature changes. Meerkat Meta declares its stock `ask_user` this way
   (see the Meta changelog).

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A profile that lists `ask_user` under `tools.grant_gated` and also
+  restricts tools (`tools.deny` or `tools.read_only`), used for a member
+  that is given no stock `ask_user`, is refused at the member's build as
+  before, now with the grant gate's refusal `tool_not_mounted`
+  ("'ask_user' is grant-gated, but this build does not mount it") where
+  0.9.15 answered `unknown_tool` ("'ask_user' is grant-gated, but no tool
+  source of this build provides it"): the stock name is now one the build
+  knows (see Fixed). Read from the source, not run.
+
 ### Fixed
 
 - A profile that lists `ask_user` in `tools.deny` can be used for every
@@ -19,18 +30,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The same refusal met a member whose host supplies its own tool named
   `ask_user` among the build's external tools. The stock name is now one
   a deny list may name on every member build, whether or not Meta puts the
-  tool on it. Such a member builds, its model is offered no tool named
-  `ask_user`, and a call its model makes to that name anyway is refused as
-  not allowed by policy. For a host's own tool of that name the deny does
-  what it does to every tool: the tool is not offered and a call never
-  reaches it. Which members are offered the stock tool is unchanged, and
-  there is no new setting. A name in `tools.deny` that is in no tool
-  vocabulary and is no stock tool's name (a typo such as `ask_usr`) still
-  fails the member's build with `DeclaredToolUnknown`; the vocabularies
-  that refusal lists now include `host tools`. Affected: 0.9.15 only.
-  Releases through 0.9.14 have no stock `ask_user` (read from the 0.9.14
-  tags: neither Meta nor Meerkat has the tool there, and the deny check is
-  the same), so there a profile had no reason to deny the name.
+  tool on it. Such a member builds and its model is offered no tool named
+  `ask_user` (by rows on a Meta host that installs a member registration
+  hook, and by a model turn of a member with its host's own tool of that
+  name). What a call its model makes to the name anyway is answered
+  depends on the member's build. Where no tool of the build has the name
+  (a member whose host decides its surface and supplies no such tool), the
+  call is answered as a call to any name the build does not have: the tool
+  is not found. Where the host supplies its own tool of that name, the
+  deny does what it does to every tool: the tool is not offered, and a
+  call is refused as not allowed by policy and never reaches it. Both
+  answers are run in Meerkat for a build prepared for its host's decision;
+  the second is also run by a model turn of a member whose host decides no
+  surface. No model turn was run on a member whose host decides its
+  surface: for it the two answers are read from the source, where such a
+  build is finished through the same gate. Which members are offered the
+  stock tool is unchanged, and there is no new setting. A name in
+  `tools.deny` that is in no tool vocabulary and is no stock tool's name
+  (a typo such as `ask_usr`) still fails the member's build with
+  `DeclaredToolUnknown`; the vocabularies that refusal lists now include
+  `host tools`. Affected: 0.9.15 only. Releases through 0.9.14 have no
+  stock `ask_user` (read from the 0.9.14 tags: neither Meta nor Meerkat
+  has the tool there, and the deny check is the same), so there a profile
+  had no reason to deny the name.
 
 ## [0.9.15] - 2026-11-15
 

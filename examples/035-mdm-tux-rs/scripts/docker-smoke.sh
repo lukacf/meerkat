@@ -30,9 +30,9 @@ Commands:
 
 Environment:
   OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY  Provider keys.
-  MDM_MODEL=gpt-5.5                                  Target model.
+  MDM_MODEL=gpt-6-astra                                  Target model.
   MDM_PROVIDER=openai                                Target provider.
-  MDM_HIVE_MODEL=gpt-5.5                             Hive model.
+  MDM_HIVE_MODEL=gpt-6-astra                             Hive model.
   MDM_HIVE_PROVIDER=openai                           Hive provider.
   MDM_TARGET_A_MODEL / MDM_TARGET_A_PROVIDER         target-a override.
   MDM_TARGET_B_MODEL / MDM_TARGET_B_PROVIDER         target-b override.

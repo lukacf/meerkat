@@ -76,6 +76,12 @@ impl AgentToolDispatcher for WeatherDispatcher {
     }
 }
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a small
+/// limit a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     meerkat_runtime::host_stack::run_host("hooks-guardrails", run)?
 }
@@ -191,7 +197,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "You are a helpful weather assistant. Use the get_weather tool \
              to answer questions about the weather.",
         )
-        .max_tokens_per_turn(1024)
+        .max_tokens_per_turn(MAX_TOKENS_PER_TURN)
         .with_hook_engine(hook_engine)
         .build(Arc::new(llm), Arc::new(WeatherDispatcher), store)
         .await?;

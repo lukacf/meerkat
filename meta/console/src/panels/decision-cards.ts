@@ -253,10 +253,20 @@ export function mergeDecisionCards(
   return [...byId.values()].sort(byDeadline);
 }
 
-/** The rendering of one `meta/decisions/rendering` answer. */
+/** The rendering of one `meta/decisions/rendering` answer, as the decision
+ *  holds it. For an open question set the gateway ends the text with a
+ *  closing note for a page that cannot answer the set, and names what it
+ *  added in `rendering_suffix`. This console says in its own words where a
+ *  set is answered (`questionSetStandInHint`), so it cuts exactly that
+ *  added text; an answer that names none is taken whole. */
 export function renderingOf(answer: unknown): string | undefined {
-  const rendering = recordOf(answer)?.rendering;
-  return typeof rendering === "string" ? rendering : undefined;
+  const record = recordOf(answer);
+  const rendering = record?.rendering;
+  if (typeof rendering !== "string") return undefined;
+  const added = record?.rendering_suffix;
+  return typeof added === "string" && added !== "" && rendering.endsWith(added)
+    ? rendering.slice(0, rendering.length - added.length)
+    : rendering;
 }
 
 /** A phase in words: "Open", "Execution refused". */

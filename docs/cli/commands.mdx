@@ -475,6 +475,16 @@ one grant per target: an installed MCP server and its raw operations
 catalog (`--catalog`), or the agent's controller (`--controller` with one or
 more `--route <key>`; a controller grant has no expiry). A new grant
 supersedes only its target's previous one.
+
+In a governed realm `rkat` attaches a configured MCP server only when it is
+the realm's own installation (`rkat mcp add --scope realm`) with an operation
+ceiling (`--allow-operation`). A server from `mcp.toml`, one the realm
+inherits from a parent, and an installation without a ceiling are refused
+before the server is started (`attachment authority is unavailable`), and
+their tools are not offered. Installing the server with its ceiling and then
+granting it (`realm grant --mcp`) works, also when the realm is already
+governed.
+
 `realm revoke-grant` revokes the grant selected for one target and exits
 successfully only when it is revoked. Use the global `--as-agent` to run as a
 granted agent. `realm govern`, `grant` and `revoke-grant` take the realm's

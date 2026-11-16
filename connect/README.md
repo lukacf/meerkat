@@ -6,29 +6,25 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.14 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
-macOS archives (macOS 13.5 or later) are not built yet and follow later.
-Install [Meerkat Core 0.9.14](https://github.com/lukacf/meerkat/releases/tag/v0.9.14),
-the Core release Connect 0.9.14 was built and released with,
+Connect 0.9.15 is released for Linux x86_64 with glibc 2.39: its two programs
+need glibc 2.39 symbols (read from the released binaries, not run on other
+hosts), and it was built and checked on a glibc 2.39 host. No macOS arm64
+products are part of this release.
+Install [Meerkat Core 0.9.15](https://github.com/lukacf/meerkat/releases/tag/v0.9.15),
+the Core release Connect 0.9.15 was built and released with,
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
-Until Connect 0.9.15 is published, the Connect release to
-use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
-with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
-take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
-requires `meerkat-meta==0.9.14`. That pairing was not run as a whole, in
-either direction: it rests on the version requirements Connect 0.9.14
-published. Connect 0.9.14's archives are built with Core 0.9.14 and Meta
-0.9.14; see the [upgrade guide](../docs/guides/upgrading.mdx) for the limits
-of that pairing.
+Connect 0.9.15 was built and released with Core 0.9.15 and Meta 0.9.15, all
+three from one source commit. The `native-host` extra of its `meerkat-toolkit`
+wheel requires `meerkat-meta==0.9.15`.
 
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=linux-x86_64 # 0.9.14 has no macos-arm64 archive yet.
-archive="meerkat-connect-0.9.14-$platform.tar.gz"
-release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14
+platform=linux-x86_64 # 0.9.15 has no macos-arm64 archive.
+archive="meerkat-connect-0.9.15-$platform.tar.gz"
+release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
 sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
@@ -101,7 +97,7 @@ qualify the published release or a deployed provider flow.
 - REST and an outer MCP Connect entry point are deferred. MCP servers used as
   integrations are included.
 
-See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.14) for platform assets and compatibility,
+See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15) for platform assets and compatibility,
 [BUILDING.md](BUILDING.md) to build from source, and
 [source provenance](SOURCE-PROVENANCE.md) for upstream attribution and catalog
 identity. The [documentation source](docs/site) contains the full contracts.

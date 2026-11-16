@@ -5,7 +5,7 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "cad9cfcdf564a5af2b4b3fe3737d144403e38837",
+  "source_docs_tree": "9ab67aa5b0fdd5c6ccb0f068ca946533fa66b965",
   "connect_source_commit": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
   "connect_source_tree": "245cf826ee78d6f60c098dc9d8856b100448fa23",
   "connect_source_state": "monorepo_sync",
@@ -37,8 +37,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "7c2e305d7401ff5aee2aeaa57f1d8dac311ea513db5ad96cd7ceec40456f4c60",
-      "rendered_sha256": "7dab049d1c6ef5591546aa2ab0e1d862e96278870c6c32de186903d3fdb6fb22"
+      "source_sha256": "ca950f3fce2e79de38bf49bd726ef9cfb7b0ca8bab1dc7a6b149df08de06c5c6",
+      "rendered_sha256": "b93dc418e8c46a96bb9d042c2803fe32e69eb0ca307c7e22f673e9e615d9bf6a"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -187,8 +187,8 @@
     },
     {
       "path": "quickstart.mdx",
-      "source_sha256": "fb31a8c41807f91608944c4ac083e3b227b785617b8f1a5270e7bbbd64f713f7",
-      "rendered_sha256": "dc5c982a442c5faaca65b6d8146cf905a94b82c4a1dd5c7489610044f5fb3542"
+      "source_sha256": "64a3df64978e7b1fe3fb7c719058ef51dff089939e8ad074332dc5b59f54cb55",
+      "rendered_sha256": "0751670c0c09a08885ec809acc86ae415d4f56317f9e31036d8d141207b2f428"
     },
     {
       "path": "reference/access-control.mdx",
@@ -252,13 +252,13 @@
     },
     {
       "path": "sdks/python.mdx",
-      "source_sha256": "904349846a443ac726b9490f9a2cfbd750d548a2f29f855a46169fafbddc8369",
-      "rendered_sha256": "9875b7c5d1292cf1e8188d35e429feb7bd2bb288f350710a3b984d784c0ec52d"
+      "source_sha256": "0c8bc372e7ed7619eb174ebd33387f2e5df11d82792ad2aec2d230abe24ee132",
+      "rendered_sha256": "b274f764133ee36bb531a9bb81a014bdb18927646eacd6627e57048eca84d428"
     },
     {
       "path": "sdks/rust.mdx",
-      "source_sha256": "1db65990216025c5581a1d67c02ddfc47416f2b6786c6a16b6044db27fc204f8",
-      "rendered_sha256": "4bef4da02bbe1b8cd642716f427659d23d7696d58c2bc615011481664d9c63cb"
+      "source_sha256": "106043afcaf74195e607345787c8f42009588ce4f68913d8e279e24e2097c4e8",
+      "rendered_sha256": "2d8c83a4c697577d4b3d8e4c164c45d64b5bc13ccc1ee0f8d7e72c1450c8b78e"
     },
     {
       "path": "sdks/service-profiles.mdx",
@@ -272,8 +272,8 @@
     },
     {
       "path": "sdks/typescript.mdx",
-      "source_sha256": "842e6169834291c1786fa14a4f7def14fbbc1b996a9b271b00846415492b8d5a",
-      "rendered_sha256": "b292bfcbe1abdf1637c5f7adfad024f87c94d27fdee0f714ec3f32a2f0082c44"
+      "source_sha256": "2fffc180b78f1ffbd41c9912ecdae2615b4a407f109d0ff9a357a8d2366cdcf4",
+      "rendered_sha256": "c50cc087e2413ff3d576a173744ca5f4eff3eefed4c344ba6b97691811f1879e"
     },
     {
       "path": "sdks/ui.mdx",

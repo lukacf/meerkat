@@ -28411,6 +28411,54 @@ mod prompt_tests {
         );
     }
 
+    /// A default root whose existence cannot be established (here: the
+    /// directory above it cannot be searched) is not taken for absent. The
+    /// root is passed on, and the build is refused with the fault.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn default_convention_root_that_cannot_be_probed_refuses_the_build() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let closed = temp.path().join("closed");
+        let default_root = closed.join("project");
+        std::fs::create_dir_all(&default_root).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A runner that reads through the closed directory (the superuser)
+        // cannot make the probe fail: the row has nothing to state there.
+        let probe_fails = std::fs::metadata(&default_root).is_err();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(&default_root)
+            .builtins(false);
+        let passed_on = factory
+            .project_instructions_root()
+            .await
+            .map(std::path::Path::to_path_buf);
+        let result = if probe_fails {
+            Some(
+                factory
+                    .build_agent(external_only_build_config(), &Config::default())
+                    .await,
+            )
+        } else {
+            None
+        };
+        // Reopen the directory before any assertion, so it can be removed.
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(result) = result else {
+            return;
+        };
+
+        assert_eq!(passed_on.as_deref(), Some(default_root.as_path()));
+        let refusal = build_config_refusal(result);
+        assert!(
+            refusal.contains("project AGENTS.md")
+                && refusal.contains("is not readable")
+                && refusal.contains(&default_root.display().to_string()),
+            "{refusal}"
+        );
+    }
+
     /// Item A3: the mob family reaches a `tools.mob` member through two
     /// dispatchers, the agent-facing mob surface (19 tools, ~15.8 KB of
     /// descriptions; `delegate` alone is 2,464 bytes) and the 12-tool operator

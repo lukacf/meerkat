@@ -104,6 +104,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   has the tool there, and the deny check is the same), so there a profile
   had no reason to deny the name.
 
+- A member's `ask_user` call is held whatever the length of the tool-call
+  id its model provider issues. In 0.9.15 a call whose agent name and
+  tool-call id were together longer than 986 bytes, or whose tool-call id
+  held a control character, was refused with an invalid-arguments error
+  (`invalid subject key`) although its questions were valid: no set was
+  held and no person was asked. Such a call now answers `asked`, its set
+  is listed by `meta/gating/questions` and on the Console, a person answers
+  it through `meta/gating/decide`, and the member reads the result on its
+  next turn, as for any other call. The question sets a 0.9.15 runtime
+  held keep their pending ids. In `meta/decisions/list` and
+  `meta/decisions/get` the `subject_key` of such a set is a 122-byte key
+  that names the run and a digest instead of the agent and the call id; see
+  Fixed in the Meerkat changelog for its form. Affected: 0.9.15 (members
+  get the tool since 0.9.15).
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

@@ -54,6 +54,43 @@ them.
   signature changes. Meerkat Meta declares its stock `ask_user` this way
   (see the Meta changelog).
 
+### Fixed
+
+- `meerkat-runtime`: an `ask_user` call is held whatever the length of its
+  tool-call id. In 0.9.15 a call whose asking agent's key and tool-call id
+  were together longer than 986 bytes (a model provider that issues very
+  long tool-call ids, or a long agent key), or held a control character,
+  was refused before its questions were held, although its arguments were
+  valid: the agent read an invalid-arguments error (`invalid subject key`),
+  nothing was held and no person was asked. The cause: the decision that
+  holds a question set is keyed by `{asker}/{run id}/{call id}`, and a
+  decision's subject key is at most 1,024 bytes without control characters.
+  Such a call is now held under a bounded key,
+  `ask_user.call:{run id}:sha256:{digest}` (122 bytes; the digest is the
+  SHA-256 of the asker, the run id and the call id, each preceded by its
+  length in bytes as an 8-byte big-endian integer), and is listed, answered,
+  replayed and told its result as any other. What still bounds the asking
+  agent's key: the held request carries the key and the questions and is at
+  most 256 KiB, and a call whose request is larger is still refused. A
+  control character in the asking agent's key is held by the hold of
+  `meerkat-runtime` only: a host that names the asking agent as a principal
+  (Meta does) still refuses such a key before the hold, as in 0.9.15,
+  because a principal id takes no control character; on such a host, of the
+  control characters, only one in the tool-call id is newly held. Every call
+  0.9.15 held keeps its key and its decision id byte for byte, so the
+  question sets of a 0.9.15 store are found, listed, answered and settled as
+  before, and nothing is migrated. What a reader of decisions sees: for such
+  a call `subject_key` (`decision/list`, `decision/get`) reads the bounded
+  form, which names the run and not the asker or the call id; the asker
+  stays in the held request. The limit of a subject key is unchanged.
+  Affected: 0.9.15 (the tool is new in 0.9.15). Measured by tests of this
+  change, with a 2,000-byte tool-call id, a 2,000-byte agent key, and a
+  request of exactly 256 KiB and of one byte more. Not measured, read from
+  0.9.15's reader code, which this change does not touch (no 0.9.15 host
+  was run on such a store): after a downgrade to 0.9.15, a set held for such
+  a call is still listed and answerable there, and a replay of that call is
+  refused there, as every such call is in 0.9.15.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

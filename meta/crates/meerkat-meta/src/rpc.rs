@@ -6865,6 +6865,13 @@ async fn handle_unified_rpc_json_inner(
                             let live = live.clone();
                             let method = method.to_string();
                             let operation_response_id = response_id.clone();
+                            // The tracked operation runs on a task of its
+                            // own: carry the request's delivery slot to it,
+                            // so the custody of the handler's response
+                            // reaches the gateway's writer.
+                            #[cfg(feature = "openai-live")]
+                            let delivery =
+                                crate::live_wiring::CarriedLiveRpcResponseDelivery::current();
                             match crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
                             vec![target],
                             move || async move {
@@ -6875,15 +6882,17 @@ async fn handle_unified_rpc_json_inner(
                                     &params,
                                 )
                                 .await?;
-                                Ok(live.dispatch(
+                                let dispatch = live.dispatch(
                                     crate::live_wiring::LiveSurfaceAuthority::host_trusted_stdio(),
                                     session,
                                     Some(canonical_target_identity),
                                     method,
                                     params,
                                     operation_response_id,
-                                )
-                                .await)
+                                );
+                                #[cfg(feature = "openai-live")]
+                                let dispatch = delivery.scope(dispatch);
+                                Ok(dispatch.await)
                             },
                         )
                         .await

@@ -27,6 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `candidate_launch`), and a build without `openai-live`, which has no
   such live method, still treats the name as a module call.
 
+- A live open with `execution_identity` and a WebRTC answer that name a
+  member by `identity` no longer fail over the stdio gateway of a build
+  with `openai-live` when the gateway's identity runtime holds that member
+  (an identity-first member). The gateway runs a live request for such a
+  member under the member's identity authority, on a task of its own, and
+  the custody of the request's response, which the gateway's writer
+  settles once it has written the answer, did not follow the request to
+  that task. A `meta/live/open` with `execution_identity` and a
+  `live/webrtc/answer` for such a member therefore answered `-32000`
+  "experimental live response requires a delivery-aware outer RPC writer":
+  the open was made and then undone, and the provider's answer was made
+  and then rejected. The SDK calls that send these always name the member:
+  `live_open_typed` with an execution identity, `live_connect` and
+  `live_webrtc_answer_pending` in Python, `liveOpenTyped`, `liveConnect`
+  and `liveWebrtcAnswerPending` in TypeScript. Every Meta release had this,
+  from 0.9.0 on. A request that names no member, a live open without
+  `execution_identity`, every other live method and the Console's own door
+  were not affected.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

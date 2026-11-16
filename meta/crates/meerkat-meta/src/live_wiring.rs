@@ -1026,6 +1026,37 @@ where
     (output, delivery)
 }
 
+/// The response delivery slot of the request the current task serves,
+/// carried into work the request runs on another task.
+/// [`capture_live_rpc_response_delivery`] keeps the slot in a task-local,
+/// which a spawned task does not inherit, so a live handler run on a spawned
+/// task under [`Self::scope`] hands its response's custody to the same outer
+/// writer as one run in the request's own task.
+#[cfg(feature = "openai-live")]
+pub(crate) struct CarriedLiveRpcResponseDelivery(
+    Option<Arc<StdMutex<Option<LiveRpcResponseDeliveryCustody>>>>,
+);
+
+#[cfg(feature = "openai-live")]
+impl CarriedLiveRpcResponseDelivery {
+    /// The current request's slot; none outside a delivery-aware dispatch.
+    pub(crate) fn current() -> Self {
+        Self(LIVE_RPC_RESPONSE_DELIVERY.try_with(Arc::clone).ok())
+    }
+
+    /// Run `future` with the carried slot as its request's slot. With none
+    /// carried, `future` runs as it is.
+    pub(crate) async fn scope<F>(self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        match self.0 {
+            Some(slot) => LIVE_RPC_RESPONSE_DELIVERY.scope(slot, future).await,
+            None => future.await,
+        }
+    }
+}
+
 #[cfg(feature = "openai-live")]
 fn retain_live_webrtc_answer_delivery(
     custody: meerkat::surface::LiveWebrtcAnswerDeliveryCustody,

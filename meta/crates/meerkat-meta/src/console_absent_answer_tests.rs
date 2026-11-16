@@ -274,10 +274,10 @@ fn viewer(
 ) -> Result<ConsoleViewerContext, Box<dyn std::error::Error + Send + Sync>> {
     let caller = authenticate(state, claims).ok_or("the caller authenticates")?;
     Ok(ConsoleViewerContext {
-        principal: caller.principal.clone(),
+        principal: caller.principal,
         service_identity: caller.service_identity,
-        access_view: caller.access_view.clone(),
-        human: caller.human.clone(),
+        access_view: caller.access_view,
+        human: caller.human,
     })
 }
 
@@ -741,35 +741,45 @@ fn rules_that_name(names: &[&str]) -> AccessController {
     .expect("access controller")
 }
 
-/// Under rules that allow a send to exactly the member's name and to a name
-/// no member holds, the REST send, its recovery and the host's precheck
-/// answer the member hidden from the caller as that other name: the rules
-/// are asked about the name the request carries.
+/// A stated behaviour of the send gate, pinned as it is: the gate asks the
+/// access rules about the name a hidden member is answered under, not about
+/// the member's own name. Under a rule that allows exactly the member's
+/// name, the REST send, its recovery and the host's precheck therefore
+/// refuse a send to a member hidden from the caller by the rules, where the
+/// same send to another name the rule names is answered as a send to a name
+/// no member holds.
 #[tokio::test]
-async fn the_rest_send_routes_ask_the_rules_about_the_name_a_request_carries() -> TestResult {
+async fn a_rule_naming_a_hidden_member_is_asked_about_another_name_on_the_send_gate() -> TestResult
+{
     let console = PrivateSideChat::new("absent-answer-rules-by-name").await?;
     let mut state = console.state.clone();
     state.access = Some(rules_that_name(&[HIDDEN, ABSENT]));
     let hidden = rest_answers(&console, &state, HIDDEN).await?;
     let absent = rest_answers(&console, &state, ABSENT).await?;
-    let mut differences = Vec::new();
-    for (((door, hidden), (_, absent)), pinned) in hidden
+    let refused = format!(
+        "{} {}",
+        StatusCode::FORBIDDEN,
+        json!({
+            "error": "access_denied",
+            "message": "you are not allowed to send to this agent",
+        })
+    );
+    let refusals = [refused.clone(), refused, "Err(AccessDenied)".to_string()];
+    for ((((door, hidden), (_, absent)), refusal), pinned) in hidden
         .into_iter()
         .zip(absent)
+        .zip(refusals)
         .zip(rest_answers_for_an_absent_name())
     {
-        if absent != pinned {
-            differences.push(format!(
-                "{door}: a name no member holds is answered {absent}, pinned {pinned}"
-            ));
-        }
-        if masked(&hidden, HIDDEN) != masked(&absent, ABSENT) {
-            differences.push(format!(
-                "{door}: the hidden member is answered {hidden}, a name no member holds {absent}"
-            ));
-        }
+        assert_eq!(
+            hidden, refusal,
+            "{door}: the hidden member, which the rule names"
+        );
+        assert_eq!(
+            absent, pinned,
+            "{door}: a name no member holds, which the rule names"
+        );
     }
-    assert!(differences.is_empty(), "{differences:#?}");
     Ok(())
 }
 
@@ -815,6 +825,94 @@ async fn a_rule_naming_a_hidden_member_is_asked_about_another_name_on_the_two_rp
             request.method
         );
     }
+    Ok(())
+}
+
+/// Access rules under which every caller may do everything these doors ask
+/// for to every agent, and a deny by the role `worker` applies to every
+/// caller.
+fn rules_with_a_deny_by_role() -> AccessController {
+    let actions = vec!["agent.*".to_string(), "schedule.manage".to_string()];
+    AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            AccessRule {
+                id: "drives-every-agent".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: actions.clone(),
+                agents: vec!["*".to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "keeps-out-of-workers".to_string(),
+                effect: crate::access::AccessEffect::Deny,
+                subjects: vec!["*".to_string()],
+                actions,
+                roles: vec!["worker".to_string()],
+                ..AccessRule::default()
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("access controller")
+}
+
+/// A caller the rules allow every agent, and to whom a deny by role
+/// applies, is answered alike for a member hidden from them and for a name
+/// no member holds, on every door of this file: a fact and a console
+/// schedule, with the member named once and twice, the REST send, its
+/// recovery and the host's precheck. What the Console answers such a caller
+/// for a name its records do not know is not pinned here; the two answers
+/// are compared with each other.
+#[tokio::test]
+async fn a_caller_under_a_deny_by_role_is_answered_alike_for_a_hidden_member_and_an_absent_one()
+-> TestResult {
+    let console = PrivateSideChat::new("absent-answer-deny-by-role").await?;
+    let mut state = console.state.clone();
+    state.access = Some(rules_with_a_deny_by_role());
+    let app = console_json_router_with_state(state.clone());
+    let bob = bearer(bob_claims());
+    let mut differences = Vec::new();
+    for request in fact_and_schedule_requests(ALLOWED) {
+        if request.short.is_some() {
+            continue;
+        }
+        for second in [
+            None,
+            Some("member_id"),
+            Some("agent_id"),
+            Some("agent_identity"),
+        ] {
+            let named = |name: &str| match second {
+                Some(spelling) => with((request.whole)(name), spelling, json!(name)),
+                None => (request.whole)(name),
+            };
+            let hidden = console_rpc_as(&app, Some(&bob), request.method, named(HIDDEN)).await;
+            let absent = console_rpc_as(&app, Some(&bob), request.method, named(ABSENT)).await;
+            let (hidden, absent) = (&hidden["error"], &absent["error"]);
+            if masked(&hidden.to_string(), HIDDEN) != masked(&absent.to_string(), ABSENT) {
+                differences.push(format!(
+                    "{}, the name {}: the hidden member is answered {hidden}, a name no member \
+                     holds {absent}",
+                    request.method,
+                    second.map_or("once".to_string(), |spelling| format!(
+                        "also under {spelling}"
+                    )),
+                ));
+            }
+        }
+    }
+    let hidden = rest_answers(&console, &state, HIDDEN).await?;
+    let absent = rest_answers(&console, &state, ABSENT).await?;
+    for ((door, hidden), (_, absent)) in hidden.into_iter().zip(absent) {
+        if masked(&hidden, HIDDEN) != masked(&absent, ABSENT) {
+            differences.push(format!(
+                "{door}: the hidden member is answered {hidden}, a name no member holds {absent}"
+            ));
+        }
+    }
+    assert!(differences.is_empty(), "{differences:#?}");
     Ok(())
 }
 

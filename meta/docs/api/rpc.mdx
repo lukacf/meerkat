@@ -3382,8 +3382,8 @@ which no rule names a memory action grants, and denies, `agent.memory.read`
 wherever a rule grants, or denies, `agent.view`), and
 `memory.quarantine.review` as well for a record that was ever quarantined;
 otherwise to any Console caller. In both cases the memory of an agent
-private to a person is shown to no other person. The bundled store has no
-call that erases one record; see
+private to a person is shown to no other person except an access admin named
+in `admins`. The bundled store has no call that erases one record; see
 [Agent memory injection](/concepts/memory#agent-memory-injection) for what
 stays and how a realm's memory is removed.
 

@@ -905,24 +905,31 @@ entry names a run.
 - **Meta, 0.9.11.** Not read against every item. Three differences are
   known.
   - A 0.9.11 gateway refuses to start (`-32602`) on a launch that carries a
-    0.9.15 identity policy whose rules name change classes it does not know
-    (`archive`, `adopt`); the stores are as they were after the refusal.
-    0.9.11 knows the same change classes as 0.9.14, so the step is the one
-    the item "Identity policy" below gives for 0.9.14: before going back,
-    remove the `archive` and `adopt` keys and values from
-    `runtime_options.identity_creation`; add them again after the return.
+    0.9.15 identity policy in which a rule's `change` names `archive` or
+    `adopt` (each by a run); the stores are as they were after the refusal.
+    The launch is accepted once those two values are taken out of the rules'
+    `change`, or with no identity policy at all (both by a run). Keys for
+    them, under `approval.timeouts_ms` for example, were not run on 0.9.11;
+    0.9.11 reads the policy with the same code as 0.9.14 (read from the
+    source), so take them out as well, as the item "Identity policy" below
+    says for 0.9.14. Add all of them again after the return.
   - A 0.9.11 gateway does not serve agents created at run time, and it
     leaves them as they are. Its roster pass retires none of them, a send to
     one answers `-32001` (unknown identity), and nothing of theirs changes
-    in the stores. After the return to 0.9.15 they are listed with the same
+    in the stores: 0.9.11 writes only what a restart writes (the mob's stop
+    and start events, a Console start frame, cursors and the schedule
+    lease). After the return to 0.9.15 they are listed with the same
     records, sessions and peers, and a send to one that had a conversation
-    appends to that conversation. This is by one run of the stdio
+    appends to that conversation. This is by two runs of the stdio
     `rpc_gateway`, built from the two releases' tags and not the published
-    binaries, with one mob and two created agents that were dormant, and the
-    0.9.11 gateway up for seconds (one roster pass). Not run: `meta_gateway`;
-    archived, removed, adopted or held agents; schedules; memory; nested
-    mobs; a peer message to a created agent while 0.9.11 runs. The run
-    says nothing of a rollback to 0.9.12 or 0.9.13.
+    binaries, with one mob and two created agents: in the first both were
+    dormant, in the second one of them had a conversation (a scripted model
+    in place of a provider); the 0.9.11 gateway was up for seconds (one
+    roster pass). Not run: `meta_gateway`; archived, removed, adopted or
+    held agents; an agent changed after its creation; schedules; memory;
+    nested mobs; a peer message to a created agent, or a turn of a
+    configured agent, while 0.9.11 runs. These runs say nothing of a
+    rollback to 0.9.12 or 0.9.13.
   - A `meta_gateway` launched with `persistent_sessions: true` keeps its
     metadata and its console log in memory (see "Rolling back to 0.9.11"
     below).
@@ -1296,9 +1303,10 @@ needs no change.
 `archive` or `adopt` under `change`, is refused by a 0.9.14 gateway at init,
 enabled or not (confirmed by a run for `archive`: in a rule's `change` of an
 enabled policy and under `approval.timeouts_ms` of a disabled one; the other
-combinations and `adopt` were read from the source). In a run, a 0.9.11
-gateway refused a launch whose policy rules named them as well (`-32602`;
-see the entry on Meta 0.9.11 at the head of this subsection). **Do:** before
+combinations and `adopt` were read from the source). In runs, a 0.9.11
+gateway refused a launch in which a rule's `change` named either of them
+(`-32602`; see the entry on Meta 0.9.11 at the head of this subsection; keys
+under `approval.timeouts_ms` were not run there). **Do:** before
 a rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
 

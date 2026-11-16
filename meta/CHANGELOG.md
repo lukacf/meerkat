@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the method to its voice controller and never to this dispatch. Nothing
   else changes: a candidate launch still refuses the method (`-32047`
   `candidate_launch`), and a build without `openai-live`, which has no
-  such live method, still treats the name as a module call.
+  such live method, still treats the name as a module call. On a build
+  with `openai-live`, a loaded module named `live` no longer receives this
+  one method name.
 
 - A live open with `execution_identity` and a WebRTC answer that name a
   member by `identity` no longer fail over the stdio gateway of a build

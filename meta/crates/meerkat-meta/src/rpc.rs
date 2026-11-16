@@ -10402,14 +10402,20 @@ shell = true
     /// The loaded-module arm of the stdio dispatch still takes every other
     /// method with a slash outside `meta/`, a name under `live/` that is not
     /// a live method included: with no such module loaded each answers
-    /// `-32601` naming the module.
+    /// `-32601` naming the module. On a build without `openai-live` that
+    /// includes `live/webrtc/answer`, which is no live method there.
     #[tokio::test]
     async fn stdio_module_calls_still_reach_the_loaded_module_arm()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let temp_dir = tempfile::tempdir()?;
         let runtime = reservation_test_runtime(&temp_dir, "rpc-module-arm").await?;
+        let mut calls = vec![("calendar/list", "calendar"), ("live/status", "live")];
+        if cfg!(not(feature = "openai-live")) {
+            calls.push(("live/webrtc/answer", "live"));
+        }
         let mut answers = Vec::new();
-        for method in ["calendar/list", "live/status"] {
+        let mut expected = Vec::new();
+        for (method, module) in calls {
             let response: Value = serde_json::from_str(
                 &handle_unified_rpc_json(
                     &runtime,
@@ -10420,16 +10426,14 @@ shell = true
                 )
                 .await,
             )?;
-            answers.push(response["error"].clone());
+            answers.push((method, response["error"].clone()));
+            expected.push((
+                method,
+                json!({"code": -32601, "message": format!("Module '{module}' not loaded")}),
+            ));
         }
         let _ = runtime.mob_handle().stop().await;
-        assert_eq!(
-            answers,
-            [
-                json!({"code": -32601, "message": "Module 'calendar' not loaded"}),
-                json!({"code": -32601, "message": "Module 'live' not loaded"}),
-            ]
-        );
+        assert_eq!(answers, expected);
         Ok(())
     }
 

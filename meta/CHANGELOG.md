@@ -54,18 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   adopt, a plan of one of them); `agent.identity.remove` (remove, a plan of
   it); `agent.send` (run_flow). See Security.
 
-- Behaviour-only (not measured by the gate): An access file with an unknown
-  key is refused. A gateway whose access file holds a key that the access
+- Behaviour-only (not measured by the gate): the Console's access save methods
+  refuse an unknown key. `meta/access/set`, `meta/access/rules/upsert` and
+  `meta/access/groups/set` refuse a request that holds a key the access
   configuration does not define, in the configuration itself, in a group, in a
-  rule or in an approver, is not started: the gateway binary and the Rust
-  builder refuse the load, and the stdio gateway and the SDK hosts refuse the
-  runtime options. The refusal names the file, each table (a rule by its `id`,
-  or by its position when it has none) and every unknown key, in one message,
-  and changes nothing on disk. The Console's save methods refuse such a key
-  with `-32602`, name each table and key, and apply nothing. Through 0.9.15
-  the key was dropped and the rest applied; one exception: an unknown key in
-  an entry of an approver's `people` or `ingress_subjects` is refused since
-  0.9.11.
+  rule or in an approver, with `-32602`. The refusal names each table (a rule
+  by its `id`, or by its position when it has none) and every unknown key in
+  one message, and nothing is applied or saved. Through 0.9.15 the key was
+  dropped and the rest applied. An unknown key in an approver's `people` or
+  `ingress_subjects` entry has been refused since 0.9.11.
 
 - Behaviour-only (not measured by the gate): an agent's `mob_spawn_member`,
   `delegate` and `fork_off` refuse a call that supplies the label
@@ -91,50 +88,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on this release).
 
 - A key the access file does not define could weaken a rule without a word
-  (every release that has the access file, through 0.9.15). The loader of the
-  access file and the Console's save methods (`meta/access/set`,
+  (through 0.9.15; read by lines back to 0.9.9). The loader of the access file
+  and the Console's save methods (`meta/access/set`,
   `meta/access/rules/upsert`, `meta/access/groups/set`) dropped a key they did
   not know and applied the rest of its table. A deny rule whose `effect` was
-  misspelt was loaded as an allow rule. A rule whose only selector (`agents`,
-  `roles` or `match_labels`) was misspelt applied to every agent, and one
-  whose only `subjects` or `groups` key was misspelt applied to every caller.
-  A misspelt `enabled` left every rule unenforced; the `approvers` bindings
-  are read whatever `enabled` says. Neither the log nor the Console said so.
-  No caller without access administration could bring this about; it took a
-  slip in the operator's own file or in an administrator's own save request.
-  From this release the load and the save methods refuse such a key and name
-  it. See Breaking and the upgrade step.
+  misspelt was loaded as an allow rule; a rule whose only selector (`agents`,
+  `roles` or `match_labels`) was misspelt applied to every agent; a rule whose
+  only `subjects` or `groups` key was misspelt applied to every caller; a
+  misspelt `enabled` left every rule unenforced, while the `approvers`
+  bindings are read whatever `enabled` says. Neither the log nor the Console
+  said anything about the key. No caller without access administration could
+  bring this about; it took a slip in the operator's own file or in an
+  administrator's own save request. From this release the save methods refuse
+  such a key and name it. The loader of the file still drops it: see Known
+  limitations for the check.
 
 ### Upgrade
-
-- Before you upgrade a gateway that has an access file, read the configuration
-  as the running gateway loaded it. As an access administrator call
-  `meta/access/get` (`POST <http_base_url>/console/rpc` with the body
-  `{"jsonrpc": "2.0", "id": 1, "method": "meta/access/get", "params": {}}`);
-  `result.config` is the configuration in force. Read it rule by rule. Look at
-  whether `enabled` is `true`; at every rule meant as a deny, whose `effect`
-  must read `deny`; at every rule with no `agents`, `roles` and
-  `match_labels`, which applies to every agent; and at every rule with no
-  `subjects` and `groups`, which applies to every caller. A rule that does not
-  say what you meant may have lost a key at a load or a save. Do this even if
-  the file looks right: a save from the Console writes the file from the
-  configuration in force, so the misspelt key is gone from the file while its
-  rule stays as it was loaded, and neither release reports that.
-
-  Then compare the file with the answer. A key that the file holds with a
-  value and the answer lacks was dropped by the running gateway, and the new
-  release refuses to start on it. A known key written with an empty list or
-  table can also be absent from the answer; the new release starts on those.
-  The answer's `actions` can hold more than the file's: `schedule.manage` is
-  added where a rule covers `agent.send`, and `agent.memory.read` where one
-  covers `agent.view`. If you upgrade without the check and the gateway
-  refuses to start, its message lists every such key.
-
-  Correcting a key or a rule changes what the rule does: it then applies as
-  written, so a deny rule that was loaded as an allow rule starts to deny.
-
-  0.9.15 starts on the same file as before and again drops such a key without
-  a word. The refusal stores nothing.
 
 - Reload open Console pages after an upgrade. A Console page that was opened
   before the gateway was upgraded keeps running the earlier front end until it
@@ -467,6 +436,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reading: 0.9.9 to 0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their
   tags in Meta's earlier repository for the same lines; the bundled store is
   the default from 0.7.20.)
+
+- The access file's loader still drops an unknown key. A gateway whose access
+  file holds a key the access configuration does not define starts, drops the
+  key and applies the rest of its table, and neither the log nor the Console
+  says anything about the key; the effects are those named under Security. The
+  one exception: an unknown key in an approver's `people` or
+  `ingress_subjects` entry has made the load refuse the file since 0.9.11.
+  Check a gateway that has an access file. Signed in to the Console as a
+  person listed in the file's `admins`, call `meta/access/get`:
+  `POST <http_base_url>/console/rpc` with the header
+  `Authorization: Bearer <your Console token>` and the body
+  `{"jsonrpc": "2.0", "id": 1, "method": "meta/access/get", "params": {}}`. On
+  a Console that requires sign-in, a call without a token answers HTTP 401;
+  for a signed-in person who is not an administrator it answers
+  `access_denied`. On a Console that does not require sign-in, a call without
+  a token answers `access_denied`, not 401; if the gateway can verify no token
+  at all, the call answers `access_denied` to everyone and this check cannot
+  be made through that Console: there, read the file itself against the keys
+  the access configuration defines. They are: in the configuration, `enabled`,
+  `admins`, `groups`, `rules`, `approvers`; in a group, `description`,
+  `members`; in a rule, `id`, `description`, `effect`, `subjects`, `groups`,
+  `actions`, `agents`, `roles`, `match_labels`; in an approver, `subjects`,
+  `groups`, `ingress_subjects`, `people`; in a `people` entry, `subjects`,
+  `ingress_subjects`; in an `ingress_subjects` entry, `ingress`, `subject`.
+  Read `result.config` rule by rule, even if the file looks right: whether
+  `enabled` is true; every rule meant as a deny; every rule with no `agents`,
+  `roles` or `match_labels`, which applies to every agent; every rule with no
+  `subjects` and no `groups`, which applies to every caller. A Console save
+  rewrites the file from the configuration in force, so a misspelt key can be
+  gone from the file while its rule stays as it was loaded. Then compare the
+  file with the answer: a key that the file holds with a value and the answer
+  lacks was dropped. A known key written with an empty list or table can also
+  be absent from the answer; that is no fault. The answer's `actions` can hold
+  more than the file's (`schedule.manage` where a rule covers `agent.send`,
+  `agent.memory.read` where it covers `agent.view`). Correcting a key changes
+  what its rule does: a deny rule that was loaded as an allow rule starts to
+  deny. A refusal to start on such a file is planned for a later release. (The
+  check's call and what it shows: by two runs on released 0.9.15 gateways; the
+  rest by reading.)
 
 ## [0.9.15] - 2026-11-15
 

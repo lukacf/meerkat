@@ -294,22 +294,20 @@ def on_windows() -> bool:
     return os.name == "nt"
 
 
-def windows_profile_dirs(home: Path) -> dict[str, str]:
-    """The application data folders of the profile at `home`, made if they
-    are missing, as the environment names them.
+def windows_profile_dirs(home: Path) -> None:
+    """Make the application data folders of the profile at `home`, if they
+    are missing.
 
     A Windows binary asks the operating system for its roaming application
     data folder (the default credential root is the platform's configuration
     directory). The answer follows the profile directory, not `APPDATA` or an
     XDG variable, and is refused when the folder does not exist: a server
     then stops with "backend unavailable: no XDG_CONFIG_HOME". A real profile
-    always has both folders, so the scratch one gets them too.
+    always has both folders, so the scratch one gets them too. Nothing is
+    added to the environment: no variable names them.
     """
-    roaming = home / "AppData" / "Roaming"
-    local = home / "AppData" / "Local"
-    roaming.mkdir(parents=True, exist_ok=True)
-    local.mkdir(parents=True, exist_ok=True)
-    return {"APPDATA": str(roaming), "LOCALAPPDATA": str(local)}
+    (home / "AppData" / "Roaming").mkdir(parents=True, exist_ok=True)
+    (home / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
 
 
 def clean_env(scratch: Path) -> dict[str, str]:
@@ -337,10 +335,10 @@ def clean_env(scratch: Path) -> dict[str, str]:
         XDG_STATE_HOME=str(home / ".local" / "state"),
     )
     # Every start of a binary asks for this environment, so on Windows the
-    # profile's folders exist before any binary starts. Nothing is made and
-    # nothing is added on another platform.
+    # profile's folders exist before any binary starts. The environment is
+    # the same on every platform, and nothing is made on another one.
     if on_windows():
-        env.update(windows_profile_dirs(home))
+        windows_profile_dirs(home)
     return env
 
 

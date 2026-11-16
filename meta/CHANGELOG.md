@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart, and the grant that opens `shell` opens it. A member whose
   `shell` is closed by name is therefore not offered the monitor by the
   upgrade.
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one: add `monitor_start` to such a guard, or deny the tool. See the
+  Upgrade notes in the Meerkat changelog.
 
 ## [0.9.15] - 2026-11-15
 

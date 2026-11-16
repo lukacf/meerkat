@@ -143,7 +143,14 @@ them.
   closes `shell` closes `monitor_start` with it, at every build and after a
   restart, and the grant that opens `shell` opens it. A session whose
   `shell` is closed by name is therefore not offered the monitor by the
-  upgrade, and its recorded monitors are not run again.
+  upgrade, and where a deny list or a grant gate closes it, its recorded
+  monitors are not run again. An allow list that names `monitor_start` and
+  not `shell` no longer admits the monitor.
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one, and nothing in Meerkat can teach it the name: add `monitor_start` to
+  such a guard, or deny the tool. A governed application tool policy admits
+  only the tools it names, so it refuses `monitor_start` until it names it.
 - A live session of an agent with shell is offered `monitor_start` from its
   next build. Its stored session and its stored system prompt are not
   rewritten; the tool list sent to the provider gains one definition.

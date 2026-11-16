@@ -7,7 +7,14 @@
 //! the binary itself. Synthetic state only: a scripted model, no provider, no
 //! network. The stand-in MCP server is a script this file writes under the
 //! fixture's temporary directory.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+// `disallowed_methods`: one row starts this crate's own binary, a test-only
+// process launch.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 
 mod support;
 
@@ -22,7 +29,8 @@ use meerkat_core::types::{ContentInput, HandlingMode, ToolCallView, ToolDef, Too
 use meerkat_core::{AgentToolDispatcher, ToolDispatchOutcome, ToolError};
 use meerkat_mob::{AgentIdentity, BoundedResultSpec, MobId, MobRuntimeMode, WorkOrigin, WorkSpec};
 use meerkat_mob_mcp::{
-    ChildToolBundleAvailability, ChildToolBundles, handle_public_tools_call, public_tools_list,
+    ChildToolBundleAvailability, ChildToolBundles, MobMcpState, handle_public_tools_call,
+    public_tools_list,
 };
 use serde_json::{Value, json};
 use support::{CouncilFixture, ScriptedTurn};
@@ -540,6 +548,107 @@ async fn profile_update_refuses_tools_rust_bundles_and_keeps_the_stored_profile(
 }
 
 // ---------------------------------------------------------------------------
+// tools.bundles, a null value, an unknown key
+// ---------------------------------------------------------------------------
+
+/// One public tool call on a state of its own.
+async fn public_on(
+    state: &Arc<MobMcpState>,
+    tool: &str,
+    args: Value,
+) -> Result<Value, (i32, String)> {
+    handle_public_tools_call(state, tool, &args)
+        .await
+        .map_err(|error| (error.code, error.message))
+}
+
+/// Create is refused naming `named` and stores nothing; then, over a stored
+/// public profile, update is refused the same way and changes nothing.
+async fn assert_both_tools_refuse(profile: Value, named: &str) {
+    let state = MobMcpState::new_in_memory();
+    let create = public_on(
+        &state,
+        CREATE,
+        json!({ "name": "worker-profile", "profile": profile.clone() }),
+    )
+    .await;
+    assert_refused_naming(&create, named);
+    assert!(
+        state
+            .realm_profile_get("worker-profile")
+            .await
+            .expect("read the realm profile store")
+            .is_none(),
+        "{named}: nothing is stored"
+    );
+
+    public_on(
+        &state,
+        CREATE,
+        json!({ "name": "worker-profile", "profile": public_profile() }),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("a public profile is stored: {error:?}"));
+    let update = public_on(
+        &state,
+        UPDATE,
+        json!({ "name": "worker-profile", "profile": profile, "expected_revision": 1 }),
+    )
+    .await;
+    assert_refused_naming(&update, named);
+    let stored = state
+        .realm_profile_get("worker-profile")
+        .await
+        .expect("read the realm profile store")
+        .expect("the profile stays stored");
+    assert_eq!(
+        stored.revision, 1,
+        "{named}: the stored profile is unchanged"
+    );
+    assert!(stored.profile.tools.bundles.is_empty(), "{named}");
+}
+
+/// A realm profile cannot opt into tool bundles through the profile tools:
+/// `tools.bundles` is a key of the public profile input, and the public
+/// profile decode refuses it on a profile that is not a child mob's own
+/// inline profile.
+#[tokio::test]
+async fn the_profile_tools_refuse_tools_bundles_and_store_nothing() {
+    assert_both_tools_refuse(
+        profile_with_tools_key("bundles", json!(["some-bundle"])),
+        "tools.bundles",
+    )
+    .await;
+}
+
+/// A key outside the public profile input is refused whatever its value, a
+/// null included, and so is a key no profile form has.
+#[tokio::test]
+async fn the_profile_tools_refuse_a_null_value_and_an_unknown_key() {
+    for (profile, named) in [
+        (
+            profile_with_key("auth_binding", Value::Null),
+            "auth_binding",
+        ),
+        (
+            profile_with_tools_key("mcp_servers", Value::Null),
+            "mcp_servers",
+        ),
+        (
+            profile_with_tools_key("rust_bundles", Value::Null),
+            "rust_bundles",
+        ),
+        (profile_with_key("no_such_key", json!(1)), "no_such_key"),
+        (
+            profile_with_tools_key("no_such_key", json!(true)),
+            "no_such_key",
+        ),
+    ] {
+        assert_both_tools_refuse(profile, named).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
 
@@ -672,8 +781,17 @@ fn the_profile_tools_advertise_the_public_profile_input() {
 /// The mob MCP binary answers the same way: its `tools/call` is this dispatch.
 #[test]
 fn the_mob_mcp_binary_refuses_a_profile_field_outside_the_public_input() {
-    let binary = std::env::var_os("CARGO_BIN_EXE_rkat-mob-mcp")
-        .expect("CARGO_BIN_EXE_rkat-mob-mcp is set by cargo and by the generated Bazel targets");
+    let advertised =
+        std::path::PathBuf::from(std::env::var_os("CARGO_BIN_EXE_rkat-mob-mcp").expect(
+            "CARGO_BIN_EXE_rkat-mob-mcp is set by cargo and by the generated Bazel targets",
+        ));
+    // Bazel wires a runfiles-relative path.
+    let binary = advertised.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "CARGO_BIN_EXE_rkat-mob-mcp names a missing binary {}: {error}",
+            advertised.display()
+        )
+    });
     let mut child = Command::new(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

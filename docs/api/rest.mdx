@@ -862,9 +862,9 @@ idle session: the event waits for the session's next turn. That holds only
 while the session is idle. While the session is running a turn or still
 finishing one, including the instant after that turn's call (or the create
 call) has answered, an event admitted then is taken as soon as that turn
-ends, as a new turn: the session makes a model call that no caller started.
-The answer is `202` and `{"queued": true}` in both cases (see Known
-limitations of 0.9.15 in the CHANGELOG).
+ends, as a new turn: the session makes at least one model call, in a run
+that no caller started. The answer is `202` and `{"queued": true}` in both
+cases (see Known limitations of 0.9.15 in the CHANGELOG).
 Correlated terminal peer responses use
 `POST /sessions/{id}/peer-response-terminal`, not this generic event route.
 </Note>

@@ -399,6 +399,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   order from a create refused before a hold. A create refused when it is
   carried out after approval answers no `field`.
 
+- Forgetting an agent memory record does not erase it.
+  `meta/agent_memory/forget`, and the SDKs' forget calls, withdraw a record
+  from its agent: it is no longer recalled, injected or listed in the agent's
+  index, and the call answers `deleted: true`. With the bundled SQLite store
+  nothing is erased: the record is marked tombstoned (the Memory panel shows
+  it as Discarded) and its title, description, body and tags stay in the
+  realm's database under `<persistent_state>/agent-memory`. The Console's
+  Memory panel still lists the record, and its record read still returns the
+  body: with access control enforced, to a caller with `agent.memory.read` and
+  `agent.view` on the identity, and `memory.quarantine.review` as well for a
+  record that was ever quarantined; on a Console without enforced access
+  control, to any caller. In either case the memory of an agent private to
+  another person is shown only to an access admin (one named in `admins`). An
+  access file in which no rule names a memory action grants, and denies,
+  `agent.memory.read` wherever a rule grants, or denies, `agent.view`. The
+  same holds for the text a record had before an update replaced it. 0.9.15's
+  memory concepts page says this; its RPC reference, configuration reference
+  and SDK pages still said that `forget` deletes a record, the configuration
+  reference also for privacy resets. They are being corrected. If you relied
+  on it, the text is still stored. The bundled store has no call that erases
+  one record. A call that blanks a forgotten record's text in the store's
+  records is accepted work and is in no release yet; it does not scrub the
+  database file, so the following step stays the only complete removal. Today
+  the text is removed only by stopping the gateway and removing the realm's
+  database file under `<persistent_state>/agent-memory` together with its
+  SQLite side files, since the `-wal` file can hold record text: for the realm
+  `default`, `default.sqlite3`, `default.sqlite3-shm` and
+  `default.sqlite3-wal` (`default.sqlite3.mfence`, a lock file that holds no
+  text, may be removed or left). The file is named `<realm>.sqlite3`, with the
+  realm's name percent-encoded (the realm `team a/b` has
+  `team%20a%2Fb.sqlite3`); remove only files whose names begin with that whole
+  file name (`default2.sqlite3` is another realm's). A state directory first
+  written by an older Rust embedding may hold the database under
+  `agent-memory-sqlite` instead. A store that once imported markdown memory
+  keeps those files, with their text, in the directory named as the realm
+  beside the database (for the realm `default`, `agent-memory/default/`), one
+  for each agent, named `<agent>.md.imported`, or `<agent>.md.import-failed`
+  for a file that could not be imported; remove that directory as well: a
+  plain `<agent>.md` file left there is imported into the new database when
+  the realm is next opened. This removes all agent memory of that realm, every
+  agent's, every mob's and every person's, and it does not remove text already
+  in a session's history, in an agent's context, or in copies and backups of
+  the store. What else keeps a record's text (earlier versions, proposals and
+  copies derived from it) is named under Agent memory injection on the memory
+  concepts page. Only the Memory panel's record read returns the body to a
+  caller: no agent, stdio gateway or SDK call does. Where the memory steward
+  is enabled (it is off unless configured), its dreams can read the body of a
+  forgotten or replaced record too. Where the memory Distiller is enabled (it
+  is off by default), the kind and title of an agent's records forgotten in
+  the last seven days, the 32 newest, are sent to the Distiller's model when
+  it distills that agent's conversation. An app that must erase single records
+  needs its own `AgentMemoryProvider`, which only a Rust embedding can
+  install. (By a run on the released Meta 0.9.15 gateway with the bundled
+  store: after remember and forget the record was in no recall and not in the
+  manifest, the panel listed it as tombstoned and its record read returned the
+  body; the same for a record replaced by an update; the text was in the
+  realm's files after shutdown. The removal step by a run on the released
+  0.9.15 gateway (three realms, an imported markdown file; the `import-failed`
+  file and the plain file's import by reading). The steward's and the
+  Distiller's clauses and the releases before 0.9.15 by reading: 0.9.9 to
+  0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their tags in Meta's
+  earlier repository for the same lines; the bundled store is the default from
+  0.7.20.)
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without
@@ -3586,6 +3650,70 @@ Security, Upgrade and Changed.
   order of the request. For a request that does not list its agents in name
   order it can name another agent of the request than the one whose name is
   taken. (Seen by one row; the rest by reading.)
+
+- Forgetting an agent memory record does not erase it (added 2026-11-16).
+  `meta/agent_memory/forget`, and the SDKs' forget calls, withdraw a record
+  from its agent: it is no longer recalled, injected or listed in the agent's
+  index, and the call answers `deleted: true`. With the bundled SQLite store
+  nothing is erased: the record is marked tombstoned (the Memory panel shows
+  it as Discarded) and its title, description, body and tags stay in the
+  realm's database under `<persistent_state>/agent-memory`. The Console's
+  Memory panel still lists the record, and its record read still returns the
+  body: with access control enforced, to a caller with `agent.memory.read` and
+  `agent.view` on the identity, and `memory.quarantine.review` as well for a
+  record that was ever quarantined; on a Console without enforced access
+  control, to any caller. In either case the memory of an agent private to
+  another person is shown only to an access admin (one named in `admins`). An
+  access file in which no rule names a memory action grants, and denies,
+  `agent.memory.read` wherever a rule grants, or denies, `agent.view`. The
+  same holds for the text a record had before an update replaced it. 0.9.15's
+  memory concepts page says this; its RPC reference, configuration reference
+  and SDK pages still said that `forget` deletes a record, the configuration
+  reference also for privacy resets. They are being corrected. If you relied
+  on it, the text is still stored. The bundled store has no call that erases
+  one record. A call that blanks a forgotten record's text in the store's
+  records is accepted work and is in no release yet; it does not scrub the
+  database file, so the following step stays the only complete removal. Today
+  the text is removed only by stopping the gateway and removing the realm's
+  database file under `<persistent_state>/agent-memory` together with its
+  SQLite side files, since the `-wal` file can hold record text: for the realm
+  `default`, `default.sqlite3`, `default.sqlite3-shm` and
+  `default.sqlite3-wal` (`default.sqlite3.mfence`, a lock file that holds no
+  text, may be removed or left). The file is named `<realm>.sqlite3`, with the
+  realm's name percent-encoded (the realm `team a/b` has
+  `team%20a%2Fb.sqlite3`); remove only files whose names begin with that whole
+  file name (`default2.sqlite3` is another realm's). A state directory first
+  written by an older Rust embedding may hold the database under
+  `agent-memory-sqlite` instead. A store that once imported markdown memory
+  keeps those files, with their text, in the directory named as the realm
+  beside the database (for the realm `default`, `agent-memory/default/`), one
+  for each agent, named `<agent>.md.imported`, or `<agent>.md.import-failed`
+  for a file that could not be imported; remove that directory as well: a
+  plain `<agent>.md` file left there is imported into the new database when
+  the realm is next opened. This removes all agent memory of that realm, every
+  agent's, every mob's and every person's, and it does not remove text already
+  in a session's history, in an agent's context, or in copies and backups of
+  the store. What else keeps a record's text (earlier versions, proposals and
+  copies derived from it) is named under Agent memory injection on the memory
+  concepts page. Only the Memory panel's record read returns the body to a
+  caller: no agent, stdio gateway or SDK call does. Where the memory steward
+  is enabled (it is off unless configured), its dreams can read the body of a
+  forgotten or replaced record too. Where the memory Distiller is enabled (it
+  is off by default), the kind and title of an agent's records forgotten in
+  the last seven days, the 32 newest, are sent to the Distiller's model when
+  it distills that agent's conversation. An app that must erase single records
+  needs its own `AgentMemoryProvider`, which only a Rust embedding can
+  install. (By a run on the released Meta 0.9.15 gateway with the bundled
+  store: after remember and forget the record was in no recall and not in the
+  manifest, the panel listed it as tombstoned and its record read returned the
+  body; the same for a record replaced by an update; the text was in the
+  realm's files after shutdown. The removal step by a run on the released
+  0.9.15 gateway (three realms, an imported markdown file; the `import-failed`
+  file and the plain file's import by reading). The steward's and the
+  Distiller's clauses and the releases before 0.9.15 by reading: 0.9.9 to
+  0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their tags in Meta's
+  earlier repository for the same lines; the bundled store is the default from
+  0.7.20.)
 
 ## [0.9.14] - 2026-11-11
 

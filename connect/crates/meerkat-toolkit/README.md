@@ -1,6 +1,6 @@
 # Application contracts
 
-This crate currently implements host-attested authority and typed service/frontend readiness checks. It is not yet the complete optional MobKit setup feature. The full target remains [revision 8](../../docs/spec/meerkat-toolkit-capability-acquisition.md).
+This crate currently implements host-attested authority and typed service/frontend readiness checks. It is not yet the complete optional Meta setup feature. The full target remains [revision 8](../../docs/spec/meerkat-toolkit-capability-acquisition.md).
 
 `validate_request` preserves the original request, supplied context and labeled caller observations without selecting packages or roles. Its model-facing JSON has no authority or routing fields. The authenticated host supplies the target, correlation, original-task continuation, environment and limits; current owner checks gate exact context references. Separate correlation and full-input digests permit a future atomic admission owner to distinguish exact retries from changed requests. Validation alone does not create an operation, spawn agents or persist a decision. Referenced content must be checked again before a helper receives it, and request serialization belongs in access-controlled storage rather than logs or a public UI.
 

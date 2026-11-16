@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [faebf66ed0ec](https://github.com/lukacf/meerkat/commit/faebf66ed0ecb9c43446e73f77939afacdca1e9b) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [fda523f1d63e](https://github.com/lukacf/meerkat/commit/fda523f1d63e529f3d0bdb6e0017e7291294dbfc) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -1206,16 +1206,28 @@ the persistent mob storage was created. Its `kind` names the refusal
 `"candidate_divergent"` from gateways launched as a candidate) and `fields`
 lists the diverged definition fields as dotted paths, so a host can show what
 changed without parsing the message. Revert the edit, or move the stored
-definition with `declare_spec_update(expected_revision=...)`:
+definition with `declare_spec_update(expected_revision=...)`.
+
+In 0.9.15, with a gateway the SDK starts itself, `builder.build()` does not
+raise the exception of a refusal of the start itself, when the gateway
+refuses after it has accepted the init request; this refusal is one such. It
+raises `GatewayStartupCleanupError`, a `TransportError`, and the refusal is
+its `startup_error` (also its `__cause__`): `except
+CompositionProvenanceError` and `except RpcError` do not match it (see Known
+limitations in the Meta changelog). Catch both and read the refusal, so the
+code keeps working when the refusal is raised unwrapped (as it is where a
+host's own `gateway_transport()` stops cleanly; read from the source, not
+run), and do not retry a start whose `startup_error` is a typed refusal:
 
 ```python
-from meerkat_meta import CompositionProvenanceError
+from meerkat_meta import CompositionProvenanceError, GatewayStartupCleanupError
 
 try:
     runtime = await builder.build()
-except CompositionProvenanceError as err:
-    if err.kind == "divergent":
-        print("mob.toml differs from the stored definition in", err.fields)
+except (CompositionProvenanceError, GatewayStartupCleanupError) as err:
+    refusal = err.startup_error if isinstance(err, GatewayStartupCleanupError) else err
+    if isinstance(refusal, CompositionProvenanceError) and refusal.kind == "divergent":
+        print("mob.toml differs from the stored definition in", refusal.fields)
     raise
 ```
 

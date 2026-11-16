@@ -80,12 +80,12 @@ installation, a reusable grant, original-task completion or a running frontend.
 Those remain separately observed actions in the management view. Both service
 and frontend setup can be discussed in the same conversation.
 
-This is source-level embedding support, not stock MobKit console integration or
+This is source-level embedding support, not stock Meta console integration or
 packaged Connect delivery. The TypeScript native Session client is Node-oriented;
 it must remain in the privileged host, not be serialized to a browser. A web
-console still needs its authenticated application bridge and the optional MobKit
+console still needs its authenticated application bridge and the optional Meta
 application slot. This package introduces neither a user-operated Connect server
-nor invented MobKit RPC methods. Component type/event tests require the selected
+nor invented Meta RPC methods. Component type/event tests require the selected
 matching SDK. No native/provider execution, sign-in or host adoption is implied
 by those tests.
 The browser UI declaration closure uses only the safe view model and remains
@@ -113,7 +113,7 @@ panel.update(await readOwnerProjection());
 // panel.dispose();
 ```
 
-The sample host functions are application-supplied ports, not existing MobKit RPC
+The sample host functions are application-supplied ports, not existing Meta RPC
 method names. This package does not install a management endpoint, establish a
 user session, open a browser or implement an authorization queue. Its production
 integration remains dependent on those owners.

@@ -2058,8 +2058,11 @@ names the member's session and the admitted input in its answer
 (`admission`, or a keyed send's `continuation` status), and
 `session/external_event` answers its `input_id` when the event is admitted,
 which is at once on a session with no turn running (the event then waits
-queued for the session's next turn) and only after the running turn has
-ended on a session with one; until then its idempotency key finds no input
+queued for the session's next turn, except in the instant after a turn's
+call has answered: a session still finishing that turn takes the event as
+soon as the turn ends, as a new turn) and only after the running turn has
+ended on a session with one (whether the event is then taken at once, as it
+is over REST, is not established by a run); until then its idempotency key finds no input
 (`session/input_status` answers an empty object). A `turn/start` that waits
 behind a running turn takes no idempotency key and answers nothing until its
 own turn ends, so no call names its input: withdraw it by cancelling its

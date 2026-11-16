@@ -93,6 +93,19 @@ npx --yes mint@4.2.728 dev --port 3333
 
 Mintlify validation parses the actual MDX/configuration. Inspect representative pages in the preview for navigation, tables, callouts, code, tabs and Mermaid rendering. A successful parser check alone is not visual verification.
 
+## Published copies
+
+The documentation site publishes these pages from `docs/connect` in the Meerkat repository. A published copy is its source page with one change: root-relative links outside fenced code blocks gain the `/connect` prefix. After changing a page, regenerate the copies and check them from the `connect` directory:
+
+```sh
+python3 scripts/render-docs-mirror.py
+python3 scripts/render-docs-mirror.py --check
+```
+
+The first command rewrites the copies that differ, removes a copy whose source page is gone, updates the manifest `docs/connect/_source.json`, and sets the Connect navigation and redirects of the site's `docs/docs.json` from `docs/site/docs.json`, so a new or removed page needs no other step. The second command changes nothing and exits non-zero when a copy, the manifest or the navigation would change. Do not edit a published copy by hand. Both use the standard library only.
+
+The manifest binds the copies to their source by `source_docs_tree`, the Git tree id of `docs/site`, and states Connect's version as its crates state it. It records no source commit: the tree id is the binding.
+
 ## Update claims with changes
 
 When changing an operation, update the corresponding SDK reference and examples. When changing a recipe, update its version and evidence, compiled registration if intended, and [catalog inventory](/connect/reference/catalog). When changing readiness or native composition, recheck [availability](/connect/availability), [readiness](/connect/concepts/readiness) and the affected host guides.

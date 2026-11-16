@@ -4710,6 +4710,50 @@ them.
   runner that creates one realm from 32 tasks at once. A fix is planned for
   the next release.
 
+- Added 2026-11-16, after the release. External events admitted without a
+  wake (REST `POST /sessions/{id}/external-events`, JSON-RPC
+  `session/external_event`): such an event waits queued for the session's
+  next turn only while the session is idle. Admitted over REST while a turn
+  is running, it is queued behind that turn, and the runtime takes it at
+  once when the turn ends, as a new turn: at least one model call, in a run
+  that the caller did not start. The same happens in the instant after a
+  turn's call has answered: after a run ends the runtime looks once more for
+  queued input before it comes to rest, and the caller's answer is released
+  before that look. The admission answers that the event is queued in every
+  case (REST `202`). Nothing is lost: the event is taken once and reaches
+  one terminal state; a run that fails before completing retries it, as for
+  any queued input. To keep an event for the next turn, post it while the
+  session is idle; how long after a turn's answer a session counts as idle
+  is not established. The running turn and the idle session are by a run on
+  the released 0.9.15 `rkat-rest`; the instant after a turn's answer is read
+  from the source and seen as one `meerkat-rest` test that fails in some
+  runs on a machine with one to four CPUs. On JSON-RPC the event is admitted
+  only after the running turn has ended; whether it is then taken at once
+  was not run. The same lines stand at every tag from 0.9.11 to 0.9.15;
+  earlier releases were not read.
+- Added 2026-11-16, after the release. `rkat-rest`: where the server's
+  default context directory does not exist yet (on Linux by default
+  `~/.local/share/meerkat/rest`, or `$XDG_DATA_HOME/meerkat/rest` when that
+  is set; a new machine or a new account), a `POST /sessions` that carries
+  no `system_prompt` is answered HTTP 500, every time: `agent error: Build
+  error: Config error: project AGENTS.md '<path>' is not readable: No such
+  file or directory (os error 2)`, where `<path>` is that directory. The
+  server does not create it; the directory the server is started from does
+  not matter, and setting XDG_DATA_HOME only moves the directory to
+  `$XDG_DATA_HOME/meerkat/rest`. Create the directory the message names (on
+  Linux by default `mkdir -p ~/.local/share/meerkat/rest`; a running server
+  need not be restarted), or start the server with
+  `--context-root <an existing directory>`. A request that carries a
+  `system_prompt` is not affected. Affects 0.7.9 through 0.9.15: the lines
+  that cause it came with 0.7.9 and stand at every tag from 0.8.0 (read from
+  the source); run on the released Linux x86_64 `rkat-rest` with an empty
+  home directory for 0.8.28, 0.8.52, 0.9.0, 0.9.13, 0.9.14 and 0.9.15.
+  `rkat-rpc`, the server the Python and TypeScript SDKs start, is not
+  affected (run on 0.9.14 and 0.9.15); `rkat-mcp`, the `rkat` command and
+  the Meta gateway take their context directory from elsewhere and are not
+  affected, by a reading of the source. macOS and Windows were not run. A
+  fix is planned for the next release.
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

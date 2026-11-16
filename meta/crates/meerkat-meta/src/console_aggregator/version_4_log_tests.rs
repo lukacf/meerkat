@@ -19,14 +19,17 @@ use super::*;
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), Failure>;
 
-/// The move to schema version 4, as the later release makes it.
+/// The move to schema version 4, as the later release makes it, in that
+/// release's own statements: this release checks a moved log's tables and
+/// indexes against them when it opens the log, down to the statement text
+/// (runs of white space aside).
 const MOVE_TO_VERSION_4: &str = "
     ALTER TABLE console_frames ADD COLUMN mob_id TEXT NOT NULL DEFAULT '';
     DROP INDEX idx_console_frames_identity_cursor;
     CREATE INDEX idx_console_frames_mob_identity_cursor
-        ON console_frames (mob_id, identity, cursor_seq);
+        ON console_frames(mob_id, identity, cursor_seq);
     CREATE INDEX idx_console_frames_mob_cursor
-        ON console_frames (mob_id, cursor_seq);
+        ON console_frames(mob_id, cursor_seq);
     UPDATE meerkat_schema SET version = 4 WHERE domain = 'meta-console';
 ";
 
@@ -657,6 +660,36 @@ async fn a_version_3_log_is_opened_and_written_as_before() -> TestResult {
 
     assert_eq!(ledger_version(&path)?, Some(3));
     assert_eq!(catalog(&path)?, declared);
+    Ok(())
+}
+
+/// A log stamped version 4 whose tables and indexes are not the ones of
+/// version 4 is refused at open, and the refusal names what differs and
+/// changes nothing in the file: here the log lacks the index by mob and
+/// cursor.
+#[tokio::test]
+async fn a_version_4_log_in_another_form_is_refused() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("console.sqlite3");
+    version_4_log(&path).await?;
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute_batch("DROP INDEX idx_console_frames_mob_cursor")?;
+    drop(conn);
+    let declared = catalog(&path)?;
+    let stored = rows(&path, "1 = 1")?;
+
+    let refused = SqliteConsoleLogStore::open(&path)
+        .err()
+        .map(|error| error.to_string());
+
+    let refusal = refused.expect("a version 4 log in another form is refused");
+    assert!(
+        refusal.contains("meta-console") && refusal.contains("idx_console_frames_mob_cursor"),
+        "the refusal names the log and what differs: {refusal}"
+    );
+    assert_eq!(ledger_version(&path)?, Some(4));
+    assert_eq!(catalog(&path)?, declared);
+    assert_eq!(rows(&path, "1 = 1")?, stored);
     Ok(())
 }
 

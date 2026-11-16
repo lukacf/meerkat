@@ -7,8 +7,9 @@ and Gemini responses. Set one reasoning-effort level for all of them.
 - Provider auto-detection from model name
 - One provider-neutral `reasoning_effort` level, sent to every configured
   provider, with the report of what each request carried
-- What a refusal looks like: a level a model does not accept is refused with
-  the levels it does accept, never lowered
+- What a refusal looks like: a level a model does not accept is refused,
+  never lowered, and the refusal names the levels the model accepts when a
+  source states them
 - A provider-specific parameter: the Anthropic thinking budget, as a request
   of its own (a budget and a level on one request are refused)
 - Per-session model routing across configured providers

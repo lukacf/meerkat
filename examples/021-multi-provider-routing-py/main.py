@@ -84,8 +84,8 @@ async def main():
         # `reasoning_effort` is provider-neutral. Meerkat checks the level
         # against the model, writes the provider field itself and reports what
         # it sent. It never lowers a level: one the model does not accept is
-        # refused before any provider request, and the refusal lists the
-        # levels the model does accept.
+        # refused before any provider request, and the refusal says which
+        # levels the model accepts when a source states them.
         for model in models:
             print(f"--- {model} with reasoning_effort=high ---")
             try:
@@ -100,11 +100,19 @@ async def main():
                 # other error (the provider, the key, the network) is not about
                 # the level at all.
                 refusal = reasoning_effort_refusal(error)
-                if refusal is not None:
-                    accepted = ", ".join(refusal.supported) if refusal.supported else "no level"
-                    print(f"  Refused: {refusal.reason}; this model accepts: {accepted}")
-                else:
+                if refusal is None:
                     print(f"  Error ({type(error).__name__}, code {error.code}): {error}")
+                elif refusal.supported is None:
+                    # No source states the levels for this model, or the
+                    # source cannot be read now. Only the second can succeed
+                    # later with no change (`refusal.transient`).
+                    later = "; try again later" if refusal.transient else ""
+                    print(f"  Refused: {refusal.reason}; the levels this model accepts are not known{later}")
+                elif not refusal.supported:
+                    print(f"  Refused: {refusal.reason}; this model takes no reasoning-effort level")
+                else:
+                    accepted = ", ".join(refusal.supported)
+                    print(f"  Refused: {refusal.reason}; this model accepts: {accepted}")
                 print()
                 continue
             print(f"  Response: {session.text[:200]}...")

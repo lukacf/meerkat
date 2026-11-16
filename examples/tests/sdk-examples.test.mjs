@@ -236,6 +236,23 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
     assert.match(result.stdout, /Anthropic with a thinking budget/);
     assert.match(result.stdout, /Routing Strategies/);
   });
+  for (const [mode, line] of [
+    ["effort-refusal-no-level", /Refused: unsupported_level; this model takes no reasoning-effort level/g],
+    ["effort-refusal-unknown", /Refused: supported_levels_unknown; the levels this model accepts are not known$/gm],
+    ["effort-refusal-unavailable", /Refused: supported_levels_unavailable; the levels this model accepts are not known; try again later/g],
+  ]) {
+    it(`021 tells an empty list of levels from an unknown one (${mode})`, async () => {
+      const result = await runExample("021-multi-provider-routing-py", mode, {
+        ANTHROPIC_API_KEY: "synthetic-not-a-key",
+        OPENAI_API_KEY: "synthetic-not-a-key",
+        GEMINI_API_KEY: "synthetic-not-a-key",
+      });
+      successful(result);
+      assert.equal(result.stdout.match(line)?.length, 3);
+      assert.doesNotMatch(result.stdout, /this model accepts:/);
+      assert.match(result.stdout, /Routing Strategies/);
+    });
+  }
   it("021 reports an error that is not a refusal as an error and carries on", async () => {
     const result = await runExample("021-multi-provider-routing-py", "effort-error", {
       ANTHROPIC_API_KEY: "synthetic-not-a-key",

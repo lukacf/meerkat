@@ -79,20 +79,28 @@ for line in sys.stdin:
                 "code": -32000, "message": "Synthetic provider failure",
             }})
             continue
-        if mode == "effort-refusal" and "reasoning_effort" in params:
+        effort_refusals = {
+            # mode: (reason, supported, facts, retryable)
+            "effort-refusal": ("unsupported_level", ["low", "medium"], "catalog", False),
+            "effort-refusal-no-level": ("unsupported_level", [], "catalog", False),
+            "effort-refusal-unknown": ("supported_levels_unknown", None, None, False),
+            "effort-refusal-unavailable": ("supported_levels_unavailable", None, None, True),
+        }
+        if mode in effort_refusals and "reasoning_effort" in params:
+            reason, supported, facts, retryable = effort_refusals[mode]
             send({"id": request["id"], "error": {
                 "code": -32602, "message": "Synthetic reasoning effort refusal",
                 "data": {
                     "kind": "reasoning_effort_refused",
-                    "retryable": False,
+                    "retryable": retryable,
                     "reasoning_effort_refusal": {
                         "requested": params["reasoning_effort"],
                         "provider": "synthetic",
                         "model": params.get("model", "synthetic"),
                         "route": None,
-                        "reason": "unsupported_level",
-                        "supported": ["low", "medium"],
-                        "facts": "catalog",
+                        "reason": reason,
+                        "supported": supported,
+                        "facts": facts,
                     },
                 },
             }})

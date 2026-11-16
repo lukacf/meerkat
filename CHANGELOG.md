@@ -4571,6 +4571,21 @@ them.
   only after the running turn has ended; whether it is then taken at once
   was not run. The same lines stand at every tag from 0.9.11 to 0.9.15;
   earlier releases were not read.
+- Added 2026-11-16, after the release. `rkat-rest`: where the server's
+  default context directory does not exist yet (by default
+  `~/.local/share/meerkat/rest`; a new machine or a new account), a
+  `POST /sessions` that carries no `system_prompt` is answered HTTP 500,
+  every time: `agent error: Build error: Config error: project AGENTS.md
+  '<path>' is not readable: No such file or directory (os error 2)`, where
+  `<path>` is that directory. The server does not create it, and neither the
+  directory the server is started from nor the XDG variables cure it. Create
+  the directory the message names before the start
+  (`mkdir -p ~/.local/share/meerkat/rest`), or start the server with
+  `--context-root <an existing directory>`. A request that carries a
+  `system_prompt` is not affected. Run on the released Linux x86_64
+  `rkat-rest` 0.9.15 with an empty home directory; the released 0.9.14 does
+  the same. Earlier releases, `rkat-rpc`, the `rkat` command, macOS and
+  Windows were not run.
 
 ## [0.9.14] - 2026-11-11
 

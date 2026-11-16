@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from Meerkat Meta main at [d1ec9a391602](https://github.com/lukacf/meerkat/commit/d1ec9a391602d0e5045996fce2f2f9b3abeaab4a) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [f203b94ce023](https://github.com/lukacf/meerkat/commit/f203b94ce0233d766cf68d583b775c6de1df5c1a) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 Meta ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -242,7 +242,7 @@ groups = ["release-managers"]
 
 Holders are read from the live configuration when a decision is made, so removing a subject from a binding or from a holding group revokes the identity for the next request. An approver id must not be empty or carry surrounding whitespace, must have at least one holder, and may only reference defined groups. A binding grants no permission by itself: deciding still requires `gating.decide`. Bindings apply only to console decisions by a signed-in person: on an open console a caller without a token decides nothing (`approver_unauthenticated`), and the host's stdio RPC gateway names the approver id itself. The console re-checks `gating.decide`, the request's origin and the held approver ids against the live configuration while it records the decision, so a revocation published while a decision waits is honored.
 
-The same map is the only approver source for durable decisions (see [durable decision methods](/meta/api/rpc#durable-decision-methods)). Besides console subjects and groups, a binding lists the people a host channel attests and the stdio operator:
+The same map is the only approver source for the durable decisions an approver decides with `meta/decisions/decide` (see [durable decision methods](/meta/api/rpc#durable-decision-methods)); a [question set](/meta/concepts/gating#question-sets) is a durable decision too, and it is answered without the map. The stdio gateway reads the map from the access file whether or not `enabled` is `true`: a file with `enabled = false` leaves access control off and still supplies the approvers. A launch without an access file has no approver map, so a decision that waits for an approver's `meta/decisions/decide` can be decided by nobody; for a held change of an agent, see [Approval rules](/meta/reference/identity-policy#approval-rules). Besides console subjects and groups, a binding lists the people a host channel attests and the stdio operator:
 
 ```toml
 [approvers."team:owners"]

@@ -1429,7 +1429,7 @@ host's own cleanup:
 
 | Outcome | Where |
 |---------|-------|
-| The native terminal failure | `transport.start_failure`: for a start that failed after the hand-off, a `GatewayStartFailure` with the startup `error` and what is known of `meta/init` (`init_outcome`: `"not_sent"`, `"refused"`, `"failed"`, `"unknown"` or `"ready"`). The gateway's answer to the shutdown request is `last_termination.native_shutdown` |
+| The native terminal failure | `transport.start_failure`: for a start that failed after the hand-off, a `GatewayStartFailure` with the startup `error` and what is known of `meta/init` (`init_outcome`: `"not_sent"`, `"refused"`, `"failed"`, `"unknown"` or `"ready"`). The gateway's answer to the shutdown request is `last_termination.native_shutdown`. After a start with `init_outcome` `"failed"` the stop makes no shutdown request, and the value reads `"not_negotiated"` |
 | The direct child's exit | `transport.child_exit`: `GatewayChildExit("exited", code)` once the watcher or a stop observed it through `wait_process`, or `GatewayChildExit("pending", None)` after a stop's bound ended first. `runtime.last_gateway_termination` records it as well, with `escalation` always `"none"` |
 | The SDK reader's completion | `transport.reader_completed`: the reader reached the end of `output`, or failed, and closed it |
 

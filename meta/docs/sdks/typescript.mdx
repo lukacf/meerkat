@@ -1031,16 +1031,27 @@ the persistent mob storage was created. Its `kind` names the refusal
 (`"divergent"`, `"created_by_rehearsal"`, the manifest kinds, and
 `"candidate_divergent"` from gateways launched as a candidate) and `fields`
 lists the diverged definition fields as dotted paths, so a host can show what
-changed without parsing the message:
+changed without parsing the message.
+
+In 0.9.15 `builder.build()` does not reject with the error of a refusal of
+the start itself, when the gateway refuses after it has accepted the init
+request; this refusal is one such. It rejects with
+`GatewayStartupCleanupError`, a `TransportError`, and the refusal is its
+`startupError` (also its `cause`): `instanceof CompositionProvenanceError`
+and `instanceof RpcError` are false for it (see Known limitations in the
+Meta changelog). Test for both, so the code keeps working when the refusal
+is thrown unwrapped, and do not retry a start whose `startupError` is a
+typed refusal:
 
 ```typescript
-import { CompositionProvenanceError } from "@rkat/meta-sdk";
+import { CompositionProvenanceError, GatewayStartupCleanupError } from "@rkat/meta-sdk";
 
 try {
   const runtime = await builder.build();
 } catch (err) {
-  if (err instanceof CompositionProvenanceError && err.kind === "divergent") {
-    console.error("mob.toml differs from the stored definition in", err.fields);
+  const refusal = err instanceof GatewayStartupCleanupError ? err.startupError : err;
+  if (refusal instanceof CompositionProvenanceError && refusal.kind === "divergent") {
+    console.error("mob.toml differs from the stored definition in", refusal.fields);
   }
   throw err;
 }

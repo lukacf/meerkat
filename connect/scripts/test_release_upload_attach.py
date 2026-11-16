@@ -339,6 +339,8 @@ class OwnUpload:
         return self.release.download(asset_id, stream)
 
     def upload(self, release_id, name, stream):
+        # The `gh` the tool starts is the stand-in (and the proxy variables name a closed port).
+        assert shutil.which("gh") == str(self.host / "bin" / "gh"), "the stand-in gh is not first on PATH"
         self.adapter.upload(release_id, name, stream)
         with (self.host / ("body-" + name)).open("rb") as stored:
             self.release.upload(release_id, name, stored)

@@ -47,6 +47,13 @@ class UploadHost:
             shlex.quote(str(word)) for word in (sys.executable, UPLOAD_HOST, directory)))
         (commands / "gh").chmod(0o755)
         monkeypatch.setenv("PATH", str(commands) + os.pathsep + os.environ["PATH"])
+        # Two guards: the `gh` a row starts is this stand-in, and every proxy variable names a
+        # closed local port, so a request to a real address would fail at once.
+        assert shutil.which("gh") == str(commands / "gh")
+        for name in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, "http://127.0.0.1:9")
+        for name in ("no_proxy", "NO_PROXY"):
+            monkeypatch.delenv(name, raising=False)
 
     def requests(self):
         log = self.directory / "requests.jsonl"

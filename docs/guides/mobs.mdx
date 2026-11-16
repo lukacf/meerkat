@@ -351,7 +351,9 @@ deny = ["monitor_start"]
 The deny also holds for a monitor the member started earlier: after a host
 restart, at the member's next shell job call, it is not run again and its
 job ends as `needs_attention` (`monitor_start_not_permitted`). An operator's
-own monitor for the member is not the member's to end and is left as it is.
+own monitor for the member is not the member's to end and is left as it is,
+until an operator calls `monitors/start` or `jobs/cancel` for the member's
+session.
 The host's
 own monitor route is not bound by the deny; the `monitor_start` entry of the
 built-in tools reference says what it does. A deny that names `shell` closes

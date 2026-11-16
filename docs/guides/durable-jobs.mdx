@@ -236,7 +236,8 @@ one: under a profile that denies `monitor_start`, gates it without a grant,
 or is read-only, and under a tool filter that hides it, the session does not
 run it again. A monitor the session's own tool started then ends as
 `needs_attention` with the failure code `monitor_start_not_permitted`; a
-monitor that `monitors/start` started is left as it is. `monitors/start` and
+monitor that `monitors/start` started is left as it is, and waits for the
+host's next call. `monitors/start` and
 `jobs/cancel` for a session run its recorded resumable monitors again under
 the host's authority, whatever the session's profile denies.
 

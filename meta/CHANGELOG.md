@@ -52,9 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   A profile's `deny`, a spawn's tool access policy, a turn's block list or
   a grant gate on the name `shell` (`grant_gated = { tools = ["shell"] }`)
   that closes `shell` closes `monitor_start` with it, also after a gateway
-  restart, and the grant that opens `shell` opens it. A member whose
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force. A member whose
   `shell` is closed by name is therefore not offered the monitor by the
   upgrade.
+- An operator's monitor on a member that may not start one: in earlier
+  releases the member's next shell job call resumed an operator's lost
+  resumable monitor after a gateway restart. Now it does not, and the
+  monitor waits until an operator calls `monitors/start` or `jobs/cancel`
+  for that member's session.
+- Going back to an earlier release: it runs every recorded resumable
+  monitor again at the member's next shell job call, whatever the
+  member's profile says, so cancel the monitors a deny should hold before
+  going back. See the Upgrade notes in the Meerkat changelog.
 - A pre-tool hook or a host's dispatch admission that refuses or inspects
   `shell` calls by the tool's name does not take a `monitor_start` call for
   one: add `monitor_start` to such a guard, or deny the tool. See the

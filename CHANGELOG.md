@@ -43,8 +43,15 @@ them.
   and now also turn on `monitor_start`; and a shell job manager whose
   dispatcher does not enable `monitor_start`, or whose session may not
   start a monitor, no longer runs a recorded resumable monitor again, and
-  ends as `needs_attention` the ones that session's own tool started. See
-  Changed, Fixed and the Upgrade notes.
+  ends as `needs_attention` the ones that session's own tool started.
+  `JobManager::spawn_monitor_for_call` keeps its signature and records
+  the monitor as the host's: an embedder that used it as its own tool's
+  path starts monitors the session does not end. In `meerkat-core`,
+  `ToolExecutionPolicy::permits_call` and `permits`,
+  `ComposedToolFilter::allows` and the projection of
+  `PreparedToolSurface::of` keep their shape and now refuse or hide
+  `monitor_start` where `shell` is out. See Changed, Fixed and the
+  Upgrade notes.
 
 ### Changed
 
@@ -76,7 +83,10 @@ them.
   denies it for the session. A grant-gated shell
   family keeps `monitor_start` closed with its other tools until a grant,
   which opens all five; a read-only profile lists it, as it lists `shell`,
-  and refuses every call.
+  and refuses every call. Under a grant gate on the name `shell` alone,
+  the grant of `shell` opens `monitor_start` too, and each
+  `monitor_start` call is admitted as a use of that grant: a call made
+  after the grant ended is refused with the gate's refusal for `shell`.
 
   What a monitor may do that a background `shell` command may not:
 
@@ -118,7 +128,10 @@ them.
   one recorded before this release, is left as it is for the host's
   route. Earlier releases ran such a monitor again whatever the session's
   tools said. A session whose shell family was turned off has no shell job
-  call, so nothing of its own runs a recorded monitor again.
+  call, so nothing of its own runs a recorded monitor again. Where what
+  the session may do cannot be read at that moment (its tool filters or
+  its grants are unreadable), nothing is decided: the monitor is neither
+  run again nor ended, and the session's next shell job call asks again.
 
   What the re-run asks is the session's execution policy, its durable
   tool filters and its grant gate. The re-run happens outside any run, so
@@ -129,11 +142,16 @@ them.
 ### Added
 
 - Rust API of `meerkat-tools`: the trait
-  `builtin::shell::MonitorRerunAdmission` and
-  `DurableShellJobRuntime::with_monitor_rerun_admission`, through which the
-  builder of a session's tools says whether the session may start a monitor
-  at the moment a recorded one would be run again. A runtime without one
-  runs every recorded resumable monitor again, as before.
+  `builtin::shell::MonitorRerunAdmission`, its answer
+  `builtin::shell::MonitorRerunAnswer` (admitted, refused, or not known)
+  and `DurableShellJobRuntime::with_monitor_rerun_admission`, through
+  which the builder of a session's tools says whether the session may
+  start a monitor at the moment a recorded one would be run again. A
+  runtime without one runs every recorded resumable monitor again, as
+  before.
+- Rust API of `meerkat-core`: `tool_scope::tool_never_wider_than`, which
+  names the tool a tool is never offered or callable more widely than
+  (`shell` for `monitor_start`).
 - The job failure code `monitor_start_not_permitted`, the `reason` of a
   `needs_attention` monitor job that was not run again. Failure codes are
   open strings.
@@ -148,11 +166,16 @@ them.
   A deny list, a spawn's or a fork's tool access policy, a session's tool
   filter, a turn's block list or a grant gate on the name `shell` that
   closes `shell` closes `monitor_start` with it, at every build and after a
-  restart, and the grant that opens `shell` opens it. A session whose
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force: a `monitor_start` call is checked against it when it
+  is dispatched. A session whose
   `shell` is closed by name is therefore not offered the monitor by the
   upgrade, and, unless only a turn's block list closes it, its recorded
   monitors are not run again. An allow list that names `monitor_start` and
-  not `shell` no longer admits the monitor.
+  not `shell` no longer admits the monitor. The rule goes by the tool's
+  name: a host's or an MCP server's tool exposed as `monitor_start` is
+  bound to `shell` in the same way, and where shell is on with durable
+  stores the built-in tool takes the name.
 - A pre-tool hook or a host's dispatch admission that refuses or inspects
   `shell` calls by the tool's name does not take a `monitor_start` call for
   one, and nothing in Meerkat can teach it the name: add `monitor_start` to
@@ -168,6 +191,18 @@ them.
   before this release is left for the host's route, as is every monitor an
   operator starts. Only a monitor the session's own tool starts from this
   release on is ended as `needs_attention`.
+- An operator's monitor on a session that may not start one: in earlier
+  releases the session's next shell job call resumed an operator's lost
+  resumable monitor. Now that call does not, and the monitor waits until
+  an operator calls `monitors/start` or `jobs/cancel` for that session:
+  the host's route recovers a session's jobs only when it is called.
+- Going back to an earlier release: it runs every recorded resumable
+  monitor again at the session's next shell job call, whatever the
+  session's tools say, so cancel the monitors a deny should hold before
+  going back. A host that offered `monitor_start` itself on the earlier
+  release meets one more thing there: a re-dispatch of the call that
+  started a monitor under this release answers a submission conflict
+  instead of joining its job.
 
 ### Known limitations
 

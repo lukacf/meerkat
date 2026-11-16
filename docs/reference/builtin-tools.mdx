@@ -1192,9 +1192,14 @@ must implement the corresponding idempotency/checkpoint behavior.
   list, a spawn's or a fork's `tool_access_policy`, a session's tool
   filter, a turn's block list, or a grant gate on the name `shell`
   (`grant_gated = { tools = ["shell"] }`), whose grant then opens both.
+  A `monitor_start` call is admitted as a use of that grant when it is
+  dispatched, so a call made after the grant ended is refused with the
+  gate's refusal for `shell`.
   The monitor is never offered or callable where `shell` is not, at every
   build and after a restart. An allow list that names `monitor_start` and
-  not `shell` does not admit it.
+  not `shell` does not admit it. The rule goes by the tool's name: a
+  host's or an MCP server's tool exposed as `monitor_start` is bound to
+  `shell` in the same way.
 - A pre-tool hook or a host's dispatch admission that refuses or inspects
   `shell` calls by the tool's name does not take a `monitor_start` call for
   one: add `monitor_start` to such a guard, or deny the tool.
@@ -1219,7 +1224,10 @@ again. At its next shell job call, a monitor its own tool started ends as
 monitor the host's route started, and one recorded before jobs said who
 started them, is left as it is for the host's route. A session whose shell
 family was turned off has no shell job call, so nothing of its own runs a
-recorded monitor again.
+recorded monitor again. Where what the session may do cannot be read at
+that moment (its tool filters or its grants are unreadable), nothing is
+decided: the monitor is neither run again nor ended, and the session's next
+shell job call asks again.
 
 What the re-run asks is the session's execution policy, its durable tool
 filters and its grant gate. It happens outside any run, so a grant scoped to
@@ -1238,7 +1246,10 @@ cancel for a session runs that session's recorded resumable monitors again
 under the host's authority; a member's deny does not bind the operator's
 route. A monitor job says who started it, so a session that may not start a
 monitor ends only the ones its own tool started and leaves an operator's
-monitor for it untouched.
+monitor for it untouched. Such a session does not resume an operator's lost
+monitor either: it waits until an operator calls `monitors/start` or
+`jobs/cancel` for that session, since the host's route recovers a session's
+jobs only when it is called.
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/monitor_tool.rs`
 </Accordion>

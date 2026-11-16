@@ -4,9 +4,7 @@ description: "The host's rules for changes of long-term agents: who may create, 
 icon: "id-card"
 ---
 
-*Mirrored from Meerkat Meta main at [225d539132a2](https://github.com/lukacf/meerkat/commit/225d539132a2ace672400cfa432d00adb43db1a7) on 2026-11-14; Meta version 0.9.14 at that commit.*
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
+*Mirrored from Meerkat Meta main at [d1ec9a391602](https://github.com/lukacf/meerkat/commit/d1ec9a391602d0e5045996fce2f2f9b3abeaab4a) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -78,6 +76,12 @@ and of what this release carries out are not reached.
   }
 }
 ```
+
+The sample lets the host's archive of an assistant through without a
+decision while a removal waits for one. That does not make an archive the
+harmless one: it stops the agent until an unarchive, and it is refused
+`owns_mobs` while the agent still owns mobs it created (see the `archive`
+class below).
 
 | Member | Meaning |
 |--------|---------|
@@ -159,8 +163,8 @@ A rule is `{change, requester, target, outcome}`.
 | `peers` | Peers added or removed |
 | `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
 | `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |
-| `archive` | An archive, and an unarchive |
-| `remove` | A removal: permanent, the name is never available again |
+| `archive` | An archive, and an unarchive. An archive of an agent that still owns mobs it created is refused `owns_mobs`: have the agent destroy them first (see [`meta/identity/archive`](/meta/api/rpc#meta%2Fidentity%2Farchive-meta%2Fidentity%2Funarchive-meta%2Fidentity%2Fremove-meta%2Fidentity%2Fadopt)) |
+| `remove` | A removal: permanent, the name is never available again. Whatever the rule's outcome, a removal of an agent that still owns mobs it created is refused `owns_mobs`: have the agent destroy its mobs first |
 | `adopt` | The release of a configured agent from configuration (see [Adopting configured agents](#adopting-configured-agents)) |
 
 **`requester`** selects who asks, as the transport attributed it, never as a
@@ -294,18 +298,22 @@ and a `get`, a `plan` or a change of it answers `identity_unknown`,
 exactly as a name no agent holds. A create under its name is the one
 thing that differs from a name no agent holds: one namespace holds every
 name, so a taken name cannot be created, and the create is refused
-`name_taken`. The refusal says nothing of what holds the name to a
-caller that is not shown every agent (an agent, or a Console caller that
-does not administer the runtime): `by` reads `identity` whether the
-holder is an agent the caller is shown, one it is not, a removed agent's
-name or a worker member. The host and an administrator read the holder
-(`identity`, `removed`, `worker`, `unreadable`). Who is private is read from the agent's
-own record, never from what the running host happened to start, so the
-rule holds for an agent that has not run since its host started. A `get`
-names to an agent only the peers it is shown, and who asked for an agent
-only while the asker's record can be read and is shown to it: once an
-asker is removed, an agent reads no `provenance` on the agents that asker
-asked for. The host reads all of it.
+`name_taken`. On the Console there is one exception: when the name is
+held by an agent private to another person, a caller who is neither that
+person nor an access administrator is answered `-32001` (unknown
+identity) instead. That create does not reach `name_taken`, and no `by`
+is read. The refusal says nothing of what holds the name to a caller
+that is not shown every agent (an agent, or a Console caller that does
+not administer the runtime): `by` reads `identity` whether the holder is
+an agent the caller is shown, one it is not, a removed agent's name or a
+worker member. The host and an administrator read the holder
+(`identity`, `removed`, `worker`, `unreadable`). Who is private is read
+from the agent's own record, never from what the running host happened
+to start, so the rule holds for an agent that has not run since its host
+started. A `get` names to an agent only the peers it is shown, and who
+asked for an agent only while the asker's record can be read and is
+shown to it: once an asker is removed, an agent reads no `provenance` on
+the agents that asker asked for. The host reads all of it.
 
 The list of an agent's schedules, which the answer of an archive, an
 unarchive and a removal and their plan carry (`schedules`), is the host's:

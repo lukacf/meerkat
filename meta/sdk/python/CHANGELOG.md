@@ -4,6 +4,11 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- A gateway start refused after the init request was accepted raises the
+  refusal's own typed error (`CompositionProvenanceError`,
+  `StorageResolutionError` or the typed RPC error) instead of
+  `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+
 ## 0.9.15
 
 - `MetaRuntime.compact_member(identity, *, floor_tokens=None, timeout=None)`

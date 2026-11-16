@@ -57,13 +57,14 @@ impl Drop for OwnSocketPath {
 /// A listener bound to a socket path.
 ///
 /// [`Self::bind`] removes a socket file that a listener which has ended left
-/// at the path, as a restarted host needs. A live listener at the path is
-/// kept: the bind is refused with [`std::io::ErrorKind::AddrInUse`], the kind
-/// a taken TCP address gives, and an error that names the path. The one
-/// exception is a listener of this same process, which a new listener
-/// replaces as before: a runtime's end aborts its listener without waiting
-/// for it, so a runtime rebuilt in one process can meet its predecessor's
-/// listener still open.
+/// at the path, as a restarted host needs. A path that is held is kept: a
+/// live listener answers a dial of it, or the dial is refused for permission
+/// (the file is another user's). The bind is then refused with
+/// [`std::io::ErrorKind::AddrInUse`], the kind a taken TCP address gives, and
+/// an error that names the path. The one exception is a listener of this
+/// same process, which a new listener replaces as before: a runtime's end
+/// aborts its listener without waiting for it, so a runtime rebuilt in one
+/// process can meet its predecessor's listener still open.
 pub(crate) struct BoundSocketListener {
     // Field order: the listener is closed before its entry goes.
     listener: UnixListener,
@@ -72,10 +73,12 @@ pub(crate) struct BoundSocketListener {
 
 impl BoundSocketListener {
     pub(crate) async fn bind(path: &Path) -> std::io::Result<Self> {
-        if !OwnSocketPath::is_entered(path) && has_live_listener(path).await {
+        if !OwnSocketPath::is_entered(path)
+            && let Some(held) = held_by_another(path).await
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
-                format!("socket path {} is held by a live listener", path.display()),
+                format!("socket path {} {held}", path.display()),
             ));
         }
         // Remove existing socket file if present (without blocking the executor).
@@ -97,15 +100,24 @@ impl BoundSocketListener {
     }
 }
 
-/// Whether a listener answers a dial of `path`. A connection is an answer;
-/// so is a full backlog, and so is a dial that neither connects nor fails
-/// within [`LIVE_LISTENER_DIAL_TIMEOUT`]. A missing file, a socket file
-/// nobody listens on and any other dial error are no answer.
-async fn has_live_listener(path: &Path) -> bool {
+/// How `path` is held, when a dial of it shows that it is; the text ends the
+/// refusal's sentence. A listener answers with a connection, with a full
+/// backlog, or by neither connecting nor failing within
+/// [`LIVE_LISTENER_DIAL_TIMEOUT`]. A dial refused for permission is a file
+/// this user may not dial, so not one to remove. A missing file, a socket
+/// file nobody listens on and any other dial error leave the path free.
+async fn held_by_another(path: &Path) -> Option<&'static str> {
+    const LIVE: &str = "is held by a live listener";
     match tokio::time::timeout(LIVE_LISTENER_DIAL_TIMEOUT, UnixStream::connect(path)).await {
-        Ok(Ok(_connected)) => true,
-        Ok(Err(error)) => error.kind() == std::io::ErrorKind::WouldBlock,
-        Err(_elapsed) => true,
+        Ok(Ok(_connected)) => Some(LIVE),
+        Ok(Err(error)) => match error.kind() {
+            std::io::ErrorKind::WouldBlock => Some(LIVE),
+            std::io::ErrorKind::PermissionDenied => {
+                Some("may not be dialled by this user and is not removed")
+            }
+            _ => None,
+        },
+        Err(_elapsed) => Some(LIVE),
     }
 }
 
@@ -118,8 +130,8 @@ impl UdsListener {
     /// Bind to a Unix domain socket path.
     ///
     /// A socket file no listener holds is removed first. A path a live
-    /// listener of another process holds is refused with
-    /// [`std::io::ErrorKind::AddrInUse`].
+    /// listener of another process holds, or one whose dial is refused for
+    /// permission, is refused with [`std::io::ErrorKind::AddrInUse`].
     pub async fn bind(path: &Path) -> Result<Self, TransportError> {
         let listener = BoundSocketListener::bind(path).await?;
         Ok(Self { listener })

@@ -4186,6 +4186,122 @@ async fn the_plan_of_a_create_the_rules_allow_is_the_same_plan_under_a_taken_nam
     rig.shutdown().await;
 }
 
+/// What a create answers, by its outcome and the names of its members.
+fn answered_with(outcome: &IdentityOutcome) -> (Value, Vec<String>) {
+    let answer = outcome.to_json();
+    let mut members: Vec<String> = answer
+        .as_object()
+        .expect("an outcome")
+        .keys()
+        .cloned()
+        .collect();
+    members.sort_unstable();
+    (answer["outcome"].clone(), members)
+}
+
+/// A create that waits for a person answers its decision when it is asked
+/// again, also once its name was taken meanwhile: the same request under
+/// the same id is the held request, and it is refused when it is carried
+/// out, not when it is asked again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_create_asked_again_after_its_name_was_taken_answers_its_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = taken_names_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let family = rig.family();
+    let seed = ChangeRequester::host("seed");
+    let host = ChangeRequester::host("ops");
+    let late = || json!([{"name": "late", "profile": "worker"}]);
+
+    let held = asked_create(&family, &mob, &host, "late-1", late()).await;
+    let decision_id = decision_of(&held);
+    let made = rig.change(&seed, "s-late", create_of(late())).await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let again = asked_create(&family, &mob, &host, "late-1", late()).await;
+    assert_eq!(
+        decision_of(&again),
+        decision_id,
+        "the held request answers its decision: {again:?}"
+    );
+    rig.shutdown().await;
+}
+
+/// The host's own call for a person, which has no view of the mob, is
+/// refused before the hold as the host is: under an agent, under a removed
+/// agent's name and under a worker member, each with its holder. An agent
+/// is refused under an archived agent it is shown as under any agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_with_no_view_for_a_person_and_an_agent_under_an_archived_agent_are_refused_before_the_hold()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = limited_sight_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let family = rig.family();
+    let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
+    let person = ChangeRequester::human(person_key("person-4"));
+    let agent = ChangeRequester::agent_recorded(PLANNER);
+
+    let mut wrong = Vec::new();
+    for (who, requester, name, holder) in [
+        ("the person", &person, HOST_A, "identity"),
+        ("the person", &person, "zz-shelved", "identity"),
+        ("the person", &person, "zz-former", "removed"),
+        ("the person", &person, "zz-temp", "worker"),
+        ("the agent", &agent, "zz-shelved", "identity"),
+    ] {
+        let taken = json!({"kind": "name_taken", "by": holder, "field": "agents[0].name"});
+        match planned_create(&family, &mob, requester, &format!("p-{name}"), one(name)).await {
+            Err(said) if said == taken => {}
+            Err(said) => wrong.push(format!("{who}: the plan under {name} is refused {said}")),
+            Ok(plan) => wrong.push(format!(
+                "{who}: the plan under {name} answers the outcome {}",
+                plan["outcome"]
+            )),
+        }
+        let held = asked_create(&family, &mob, requester, &format!("c-{name}"), one(name)).await;
+        match held.refusal() {
+            Some(refusal) if taken_as(refusal) == taken => {}
+            _ => wrong.push(format!(
+                "{who}: the create under {name} answers {}",
+                held.to_json()
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
+/// A caller whose view shows an agent's name and not its record is
+/// answered under that name exactly as under a name no agent holds: the
+/// plan is the same plan and the create is held the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_whose_view_hides_an_agents_record_is_answered_under_its_name_as_under_a_free_name()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = limited_sight_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let family = rig
+        .runtime
+        .identity_family_seen_by(Arc::new(SeesNoRecordOf("worker")))
+        .expect("the family as a caller that sees no record of the profile");
+    let requester = ChangeRequester::human(person_key("person-5"));
+    let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
+
+    let mut answers = Vec::new();
+    for name in ["zz-nobody", HOST_A, "zz-shelved"] {
+        let plan = planned_create(&family, &mob, &requester, &format!("p-{name}"), one(name))
+            .await
+            .unwrap_or_else(|said| panic!("the plan under {name}: {said}"));
+        let held = asked_create(&family, &mob, &requester, &format!("c-{name}"), one(name)).await;
+        assert_eq!(held.token(), "pending_decision", "{name}: {held:?}");
+        answers.push((plan_under(plan, name), answered_with(&held)));
+    }
+    for (answer, holder) in answers[1..].iter().zip(["an agent", "an archived agent"]) {
+        assert_eq!(answer, &answers[0], "under {holder} as under a free name");
+    }
+    rig.shutdown().await;
+}
+
 /// A taken name refused before the hold reads as the one refused when a
 /// create is carried out. For a name held by an agent created earlier, by
 /// an agent the host's roster declares, by an archived agent, by a removed
@@ -4274,8 +4390,9 @@ fn limited_sight_policy() -> Arc<IdentityCreationPolicy> {
 }
 
 /// A launch over a roster with an agent private to a person, under
-/// [`limited_sight_policy`], with a removed agent's name (`zz-former`) and
-/// a worker member (`zz-temp`).
+/// [`limited_sight_policy`], with an archived agent (`zz-shelved`), a
+/// removed agent's name (`zz-former`), a worker member (`zz-temp`) and a
+/// worker member private to a person (`zz-side`).
 async fn limited_sight_rig(state: &Path) -> Rig {
     let (runtime, asked, fail_next_session) = launch_roster(
         state,
@@ -4313,12 +4430,36 @@ async fn limited_sight_rig(state: &Path) -> Rig {
         let ended = rig.change(&seed, request_id, change).await;
         assert_eq!(ended.token(), "done", "{ended:?}");
     }
-    Box::pin(rig.runtime.mob_handle().spawn_spec(SpawnMemberSpec::new(
+    let shelved = rig
+        .change(
+            &seed,
+            "s-4",
+            create_of(json!([{"name": "zz-shelved", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(shelved.token(), "done", "{shelved:?}");
+    let shelved = rig
+        .change(
+            &seed,
+            "s-5",
+            IdentityChangeSpec::Archive(agent_ref("zz-shelved", &rig.digest("zz-shelved").await)),
+        )
+        .await;
+    assert_eq!(shelved.token(), "done", "{shelved:?}");
+    let mob = rig.runtime.mob_handle();
+    Box::pin(mob.spawn_spec(SpawnMemberSpec::new(
         "worker",
         meerkat_mob::AgentIdentity::from("zz-temp"),
     )))
     .await
     .expect("a worker member is spawned");
+    Box::pin(mob.spawn_spec(
+        SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("zz-side")).with_labels(
+            BTreeMap::from([(PRIVATE_TO.to_owned(), "person-1".to_owned())]),
+        ),
+    ))
+    .await
+    .expect("a worker member private to a person is spawned");
     rig
 }
 
@@ -4360,10 +4501,10 @@ fn of_limited_sight(rig: &Rig) -> [(&'static str, Arc<dyn IdentityFamily>, Chang
 /// A requester that is not shown every agent is answered under a name
 /// whose holder it is not shown exactly as under a name no agent holds:
 /// the plan answers the same plan and the create is held the same way,
-/// whether an agent it is not shown, a removed agent's name or a worker
-/// member holds the name. Once a person approved it, the create under the
-/// taken name is refused when it is carried out, and its operation says so
-/// and names no holder.
+/// whether an agent it is not shown, a removed agent's name, a worker
+/// member or a worker member private to a person holds the name. Once a
+/// person approved it, the create under the taken name is refused when it
+/// is carried out, and its operation says so and names no holder.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_requester_of_limited_sight_is_answered_under_a_name_it_is_not_shown_as_under_a_free_name()
  {
@@ -4408,7 +4549,7 @@ async fn a_requester_of_limited_sight_is_answered_under_a_name_it_is_not_shown_a
         );
         let free_held = members_of(&free_held);
 
-        for name in ["confidant", "zz-former", "zz-temp"] {
+        for name in ["confidant", "zz-former", "zz-temp", "zz-side"] {
             let plan = planned_create(&family, &mob, &requester, &format!("p-{name}"), one(name))
                 .await
                 .unwrap_or_else(|said| panic!("{who}: the plan under {name}: {said}"));
@@ -4498,13 +4639,6 @@ async fn a_caller_with_a_view_is_answered_under_a_name_no_agent_holds_as_under_a
     let temp = tempfile::tempdir().unwrap();
     let rig = limited_sight_rig(temp.path()).await;
     let mob = rig.runtime.mob_handle();
-    Box::pin(mob.spawn_spec(
-        SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("zz-side")).with_labels(
-            BTreeMap::from([(PRIVATE_TO.to_owned(), "person-1".to_owned())]),
-        ),
-    ))
-    .await
-    .expect("a worker member private to a person is spawned");
     let family = rig
         .runtime
         .identity_family_seen_by(Arc::new(SeesEveryAgent))

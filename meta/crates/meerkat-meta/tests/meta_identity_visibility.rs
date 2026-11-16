@@ -2105,3 +2105,180 @@ async fn the_console_plans_a_create_the_rules_allow_the_same_under_a_taken_name(
     }
     rig.shutdown().await;
 }
+
+/// A plan the Console answers, without the digests of its request, which
+/// its name moves.
+fn console_plan_without_digests(answer: &Value) -> Value {
+    let mut plan = console_ok(answer).clone();
+    for digest in ["request_digest", "subject_digest"] {
+        plan.as_object_mut().expect("a plan").remove(digest);
+    }
+    plan
+}
+
+/// The Console's create of one agent `name` of the profile `worker`, as
+/// `subject` asks for it.
+async fn console_create_of(app: &axum::Router, subject: &str, name: &str) -> Value {
+    console_rpc(
+        app,
+        subject,
+        "meta/identity/create",
+        json!({"request_id": format!("make-{name}"),
+               "agents": [{"name": name, "profile": "worker"}]}),
+    )
+    .await
+}
+
+/// What a create the Console holds answers, by its outcome and the names
+/// of its members.
+fn console_held_as(answer: &Value) -> (Value, Vec<String>) {
+    let held = console_ok(answer);
+    let mut members: Vec<String> = held
+        .as_object()
+        .expect("an outcome")
+        .keys()
+        .cloned()
+        .collect();
+    members.sort_unstable();
+    (held["outcome"].clone(), members)
+}
+
+/// Where a person decides the create, the Console holds a create under the
+/// name of an agent its caller's access rules deny it exactly as a create
+/// under a name no agent holds, and plans it the same; that holds for a
+/// caller that administers the runtime and is no access administrator,
+/// too. A create under the name of an agent private to another person is
+/// answered as one that names an unknown agent, and its plan is the plan
+/// under a free name.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_holds_a_create_under_a_name_its_caller_is_not_shown_as_under_a_free_name() {
+    for access in [SCOPED_DENIES, A_RUNTIME_ADMINISTRATOR_WITH_A_DENY] {
+        let temp = tempfile::tempdir().unwrap();
+        let rig = boot_under(
+            temp.path(),
+            roster_with_a_private_agent(),
+            Some(access),
+            holding_policy(),
+        )
+        .await;
+        let app = rig.console();
+        let all = console_listed(&app, ROOT).await;
+        assert_eq!(all.len(), 3, "the Console knows the three agents: {all:?}");
+
+        let free = console_plan_of_a_create(&app, BOB, "nobody-yet").await;
+        let free = console_plan_without_digests(&free);
+        assert_eq!(free["outcome"], json!("require_approval"), "{free:#}");
+        for name in ["confidant", "rev-a"] {
+            let planned = console_plan_of_a_create(&app, BOB, name).await;
+            assert_eq!(
+                renamed(&console_plan_without_digests(&planned), name, "nobody-yet"),
+                free,
+                "the plan under {name} is the plan under a free name: {planned:#}"
+            );
+        }
+        let free = console_create_of(&app, BOB, "nobody-yet").await;
+        let free = console_held_as(&free);
+        assert_eq!(free.0, json!("pending_decision"), "{free:?}");
+        let denied = console_create_of(&app, BOB, "rev-a").await;
+        assert_eq!(
+            console_held_as(&denied),
+            free,
+            "the create under the agent the rules deny is held as under a free name: {denied:#}"
+        );
+        let private = console_create_of(&app, BOB, "confidant").await;
+        assert_eq!(
+            console_refused(&private)["code"],
+            json!(-32001),
+            "the create names an unknown agent: {private:#}"
+        );
+        rig.shutdown().await;
+    }
+}
+
+/// Where a person decides the create, the Console answers no caller, an
+/// access administrator included, under a removed agent's name or under a
+/// worker member's name before the hold: the plan is the plan under a name
+/// no agent holds and the create is held the same way. Every Console call
+/// reaches the family with its caller's view, and a view decides agents
+/// only.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_answers_no_caller_under_a_removed_or_a_worker_members_name_before_the_hold() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot_under(
+        temp.path(),
+        roster_with_a_private_agent(),
+        Some(A_RUNTIME_ADMINISTRATOR_WITH_A_DENY),
+        holding_policy(),
+    )
+    .await;
+    let host = ChangeRequester::host_operator("rpc");
+    let made = rig
+        .change(
+            &host,
+            "make-gone",
+            IdentityChangeSpec::Create(
+                serde_json::from_value(json!({"agents": [{"name": "gone", "profile": "worker"}]}))
+                    .expect("a create as a surface writes it"),
+            ),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    for (request_id, remove) in [("archive-gone", false), ("remove-gone", true)] {
+        let agent = agent_ref("gone", &rig.agent("gone").await.agent.spec_digest);
+        let change = if remove {
+            IdentityChangeSpec::Remove(agent)
+        } else {
+            IdentityChangeSpec::Archive(agent)
+        };
+        let ended = rig.change(&host, request_id, change).await;
+        assert_eq!(ended.token(), "done", "{ended:?}");
+    }
+    let mob = rig.runtime.mob_handle();
+    Box::pin(mob.spawn_spec(meerkat_mob::SpawnMemberSpec::new(
+        "worker",
+        meerkat_mob::AgentIdentity::from("temp-w"),
+    )))
+    .await
+    .expect("a worker member is spawned");
+    let app = rig.console();
+
+    // The access administrator, and the person who administers the
+    // runtime: neither is answered early.
+    for subject in [ROOT, BOB] {
+        let free = format!("nobody-{}", if subject == ROOT { "r" } else { "b" });
+        let free_plan = console_plan_of_a_create(&app, subject, &free).await;
+        let free_plan = renamed(&console_plan_without_digests(&free_plan), &free, "NAME");
+        assert_eq!(
+            free_plan["outcome"],
+            json!("require_approval"),
+            "{free_plan:#}"
+        );
+        let free_held = console_create_of(&app, subject, &free).await;
+        let free_held = console_held_as(&free_held);
+        assert_eq!(free_held.0, json!("pending_decision"), "{free_held:?}");
+        for name in ["gone", "temp-w"] {
+            let planned = console_plan_of_a_create(&app, subject, name).await;
+            assert_eq!(
+                renamed(&console_plan_without_digests(&planned), name, "NAME"),
+                free_plan,
+                "{subject}: the plan under {name} is the plan under a free name: {planned:#}"
+            );
+            // Each caller asks under its own request id: the name is held
+            // once per caller.
+            let held = console_rpc(
+                &app,
+                subject,
+                "meta/identity/create",
+                json!({"request_id": format!("make-{name}-{free}"),
+                       "agents": [{"name": name, "profile": "worker"}]}),
+            )
+            .await;
+            assert_eq!(
+                console_held_as(&held),
+                free_held,
+                "{subject}: the create under {name} is held as under a free name: {held:#}"
+            );
+        }
+    }
+    rig.shutdown().await;
+}

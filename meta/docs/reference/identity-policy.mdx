@@ -316,7 +316,10 @@ and a `get`, a `plan` or a change of it answers `identity_unknown`,
 exactly as a name no agent holds. A create under its name is the one
 thing that differs from a name no agent holds: one namespace holds every
 name, so a taken name cannot be created, and the create is refused
-`name_taken`. On the Console there is one exception: when the name is
+`name_taken`. In 0.9.15 that refusal comes at once only where the rules
+allow the create: where a rule requires approval for it, the create is held
+first and is refused when the approved change is carried out (see Known
+limitations in the Meta changelog). On the Console there is one exception: when the name is
 held by an agent private to another person, a caller who is neither that
 person nor an access administrator is answered `-32001` (unknown
 identity) instead. That create does not reach `name_taken`, and no `by`

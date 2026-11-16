@@ -4088,3 +4088,8 @@ mod tests {
         ));
     }
 }
+
+/// Rows of the control channel's member verbs for a member kept apart.
+#[cfg(test)]
+#[path = "control_member_verbs_tests.rs"]
+mod control_member_verbs_tests;

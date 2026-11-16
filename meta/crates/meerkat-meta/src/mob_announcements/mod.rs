@@ -59,6 +59,8 @@ mod escalations_tests;
 #[cfg(test)]
 mod host_store_tests;
 #[cfg(test)]
+mod keyed_member_apart_tests;
+#[cfg(test)]
 mod remote_tests;
 #[cfg(test)]
 pub(crate) mod tests;

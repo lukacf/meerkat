@@ -48,7 +48,7 @@ them.
   out. A typed turn now ends that: a delegation created after it with
   nothing spoken is refused like one on a channel that has heard no request
   (nothing runs for it and the call continues), and a request spoken after
-  the typed turn runs once, as before. Affects 0.8.38 through 0.9.14, every
+  the typed turn runs once, as before. Affects 0.8.38 through 0.9.15, every
   release with the public GPT Live channel. From 0.9.2 a typed turn's rows
   pass the adapter's hold, the form the new tests drive on the current
   source; for 0.8.38 through 0.9.1 it is established by reading the code,
@@ -72,7 +72,7 @@ them.
   turn or delegates it as a request of its own, and none of it reaches the
   earlier job. Words within that pause still join the request, which is
   what carries on a request that was delegated at a pause in mid-sentence.
-  Affects 0.8.50 through 0.9.14: in the words of the known issue on the
+  Affects 0.8.50 through 0.9.15: in the words of the known issue on the
   0.9.14 release page, "read from the source, and seen in our live voice
   test runs of development builds on 2026-11-11 and 2026-11-14, whose code
   for this is the same as in 0.9.14". The new tests drive the rule on the

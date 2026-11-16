@@ -9,16 +9,19 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::{BlobStore, SessionId};
 use meerkat_jobs::{
-    AttemptClaim, CanonicalArgumentsHash, DetachedJobService, DetachedJobStore, ExecutionIntentId,
-    InteractionLineageId, JobSpec, JobSubmissionKey, RestartClass, RunnerHandleRef, RunnerIdentity,
-    SqliteDetachedJobStore, ToolIdentity, WorkerId,
+    AttemptClaim, CanonicalArgumentsHash, DetachedJobError, DetachedJobService, DetachedJobStore,
+    ExecutionIntentId, InsertJobOutcome, InteractionLineageId, JobOutboxCommitSignal,
+    JobOutboxEntry, JobSpec, JobSubmissionKey, OriginMemberId, PredicateDeliveryCommit,
+    PredicateDeliveryCommitOutcome, PredicateDeliveryIdentity, PredicateDeliveryReceipt,
+    RestartClass, RunnerHandleRef, RunnerIdentity, SqliteDetachedJobStore, StoredJob, ToolIdentity,
+    WorkerId,
 };
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use meerkat_store::FsBlobStore;
@@ -55,6 +58,18 @@ struct Host {
 impl Host {
     fn new() -> Self {
         Self::open(tempfile::tempdir().unwrap())
+    }
+
+    /// A host that runs mobs: its job store records, with each submission,
+    /// the member the submitting session serves.
+    fn with_members() -> (Self, Arc<MemberJobStore>) {
+        let mut host = Self::new();
+        let members = Arc::new(MemberJobStore {
+            inner: host.store.clone(),
+            serving: std::sync::Mutex::default(),
+        });
+        host.store = members.clone();
+        (host, members)
     }
 
     fn open(root: tempfile::TempDir) -> Self {
@@ -156,6 +171,17 @@ impl Host {
         receipt.job_id.to_string()
     }
 
+    /// The member address the job's record carries, if any.
+    async fn origin_member(&self, job_id: &str) -> Option<OriginMemberId> {
+        self.store
+            .get(&meerkat_jobs::JobId::new(job_id).unwrap())
+            .await
+            .unwrap()
+            .expect("the job is in the host's store")
+            .spec
+            .origin_member_id
+    }
+
     async fn snapshot(&self, job_id: &str) -> meerkat_jobs::JobSnapshot {
         DetachedJobService::new(self.store.clone())
             .get(&meerkat_jobs::JobId::new(job_id).unwrap())
@@ -190,6 +216,134 @@ impl Host {
         })
         .await
         .expect("the job ends")
+    }
+}
+
+/// The job store of a host that runs mobs. It knows which member each
+/// session serves now and records that member's delivery address with the
+/// session's submissions, the address the job's notices are then sent to.
+struct MemberJobStore {
+    inner: Arc<dyn DetachedJobStore>,
+    serving: std::sync::Mutex<HashMap<SessionId, OriginMemberId>>,
+}
+
+impl MemberJobStore {
+    /// `session` serves `member` from now on, and no other session does.
+    fn serve(&self, member: &str, session: &SessionId) {
+        let member = OriginMemberId::new(member).unwrap();
+        let mut serving = self.serving.lock().unwrap();
+        serving.retain(|_, served| served != &member);
+        serving.insert(session.clone(), member);
+    }
+
+    fn member_of(&self, session: &SessionId) -> Option<OriginMemberId> {
+        self.serving.lock().unwrap().get(session).cloned()
+    }
+}
+
+#[async_trait::async_trait]
+impl DetachedJobStore for MemberJobStore {
+    async fn insert_deduplicated(
+        &self,
+        mut job: StoredJob,
+    ) -> Result<InsertJobOutcome, DetachedJobError> {
+        if job.spec.origin_member_id.is_none() {
+            job.spec.origin_member_id = self.member_of(&job.spec.origin_session_id);
+        }
+        self.inner.insert_deduplicated(job).await
+    }
+
+    async fn get(
+        &self,
+        job_id: &meerkat_jobs::JobId,
+    ) -> Result<Option<StoredJob>, DetachedJobError> {
+        self.inner.get(job_id).await
+    }
+
+    async fn get_by_submission_key(
+        &self,
+        realm_id: &str,
+        submission_key: &JobSubmissionKey,
+    ) -> Result<Option<StoredJob>, DetachedJobError> {
+        self.inner
+            .get_by_submission_key(realm_id, submission_key)
+            .await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        expected_revision: u64,
+        replacement: StoredJob,
+    ) -> Result<StoredJob, DetachedJobError> {
+        self.inner
+            .compare_and_swap(expected_revision, replacement)
+            .await
+    }
+
+    async fn predicate_delivery_receipt(
+        &self,
+        job_id: &meerkat_jobs::JobId,
+        identity: &PredicateDeliveryIdentity,
+    ) -> Result<Option<PredicateDeliveryReceipt>, DetachedJobError> {
+        self.inner
+            .predicate_delivery_receipt(job_id, identity)
+            .await
+    }
+
+    async fn commit_predicate_delivery(
+        &self,
+        expected_revision: u64,
+        replacement: StoredJob,
+        commit: PredicateDeliveryCommit,
+    ) -> Result<PredicateDeliveryCommitOutcome, DetachedJobError> {
+        self.inner
+            .commit_predicate_delivery(expected_revision, replacement, commit)
+            .await
+    }
+
+    async fn list_pending_outbox(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<JobOutboxEntry>, DetachedJobError> {
+        self.inner.list_pending_outbox(limit).await
+    }
+
+    async fn list_for_origin(
+        &self,
+        realm_id: &str,
+        origin_session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        self.inner
+            .list_for_origin(realm_id, origin_session_id, limit)
+            .await
+    }
+
+    async fn list_all(&self, limit: usize) -> Result<Vec<StoredJob>, DetachedJobError> {
+        self.inner.list_all(limit).await
+    }
+
+    async fn count_pending_outbox_jobs(
+        &self,
+        realm_id: Option<&str>,
+    ) -> Result<u64, DetachedJobError> {
+        self.inner.count_pending_outbox_jobs(realm_id).await
+    }
+
+    async fn list_census_candidates(
+        &self,
+        realm_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredJob>, DetachedJobError> {
+        self.inner.list_census_candidates(realm_id, limit).await
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+
+    fn outbox_commit_signal(&self) -> JobOutboxCommitSignal {
+        self.inner.outbox_commit_signal()
     }
 }
 
@@ -570,6 +724,89 @@ async fn a_cancel_of_a_job_of_another_kind_answers_as_an_unknown_job_and_request
             host.assert_untouched(job_id).await;
         }
     }
+}
+
+/// A fork child starts from its parent's transcript, which holds the ids of
+/// the parent's jobs. The child is another member in another session: it
+/// never owns them.
+#[tokio::test]
+async fn a_fork_child_does_not_own_its_parents_jobs() {
+    let (host, members) = Host::with_members();
+    let parent_session = SessionId::new();
+    let child_session = SessionId::new();
+    members.serve("rt:mob-member:team:1:lead:1", &parent_session);
+    members.serve("rt:mob-member:team:1:lead-fork:1", &child_session);
+    let parent = host.seat(MEMBER_REALM, &parent_session);
+    let child = host.seat(MEMBER_REALM, &child_session);
+    let completed = parent.start_completed("parent-output", "call-1").await;
+    let running = parent.start_running("call-2").await;
+    assert_eq!(
+        host.origin_member(&running).await,
+        members.member_of(&parent_session),
+        "the job's record carries its member's address"
+    );
+
+    for door in DOORS {
+        child
+            .assert_reads_as_unknown(door, &running, &["sleep"])
+            .await;
+        child
+            .assert_reads_as_unknown(door, &completed, &["parent-output", "printf"])
+            .await;
+    }
+    assert!(child.listed().await.is_empty());
+
+    assert_owner_keeps_its_jobs(&host, &parent, &completed, "parent-output", &running).await;
+}
+
+/// The stated limit of "the caller's own": a job belongs to the session that
+/// submitted it. When a member is moved to a successor session, the job's
+/// record still carries the member's address and the host reports the
+/// successor as serving that member (so the job's notices go to the
+/// successor), yet the successor's shell job tools answer the predecessor's
+/// jobs as unknown ids and list none of them. The predecessor session, and
+/// the host's own job calls, still reach them.
+#[tokio::test]
+async fn a_members_successor_session_reads_its_predecessors_jobs_as_unknown_jobs() {
+    let (host, members) = Host::with_members();
+    let member = "rt:mob-member:team:1:worker:1";
+    let predecessor_session = SessionId::new();
+    let successor_session = SessionId::new();
+    members.serve(member, &predecessor_session);
+    let predecessor = host.seat(MEMBER_REALM, &predecessor_session);
+    let completed = predecessor
+        .start_completed("predecessor-output", "call-1")
+        .await;
+    let running = predecessor.start_running("call-2").await;
+
+    members.serve(member, &successor_session);
+    let successor = host.seat(MEMBER_REALM, &successor_session);
+    assert_eq!(members.member_of(&predecessor_session), None);
+    assert_eq!(
+        host.origin_member(&running).await,
+        members.member_of(&successor_session),
+        "the successor serves the member the job's notices are addressed to"
+    );
+
+    for door in DOORS {
+        successor
+            .assert_reads_as_unknown(door, &running, &["sleep"])
+            .await;
+        successor
+            .assert_reads_as_unknown(door, &completed, &["predecessor-output", "printf"])
+            .await;
+    }
+    host.assert_untouched(&running).await;
+    assert!(successor.listed().await.is_empty());
+
+    assert_owner_keeps_its_jobs(
+        &host,
+        &predecessor,
+        &completed,
+        "predecessor-output",
+        &running,
+    )
+    .await;
 }
 
 /// Controls: each session reads, lists and cancels exactly its own jobs.

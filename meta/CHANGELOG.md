@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-<!-- DRAFT wording: the shell family entries below are to be finalised before the release. -->
+### Breaking
+
+- Behaviour only: a mob profile's `shell = true` keeps its shape and now
+  also turns on `monitor_start` for the member. See Changed, Upgrade, and
+  Breaking in the Meerkat changelog.
 
 ### Changed
 
@@ -33,9 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - A deny, a closed grant gate or `read_only = true` that a member's profile
   gained after the member started a script monitor now holds for the
-  monitor's re-run after a gateway restart: the monitor is not run again and
-  its job ends as `needs_attention` (`monitor_start_not_permitted`). See
-  Fixed in the Meerkat changelog.
+  monitor's re-run after a gateway restart: at the member's next shell job
+  call the monitor is not run again and its job ends as `needs_attention`
+  (`monitor_start_not_permitted`). The host's own monitor route is not
+  bound by the member's deny. See Fixed and Known limitations in the
+  Meerkat changelog.
+
+### Upgrade
+
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A profile's `deny`, a spawn's tool access policy, a turn's block list or
+  a grant gate on the name `shell` (`grant_gated = { tools = ["shell"] }`)
+  that closes `shell` closes `monitor_start` with it, also after a gateway
+  restart, and the grant that opens `shell` opens it. A member whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade.
 
 ## [0.9.15] - 2026-11-15
 

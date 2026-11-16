@@ -1188,11 +1188,19 @@ must implement the corresponding idempotency/checkpoint behavior.
 - The grant gate: `grant_gated = { families = ["shell"] }` mounts the family
   closed until a grant, which opens all five tools;
   `grant_gated = { tools = ["monitor_start"] }` gates the monitor alone.
+- Whatever closes `shell` by name closes `monitor_start` with it: a deny
+  list, a spawn's or a fork's `tool_access_policy`, a session's tool
+  filter, a turn's block list, or a grant gate on the name `shell`
+  (`grant_gated = { tools = ["shell"] }`), whose grant then opens both.
+  The monitor is never offered or callable where `shell` is not, at every
+  build and after a restart.
 - A read-only profile lists the tool, as it lists `shell`, and refuses every
   call.
-- Outside a mob, `session/create` carries no deny list. A turn's
+- Outside a mob, `session/create` takes a session tool filter,
+  `"tool_filter": {"Deny": ["monitor_start"]}`, which hides the tool and
+  refuses a call by name for the session. A turn's
   `turn_tool_overlay.blocked_tools` (CLI `--block-tool monitor_start`, for a
-  run's first turn) hides the tool for that turn; a fork's or a mob spawn's
+  run's first turn) does so for that turn; a fork's or a mob spawn's
   `tool_access_policy`
   (`{"type": "deny_list", "value": ["monitor_start"]}`) and a Rust
   build's `tool_access_policy` deny it for the session.
@@ -1200,17 +1208,32 @@ must implement the corresponding idempotency/checkpoint behavior.
 **A later deny holds for the re-run.** A recorded monitor is run again only
 while its session may still start one: `monitor_start` enabled for it, not
 denied, not closed by its grant gate, its profile not read-only, as the
-session's current build resolves them (a per-turn overlay is not part of
-that). Otherwise the job ends as `needs_attention` with the failure code
+session's current build resolves them. Otherwise, at the session's next
+shell job call, the job ends as `needs_attention` with the failure code
 `monitor_start_not_permitted` and is never run again. A session whose shell
 family was turned off has no shell job call, so nothing of its own runs a
-recorded monitor again. A monitor that is already running is not stopped by a
-deny: cancel its job (`shell_job_cancel`, `jobs/cancel`).
+recorded monitor again.
+
+What the re-run asks is the session's execution policy and its grant gate.
+It happens outside any run, so a grant scoped to one run does not admit it.
+A session tool filter, an inherited filter and a turn's block list hide the
+tool but are not asked at the re-run, and neither are a governed application
+tool policy or a host's dispatch admission.
+
+A monitor that is already running is not stopped by a deny: cancel its job
+(`shell_job_cancel`, or the host's `jobs/cancel` with the job's id; the
+host's `jobs/list` with the session's id lists a session's jobs, and a
+monitor's `runner.name` is `meerkat.monitor_script`). Cancel before the
+restart that brings the deny: after a restart, the host's cancel of a lost
+resumable monitor starts it once more before it cancels it.
 
 The host's own route is separate. An operator's `monitors/start` or job
 cancel for a session runs that session's recorded resumable monitors again
 under the host's authority; a member's deny does not bind the operator's
-route.
+route. A stored monitor job does not say who started it, so a session that
+may not start a monitor ends an operator's monitor for it too, at its next
+shell job call after a restart, unless the host's route recovered the
+session's jobs first.
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/monitor_tool.rs`
 </Accordion>

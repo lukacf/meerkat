@@ -35,7 +35,15 @@ them.
 
 ## [Unreleased]
 
-<!-- DRAFT wording: the shell family entries below are to be finalised before the release. -->
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat`, `meerkat-tools`:
+  `enable_shell` / `.shell(bool)` / `override_shell`, the config's
+  `tools.shell_enabled` and a mob profile's `tools.shell` keep their shape
+  and now also turn on `monitor_start`; and a shell job manager whose
+  dispatcher does not enable `monitor_start`, or whose session may not
+  start a monitor, ends a recorded resumable monitor as `needs_attention`
+  where it ran it again. See Changed, Fixed and the Upgrade notes.
 
 ### Changed
 
@@ -58,11 +66,13 @@ them.
   deny = ["monitor_start"]
   ```
 
-  Outside a mob, `session/create` carries no deny list: a turn's
+  Outside a mob, `session/create` takes a session tool filter,
+  `"tool_filter": {"Deny": ["monitor_start"]}`, which hides the tool and
+  refuses a call by name for the session; a turn's
   `turn_tool_overlay.blocked_tools` (CLI `--block-tool monitor_start`, for a
-  run's first turn) hides the tool for that turn, and a fork's or a mob
-  spawn's `tool_access_policy` deny list, or a Rust build's
-  `tool_access_policy`, denies it for the session. A grant-gated shell
+  run's first turn) does so for that turn; and a fork's or a mob spawn's
+  `tool_access_policy` deny list, or a Rust build's `tool_access_policy`,
+  denies it for the session. A grant-gated shell
   family keeps `monitor_start` closed with its other tools until a grant,
   which opens all five; a read-only profile lists it, as it lists `shell`,
   and refuses every call.
@@ -99,12 +109,19 @@ them.
   after a host restart. A recorded resumable monitor is run again only while
   its session may still start one: `monitor_start` enabled for it, not
   denied by name, not closed by its grant gate, and its profile not
-  read-only, as the session's current build resolves them. Otherwise the job
-  ends as `needs_attention` with the failure code
-  `monitor_start_not_permitted` and is never run again. Earlier releases ran
-  such a monitor again whatever the session's tools said. A session whose
-  shell family was turned off has no shell job call, so nothing of its own
-  runs a recorded monitor again.
+  read-only, as the session's current build resolves them. Otherwise, at
+  the session's next shell job call, the job ends as `needs_attention` with
+  the failure code `monitor_start_not_permitted` and is never run again.
+  Earlier releases ran such a monitor again whatever the session's tools
+  said. A session whose shell family was turned off has no shell job call,
+  so nothing of its own runs a recorded monitor again.
+
+  What the re-run asks is the session's execution policy and its grant
+  gate. The re-run happens outside any run, so a grant scoped to one run
+  does not admit it. A session tool filter, an inherited filter and a
+  turn's block list hide the tool but are not asked at the re-run, and
+  neither are a governed application tool policy or a host's dispatch
+  admission.
 
 ### Added
 
@@ -120,6 +137,13 @@ them.
 
 ### Upgrade notes
 
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A deny list, a spawn's or a fork's tool access policy, a session's tool
+  filter, a turn's block list or a grant gate on the name `shell` that
+  closes `shell` closes `monitor_start` with it, at every build and after a
+  restart, and the grant that opens `shell` opens it. A session whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade, and its recorded monitors are not run again.
 - A live session of an agent with shell is offered `monitor_start` from its
   next build. Its stored session and its stored system prompt are not
   rewritten; the tool list sent to the provider gains one definition.
@@ -136,7 +160,17 @@ them.
 - The host's own monitor route is not bound by a member's deny: an
   operator's `monitors/start` or job cancel for a session runs that
   session's recorded resumable monitors again under the host's authority.
+- A stored monitor job does not say who started it. After a restart, a
+  session that may not start a monitor (denied, gated without a grant, or
+  read-only) ends every recorded resumable monitor of its own at its next
+  shell job call, an operator's `monitors/start` monitor for that session
+  included, unless the host's route recovered the session's jobs first.
 - A deny does not stop a monitor that is already running; cancel its job.
+  `jobs/list` with the session's id lists its jobs (a monitor's
+  `runner.name` is `meerkat.monitor_script`) and `jobs/cancel` with the
+  job's id cancels one. Cancel before the restart that brings the deny:
+  after a restart, the host's cancel of a lost resumable monitor starts it
+  once more before it cancels it.
 
 ## [0.9.15] - 2026-11-15
 

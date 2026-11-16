@@ -349,8 +349,11 @@ deny = ["monitor_start"]
 ```
 
 The deny also holds for a monitor the member started earlier: after a host
-restart it is not run again and its job ends as `needs_attention`
-(`monitor_start_not_permitted`).
+restart, at the member's next shell job call, it is not run again and its
+job ends as `needs_attention` (`monitor_start_not_permitted`). The host's
+own monitor route is not bound by the deny; the `monitor_start` entry of the
+built-in tools reference says what it does. A deny that names `shell` closes
+`monitor_start` with it.
 
 ### Granting tools to a member at run time
 

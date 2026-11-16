@@ -59,12 +59,13 @@ impl Drop for OwnSocketPath {
 /// [`Self::bind`] removes a socket file that a listener which has ended left
 /// at the path, as a restarted host needs. A path that is held is kept: a
 /// live listener answers a dial of it, or the dial is refused for permission
-/// (the file is another user's). The bind is then refused with
-/// [`std::io::ErrorKind::AddrInUse`], the kind a taken TCP address gives, and
-/// an error that names the path. The one exception is a listener of this
-/// same process, which a new listener replaces as before: a runtime's end
-/// aborts its listener without waiting for it, so a runtime rebuilt in one
-/// process can meet its predecessor's listener still open.
+/// while a file lies there (for example the file is another user's). The
+/// bind is then refused with [`std::io::ErrorKind::AddrInUse`], the kind a
+/// taken TCP address gives, and an error that names the path. The one
+/// exception is a listener of this same process, which a new listener
+/// replaces as before: a runtime's end aborts its listener without waiting
+/// for it, so a runtime rebuilt in one process can meet its predecessor's
+/// listener still open.
 pub(crate) struct BoundSocketListener {
     // Field order: the listener is closed before its entry goes.
     listener: UnixListener,
@@ -103,21 +104,36 @@ impl BoundSocketListener {
 /// How `path` is held, when a dial of it shows that it is; the text ends the
 /// refusal's sentence. A listener answers with a connection, with a full
 /// backlog, or by neither connecting nor failing within
-/// [`LIVE_LISTENER_DIAL_TIMEOUT`]. A dial refused for permission is a file
-/// this user may not dial, so not one to remove. A missing file, a socket
-/// file nobody listens on and any other dial error leave the path free.
+/// [`LIVE_LISTENER_DIAL_TIMEOUT`]. For a dial that fails, see
+/// [`held_after_failed_dial`].
 async fn held_by_another(path: &Path) -> Option<&'static str> {
-    const LIVE: &str = "is held by a live listener";
     match tokio::time::timeout(LIVE_LISTENER_DIAL_TIMEOUT, UnixStream::connect(path)).await {
-        Ok(Ok(_connected)) => Some(LIVE),
-        Ok(Err(error)) => match error.kind() {
-            std::io::ErrorKind::WouldBlock => Some(LIVE),
-            std::io::ErrorKind::PermissionDenied => {
-                Some("may not be dialled by this user and is not removed")
-            }
-            _ => None,
-        },
-        Err(_elapsed) => Some(LIVE),
+        Ok(Ok(_connected)) => Some(HELD_BY_A_LIVE_LISTENER),
+        Ok(Err(error)) => {
+            // One metadata read, and only where the answer turns on it.
+            let file_seen = error.kind() == std::io::ErrorKind::PermissionDenied
+                && tokio::fs::symlink_metadata(path).await.is_ok();
+            held_after_failed_dial(error.kind(), file_seen)
+        }
+        Err(_elapsed) => Some(HELD_BY_A_LIVE_LISTENER),
+    }
+}
+
+const HELD_BY_A_LIVE_LISTENER: &str = "is held by a live listener";
+const MAY_NOT_BE_DIALLED: &str = "may not be dialled by this user and is not removed";
+
+/// What a failed dial says about its path. A full backlog is a listener. A
+/// dial refused for permission keeps the path only where a file is seen
+/// there (`file_seen`): a file this user may not dial is not one to remove
+/// (for example another user's socket), while with no file seen the refusal
+/// is the environment's and the bind that follows reports it. A missing
+/// file, a socket file nobody listens on and any other dial error leave the
+/// path free.
+fn held_after_failed_dial(kind: std::io::ErrorKind, file_seen: bool) -> Option<&'static str> {
+    match kind {
+        std::io::ErrorKind::WouldBlock => Some(HELD_BY_A_LIVE_LISTENER),
+        std::io::ErrorKind::PermissionDenied if file_seen => Some(MAY_NOT_BE_DIALLED),
+        _ => None,
     }
 }
 
@@ -130,8 +146,9 @@ impl UdsListener {
     /// Bind to a Unix domain socket path.
     ///
     /// A socket file no listener holds is removed first. A path a live
-    /// listener of another process holds, or one whose dial is refused for
-    /// permission, is refused with [`std::io::ErrorKind::AddrInUse`].
+    /// listener of another process holds, or a file there whose dial is
+    /// refused for permission, is refused with
+    /// [`std::io::ErrorKind::AddrInUse`].
     pub async fn bind(path: &Path) -> Result<Self, TransportError> {
         let listener = BoundSocketListener::bind(path).await?;
         Ok(Self { listener })
@@ -311,6 +328,33 @@ mod tests {
         UnixStream::connect(&path)
             .await
             .expect("a dial reaches the new listener");
+    }
+
+    /// What a failed dial says about its path: a full backlog is a
+    /// listener; a refusal for permission keeps the path only where a file
+    /// is seen there; every other failure leaves the path free.
+    #[test]
+    fn test_a_failed_dial_keeps_a_path_for_a_full_backlog_or_an_undiallable_file() {
+        use std::io::ErrorKind;
+
+        assert_eq!(
+            held_after_failed_dial(ErrorKind::PermissionDenied, true),
+            Some(MAY_NOT_BE_DIALLED)
+        );
+        assert_eq!(
+            held_after_failed_dial(ErrorKind::PermissionDenied, false),
+            None,
+            "a refusal for permission with no file seen leaves the path to the bind"
+        );
+        for file_seen in [false, true] {
+            assert_eq!(
+                held_after_failed_dial(ErrorKind::WouldBlock, file_seen),
+                Some(HELD_BY_A_LIVE_LISTENER)
+            );
+            for free in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+                assert_eq!(held_after_failed_dial(free, file_seen), None, "{free:?}");
+            }
+        }
     }
 
     #[tokio::test]

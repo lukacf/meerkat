@@ -107,7 +107,7 @@ pub(crate) struct UnknownAccessKey {
 
 impl fmt::Display for UnknownAccessKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: unknown key `{}`", self.place, self.key)
+        write!(f, "{}: unknown key {:?}", self.place, self.key)
     }
 }
 

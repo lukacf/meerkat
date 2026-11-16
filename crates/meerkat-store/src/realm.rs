@@ -323,8 +323,15 @@ impl ManifestLockGuard {
 }
 
 impl Drop for ManifestLockGuard {
+    /// Release the lock before the holder returns: remove the file here,
+    /// synchronously. A removal handed to a spawned task is lost when the
+    /// runtime is dropped before it polls the task, which is what happens
+    /// when a command ends right after the holder returned; the file would
+    /// then refuse every taker until it reached the takeover age. One
+    /// unlink on the dropping thread is the price. A killed process still
+    /// leaves the file; [`MANIFEST_LOCK_STALE_AFTER`] covers that.
     fn drop(&mut self) {
-        remove_file_nonblocking_on_drop(self.path.clone());
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

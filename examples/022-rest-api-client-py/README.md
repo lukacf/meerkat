@@ -39,3 +39,27 @@ ANTHROPIC_API_KEY=sk-... "$RKAT_REST"
 # Terminal 2: Run the example
 python3 examples/022-rest-api-client-py/main.py
 ```
+
+### On a fresh machine
+
+This example creates its session with a `system_prompt`, so it runs as
+shown. A request of your own without one does not, on a machine that has never
+run the REST server:
+
+```bash
+curl -s -X POST http://localhost:8080/sessions -H 'content-type: application/json' \
+  -d '{"prompt": "Say hi in three words.", "model": "claude-sonnet-5-5"}'
+```
+
+answers `500` with `project AGENTS.md '<home>/.local/share/meerkat/rest' is not
+readable: No such file or directory`, on every call until the directory exists.
+This was run on the released `rkat-rest` 0.9.14 and 0.9.15 on Linux (and it is
+the same on older releases back to at least 0.8.28). Either of these cures it:
+
+```bash
+# Create the directory the message names (a running server picks it up, no restart):
+mkdir -p ~/.local/share/meerkat/rest
+
+# Or start the server with a context root that exists (an empty directory is enough):
+mkdir -p "$HOME/rkat-rest-context" && "$RKAT_REST" --context-root "$HOME/rkat-rest-context"
+```

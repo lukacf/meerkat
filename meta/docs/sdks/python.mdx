@@ -1936,10 +1936,22 @@ and `decisions_decide(decision_id, approve=, presented_digest=, reason=None,
 attestation=None)`. Each answers the gateway's result as a `dict`.
 
 ```python
+import time
+
 from meerkat_meta import DecisionAttestation
 
 runtime.on_decision_notice(lambda notice: print(notice["event"], notice["decision_id"]))
 page = await mob.decisions_list(phase="open")  # notices are written before the answer
+decision = page["decisions"][0]
+decision_id = decision["decision_id"]
+subject_digest = decision["subject_digest"]
+
+# Show the person the whole text of the rendering.
+rendering = await mob.decisions_rendering(decision_id)
+shown_at_ms = int(time.time() * 1000)
+# ... post rendering["rendering"] to the chat and wait for the answer ...
+observed_at_ms = int(time.time() * 1000)
+
 await mob.decisions_decide(
     decision_id,
     approve=True,
@@ -1950,9 +1962,26 @@ await mob.decisions_decide(
         scope="chat-session-1",
         event_ref="chat:event-1",
         observed_at_ms=observed_at_ms,
+        presentation={
+            "audience": {"kind": "approver", "approver_id": decision["approver_id"]},
+            "subject_digest": subject_digest,
+            "parts_shown": rendering["parts"],
+            "channel_ref": "chat:owners",
+            "message_ref": "chat:message-1",
+            "at_ms": shown_at_ms,
+        },
     ),
 )
 ```
+
+The `chat` ingress is declared at launch with `.decision_ingresses(...)`,
+and the approver map lists `U123` on it for the decision's approver id. An
+attested decide is accepted only for a decision that was presented to its
+approver: by the `presentation` the attestation carries, as here, or by one
+recorded before with `decisions_present(decision_id, presentation)`, which
+takes the same mapping. With neither, the decide is refused
+`presentation_incomplete`. The fields of a presentation are listed under
+[`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`.
 The gateway writes the notices before a list answers; the SDK runs each

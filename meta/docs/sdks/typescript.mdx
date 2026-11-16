@@ -188,6 +188,15 @@ const rt = await Meta.builder()
 
 rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
 const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
+const decision = page.decisions[0];
+const decisionId = decision.decision_id;
+const subjectDigest = decision.subject_digest;
+
+// Show the person the whole text of the rendering.
+const rendering = await mob.decisionsRendering(decisionId);
+const shownAtMs = Date.now();
+// ... post rendering.rendering to the chat and wait for the answer ...
+
 await mob.decisionsDecide(decisionId, {
   approve: true,
   presentedDigest: subjectDigest,
@@ -197,9 +206,26 @@ await mob.decisionsDecide(decisionId, {
     scope: "chat-session-1",
     eventRef: "chat:event-1",
     observedAtMs: Date.now(),
+    presentation: {
+      audience: { kind: "approver", approver_id: decision.approver_id },
+      subject_digest: subjectDigest,
+      parts_shown: rendering.parts,
+      channel_ref: "chat:owners",
+      message_ref: "chat:message-1",
+      at_ms: shownAtMs,
+    },
   },
 });
 ```
+
+The approver map of `config/access.toml` lists `U123` on the `chat` ingress
+for the decision's approver id. An attested decide is accepted only for a
+decision that was presented to its approver: by the `presentation` the
+attestation carries, as here, or by one recorded before with
+`decisionsPresent(decisionId, presentation)`, which takes the same object.
+With neither, the decide is refused `presentation_incomplete`. The keys of a
+presentation are the gateway's own (snake_case) and are listed under
+[`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.

@@ -6,7 +6,7 @@ All client arguments in the examples below are already prepared.
 
 Install `meerkat-toolkit[gmail]` and import `GmailOperations` from
 `meerkat_toolkit.connectors.gmail`. This Python 3.11+ library requires HTTPX
-0.28.x and AnyIO 4.13+, without requiring MobKit, a browser, Google SDK credentials or the Toolkit UI.
+0.28.x and AnyIO 4.13+, without requiring Meta, a browser, Google SDK credentials or the Toolkit UI.
 
 ```python
 from meerkat_toolkit.connectors.gmail import GmailOperations

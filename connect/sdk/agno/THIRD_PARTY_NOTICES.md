@@ -58,7 +58,7 @@ Trello, Salesforce, Twilio, Webex, Plivo and arXiv use explicit constructor port
 
 Webex closes the SDK-created Requests session and replaces that instance's `_session._req_session` with the borrowed transport. The real RoomsAPI/Room enumeration executes with `max=100`; a nonempty Link header or more than 100 entries fails explicitly, never yielding a partial all-rooms success. Plivo replaces the real RestClient `send_request` boundary after its genuine request preparation and before regional retry/fallback. The selected call UUID must match both path and the SDK's duplicate query field, and the real Call model remains in use. Its two otherwise unused SDK sessions are registered for retirement. arXiv closes/replaces the real client's instance `_session`, preserves its Atom parser/Result models and donor result formatting, and omits the original constructor's PDF-directory setup. Strict XML/feed checks reject malformed or silently skipped entries; an explicit empty feed remains valid. The SDK clients own no second active socket route. Profile retirement stays with the existing joined MCP lifecycle.
 
-The exact direct additions are `exa-py==2.25.0`, `firecrawl-py==4.46.2`, `py-trello==0.20.1`, `simple-salesforce==1.12.10`, `twilio==9.11.2`, `webexpythonsdk==2.0.6`, `plivo==4.63.0`, `arxiv==4.0.1` and `pypdf==6.19.0`. pypdf is required by the pinned Agno arXiv import only; no PDF operation is exposed. The optional library closure preserves all prior 63 versions and adds 33 exact pins, for 96 total. Its source audit checks 3,807 non-RECORD installed payloads and 43 retained notice files against the 33 original wheels and records per-profile declared dependency closures. Dependency licenses include MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, PSF-2.0, ISC and dual-license choices; each distribution's original metadata/notices remain authoritative. Provider SDK source is installed from those distributions, not vendored into this component or relicensed as Toolkit. These dependencies are not added to core Meerkat/MobKit. Source tests and dependency auditing do not establish successor installed-artifact acceptance, OAuth acquisition, live service readiness or write coverage.
+The exact direct additions are `exa-py==2.25.0`, `firecrawl-py==4.46.2`, `py-trello==0.20.1`, `simple-salesforce==1.12.10`, `twilio==9.11.2`, `webexpythonsdk==2.0.6`, `plivo==4.63.0`, `arxiv==4.0.1` and `pypdf==6.19.0`. pypdf is required by the pinned Agno arXiv import only; no PDF operation is exposed. The optional library closure preserves all prior 63 versions and adds 33 exact pins, for 96 total. Its source audit checks 3,807 non-RECORD installed payloads and 43 retained notice files against the 33 original wheels and records per-profile declared dependency closures. Dependency licenses include MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, PSF-2.0, ISC and dual-license choices; each distribution's original metadata/notices remain authoritative. Provider SDK source is installed from those distributions, not vendored into this component or relicensed as Toolkit. These dependencies are not added to core Meerkat/Meta. Source tests and dependency auditing do not establish successor installed-artifact acceptance, OAuth acquisition, live service readiness or write coverage.
 
 
 ## Six HTTP read profile source attributions
@@ -153,7 +153,7 @@ payloads, per-profile closures, notices and the JMESPath installed-script
 shebang projection are recorded in the source dependency audit. Dependency
 source stays in its original installed distributions unless an attributable
 entry/operation port is explicitly identified above. These optional SDKs do
-not become Meerkat/MobKit core dependencies. Independent review and fresh
+not become Meerkat/Meta core dependencies. Independent review and fresh
 installed-artifact proof are still required for this six-profile successor.
 
 ### PRAW 8.0.3 source-port notice (BSD-2-Clause)
@@ -327,4 +327,4 @@ qualification retains exact artifacts, full upstream license text, 113 installed
 SDK payload comparisons and the PostgreSQL profile's SDK dependency closure.
 The successor's 111 runtime pins preserve all 109 accepted Agno35 versions.
 These dependencies remain part of this optional standalone integration library;
-core Meerkat and MobKit dependencies are unchanged.
+core Meerkat and Meta dependencies are unchanged.

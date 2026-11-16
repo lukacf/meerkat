@@ -57,7 +57,9 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 
 ## Upgrading to 0.9.15
 
-This section is for systems running 0.9.14 or 0.9.13. The full list of
+This section is for systems running 0.9.14 or 0.9.13. A system on 0.9.12 or
+0.9.11 reads "Upgrading to 0.9.14" and "Upgrading to 0.9.12" below as well:
+the second says what those releases do with stored state. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
 State that 0.9.14 or 0.9.13 persisted loads under 0.9.15 as it is. What
@@ -878,6 +880,16 @@ an item names the builds of its own run, such a run was made with a 0.9.14
 gateway built from the release tag, over state written by a gateway built from
 the development source for 0.9.15 (main on 13 November), with a scripted model
 in place of a provider.
+
+This subsection describes a rollback to 0.9.14. An item that names other
+releases (0.9.9 through 0.9.14, for example) says so for that item only. What
+a release older than 0.9.14 does with state that 0.9.15 wrote is not stated
+beyond those items; in particular nothing here says what a gateway older than
+0.9.14 does with agents created at run time. The rollback subsections of the
+older releases below ("Rolling back to 0.9.13", "Rolling back to 0.9.11")
+each describe a rollback from the release of their own section, not from
+0.9.15. The path that holds without such conditions is the backup of the
+state root taken before the upgrade (step 2 of "How to upgrade").
 
 0.9.14 and earlier releases read most of what 0.9.15 writes without a
 refusal. The items below are where a rollback differs: configurations that
@@ -1831,6 +1843,11 @@ step beyond those of "Upgrading to 0.9.12" below. The `meerkat-meta` 0.9.12
 crate was never published: a Rust host moves from `meerkat-meta` 0.9.11 to
 0.9.13.
 
+0.9.13 migrates no durable state, and what "Upgrading to 0.9.12" says about
+stored state and about a rollback to 0.9.11 holds for 0.9.13 as it does for
+0.9.12: between the two releases no Rust source file of Core, Meta or
+Connect changed except the version number.
+
 ## Upgrading to 0.9.12
 
 This section is for systems running 0.9.11. The full list of changes is in
@@ -1838,6 +1855,14 @@ the CHANGELOG under `## [0.9.12]`.
 
 Meerkat 0.9.12 is Core 0.9.12, Meta 0.9.12 and Connect 0.9.12, released
 together.
+
+0.9.12 migrates no durable state: it opens what 0.9.11 persisted as it is.
+This rests on a comparison of the source of the releases, not on loading
+state that a 0.9.11 binary wrote: the schema, journal and record version
+numbers of Core's and Meta's stores are the same in 0.9.11, 0.9.12 and
+0.9.13, no table, column or index definition of a store changed, and no
+migration was added. Connect's own stored forms were not compared; its one
+known difference is the downgrade item under "Connect 0.9.12" below.
 
 ### rusqlite 0.41 (Rust)
 
@@ -1960,6 +1985,30 @@ full release that is never the repository's latest. The full list is in
   the issuance state `not_issued`. A Connect without this change answers a
   conflict when that decision is applied or read again; other decisions are
   unaffected.
+
+### Rolling back to 0.9.11
+
+This subsection covers a rollback from 0.9.12 or from 0.9.13. What it says
+was read from the source of the releases; no rollback to 0.9.11 was run.
+
+0.9.11 opens what 0.9.12 and 0.9.13 write: the store versions are the same
+(see the top of this section), so no store refuses the older binary. Roll
+back Core, Meta and Connect together, with every process that shares a
+realm, a store or a mob, and the SDKs with their servers. Two stored forms
+differ:
+
+- Meta: the record of a failed lifecycle side effect gains an optional
+  `cause`. 0.9.12 and 0.9.13 write it only when the side effect did not run
+  because the realm's agent memory background budget did not admit it
+  (`budget_busy`). 0.9.11 reads such a record without the key: it shows the
+  side effect as failed, with the attempts and the error the record holds.
+- Connect: the downgrade item under "Connect 0.9.12" above.
+
+The comparison covers the store versions, the table definitions and the
+serialized types that changed between the releases. It is not an audit of
+every value a later release can store. The path that holds without that
+condition is the backup of the state root taken before the upgrade (step 2
+of "How to upgrade"): restoring it returns the state as it was then.
 
 ## Upgrading to 0.9.11
 

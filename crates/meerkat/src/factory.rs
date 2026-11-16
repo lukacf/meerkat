@@ -11545,11 +11545,13 @@ impl AgentFactory {
         // names in a tool vocabulary: the built-in families' (every tool a
         // family can provide, enabled here or not) and the declaring
         // configuration's own (mob operator and agent mob tools, declared MCP
-        // server tools, tool bundles). A known name this build did not mount
+        // server tools, tool bundles, and the stock tools the build's host
+        // names as its host tools). A known name this build did not mount
         // is inert; any other name (stale or mistyped) is a typed
         // configuration error, never a silently inert entry. External tools
         // outside every vocabulary (a host's undeclared MCP or provider
-        // tools) stay unknown.
+        // tools) stay unknown; one whose name a vocabulary declares is
+        // denied by that name like any tool.
         if let Some(restriction) = &declared_tool_restriction {
             let builtin_vocabulary = builtin_tool_vocabulary();
             let tool_defs = tools.tools();

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A profile that lists `ask_user` in `tools.deny` can be used for every
+  member. In 0.9.15 a member whose host decides the member's tool surface
+  itself (a host that installs a member registration hook) is given no
+  stock `ask_user`, so on such a member the deny named a tool that was in
+  none of the profile's tool vocabularies, and the member's build was
+  refused:
+  `profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`.
+  The same refusal met a member whose host supplies its own tool named
+  `ask_user` among the build's external tools. The stock name is now one
+  a deny list may name on every member build, whether or not Meta puts the
+  tool on it. Such a member builds, its model is offered no tool named
+  `ask_user`, and a call its model makes to that name anyway is refused as
+  not allowed by policy. For a host's own tool of that name the deny does
+  what it does to every tool: the tool is not offered and a call never
+  reaches it. Which members are offered the stock tool is unchanged, and
+  there is no new setting. A name in `tools.deny` that is in no tool
+  vocabulary and is no stock tool's name (a typo such as `ask_usr`) still
+  fails the member's build with `DeclaredToolUnknown`; the vocabularies
+  that refusal lists now include `host tools`. Affected: 0.9.15 only.
+  Releases through 0.9.14 have no stock `ask_user` (read from the 0.9.14
+  tags: neither Meta nor Meerkat has the tool there, and the deny check is
+  the same), so there a profile had no reason to deny the name.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

@@ -33,6 +33,21 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+### Fixed
+
+- A profile used for agents hosted by Connect's native host may list
+  `ask_user` in `tools.deny`. In 0.9.15 the build of such an agent was
+  refused with the deny
+  (`profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`):
+  the native host decides its members' tool surface itself, so they are
+  given no stock `ask_user`, and the deny named a tool no part of their
+  build knew. Meerkat Meta now knows the stock name on every member build
+  (see the Meta changelog), so a profile shared with a Meta gateway, where
+  the deny is the documented way to keep the tool from a member, builds on
+  the native host too. Its agents are still not offered the tool, with the
+  deny or without it. Affected: 0.9.15 only (0.9.14 has no stock
+  `ask_user`).
+
 ## [0.9.15] - 2026-11-15
 
 ### Fixed

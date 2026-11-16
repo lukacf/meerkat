@@ -2290,6 +2290,131 @@ async fn a_build_through_its_registrations_surface_gate_gets_no_tool() {
     );
 }
 
+/// Every member build that carries a declared tool restriction is told the
+/// stock names as names of its host tools, whether or not the tool is
+/// mounted on it: a plain member build (mounted), a build whose external
+/// tools already name `ask_user` (not mounted) and a build through its
+/// registration's tool-surface gate (not mounted). So a restriction that
+/// denies `ask_user` names a known tool on each. What is declared is the
+/// stock names, beside the vocabularies the restriction already had. A
+/// member build without a declared restriction gets none made for it, and
+/// a request that is not a member build is not touched.
+#[tokio::test]
+async fn every_member_build_is_told_the_stock_names_mounted_or_not() {
+    use meerkat_core::ToolVocabularySource;
+    fn restricted(
+        mut request: meerkat_core::service::CreateSessionRequest,
+    ) -> meerkat_core::service::CreateSessionRequest {
+        request
+            .build
+            .as_mut()
+            .expect("build options")
+            .declared_tool_restriction = Some(meerkat_core::ops::DeclaredToolRestriction {
+            declared_by: "profile 'worker'".to_string(),
+            enabled_families: vec!["comms".to_string()],
+            read_only: false,
+            deny: [ASK_USER_TOOL].into_iter().collect(),
+            vocabulary: [(
+                ToolVocabularySource::MobOperator,
+                ["spawn_member"].into_iter().collect(),
+            )]
+            .into_iter()
+            .collect(),
+            deferred_mcp_servers: std::collections::BTreeSet::new(),
+        });
+        request
+    }
+    /// The names the build's restriction lists under `source`, sorted; none
+    /// when it lists no such source or the build has no restriction.
+    fn declared(
+        request: &meerkat_core::service::CreateSessionRequest,
+        source: &ToolVocabularySource,
+    ) -> Option<Vec<String>> {
+        let names = build_of(request)
+            .declared_tool_restriction
+            .as_ref()?
+            .vocabulary
+            .get(source)?;
+        let mut names: Vec<String> = names.iter().map(ToString::to_string).collect();
+        names.sort();
+        Some(names)
+    }
+    let stock = Some(vec![ASK_USER_TOOL.to_string()]);
+    let slot = AskUserSlot::default();
+
+    let mut mounted = restricted(build_request(Some("agent-a"), None));
+    slot.mount(&mut mounted);
+    assert_eq!(
+        names_of(build_of(&mounted).host_tools.as_ref()),
+        vec![ASK_USER_TOOL.to_string()]
+    );
+    assert_eq!(declared(&mounted, &ToolVocabularySource::HostTools), stock);
+    assert_eq!(
+        declared(&mounted, &ToolVocabularySource::MobOperator),
+        Some(vec!["spawn_member".to_string()]),
+        "the vocabularies the restriction had stay"
+    );
+
+    let mut own = restricted(build_request(
+        Some("agent-a"),
+        Some(Named::of(&[ASK_USER_TOOL])),
+    ));
+    slot.mount(&mut own);
+    assert!(build_of(&own).host_tools.is_none());
+    assert_eq!(
+        declared(&own, &ToolVocabularySource::HostTools),
+        stock,
+        "a build with its own ask_user is told the stock names too"
+    );
+
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let session = meerkat_core::types::SessionId::new();
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("register the member's session");
+    let registration = machine
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the registration is current");
+    let bindings = machine
+        .prepare_bindings(session)
+        .await
+        .expect("prepare the registration's bindings");
+    machine
+        .bind_session_tool_surface_gate(&registration, Arc::new(NeverAsked))
+        .await
+        .expect("install the host's gate");
+    let mut gated = restricted(build_request(Some("agent-a"), None));
+    gated
+        .build
+        .as_mut()
+        .expect("build options")
+        .runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+    slot.mount(&mut gated);
+    assert!(build_of(&gated).host_tools.is_none());
+    assert_eq!(
+        declared(&gated, &ToolVocabularySource::HostTools),
+        stock,
+        "a build through its registration's gate is told the stock names too"
+    );
+
+    let mut unrestricted = build_request(Some("agent-a"), None);
+    slot.mount(&mut unrestricted);
+    assert!(
+        build_of(&unrestricted).declared_tool_restriction.is_none(),
+        "a member build that declares no restriction gets none made for it"
+    );
+
+    let mut plain = restricted(build_request(None, None));
+    slot.mount(&mut plain);
+    assert_eq!(
+        declared(&plain, &ToolVocabularySource::HostTools),
+        None,
+        "a request that is not a member build is not touched"
+    );
+}
+
 /// Meta's capability invariant judges the dispatchers a build supplies to
 /// the factory. The tool's dispatcher is exact, so the invariant judges
 /// every build with the tool as it judges it without. The build's host

@@ -35,6 +35,22 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-core`: `ToolVocabularySource::HostTools`, one more source of
+  names a declared deny list (`DeclaredToolRestriction::deny`) may name:
+  the stock tools the host of a build puts on its builds as host tools
+  (`SessionBuildOptions::host_tools`), named whether or not this build
+  carries them. A host lists them in `DeclaredToolRestriction::vocabulary`
+  under that source, and the factory's deny check treats each as it treats
+  a name of every other vocabulary: an inert entry on a build no tool of
+  which has the name, and on a build where another part of the surface has
+  it, an external tool included, the deny hides that tool and refuses its
+  calls, by name. `DeclaredToolUnknown` lists the source as `host tools`.
+  The enum is `#[non_exhaustive]`, and no existing variant, field or
+  signature changes. Meerkat Meta declares its stock `ask_user` this way
+  (see the Meta changelog).
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

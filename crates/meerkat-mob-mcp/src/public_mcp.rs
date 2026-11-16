@@ -1501,6 +1501,11 @@ fn build_spawn_spec(
     auth_binding: Option<WireAuthBindingRef>,
     placement: Option<String>,
 ) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
+    // Caller labels and context pass the shared public metadata rule before
+    // anything else of the spec is read, as on the JSON-RPC spawn methods: a
+    // key Meerkat reserves for its own runtime facts is invalid params.
+    meerkat::surface::validate_public_surface_metadata(labels.as_ref(), context.as_ref())
+        .map_err(McpToolError::invalid_params)?;
     let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str())
         .with_creation_source(meerkat_mob::MemberCreationSourceWitness::unavailable());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;

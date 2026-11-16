@@ -803,33 +803,12 @@ impl JobManager {
         .await
     }
 
-    /// Like [`Self::spawn_monitor_for_call`], recording the run the call
-    /// belongs to in the monitor's process custody, so interrupted-run
-    /// evidence covers monitors like any other tool process.
-    pub(crate) async fn spawn_monitor_for_call_in_run(
-        &self,
-        command: &str,
-        working_dir: Option<&Path>,
-        timeout_secs: u64,
-        tool_call_id: &str,
-        run_id: Option<&meerkat_core::RunId>,
-        options: MonitorStartOptions,
-    ) -> Result<JobId, ShellError> {
-        self.spawn_monitor_for_call_in_run_entering(
-            command,
-            working_dir,
-            timeout_secs,
-            tool_call_id,
-            run_id,
-            options,
-            None,
-        )
-        .await
-    }
-
-    /// Like [`Self::spawn_monitor_for_call_in_run`], running the call's single
-    /// native entry step immediately before the durable job handoff, after
-    /// every local validation step. A refusal publishes no job.
+    /// The session's own tool starts a monitor. Like
+    /// [`Self::spawn_monitor_for_call`], recording the run the call belongs to
+    /// in the monitor's process custody, so interrupted-run evidence covers
+    /// monitors like any other tool process, and running the call's single
+    /// native entry step, when it has one, immediately before the durable job
+    /// handoff, after every local validation step. A refusal publishes no job.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn_monitor_for_call_in_run_entering(
         &self,
@@ -4923,13 +4902,14 @@ mod durable_tests {
         let run_id = meerkat_core::RunId::new();
 
         manager
-            .spawn_monitor_for_call_in_run(
+            .spawn_monitor_for_call_in_run_entering(
                 &command,
                 None,
                 5,
                 "tool-call-monitor",
                 Some(&run_id),
                 MonitorStartOptions::default(),
+                None,
             )
             .await
             .expect("spawn monitor");

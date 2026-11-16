@@ -15,7 +15,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::{BlobStore, SessionId};
-use meerkat_jobs::{DetachedJobService, DetachedJobStore, SqliteDetachedJobStore};
+use meerkat_jobs::{
+    AttemptClaim, CanonicalArgumentsHash, DetachedJobService, DetachedJobStore, ExecutionIntentId,
+    InteractionLineageId, JobSpec, JobSubmissionKey, RestartClass, RunnerHandleRef, RunnerIdentity,
+    SqliteDetachedJobStore, ToolIdentity, WorkerId,
+};
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use meerkat_store::FsBlobStore;
 use serde_json::json;
@@ -101,6 +105,55 @@ impl Host {
                     .with_durable_job_runtime(runtime),
             ),
         }
+    }
+
+    /// A job the shell tools did not start: a host's own durable job with
+    /// its own runner, recorded for `session` under `realm_tag`. It waits in
+    /// the queue, or a host worker runs it under a long lease.
+    async fn host_job(
+        &self,
+        realm_tag: &str,
+        session: &SessionId,
+        name: &str,
+        running: bool,
+    ) -> String {
+        let service = DetachedJobService::new(self.store.clone());
+        let receipt = service
+            .submit(JobSpec::new(
+                realm_tag,
+                session.clone(),
+                ExecutionIntentId::from_string(format!("host-intent-{name}")).unwrap(),
+                InteractionLineageId::from_string(format!("host-lineage-{name}")).unwrap(),
+                ToolIdentity::new("host_tool", "v1").unwrap(),
+                RunnerIdentity::new("host.runner", "v1").unwrap(),
+                RestartClass::NonResumable,
+                CanonicalArgumentsHash::new(format!("host-arguments-{name}")).unwrap(),
+                JobSubmissionKey::new(format!("host:{name}")).unwrap(),
+            ))
+            .await
+            .unwrap();
+        if running {
+            let now_ms = u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap();
+            service
+                .claim_attempt(
+                    &receipt.job_id,
+                    AttemptClaim::new(
+                        WorkerId::new("host-worker").unwrap(),
+                        now_ms,
+                        now_ms.saturating_add(3_600_000),
+                        RunnerHandleRef::new(format!("host-runner:{name}")).unwrap(),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        receipt.job_id.to_string()
     }
 
     async fn snapshot(&self, job_id: &str) -> meerkat_jobs::JobSnapshot {
@@ -473,6 +526,50 @@ async fn a_job_held_in_another_sessions_memory_answers_as_an_unknown_job() {
         .await
         .expect("the owner cancels its job");
     assert!(cancelled.contains("\"cancelled\""), "{cancelled}");
+}
+
+/// The store also holds jobs the shell tools did not start. Such a job is no
+/// shell job of any session, the one it is recorded for included: its status
+/// answers as an unknown id.
+#[tokio::test]
+async fn a_job_of_another_kind_reads_as_an_unknown_job() {
+    let host = Host::new();
+    let session = SessionId::new();
+    let seat = host.seat(PLAIN_REALM, &session);
+    let other = host.seat(PLAIN_REALM, &SessionId::new());
+    let queued = host.host_job(PLAIN_REALM, &session, "queued", false).await;
+    let running = host.host_job(PLAIN_REALM, &session, "running", true).await;
+
+    for asker in [&seat, &other] {
+        for job_id in [&queued, &running] {
+            asker
+                .assert_reads_as_unknown(Door::Status, job_id, &["runner", "specification"])
+                .await;
+        }
+    }
+    host.assert_untouched(&queued).await;
+    host.assert_untouched(&running).await;
+}
+
+/// A cancel by the shell tools reaches shell jobs only: a job of another kind
+/// answers as an unknown id and nothing is requested for it.
+#[tokio::test]
+async fn a_cancel_of_a_job_of_another_kind_answers_as_an_unknown_job_and_requests_nothing() {
+    let host = Host::new();
+    let session = SessionId::new();
+    let seat = host.seat(PLAIN_REALM, &session);
+    let other = host.seat(PLAIN_REALM, &SessionId::new());
+    let queued = host.host_job(PLAIN_REALM, &session, "queued", false).await;
+    let running = host.host_job(PLAIN_REALM, &session, "running", true).await;
+
+    for asker in [&seat, &other] {
+        for job_id in [&running, &queued] {
+            asker
+                .assert_reads_as_unknown(Door::Cancel, job_id, &["cancel"])
+                .await;
+            host.assert_untouched(job_id).await;
+        }
+    }
 }
 
 /// Controls: each session reads, lists and cancels exactly its own jobs.

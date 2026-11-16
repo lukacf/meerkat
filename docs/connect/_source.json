@@ -5,7 +5,7 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "ac07bf740e3d0c7f8e5bcbef0ca756848d149ac9",
+  "source_docs_tree": "1540a78e353167412c5231c2bb0c9f6616e2d9f7",
   "connect_source_state": "monorepo_sync",
   "connect_source_version": "0.9.15",
   "existing_products_unchanged": true,
@@ -14,7 +14,7 @@
     "The source pages already use neutral names (the connect/ sync); rendering adds the /connect prefix to root-relative links outside fenced code blocks."
   ],
   "pages": 52,
-  "fenced_blocks_preserved": 71,
+  "fenced_blocks_preserved": 72,
   "namespaced_links": 203,
   "files": [
     {
@@ -64,8 +64,8 @@
     },
     {
       "path": "contributing/validation.mdx",
-      "source_sha256": "317c0cf6f616d85aa46255802a118e2767f608967cca7b7f52b77877d6d9c642",
-      "rendered_sha256": "131c9364b9cabf54c9c3a9da3aa29c726ab8dfff821218909cd09d4d7466d1b4"
+      "source_sha256": "de463c23721541447eb7d3f63df98def193caa34de7391d4611b4bb8c4ff2c6e",
+      "rendered_sha256": "ed3a392b335c4c9eac7c06b44d6d73aa2271ee28107d41d623606a0adbfc7341"
     },
     {
       "path": "examples/device-extension.mdx",

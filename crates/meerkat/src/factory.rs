@@ -11545,11 +11545,13 @@ impl AgentFactory {
         // names in a tool vocabulary: the built-in families' (every tool a
         // family can provide, enabled here or not) and the declaring
         // configuration's own (mob operator and agent mob tools, declared MCP
-        // server tools, tool bundles). A known name this build did not mount
+        // server tools, tool bundles, and the stock tools the build's host
+        // names as its host tools). A known name this build did not mount
         // is inert; any other name (stale or mistyped) is a typed
         // configuration error, never a silently inert entry. External tools
         // outside every vocabulary (a host's undeclared MCP or provider
-        // tools) stay unknown.
+        // tools) stay unknown; one whose name a vocabulary declares is
+        // denied by that name like any tool.
         if let Some(restriction) = &declared_tool_restriction {
             let builtin_vocabulary = builtin_tool_vocabulary();
             let tool_defs = tools.tools();
@@ -29372,6 +29374,85 @@ mod prepared_agent_tests {
             selection("host", &surface).binding,
             "the session records the selected policy"
         );
+    }
+
+    /// A deny the build declares holds on a prepared construction as on a
+    /// plain one. A denied tool the build composed stays among the surface's
+    /// tools (the upper bound its host is shown) and leaves its projection,
+    /// and the finished agent refuses a call to it as denied. A denied name
+    /// that no tool of the build has (here one its host names among its host
+    /// tools) does not refuse the build, and a call to it is answered as a
+    /// call to any name the build does not have: not found.
+    #[tokio::test]
+    async fn a_declared_deny_holds_on_a_prepared_construction() {
+        let factory = AgentFactory::minimal().builtins(true);
+        let config = Config::default();
+        let snapshots = Arc::new(AtomicUsize::new(0));
+        let plain = factory
+            .prepare_agent(governed("host", &snapshots), &config)
+            .await
+            .expect("prepared");
+        let composed = plain
+            .tool_surface()
+            .projected
+            .first()
+            .expect("the builtins are composed")
+            .name
+            .to_string();
+        plain.abort().await;
+
+        let mut build = governed("host", &snapshots);
+        build.declared_tool_restriction = Some(meerkat_core::ops::DeclaredToolRestriction {
+            declared_by: "profile 'worker'".to_string(),
+            enabled_families: vec!["builtins".to_string()],
+            read_only: false,
+            deny: [composed.as_str(), "stock_probe"].into_iter().collect(),
+            vocabulary: [(
+                meerkat_core::ToolVocabularySource::HostTools,
+                ["stock_probe"].into_iter().collect(),
+            )]
+            .into_iter()
+            .collect(),
+            deferred_mcp_servers: std::collections::BTreeSet::new(),
+        });
+        let prepared = factory
+            .prepare_agent(build, &config)
+            .await
+            .expect("a deny of a composed tool and of a host tools name prepares");
+        let surface = prepared.tool_surface().clone();
+        let names = |tools: &[meerkat_core::ToolIdentity], name: &str| {
+            tools.iter().any(|tool| tool.name.as_str() == name)
+        };
+        assert!(
+            names(&surface.tools, &composed) && !names(&surface.projected, &composed),
+            "the denied tool is in the surface and not in its projection: {surface:?}"
+        );
+        assert!(
+            !names(&surface.tools, "stock_probe"),
+            "no tool of the build has the host tools name"
+        );
+        let (mut agent, _controller) = factory
+            .finish_agent(prepared, selection("host", &surface))
+            .await
+            .expect("finished");
+        for (name, answer) in [
+            (composed.as_str(), "access_denied"),
+            ("stock_probe", "tool_not_found"),
+        ] {
+            let outcome = agent
+                .dispatch_external_tool_call(meerkat_core::ToolCall::new(
+                    format!("call-{name}"),
+                    name.to_string(),
+                    serde_json::json!({}),
+                ))
+                .await
+                .expect("a refused call is a tool result, not a dispatch fault");
+            let text = outcome.result.text_content();
+            assert!(
+                outcome.result.is_error && text.contains(answer),
+                "a call to the denied {name} is answered {answer}: {text}"
+            );
+        }
     }
 
     #[tokio::test]

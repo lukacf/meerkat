@@ -520,7 +520,10 @@ pub struct DeclaredToolRestriction {
     pub deny: ToolNameSet,
     /// The tool names the declaring configuration owns, by source: the mob
     /// operator and agent mob tools, the exposed names of the MCP servers it
-    /// declares, and its tool bundles. A bundle the configuration opted into
+    /// declares, and its tool bundles. The build's host adds the names of the
+    /// stock tools it puts on its builds
+    /// ([`ToolVocabularySource::HostTools`]), so a deny list may name one on
+    /// a build that carries none. A bundle the configuration opted into
     /// but this build withheld is listed as
     /// [`ToolVocabularySource::WithheldBundle`] with no names: its tools
     /// cannot be known, so while one is listed a deny name in no vocabulary
@@ -552,6 +555,14 @@ pub enum ToolVocabularySource {
     /// withheld, because the host does not offer it to this build. It names
     /// no tools.
     WithheldBundle(String),
+    /// The stock tools the build's host puts on its builds as host tools
+    /// (`SessionBuildOptions::host_tools`), named by the host whether or not
+    /// this build carries them. A deny list may then name such a tool on
+    /// every build of that host: the entry is inert on a build no tool of
+    /// which has the name, and on a build where another part of the surface
+    /// has it (an external tool, for one) the deny hides and refuses that
+    /// tool, as it does every tool, by name.
+    HostTools,
 }
 
 impl std::fmt::Display for ToolVocabularySource {
@@ -563,6 +574,7 @@ impl std::fmt::Display for ToolVocabularySource {
             Self::McpServer(server) => write!(f, "MCP server '{server}'"),
             Self::Bundle(bundle) => write!(f, "tool bundle '{bundle}'"),
             Self::WithheldBundle(bundle) => write!(f, "withheld tool bundle '{bundle}'"),
+            Self::HostTools => f.write_str("host tools"),
         }
     }
 }

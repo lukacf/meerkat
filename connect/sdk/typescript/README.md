@@ -1,9 +1,13 @@
 # Meerkat Toolkit TypeScript operations
 
-## Install the tagged 0.9.0 release
+## Install a release
+
+Set `VERSION` to the Connect release you run; the
+[TypeScript SDK page](https://docs.rkat.ai/connect/sdks/typescript) names the
+current one.
 
 ```sh
-npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/rkat-toolkit-0.9.0.tgz
+npm install "https://github.com/lukacf/meerkat/releases/download/connect-v$VERSION/rkat-toolkit-$VERSION.tgz"
 ```
 
 This is the Connect release asset, not a Toolkit npm registry selection.

@@ -481,9 +481,10 @@ the realm's own installation (`rkat mcp add --scope realm`) with an operation
 ceiling (`--allow-operation`). A server from `mcp.toml`, one the realm
 inherits from a parent, and an installation without a ceiling are refused
 before the server is started (`attachment authority is unavailable`), and
-their tools are not offered. Installing the server with its ceiling and then
-granting it (`realm grant --mcp`) works, also when the realm is already
-governed.
+their tools are not offered. Install the server with its ceiling first, then
+grant it (`realm grant --mcp`): a grant for a server that is not one of the
+realm's own installations is refused. Both steps work when the realm is
+already governed.
 
 `realm revoke-grant` revokes the grant selected for one target and exits
 successfully only when it is revoked. Use the global `--as-agent` to run as a

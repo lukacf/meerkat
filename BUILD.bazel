@@ -645,6 +645,7 @@ test_suite(
         "//crates/meerkat-cli:init_admission_fence_test",
         "//crates/meerkat-cli:mcp_convention_roots_test",
         "//crates/meerkat-cli:mcp_oauth_first_login_test",
+        "//crates/meerkat-cli:realm_create_then_govern_test",
         "//crates/meerkat-cli:run_json_failure_document_test",
         "//crates/meerkat-cli:run_provider_credential_echo_test",
         "//crates/meerkat-cli:run_reasoning_effort_families_test",

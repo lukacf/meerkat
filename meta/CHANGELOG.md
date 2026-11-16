@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The refusal a mob definition update gets for its revision
+  (`declare_spec_update` in Python, `declareSpecUpdate` in TypeScript, the
+  Rust `spec_update_ceremony`) now reads "the canonical definition for mob
+  <id> is at revision <stored>, not the expected revision <expected>; this
+  declaration did not change it; declare again with the current revision".
+  It said that the definition "moved from revision <expected> to <stored>
+  while the update was being declared", also when a declaration only named
+  another revision than the stored one. A host that reads the stored
+  revision out of the old sentence meets the new one, with both revisions
+  still in it as numbers. The error's type, its code (`-32014`) and its
+  fields are unchanged.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

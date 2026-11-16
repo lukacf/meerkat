@@ -190,6 +190,74 @@ fn sidebar_identities(experience: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The `toml` blocks of a page that write an access configuration: a rule,
+/// a group, an approver or the switch.
+fn access_configuration_texts(page: &str) -> Vec<String> {
+    let mut texts = Vec::new();
+    let mut block: Option<String> = None;
+    for line in page.lines() {
+        match &mut block {
+            None if line.trim_end() == "```toml" => block = Some(String::new()),
+            None => {}
+            Some(text) if line.trim_end() == "```" => {
+                let writes_access = text.lines().any(|line| {
+                    ["[[rules]]", "[groups.", "[approvers.", "enabled ="]
+                        .iter()
+                        .any(|start| line.starts_with(start))
+                });
+                if writes_access {
+                    texts.push(std::mem::take(text));
+                }
+                block = None;
+            }
+            Some(text) => {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+    texts
+}
+
+/// Every access configuration the access control page shows is read whole:
+/// as a file it loads exactly when its typed parse and validation accept it,
+/// none is refused for a key, and the page's complete example loads.
+#[test]
+fn the_access_control_page_examples_load_as_files() {
+    let texts =
+        access_configuration_texts(include_str!("../../../docs/concepts/access-control.mdx"));
+    assert!(texts.len() >= 3, "the page's access texts: {}", texts.len());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut complete_examples = 0;
+    for (index, text) in texts.iter().enumerate() {
+        let path = dir.path().join(format!("access-{index}.toml"));
+        std::fs::write(&path, text).expect("write the access file");
+        let accepted = toml::from_str::<AccessControlConfig>(text)
+            .map_err(|error| error.to_string())
+            .and_then(|config| {
+                AccessController::new(config)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+        let loaded = AccessController::load(&path)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        assert_eq!(
+            loaded.is_ok(),
+            accepted.is_ok(),
+            "as a file: {loaded:?}; as a configuration: {accepted:?}\n{text}"
+        );
+        if let Err(refusal) = &loaded {
+            assert!(!refusal.contains("unknown key"), "{refusal}\n{text}");
+        }
+        if text.contains("[[rules]]") {
+            assert_eq!(loaded, Ok(()), "{text}");
+            complete_examples += 1;
+        }
+    }
+    assert_eq!(complete_examples, 1, "the page's complete example");
+}
+
 /// Under enforced access each agent's affordances say whether the caller may
 /// change its console schedules (`can_manage_schedules`): `agent.send` and
 /// `schedule.manage` on it. A configuration that names no schedule action

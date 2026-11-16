@@ -8,7 +8,8 @@ as the conversation progresses.
 ## What This Shows
 
 - OpenAI live audio transport through the Meerkat Python SDK
-- `LiveChannel.session(...)` lifecycle wrapper
+- A live channel on a mob member, opened, committed and closed through its mob
+  (`mob.member_live_open(...)`, `member_live_control`, `member_live_close`)
 - Inline Meerkat mob skills
 - Python callback tools invoked from a live turn
 - Helper sub-agents spawned through a Meerkat mob
@@ -55,8 +56,9 @@ Say:
 - "What notes have you saved?"
 
 The first prompt should trigger the `voice_session_note` callback tool. The
-second should trigger `delegate_to_mob`, which spawns a helper member in the
-same mob and prints the helper's final output when it is available.
+second should trigger `delegate_to_mob`, which runs a helper member in the
+same mob (`mob.spawn_helper(...)`) and prints the helper's output when it
+returns.
 
 ## Options
 
@@ -64,7 +66,7 @@ same mob and prints the helper's final output when it is available.
 python3 examples/036-realtime-audio-py/main.py --help
 python3 examples/036-realtime-audio-py/main.py --text-probe
 python3 examples/036-realtime-audio-py/main.py --input-device 1 --output-device 2
-python3 examples/036-realtime-audio-py/main.py --helper-model gpt-5.5
+python3 examples/036-realtime-audio-py/main.py --helper-model gpt-6-astra
 python3 examples/036-realtime-audio-py/main.py --realm live-demo
 ```
 

@@ -24,12 +24,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from meerkat import MeerkatClient, LiveChannel
+from meerkat import MeerkatClient
 from playback import Playback
 
 
 DEFAULT_LIVE_MODEL = "gpt-realtime-2"
-DEFAULT_HELPER_MODEL = "gpt-5.5"
+DEFAULT_HELPER_MODEL = "gpt-6-astra"
+HELPER_OUTPUT_MAX_BYTES = 4000
 HOST_IDENTITY = "voice-host"
 
 
@@ -93,8 +94,6 @@ class SharedState:
     mob: Any | None = None
     notes: list[str] = field(default_factory=list)
     delegation_queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
-    helper_ids: set[str] = field(default_factory=set)
-    printed_helpers: set[str] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -343,8 +342,8 @@ async def create_voice_mob(
     client: MeerkatClient,
     args: argparse.Namespace,
     printer: TranscriptPrinter,
-) -> tuple[Any, str]:
-    """Create a mob with a voice host member and return (mob, host_session_id)."""
+) -> Any:
+    """Create a mob with a voice host member, wait until it is seated, return the mob."""
     mob_id = f"live-audio-{uuid4().hex[:8]}"
     mob = await client.create_mob(
         definition=build_mob_definition(
@@ -364,26 +363,8 @@ async def create_voice_mob(
         runtime_mode="turn_driven",
     )
     printer.mob(f"spawned {HOST_IDENTITY}")
-    session_id = await wait_for_host_session(mob, printer)
-    return mob, session_id
-
-
-async def poll_helpers(state: SharedState, printer: TranscriptPrinter, stop_event: asyncio.Event) -> None:
-    while not stop_event.is_set():
-        await asyncio.sleep(1.0)
-        async with state.lock:
-            pending = sorted(state.helper_ids - state.printed_helpers)
-            mob = state.mob
-        if mob is None:
-            continue
-        for helper_id in pending:
-            with contextlib.suppress(Exception):
-                status = await mob.member_status(helper_id)
-                if status.get("is_final"):
-                    preview = str(status.get("output_preview", "")).strip()
-                    printer.mob(f"{helper_id} final: {preview or status.get('status')}")
-                    async with state.lock:
-                        state.printed_helpers.add(helper_id)
+    await wait_for_host_session(mob, printer)
+    return mob
 
 
 async def delegation_worker(state: SharedState, printer: TranscriptPrinter, stop_event: asyncio.Event) -> None:
@@ -397,16 +378,19 @@ async def delegation_worker(state: SharedState, printer: TranscriptPrinter, stop
             continue
 
         helper_id = f"helper-{uuid4().hex[:8]}"
+        printer.mob(f"delegated to {helper_id}: {prompt}")
         try:
-            await state.mob.spawn(
-                profile="helper",
+            # The mob runs the helper to the end of its turn, returns its
+            # output and retires it.
+            result = await state.mob.spawn_helper(
+                prompt,
+                result_label="helper",
+                max_text_bytes=HELPER_OUTPUT_MAX_BYTES,
                 agent_identity=helper_id,
-                initial_message=prompt,
-                runtime_mode="turn_driven",
+                role_name="helper",
             )
-            async with state.lock:
-                state.helper_ids.add(helper_id)
-            printer.mob(f"delegated to {helper_id}: {prompt}")
+            output = str(read_field(result, "output", "")).strip()
+            printer.mob(f"{helper_id} final: {output or '(no output)'}")
         except Exception as exc:
             printer.mob(f"delegation failed: {exc}")
 
@@ -596,7 +580,7 @@ async def wait_for_first_event(
 
 async def run_text_probe(
     connection: Any,
-    channel: LiveChannel,
+    channel: MemberLiveChannel,
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
     signals: TextProbeSignals,
@@ -611,7 +595,7 @@ async def run_text_probe(
             ),
         }
     )
-    await channel.commit_input(response_modality="text")
+    await channel.commit_input()
     printer.status("text probe sent; waiting for a tool request or turn completion event")
     completed = await wait_for_first_event(
         {
@@ -673,7 +657,7 @@ async def wait_for_enter(stop_event: asyncio.Event) -> None:
         await asyncio.gather(stop_waiter, return_exceptions=True)
 
 
-def require_audio_capabilities(open_result: dict[str, Any]) -> tuple[AudioFormat, AudioFormat]:
+def require_audio_capabilities(open_result: Any) -> tuple[AudioFormat, AudioFormat]:
     capabilities = read_field(open_result, "capabilities", {})
     if not read_field(capabilities, "audio_in", False):
         raise RuntimeError(
@@ -687,7 +671,7 @@ def require_audio_capabilities(open_result: dict[str, Any]) -> tuple[AudioFormat
     return pcm_24k_mono, pcm_24k_mono
 
 
-def require_text_capabilities(open_result: dict[str, Any]) -> None:
+def require_text_capabilities(open_result: Any) -> None:
     capabilities = read_field(open_result, "capabilities", {})
     if not read_field(capabilities, "text_in", False):
         raise RuntimeError(
@@ -703,14 +687,14 @@ class LiveConnection:
     string on connect (no handshake frame). Client sends ``LiveInputChunk``
     JSON (``{"kind":"audio",...}``) or binary PCM. Server sends
     ``WireLiveAdapterObservation`` JSON. Commit/interrupt go through the
-    ``LiveChannel`` RPC methods, not through the WS.
+    channel RPC methods (see ``MemberLiveChannel``), not through the WS.
     """
 
     def __init__(self, websocket: Any):
         self._websocket = websocket
 
     @classmethod
-    async def connect(cls, open_result: dict[str, Any]) -> "LiveConnection":
+    async def connect(cls, open_result: Any) -> "LiveConnection":
         try:
             import websockets
         except ModuleNotFoundError as exc:
@@ -718,10 +702,10 @@ class LiveConnection:
                 "Install websockets: python3 -m pip install websockets"
             ) from exc
 
-        transport = open_result.get("transport", {})
-        url = transport.get("url", "")
+        transport = read_field(open_result, "transport", {})
+        url = read_field(transport, "url", "")
         if not url:
-            raise RuntimeError("live/open did not return a websocket transport URL")
+            raise RuntimeError("the live open did not return a websocket transport URL")
 
         websocket = await websockets.connect(url)
         return cls(websocket)
@@ -753,14 +737,53 @@ class LiveConnection:
         return json.loads(message)
 
 
-def build_live_channel(
-    client: MeerkatClient,
-    session_id: str,
-    args: argparse.Namespace,
-) -> LiveChannel:
-    return LiveChannel.session(
-        client,
-        session_id,
+class MemberLiveChannel:
+    """The live channel of a mob member, opened through its mob.
+
+    The voice host is a mob member, and a member session takes no
+    session-scoped ``live/open`` (``LiveChannel.session`` is for a standalone
+    session): the mob checks the member, then opens, controls and closes the
+    channel (``mob/member_live_open``, ``mob/member_live_control``,
+    ``mob/member_live_close``).
+    """
+
+    def __init__(self, mob: Any, agent_identity: str, *, turning_mode: str) -> None:
+        self._mob = mob
+        self._agent_identity = agent_identity
+        self._turning_mode = turning_mode
+        self._channel_id: str | None = None
+
+    async def open(self) -> Any:
+        result = await self._mob.member_live_open(
+            self._agent_identity,
+            turning_mode=self._turning_mode,
+        )
+        self._channel_id = str(read_field(result, "channel_id"))
+        return result
+
+    async def commit_input(self) -> Any:
+        return await self._mob.member_live_control(
+            self._agent_identity,
+            self._require_channel_id(),
+            {"verb": "commit_input"},
+        )
+
+    async def close(self) -> None:
+        if self._channel_id is None:
+            return
+        channel_id, self._channel_id = self._channel_id, None
+        await self._mob.member_live_close(self._agent_identity, channel_id)
+
+    def _require_channel_id(self) -> str:
+        if self._channel_id is None:
+            raise RuntimeError("the live channel is not open")
+        return self._channel_id
+
+
+def build_live_channel(mob: Any, args: argparse.Namespace) -> MemberLiveChannel:
+    return MemberLiveChannel(
+        mob,
+        HOST_IDENTITY,
         turning_mode="explicit_commit" if args.text_probe else "provider_managed",
     )
 
@@ -838,16 +861,17 @@ async def async_main(argv: list[str] | None = None) -> int:
     }
     playback = Playback(enabled=not (args.no_speaker or args.text_probe))
     connection = None
-    channel: LiveChannel | None = None
+    channel: MemberLiveChannel | None = None
     tasks: list[asyncio.Task[Any]] = []
+    probe_task: asyncio.Task[None] | None = None
     text_probe_signals = TextProbeSignals() if args.text_probe else None
 
     try:
         await client.connect(**connect_kwargs)
         client.require_capability("mob")
-        state.mob, host_session_id = await create_voice_mob(client, args, printer)
+        state.mob = await create_voice_mob(client, args, printer)
 
-        channel = build_live_channel(client, host_session_id, args)
+        channel = build_live_channel(state.mob, args)
         open_result = await channel.open()
         input_audio: AudioFormat | None = None
         output_audio: AudioFormat | None = None
@@ -873,19 +897,17 @@ async def async_main(argv: list[str] | None = None) -> int:
                 name="speaker",
             )
         )
-        tasks.append(asyncio.create_task(poll_helpers(state, printer, stop_event), name="helper poller"))
         tasks.append(asyncio.create_task(delegation_worker(state, printer, stop_event), name="delegation worker"))
         if not args.text_probe:
             tasks.append(asyncio.create_task(wait_for_enter(stop_event), name="stdin waiter"))
         if args.text_probe:
             if text_probe_signals is None:
                 raise RuntimeError("text probe signals were not initialized")
-            tasks.append(
-                asyncio.create_task(
-                    run_text_probe(connection, channel, printer, stop_event, text_probe_signals),
-                    name="text probe",
-                )
+            probe_task = asyncio.create_task(
+                run_text_probe(connection, channel, printer, stop_event, text_probe_signals),
+                name="text probe",
             )
+            tasks.append(probe_task)
         else:
             if input_audio is None:
                 raise RuntimeError("microphone streaming requires live audio input capabilities")
@@ -897,6 +919,11 @@ async def async_main(argv: list[str] | None = None) -> int:
             )
 
         await wait_for_stop_or_task_failure(stop_event, tasks)
+        if probe_task is not None:
+            # The probe decides the exit status. A channel that closed before
+            # the probe saw its event stops the receiver first; wait for the
+            # probe so that its failure is raised instead of a clean exit.
+            await probe_task
     finally:
         stop_event.set()
         if connection is not None:

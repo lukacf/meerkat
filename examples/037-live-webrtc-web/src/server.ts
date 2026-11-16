@@ -15,7 +15,7 @@ import {
 const EXAMPLE_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PUBLIC_ROOT = join(EXAMPLE_ROOT, "public");
 const DEFAULT_LIVE_MODEL = process.env.MEERKAT_LIVE_MODEL ?? "gpt-realtime-2";
-const DEFAULT_WORKER_MODEL = process.env.MEERKAT_LIVE_WORKER_MODEL ?? "gpt-5.5";
+const DEFAULT_WORKER_MODEL = process.env.MEERKAT_LIVE_WORKER_MODEL ?? "gpt-6-astra";
 
 interface ToolDefinition extends Record<string, unknown> {
   name: string;

@@ -319,12 +319,13 @@ The revision is the number of the mob definition a state directory holds. A
 store that holds its first definition is at revision 1, and each committed
 update adds one: the first update declares `expected_revision=1` and leaves
 the store at 2, the next declares 2. An exact retry of a committed update
-adds nothing, and a refused declaration changes nothing. In 0.9.15 no call
-of the Python or TypeScript SDK reads the revision, so a host keeps count of
-its own updates. When an update is committed, the gateway logs a warning on
-its standard error, `operator-declared mob spec update committed`, with
+adds nothing, and a refused declaration leaves the definition and its
+revision as they were. In 0.9.15 no call of the Python or TypeScript SDK
+returns the revision as a value of its own, so a host keeps count of its own
+updates. When an update is committed, the gateway logs a warning on its
+standard error, `operator-declared mob spec update committed`, with
 `previous_revision` and `committed_revision`. A host that has lost count can
-recover it only from the text of a refusal: a declaration that names another
+recover it from the text of a refusal: a declaration that names another
 number than the stored one is refused, and its message names the stored one
 (in 0.9.15 `... moved from revision <declared> to <stored> ...`; the error's
 typed fields do not carry the number).

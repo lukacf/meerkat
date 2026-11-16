@@ -245,7 +245,7 @@ signed peer codec.
 | `inproc://` | `inproc://agent-name` | In-process peer communication |
 
 <Accordion title="Transport details">
-**UDS transport**: Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path (existing files are removed first). Parent directories are created automatically.
+**UDS transport**: Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path. A socket file that a listener which has ended left there is removed first. A path that a live listener of another process holds is not taken over: the listener's start fails with an address-in-use error that names the path, and the other listener keeps the path. Parent directories are created automatically.
 
 **TCP transport**: TCP listeners are spawned by `spawn_tcp_listener()`. Accepts connections and processes each in a dedicated tokio task.
 

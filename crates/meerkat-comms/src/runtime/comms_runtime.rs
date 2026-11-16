@@ -4254,6 +4254,20 @@ impl ListenerHandle {
     }
 }
 
+/// Bind a listener at the socket path `path`, creating its directory. A
+/// socket file no listener holds is removed first; a live listener of
+/// another process at the path is kept and the bind refused
+/// ([`crate::transport::uds::BoundSocketListener`]).
+#[cfg(unix)]
+async fn bind_socket_listener(
+    path: &Path,
+) -> Result<crate::transport::uds::BoundSocketListener, std::io::Error> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    crate::transport::uds::BoundSocketListener::bind(path).await
+}
+
 #[cfg(unix)]
 async fn spawn_uds_listener(
     path: &Path,
@@ -4261,19 +4275,9 @@ async fn spawn_uds_listener(
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
-    use tokio::net::UnixListener;
-    let path = path.to_path_buf();
-    if let Err(err) = tokio::fs::remove_file(&path).await
-        && err.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(err);
-    }
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let listener = UnixListener::bind(&path)?;
+    let listener = bind_socket_listener(path).await?;
     let handle = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok(stream) = listener.accept().await {
             let (keypair, inbox_sender) = (keypair.clone(), inbox_sender.clone());
             tokio::spawn(async move {
                 let _ = handle_connection(stream, require_peer_auth, &keypair, &inbox_sender).await;
@@ -4711,23 +4715,13 @@ async fn spawn_plain_uds_listener(
     inbox_sender: InboxSender,
     max_line_length: usize,
 ) -> Result<ListenerHandle, std::io::Error> {
-    use tokio::net::UnixListener;
-    let path = path.to_path_buf();
-    if let Err(err) = tokio::fs::remove_file(&path).await
-        && err.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(err);
-    }
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let listener = UnixListener::bind(&path)?;
+    let listener = bind_socket_listener(path).await?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(PLAIN_LISTENER_MAX_CONCURRENT));
     // Shared typed ingress-fault counters across all connection tasks for this
     // listener (codec overflow / inbox-full backpressure).
     let faults = Arc::new(crate::plain_listener::PlainIngressFaults::default());
     let handle = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok(stream) = listener.accept().await {
             let sender = inbox_sender.clone();
             let sem = semaphore.clone();
             let faults = faults.clone();

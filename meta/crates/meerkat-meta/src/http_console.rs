@@ -6531,8 +6531,10 @@ const TOPOLOGY_APPLY_ENDPOINTS: &[ConsoleMemberField] = &[
 /// The member a method creates.
 const NEW_MEMBER: &[ConsoleMemberField] = &[recorded(&["agent_identity"])];
 
-/// The identity a method records something for under its `identity`.
-const RECORDED_IDENTITY: &[ConsoleMemberField] = &[recorded(&["identity"])];
+/// The identity a method remembers a fact for or defines a console schedule
+/// for, named under `identity` alone: a member the method acts on, so a
+/// member hidden from the caller is answered as a name no member holds.
+const IDENTITY_SUBJECT: &[ConsoleMemberField] = &[subject(&["identity"])];
 
 /// The agent a change or a read of the identity family names.
 const NAMED_AGENT: &[ConsoleMemberField] = &[subject(&["name"])];
@@ -6585,9 +6587,10 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
     let fields: &'static [ConsoleMemberField] = match method {
         // Methods that create the member they name.
         "meta/ensure_member" | "meta/spawn_helper" | "meta/attach_existing_session" => NEW_MEMBER,
-        // A remembered fact and a schedule are recorded for the identity
-        // they name.
-        "meta/agent_memory/remember" | "meta/schedule/create" => RECORDED_IDENTITY,
+        // A remembered fact and a console schedule are for the identity
+        // they name, under `identity` alone. Each handler refuses a name no
+        // member holds itself, before anything is written.
+        "meta/agent_memory/remember" | "meta/schedule/create" => IDENTITY_SUBJECT,
         // A fork creates its child and reads its source.
         "meta/fork_member" | "meta/fork_helper" => FORK_MEMBERS,
         // A role-targeted run's bound members.

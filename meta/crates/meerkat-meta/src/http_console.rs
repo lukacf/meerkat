@@ -3199,7 +3199,7 @@ async fn console_send_recover_handler(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    if let Err(refusal) = console_send_gate(
+    match console_send_gate(
         &state.decisions,
         state.runtime.as_ref(),
         state.console_aggregator.as_ref(),
@@ -3209,7 +3209,15 @@ async fn console_send_recover_handler(
     )
     .await
     {
-        return refusal.into_response();
+        Ok(()) => {}
+        // A recovery that names a member the caller may not know of goes on
+        // as one that names a name no member holds: it finds no send.
+        Err(ConsoleSendGateRefusal::UnknownIdentity(_)) => {
+            if let Some(named) = params.get_mut("identity") {
+                *named = Value::String(absent_member_spelling(&identity, &absent_name_nonce()));
+            }
+        }
+        Err(refusal) => return refusal.into_response(),
     }
     let Some(aggregator) = &state.console_aggregator else {
         return console_json_error(
@@ -3432,8 +3440,10 @@ impl ConsoleSendGateRefusal {
 /// The Console's stock send gate, the one implementation `/console/send` and
 /// [`ConsoleSendPrecheck`] run: the Console is writable, the target is a
 /// valid public member alias, it is no member the caller may not know of
-/// ([`AccessView::hides_agent`], answered as an unknown member, enforced
-/// access or not), and the caller's access view allows `agent.send` to it,
+/// ([`AccessView::hides_agent`], answered as a name no member holds is,
+/// enforced access or not: by the access rules where they refuse the caller
+/// a send to such a name, and as an unknown member otherwise), and the
+/// caller's access view allows `agent.send` to it,
 /// decided after the attribute cache is primed from the live roster: the
 /// local runtime's, else the runtimes of the Console's aggregator, each in
 /// its identity namespace.
@@ -3477,7 +3487,14 @@ async fn console_send_gate(
             (None, None) => {}
         }
     }
-    if access_view.is_some_and(|view| view.hides_agent(identity)) {
+    if let Some(view) = access_view.filter(|view| view.hides_agent(identity)) {
+        // A member the caller may not know of is answered as a name no
+        // member holds is: by the access rules where they refuse the caller
+        // a send to such a name, and as an unknown member otherwise.
+        let absent = absent_member_spelling(identity, &absent_name_nonce());
+        if view.enforced() && !view.allows_agent(ACTION_AGENT_SEND, &absent) {
+            return Err(ConsoleSendGateRefusal::AccessDenied);
+        }
         return Err(ConsoleSendGateRefusal::UnknownIdentity(
             ConsoleSendError::UnknownIdentity(identity.to_string()).to_string(),
         ));

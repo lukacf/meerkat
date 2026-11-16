@@ -1013,6 +1013,24 @@ impl MobNativeDelivery {
         Ok(self.service()?.governs_work_authority())
     }
 
+    /// Whether the identity is kept apart from other callers: its registered
+    /// row carries the label that keeps a member apart. A peer gateway's
+    /// keyed delivery answers such an identity as one that is not
+    /// registered here; this gateway's own deliveries are not asked.
+    pub(crate) async fn kept_apart(
+        &self,
+        identity: &MemberIdentity,
+    ) -> Result<bool, NativeUnavailable> {
+        let identity = Self::agent_identity(identity)?;
+        Ok(self
+            .identities
+            .registered_spec(&identity)
+            .await
+            .is_ok_and(|registered| {
+                crate::access::private_owner(&registered.spec.labels).is_some()
+            }))
+    }
+
     /// Whether the identity is registered with this gateway, and if so
     /// whether this gateway's runtime serves it.
     pub async fn identity_service(

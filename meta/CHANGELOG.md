@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Behaviour-only: on the cross-mob control channel, a member that is kept
+  apart from other callers is answered as a name no member has by every
+  verb that names a member: `wire`, `unwire`, `inject`, `lookup_member`,
+  `inject_keyed` and `inject_status`, whatever the peer gateway's control
+  grant lists, a grant without `members` included. Nothing is wired to such
+  a member, nothing is admitted into its session, and its status reads as
+  no commit. While a gateway is still reading which of its members are kept
+  apart (after a start), the member verbs answer every name that way; they
+  answer as before once the read has succeeded. A member that is not kept
+  apart is answered as before. Rust: a host that builds its own
+  `MobHandleControlHandler` gets the roster entries' labels read; the
+  runtime's record of its members is read by the listener a runtime starts
+  (`start_control_listener`, `start_control_listener_with_authorizer`).
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

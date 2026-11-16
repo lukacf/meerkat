@@ -7050,7 +7050,8 @@ fn console_rpc_resolve_members_with(
         );
     let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
     let mut nonce: Option<String> = None;
-    for field in console_method_member_fields_or_subject(method) {
+    let fields = console_method_member_fields_or_subject(method);
+    for field in fields {
         visit_member_field(params, field.path, &mut |slot| {
             let Some(spelling) = slot.as_str().map(str::trim) else {
                 return Ok(());
@@ -7071,6 +7072,34 @@ fn console_rpc_resolve_members_with(
                 }
             }
         })?;
+    }
+    // The access rules judge every subject spelling a request carries
+    // ([`console_rpc_member_targets`]), one its method's entry does not
+    // list included. For a method that reads or acts on a member, a hidden
+    // member named under such a spelling is swapped too, under the same
+    // suffix, so the rules judge a name no member holds there as well. A
+    // value that is no string stays as it is.
+    if fields
+        .iter()
+        .any(|field| field.kind == ConsoleMemberFieldKind::Subject)
+    {
+        for spelling in SUBJECT_MEMBER {
+            let [key] = spelling.path else { continue };
+            if fields.iter().any(|field| field.path == spelling.path) {
+                continue;
+            }
+            let Some(slot) = params.get_mut(*key) else {
+                continue;
+            };
+            let Some(name) = slot.as_str().map(str::trim) else {
+                continue;
+            };
+            if !name.is_empty() && view.hides_agent(name) {
+                let nonce = nonce.get_or_insert_with(absent_name_nonce);
+                let absent = absent_member_spelling(name, nonce);
+                *slot = Value::String(absent);
+            }
+        }
     }
     Ok(ConsoleAbsentNames { nonce })
 }

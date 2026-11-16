@@ -52,21 +52,19 @@ impl ToolCallError {
 
 const MODEL_DESCRIPTION: &str = "\
 Available models: \
-claude-opus-5 (Anthropic, latest reasoning model), \
-claude-opus-4-8 (Anthropic, built-in advanced-pack default), \
-claude-sonnet-4-6 (Anthropic, fast + capable), \
-gpt-5.6-sol (OpenAI, frontier quality), \
-gpt-5.6-terra (OpenAI, balanced), \
-gpt-5.6-luna (OpenAI, efficient), \
-gpt-5.5 (OpenAI, prior generation), \
-gpt-5.5-pro (OpenAI, deep reasoning - slow, use sparingly), \
-gemini-3.1-pro-preview (Google, strong general), \
-gemini-3.1-flash-lite-preview (Google, fastest), \
-gemini-3.5-flash (Google, current fast model). \
-Default: gpt-5.5 (broadly available). \
-Guidance: use claude-opus-5/gpt-5.5-pro for complex reasoning (architecture, judging). \
-Use sonnet/gpt-5.5 for code tasks; use GPT-5.6 only with preview access. \
-Use gemini-3.1-flash-lite-preview for speed-sensitive roles. \
+claude-opus-5-5 (Anthropic, advanced reasoning, built-in advanced-pack default), \
+claude-sonnet-5-5 (Anthropic, fast + capable), \
+gpt-6-astra (OpenAI, general + code, built-in default), \
+gpt-6.1-sol (OpenAI, frontier quality), \
+gpt-6.1-terra (OpenAI, balanced), \
+gpt-6-luna (OpenAI, efficient), \
+gemini-4-argon (Google, strong general), \
+gemini-4-hydrogen (Google, current fast model), \
+gemini-3.5-flash-lite (Google, fastest). \
+Default: gpt-6-astra. \
+Guidance: use claude-opus-5-5 for complex reasoning (architecture, judging). \
+Use sonnet/gpt-6-astra for code tasks. \
+Use gemini-3.5-flash-lite for speed-sensitive roles. \
 Mix providers in multi-agent packs for perspective diversity";
 
 pub fn tools_list() -> Vec<Value> {
@@ -100,7 +98,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "model": {
                         "type": "string",
-                        "description": format!("Model to use (default: gpt-5.5). {MODEL_DESCRIPTION}")
+                        "description": format!("Model to use (default: gpt-6-astra). {MODEL_DESCRIPTION}")
                     },
                     "system_prompt": {
                         "type": "string",
@@ -157,7 +155,7 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
                         "description": format!(
-                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-8\", \"planner\": \"gpt-5.6-sol\"}}. \
+                            "Override models per role, e.g. {{\"critic\": \"claude-opus-5-5\", \"planner\": \"gpt-6.1-sol\"}}. \
                             Role names depend on the pack. {MODEL_DESCRIPTION}"
                         )
                     },
@@ -416,11 +414,11 @@ mod tests {
     fn advertised_model_defaults_are_current() {
         let schema = serde_json::to_string(&tools_list()).expect("tools schema serializes");
 
-        assert!(schema.contains("gpt-5.6-sol"));
-        assert!(schema.contains("gpt-5.6-terra"));
-        assert!(schema.contains("gpt-5.6-luna"));
-        assert!(schema.contains("claude-opus-4-8"));
-        assert!(!schema.contains("gpt-5.2"));
-        assert!(!schema.contains("gpt-5.4"));
+        for current in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "claude-opus-5-5", "gemini-4-argon"] {
+            assert!(schema.contains(current), "{current} is advertised");
+        }
+        for older in ["gpt-5.", "claude-opus-4", "claude-sonnet-4", "gemini-3.1"] {
+            assert!(!schema.contains(older), "{older}* is no longer advertised");
+        }
     }
 }

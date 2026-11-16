@@ -49,7 +49,7 @@ def check(binary, root):
         try:
             request("initialize", {})
             first = tool("consult", {
-                "question": "Reply exactly SYNTHETIC_OK.", "model": "gemini-3.5-flash",
+                "question": "Reply exactly SYNTHETIC_OK.", "model": "gemini-4-hydrogen",
                 "system_prompt": "Only return the requested literal. Never use tools.",
                 "shell": False,
             })

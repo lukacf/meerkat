@@ -37,7 +37,7 @@ impl Pack for RedTeamPack {
         profiles.insert(
             ProfileName::from("advocate"),
             turn_driven_profile(
-                resolve_model(overrides, "advocate", "gemini-3.1-flash-lite-preview"),
+                resolve_model(overrides, "advocate", "gemini-3.5-flash-lite"),
                 "advocate-skill",
                 "Advocate — argues in favor",
                 pp,
@@ -46,7 +46,7 @@ impl Pack for RedTeamPack {
         profiles.insert(
             ProfileName::from("adversary"),
             turn_driven_profile(
-                resolve_model(overrides, "adversary", "gpt-5.5"),
+                resolve_model(overrides, "adversary", "gpt-6-astra"),
                 "adversary-skill",
                 "Adversary — argues against",
                 pp,
@@ -55,7 +55,7 @@ impl Pack for RedTeamPack {
         profiles.insert(
             ProfileName::from("judge"),
             turn_driven_profile(
-                resolve_model(overrides, "judge", "claude-opus-4-8"),
+                resolve_model(overrides, "judge", "claude-opus-5-5"),
                 "judge-skill",
                 "Judge — balanced assessment",
                 pp,

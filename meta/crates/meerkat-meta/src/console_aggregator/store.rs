@@ -100,20 +100,100 @@ fn sql_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
         .join(", ")
 }
 
+/// Which frames a statement over `console_frames` takes on the log behind a
+/// connection.
+///
+/// A release that stores the frames of several mobs keeps them in this one
+/// table and, from schema version 4 on, each with its mob in `mob_id`: empty
+/// for a member of the mob the gateway was launched with. This release
+/// serves that mob alone. On such a log every statement over the frames
+/// therefore takes the rows whose `mob_id` is empty and no other: a frame of
+/// another mob is never read, changed or removed here. A log at version 3 or
+/// below has no such column and holds no such frame, and its statements are
+/// the ones they were.
+#[derive(Clone, Copy)]
+struct LaunchMobFrames {
+    /// The log is at schema version 4 or above: its frames name their mob.
+    moved: bool,
+}
+
+impl LaunchMobFrames {
+    /// Read from the log's own ledger row, with the connection held, by each
+    /// operation of the store before its statements: the answer is the
+    /// log's, whichever release moved it. An operation whose read fails
+    /// fails; it never runs a statement on a guess.
+    fn of(conn: &Connection) -> ConsoleLogResult<Self> {
+        let version: i64 = conn
+            .prepare_cached("SELECT version FROM meerkat_schema WHERE domain = ?1")
+            .and_then(|mut stamp| {
+                stamp.query_row(params![META_CONSOLE_DOMAIN.name], |row| row.get(0))
+            })
+            .map_err(into_boxed)?;
+        Ok(Self {
+            moved: version > META_CONSOLE_UNKEYED_DOMAIN.supported_version(),
+        })
+    }
+
+    /// The term for a statement that reads a member's frames or walks the
+    /// frames in cursor order. On a moved log the member index (`mob_id`,
+    /// `identity`, `cursor_seq`) serves a member's statement as the identity
+    /// index does on a log that was not moved, and the mob's cursor index
+    /// (`mob_id`, `cursor_seq`) serves a walk without reading another mob's
+    /// frames.
+    fn and_launch_mob(self) -> &'static str {
+        if self.moved { " AND mob_id = ''" } else { "" }
+    }
+
+    /// The term for a statement that finds its row another way: by its key,
+    /// its id or its conversation. The unary plus keeps the statement on
+    /// that index, as on a log that was not moved, and checks the found
+    /// row's mob.
+    fn and_launch_mobs_row(self) -> &'static str {
+        if self.moved { " AND +mob_id = ''" } else { "" }
+    }
+
+    /// The term for a page of frames: of a member (the member index), of a
+    /// conversation alone (its own index, the found rows checked), or of
+    /// the whole log (the mob's cursor index).
+    fn and(self, identity: Option<&str>, conversation_id: Option<&str>) -> &'static str {
+        if identity.is_none() && conversation_id.is_some() {
+            self.and_launch_mobs_row()
+        } else {
+            self.and_launch_mob()
+        }
+    }
+
+    /// [`Self::and_launch_mob`] for the row a compaction names
+    /// `superseding`.
+    fn and_superseding_launch_mob(self) -> &'static str {
+        if self.moved {
+            " AND superseding.mob_id = ''"
+        } else {
+            ""
+        }
+    }
+
+    /// The newest cursor among the launch mob's frames of a moved log.
+    const NEWEST_ON_A_MOVED_LOG: &'static str =
+        "SELECT cursor_seq FROM console_frames WHERE mob_id = '' ORDER BY cursor_seq DESC LIMIT 1";
+}
+
 /// One identity's newest activity time: a walk of
-/// `idx_console_frames_identity_cursor` through the identity's own frames,
-/// newest first, that stops at the first acting frame, never a scan of the
-/// log. It applies [`is_activity_frame`] in SQL.
-fn latest_activity_sql() -> String {
+/// `idx_console_frames_identity_cursor` (on a log at schema version 4, of
+/// the member index in its place) through the identity's own frames, newest
+/// first, that stops at the first acting frame, never a scan of the log. It
+/// applies [`is_activity_frame`] in SQL.
+fn latest_activity_sql(frames: LaunchMobFrames) -> String {
     let sources = sql_string_list(
         ACTIVITY_SOURCE_KINDS
             .iter()
             .map(ConsoleFrameSourceKind::as_str),
     );
     let excluded = sql_string_list(NON_ACTIVITY_EVENT_KINDS);
+    let launch_mob = frames.and_launch_mob();
     format!(
         "SELECT timestamp_ms FROM console_frames
-         WHERE identity = ?1
+         WHERE identity = ?1{launch_mob}
            AND source_kind IN ({sources})
            AND kind NOT IN ({excluded})
            AND kind NOT GLOB '{MEMORY_EVENT_KIND_PREFIX}*'
@@ -952,9 +1032,12 @@ pub struct SqliteConsoleLogStore {
     dedupe_durability: ConsoleSendDedupeDurability,
 }
 
-/// The console aggregator's schema domain in the per-file migration
-/// ledger. Migration 0001 is the historical two-table + two-index DDL.
-const META_CONSOLE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+/// The console log's schema domain as this release writes it: schema
+/// versions 1 to 3, in which a frame names no mob. A fresh log is created
+/// here and a log at version 3 or below stays here: nothing in this release
+/// moves a log past version 3. Migration 0001 is the historical two-table +
+/// two-index DDL.
+const META_CONSOLE_UNKEYED_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "meta-console",
     migrations: &[
         meerkat_sqlite::Migration {
@@ -973,7 +1056,7 @@ const META_CONSOLE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Schema
             apply: migration_0003_normalized_member_provenance,
         },
     ],
-    initialize_current: initialize_current_console_schema,
+    initialize_current: initialize_v3_console_schema,
     allowed_existing_versions: &[1, 2, 3],
     // Unledgered meta files are refused at open (below the 0.8.8 ledger
     // floor) and meta never runs the offline bridge, so no source
@@ -1012,6 +1095,86 @@ const META_CONSOLE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Schema
         },
     ],
     retired_objects: &[],
+};
+
+/// The console log's schema domain once a later release has moved the log
+/// to schema version 4: a frame names its mob (`mob_id`, empty for the mob
+/// the gateway was launched with), an index by mob and identity takes the
+/// place of the index by identity, and an index by mob keeps each mob's
+/// frames in cursor order ([`migration_0004_frame_mob`]). That release
+/// moves a log when it stores the first frame of another mob.
+///
+/// This release never moves a log here and stores no frame of another mob.
+/// It declares the domain to open a log that was moved: such a log is
+/// verified against it at open and a log at a later version is refused.
+/// Version 4 is the only version the domain accepts in a file, so it cannot
+/// move a log: [`apply_console_domain`] gives it a log at version 4 or
+/// above alone, and it would refuse a log below that. Every statement over
+/// the frames of such a log takes the launch mob's alone
+/// ([`LaunchMobFrames`]).
+const META_CONSOLE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+    name: "meta-console",
+    migrations: &[
+        meerkat_sqlite::Migration {
+            version: 1,
+            name: "base-schema",
+            apply: migration_0001_console_schema,
+        },
+        meerkat_sqlite::Migration {
+            version: 2,
+            name: "member-provenance",
+            apply: migration_0002_member_provenance,
+        },
+        meerkat_sqlite::Migration {
+            version: 3,
+            name: "normalized-member-provenance",
+            apply: migration_0003_normalized_member_provenance,
+        },
+        meerkat_sqlite::Migration {
+            version: 4,
+            name: "frame-mob",
+            apply: migration_0004_frame_mob,
+        },
+    ],
+    initialize_current: initialize_v4_console_schema,
+    allowed_existing_versions: &[4],
+    // Unledgered meta files are refused at open (below the 0.8.8 ledger
+    // floor) and meta never runs the offline bridge, so no source
+    // version is inferable.
+    bridge_recoverable_versions: &[],
+    released_predecessors: &[],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "console_frames",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "console_source_watermarks",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_console_frames_conversation_cursor",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "console_member_provenance",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_console_frames_mob_identity_cursor",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_console_frames_mob_cursor",
+        },
+    ],
+    // Version 4 reads a member by its mob and identity, never by the
+    // identity alone: the member index takes the identity index's place.
+    retired_objects: &[meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "idx_console_frames_identity_cursor",
+    }],
 };
 
 fn migration_0001_console_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -1057,11 +1220,34 @@ fn migration_0002_member_provenance(tx: &rusqlite::Transaction<'_>) -> Result<()
     tx.execute_batch("ALTER TABLE console_frames ADD COLUMN member_provenance_json TEXT")
 }
 
-fn initialize_current_console_schema(
-    tx: &rusqlite::Transaction<'_>,
-) -> Result<(), rusqlite::Error> {
+fn initialize_v3_console_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
     initialize_v2_console_schema(tx)?;
     migration_0003_normalized_member_provenance(tx)
+}
+
+/// The schema of a log at version 4, built whole: what a log that was moved
+/// there is verified against when it is opened. No log is created with it.
+fn initialize_v4_console_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    initialize_v3_console_schema(tx)?;
+    migration_0004_frame_mob(tx)
+}
+
+/// The step from version 3 to version 4, as the release that stores frames
+/// of several mobs applies it: the frame's mob beside its identity (empty
+/// for a member of the launch mob, which every row stored before the step
+/// is), the member index in the place of the identity index, and an index
+/// of each mob's frames in cursor order. This release runs it only to build
+/// the schema a moved log is verified against
+/// ([`initialize_v4_console_schema`]), never on a log.
+fn migration_0004_frame_mob(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "ALTER TABLE console_frames ADD COLUMN mob_id TEXT NOT NULL DEFAULT '';
+         DROP INDEX idx_console_frames_identity_cursor;
+         CREATE INDEX idx_console_frames_mob_identity_cursor
+            ON console_frames(mob_id, identity, cursor_seq);
+         CREATE INDEX idx_console_frames_mob_cursor
+            ON console_frames(mob_id, cursor_seq);",
+    )
 }
 
 fn initialize_v2_console_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -1082,8 +1268,8 @@ fn migration_0003_normalized_member_provenance(
 fn verify_released_v1_console_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     meerkat_sqlite::verify_released_schema_fingerprint(
         conn,
-        &META_CONSOLE_DOMAIN,
-        &META_CONSOLE_DOMAIN.owned_objects[..4],
+        &META_CONSOLE_UNKEYED_DOMAIN,
+        &META_CONSOLE_UNKEYED_DOMAIN.owned_objects[..4],
         migration_0001_console_schema,
     )
 }
@@ -1091,10 +1277,29 @@ fn verify_released_v1_console_schema(conn: &rusqlite::Connection) -> Result<(), 
 fn verify_development_v2_console_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     meerkat_sqlite::verify_released_schema_fingerprint(
         conn,
-        &META_CONSOLE_DOMAIN,
-        &META_CONSOLE_DOMAIN.owned_objects[..4],
+        &META_CONSOLE_UNKEYED_DOMAIN,
+        &META_CONSOLE_UNKEYED_DOMAIN.owned_objects[..4],
         initialize_v2_console_schema,
     )
+}
+
+/// Bring the console log behind `conn` to the schema this release serves it
+/// with. A fresh log is created at version 3, a log at version 1 or 2 is
+/// brought to version 3, and a log at version 3 stays there: all as before.
+/// A log another release moved to version 4 is verified against that
+/// version's schema and left at it; a log at a later version is refused.
+/// Opening a log never moves it to version 4.
+fn apply_console_domain(conn: &mut Connection) -> ConsoleLogResult<()> {
+    let moved = meerkat_sqlite::domain_version(conn, META_CONSOLE_DOMAIN.name)
+        .map_err(into_boxed)?
+        .is_some_and(|version| version > META_CONSOLE_UNKEYED_DOMAIN.supported_version());
+    let domain = if moved {
+        &META_CONSOLE_DOMAIN
+    } else {
+        &META_CONSOLE_UNKEYED_DOMAIN
+    };
+    meerkat_sqlite::apply_domain_migrations(conn, domain).map_err(into_boxed)?;
+    Ok(())
 }
 
 impl SqliteConsoleLogStore {
@@ -1102,15 +1307,13 @@ impl SqliteConsoleLogStore {
         let path = path.as_ref().to_path_buf();
         let mut conn = meerkat_sqlite::open(&path, meerkat_sqlite::ConnectionProfile::PRIMARY)
             .map_err(into_boxed)?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &META_CONSOLE_DOMAIN)
-            .map_err(into_boxed)?;
+        apply_console_domain(&mut conn)?;
         Self::from_connection(conn, path, ConsoleSendDedupeDurability::Durable)
     }
 
     pub fn in_memory() -> ConsoleLogResult<Self> {
         let mut conn = Connection::open_in_memory().map_err(into_boxed)?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &META_CONSOLE_DOMAIN)
-            .map_err(into_boxed)?;
+        apply_console_domain(&mut conn)?;
         Self::from_connection(
             conn,
             PathBuf::from(":memory:"),
@@ -1157,7 +1360,11 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
-        if let Some(existing) = select_frame_by_dedupe(&conn, &frame.dedupe_key)? {
+        let frames = LaunchMobFrames::of(&conn)?;
+        // A key that only a frame of another mob holds answers no frame
+        // here; the insert below then fails on the key's unique index, and
+        // the append is refused with nothing stored.
+        if let Some(existing) = select_frame_by_dedupe(&conn, frames, &frame.dedupe_key)? {
             return Ok(AppendOutcome {
                 disposition: AppendDisposition::Existing,
                 frame: existing,
@@ -1215,6 +1422,8 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         } else {
             None
         };
+        // The insert names no mob: on a log at schema version 4 the column's
+        // default stores the frame as the launch mob's.
         tx.execute(
             "INSERT INTO console_frames (
                 id, dedupe_key, timestamp_ms, runtime_key, identity,
@@ -1247,7 +1456,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         )
         .map_err(into_boxed)?;
         tx.commit().map_err(into_boxed)?;
-        let inserted = select_frame_by_dedupe(&conn, &frame.dedupe_key)?
+        let inserted = select_frame_by_dedupe(&conn, frames, &frame.dedupe_key)?
             .ok_or_else(|| boxed_error("inserted console frame was not readable"))?;
         Ok(AppendOutcome {
             disposition: AppendDisposition::Inserted,
@@ -1265,12 +1474,16 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let frames = LaunchMobFrames::of(&conn)?;
         conn.execute(
-            "UPDATE console_frames SET status = ?1, frame_version = frame_version + 1, updated_at_ms = ?2 WHERE id = ?3",
+            &format!(
+                "UPDATE console_frames SET status = ?1, frame_version = frame_version + 1, updated_at_ms = ?2 WHERE id = ?3{}",
+                frames.and_launch_mobs_row()
+            ),
             params![status.as_str(), current_time_ms() as i64, frame_id],
         )
         .map_err(into_boxed)?;
-        select_frame_by_id(&conn, frame_id)
+        select_frame_by_id(&conn, frames, frame_id)
     }
 
     async fn transition_send_frame(
@@ -1284,9 +1497,13 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let frames = LaunchMobFrames::of(&conn)?;
         let Some((payload_json, status)) = conn
             .query_row(
-                "SELECT payload_json, status FROM console_frames WHERE id = ?1",
+                &format!(
+                    "SELECT payload_json, status FROM console_frames WHERE id = ?1{}",
+                    frames.and_launch_mobs_row()
+                ),
                 params![frame_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
@@ -1309,7 +1526,10 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         // connection that moved the send first leaves nothing to apply.
         let changed = conn
             .execute(
-                "UPDATE console_frames SET status = ?1, payload_json = ?2, frame_version = frame_version + 1, updated_at_ms = ?3 WHERE id = ?4 AND status = ?5 AND payload_json = ?6",
+                &format!(
+                    "UPDATE console_frames SET status = ?1, payload_json = ?2, frame_version = frame_version + 1, updated_at_ms = ?3 WHERE id = ?4 AND status = ?5 AND payload_json = ?6{}",
+                    frames.and_launch_mobs_row()
+                ),
                 params![
                     next.as_str(),
                     next_json,
@@ -1323,7 +1543,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         if changed == 0 {
             return Ok(None);
         }
-        select_frame_by_id(&conn, frame_id)
+        select_frame_by_id(&conn, frames, frame_id)
     }
 
     async fn take_send_frame_hold(&self, frame_id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
@@ -1332,9 +1552,13 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let frames = LaunchMobFrames::of(&conn)?;
         let Some(held_json) = conn
             .query_row(
-                "SELECT payload_json FROM console_frames WHERE id = ?1",
+                &format!(
+                    "SELECT payload_json FROM console_frames WHERE id = ?1{}",
+                    frames.and_launch_mobs_row()
+                ),
                 params![frame_id],
                 |row| row.get::<_, String>(0),
             )
@@ -1355,14 +1579,17 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         // connection that took or changed it first leaves nothing to take.
         let changed = conn
             .execute(
-                "UPDATE console_frames SET payload_json = ?1, frame_version = frame_version + 1, updated_at_ms = ?2 WHERE id = ?3 AND payload_json = ?4",
+                &format!(
+                    "UPDATE console_frames SET payload_json = ?1, frame_version = frame_version + 1, updated_at_ms = ?2 WHERE id = ?3 AND payload_json = ?4{}",
+                    frames.and_launch_mobs_row()
+                ),
                 params![taken_json, current_time_ms() as i64, frame_id, held_json],
             )
             .map_err(into_boxed)?;
         if changed == 0 {
             return Ok(None);
         }
-        select_frame_by_id(&conn, frame_id)
+        select_frame_by_id(&conn, frames, frame_id)
     }
 
     async fn query_frames(
@@ -1389,6 +1616,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let frames_of = LaunchMobFrames::of(&conn)?;
         let mut sql = String::from(
             "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
                     conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
@@ -1403,6 +1631,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             sql.push_str(&next_param.to_string());
             next_param += 1;
         }
+        sql.push_str(frames_of.and(query.identity.as_deref(), query.conversation_id.as_deref()));
         if query.conversation_id.is_some() {
             sql.push_str(" AND conversation_id = ?");
             sql.push_str(&next_param.to_string());
@@ -1442,6 +1671,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         }
         let latest_cursor = latest_matching_cursor(
             &conn,
+            frames_of,
             after,
             before,
             query.identity.as_deref(),
@@ -1465,7 +1695,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
-        select_frame_by_dedupe(&conn, dedupe_key)
+        select_frame_by_dedupe(&conn, LaunchMobFrames::of(&conn)?, dedupe_key)
     }
 
     async fn send_frame_by_interaction(
@@ -1481,14 +1711,17 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         // rows written since it, without reading older ones.
         let frames = query_sql_frames(
             &conn,
-            "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
+            &format!(
+                "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
                     conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
                     source_kind, source_cursor, source_event_id, interaction_id,
                     parent_frame_id, caused_by_frame_id, turn_id, run_id, COALESCE(member_provenance_json,
                     (SELECT payload_json FROM console_member_provenance WHERE id = member_provenance_id)), member_provenance_id, update_marker_shares_provenance
              FROM console_frames
-             WHERE kind = 'user_input' AND source_kind = 'send' AND interaction_id = ?1
+             WHERE kind = 'user_input' AND source_kind = 'send' AND interaction_id = ?1{}
              ORDER BY cursor_seq DESC LIMIT 1",
+                LaunchMobFrames::of(&conn)?.and_launch_mob()
+            ),
             params![interaction_id],
         )?;
         Ok(frames
@@ -1509,19 +1742,29 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
         // The window is a range of the rowid, so the scan touches at most
-        // `window` rows whatever the log's length.
+        // `window` rows whatever the log's length. On a log at schema
+        // version 4 it ends at the launch mob's newest frame.
+        let launch_mob = LaunchMobFrames::of(&conn)?;
+        let newest = if launch_mob.moved {
+            LaunchMobFrames::NEWEST_ON_A_MOVED_LOG
+        } else {
+            "SELECT MAX(cursor_seq) FROM console_frames"
+        };
         let frames = query_sql_frames(
             &conn,
-            "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
+            &format!(
+                "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
                     conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
                     source_kind, source_cursor, source_event_id, interaction_id,
                     parent_frame_id, caused_by_frame_id, turn_id, run_id, COALESCE(member_provenance_json,
                     (SELECT payload_json FROM console_member_provenance WHERE id = member_provenance_id)), member_provenance_id, update_marker_shares_provenance
              FROM console_frames
-             WHERE cursor_seq > COALESCE((SELECT MAX(cursor_seq) FROM console_frames), 0) - ?1
+             WHERE cursor_seq > COALESCE(({newest}), 0) - ?1
                AND kind = 'user_input' AND source_kind = 'send'
-               AND status IN ('accepted', 'dispatching', 'submitted', 'redacted')
+               AND status IN ('accepted', 'dispatching', 'submitted', 'redacted'){}
              ORDER BY cursor_seq ASC LIMIT ?2",
+                launch_mob.and_launch_mob()
+            ),
             params![window, limit],
         )?;
         Ok(frames.into_iter().filter(is_unsettled_send_frame).collect())
@@ -1534,7 +1777,9 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         if identities.is_empty() {
             return Ok(HashMap::new());
         }
-        let sql = latest_activity_sql();
+        // One text for each form of the log; each identity's read takes the
+        // form the log has when it runs.
+        let sql = [false, true].map(|moved| latest_activity_sql(LaunchMobFrames { moved }));
         let _fence = self.operation_fence()?;
         let mut times = HashMap::with_capacity(identities.len());
         for identity in identities {
@@ -1546,7 +1791,8 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
                     .conn
                     .lock()
                     .map_err(|_| boxed_error("console log lock poisoned"))?;
-                let mut statement = conn.prepare_cached(&sql).map_err(into_boxed)?;
+                let sql = &sql[usize::from(LaunchMobFrames::of(&conn)?.moved)];
+                let mut statement = conn.prepare_cached(sql).map_err(into_boxed)?;
                 statement
                     .query_row(params![identity], |row| row.get(0))
                     .optional()
@@ -1565,12 +1811,15 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        // On a log at schema version 4: the launch mob's newest frame, which
+        // is what a read of that log reaches.
+        let newest = if LaunchMobFrames::of(&conn)?.moved {
+            LaunchMobFrames::NEWEST_ON_A_MOVED_LOG
+        } else {
+            "SELECT cursor_seq FROM console_frames ORDER BY cursor_seq DESC LIMIT 1"
+        };
         let seq: Option<i64> = conn
-            .query_row(
-                "SELECT cursor_seq FROM console_frames ORDER BY cursor_seq DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
+            .query_row(newest, [], |row| row.get(0))
             .optional()
             .map_err(into_boxed)?;
         Ok(seq.map(|value| ConsoleCursor::from_seq(value as u64)))
@@ -1612,11 +1861,15 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         // and the cursor range keeps the scan to the block's own span. The
         // first delta row stays. A row takes part only when its payload
         // carries the message id and a source sequence, as the projection
-        // requires (`streamed_block_payload`).
+        // requires (`streamed_block_payload`). On a log at schema version 4
+        // the block's member is the launch mob's: neither the rows that go
+        // nor the complete row is another mob's, whatever lies in the span.
+        let launch_mob = LaunchMobFrames::of(&conn)?;
         conn.execute(
-            "DELETE FROM console_frames
+            &format!(
+                "DELETE FROM console_frames
              WHERE cursor_seq > ?1 AND cursor_seq < ?2
-               AND runtime_key = ?3 AND identity = ?4 AND kind = ?5
+               AND runtime_key = ?3 AND identity = ?4{} AND kind = ?5
                AND source_kind = ?6
                AND json_extract(payload_json, '$.assistant_message_id') = ?7
                AND json_type(payload_json, '$.source_sequence') = 'integer'
@@ -1624,12 +1877,15 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
                AND EXISTS (
                    SELECT 1 FROM console_frames AS superseding
                    WHERE superseding.cursor_seq = ?2
-                     AND superseding.runtime_key = ?3 AND superseding.identity = ?4
+                     AND superseding.runtime_key = ?3 AND superseding.identity = ?4{}
                      AND superseding.kind = ?8 AND superseding.source_kind = ?6
                      AND json_extract(superseding.payload_json, '$.assistant_message_id') = ?7
                      AND json_type(superseding.payload_json, '$.source_sequence') = 'integer'
                      AND json_extract(superseding.payload_json, '$.source_sequence') >= 0
                )",
+                launch_mob.and_launch_mob(),
+                launch_mob.and_superseding_launch_mob()
+            ),
             params![
                 first,
                 complete,
@@ -1650,16 +1906,34 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let launch_mob = LaunchMobFrames::of(&conn)?;
         let tx = conn.transaction().map_err(into_boxed)?;
-        tx.execute("DELETE FROM console_frames", [])
+        if launch_mob.moved {
+            // The launch mob's frames go, and the member records no frame
+            // names any more. Another mob's frames stay with the records
+            // they name, and so does the cursor sequence: a later frame is
+            // stored past every cursor the log has given out.
+            tx.execute("DELETE FROM console_frames WHERE mob_id = ''", [])
+                .map_err(into_boxed)?;
+            tx.execute(
+                "DELETE FROM console_member_provenance WHERE id NOT IN (
+                     SELECT member_provenance_id FROM console_frames
+                     WHERE member_provenance_id IS NOT NULL
+                 )",
+                [],
+            )
             .map_err(into_boxed)?;
-        tx.execute("DELETE FROM console_member_provenance", [])
-            .map_err(into_boxed)?;
-        tx.execute(
-            "DELETE FROM sqlite_sequence WHERE name = 'console_frames'",
-            [],
-        )
-        .ok();
+        } else {
+            tx.execute("DELETE FROM console_frames", [])
+                .map_err(into_boxed)?;
+            tx.execute("DELETE FROM console_member_provenance", [])
+                .map_err(into_boxed)?;
+            tx.execute(
+                "DELETE FROM sqlite_sequence WHERE name = 'console_frames'",
+                [],
+            )
+            .ok();
+        }
         tx.commit().map_err(into_boxed)?;
         *self
             .prefix_revision
@@ -1761,15 +2035,19 @@ fn query_sql_frames<P: rusqlite::Params>(
 
 fn select_frame_by_dedupe(
     conn: &Connection,
+    frames: LaunchMobFrames,
     dedupe_key: &str,
 ) -> ConsoleLogResult<Option<ConsoleFrame>> {
     conn.query_row(
-        "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
+        &format!(
+            "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
                 conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
                 source_kind, source_cursor, source_event_id, interaction_id,
                 parent_frame_id, caused_by_frame_id, turn_id, run_id, COALESCE(member_provenance_json,
                     (SELECT payload_json FROM console_member_provenance WHERE id = member_provenance_id)), member_provenance_id, update_marker_shares_provenance
-         FROM console_frames WHERE dedupe_key = ?1",
+         FROM console_frames WHERE dedupe_key = ?1{}",
+            frames.and_launch_mobs_row()
+        ),
         params![dedupe_key],
         row_to_frame,
     )
@@ -1777,14 +2055,21 @@ fn select_frame_by_dedupe(
     .map_err(into_boxed)
 }
 
-fn select_frame_by_id(conn: &Connection, id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
+fn select_frame_by_id(
+    conn: &Connection,
+    frames: LaunchMobFrames,
+    id: &str,
+) -> ConsoleLogResult<Option<ConsoleFrame>> {
     conn.query_row(
-        "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
+        &format!(
+            "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
                 conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
                 source_kind, source_cursor, source_event_id, interaction_id,
                 parent_frame_id, caused_by_frame_id, turn_id, run_id, COALESCE(member_provenance_json,
                     (SELECT payload_json FROM console_member_provenance WHERE id = member_provenance_id)), member_provenance_id, update_marker_shares_provenance
-         FROM console_frames WHERE id = ?1",
+         FROM console_frames WHERE id = ?1{}",
+            frames.and_launch_mobs_row()
+        ),
         params![id],
         row_to_frame,
     )
@@ -1794,6 +2079,7 @@ fn select_frame_by_id(conn: &Connection, id: &str) -> ConsoleLogResult<Option<Co
 
 fn latest_matching_cursor(
     conn: &Connection,
+    frames: LaunchMobFrames,
     after: i64,
     before: i64,
     identity: Option<&str>,
@@ -1805,6 +2091,7 @@ fn latest_matching_cursor(
     if identity.is_some() {
         sql.push_str(" AND identity = ?3");
     }
+    sql.push_str(frames.and(identity, conversation_id));
     if conversation_id.is_some() {
         sql.push_str(" AND conversation_id = ?");
         let next_param = 3 + usize::from(identity.is_some());
@@ -2294,12 +2581,12 @@ mod tests {
             let mut conn = meerkat_sqlite::open(&path, meerkat_sqlite::ConnectionProfile::PRIMARY)
                 .expect("sqlite");
             let domain = meerkat_sqlite::SchemaDomain {
-                migrations: &META_CONSOLE_DOMAIN.migrations[..2],
+                migrations: &META_CONSOLE_UNKEYED_DOMAIN.migrations[..2],
                 initialize_current: initialize_v2_console_schema,
                 allowed_existing_versions: &[2],
-                owned_objects: &META_CONSOLE_DOMAIN.owned_objects[..4],
+                owned_objects: &META_CONSOLE_UNKEYED_DOMAIN.owned_objects[..4],
                 released_predecessors: &[],
-                ..META_CONSOLE_DOMAIN
+                ..META_CONSOLE_UNKEYED_DOMAIN
             };
             meerkat_sqlite::apply_domain_migrations(&mut conn, &domain).expect("development v2");
             conn.execute("INSERT INTO console_frames(id,dedupe_key,timestamp_ms,runtime_key,identity,kind,status,payload_json,source_kind,member_provenance_json) VALUES ('v2','v2',1,'runtime-a','private','text_delta','completed','{}','console_event',?1)", params![serde_json::to_string(&witness).expect("JSON")]).expect("v2 row");
@@ -2349,9 +2636,9 @@ mod tests {
                 }],
                 initialize_current: migration_0001_console_schema,
                 allowed_existing_versions: &[1],
-                owned_objects: &META_CONSOLE_DOMAIN.owned_objects[..4],
+                owned_objects: &META_CONSOLE_UNKEYED_DOMAIN.owned_objects[..4],
                 released_predecessors: &[],
-                ..META_CONSOLE_DOMAIN
+                ..META_CONSOLE_UNKEYED_DOMAIN
             };
             meerkat_sqlite::apply_domain_migrations(&mut conn, &legacy_domain)
                 .expect("ledgered released v1");
@@ -2669,8 +2956,13 @@ mod tests {
     fn latest_activity_walk_reads_the_identity_cursor_index_in_order() {
         let store = SqliteConsoleLogStore::in_memory().expect("sqlite store");
         let conn = store.conn.lock().expect("connection");
+        let frames = LaunchMobFrames::of(&conn).expect("the log's form");
+        assert!(!frames.moved, "a fresh log is not at schema version 4");
         let plan = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", latest_activity_sql()))
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                latest_activity_sql(frames)
+            ))
             .expect("prepare query plan")
             .query_map(params!["archivist"], |row| row.get::<_, String>(3))
             .expect("run query plan")
@@ -2686,6 +2978,114 @@ mod tests {
             !plan.contains("temp b-tree"),
             "the index order must serve the walk without a sort; plan was: {plan}"
         );
+    }
+
+    /// On a log at schema version 4 the walk reads the launch mob's member
+    /// through the member index, newest first: no sort and no scan of the
+    /// log, as on a log that was not moved.
+    #[test]
+    fn latest_activity_walk_on_a_version_4_log_reads_the_member_index_in_order() {
+        let mut conn = Connection::open_in_memory().expect("sqlite");
+        let tx = conn.transaction().expect("transaction");
+        initialize_v4_console_schema(&tx).expect("the schema of version 4");
+        tx.commit().expect("commit");
+        let plan = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                latest_activity_sql(LaunchMobFrames { moved: true })
+            ))
+            .expect("prepare query plan")
+            .query_map(params!["archivist"], |row| row.get::<_, String>(3))
+            .expect("run query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect query plan")
+            .join("\n")
+            .to_lowercase();
+        assert!(
+            plan.contains("idx_console_frames_mob_identity_cursor"),
+            "the walk must seek the member index; plan was: {plan}"
+        );
+        assert!(
+            !plan.contains("temp b-tree"),
+            "the index order must serve the walk without a sort; plan was: {plan}"
+        );
+    }
+
+    /// On a log at schema version 4 the launch mob's newest cursor is read
+    /// from the mob's cursor index: no sort, and no frame of another mob is
+    /// read on the way.
+    #[test]
+    fn the_newest_cursor_of_a_version_4_log_reads_the_mobs_cursor_index() {
+        let mut conn = Connection::open_in_memory().expect("sqlite");
+        let tx = conn.transaction().expect("transaction");
+        initialize_v4_console_schema(&tx).expect("the schema of version 4");
+        tx.commit().expect("commit");
+        let plan = conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                LaunchMobFrames::NEWEST_ON_A_MOVED_LOG
+            ))
+            .expect("prepare query plan")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("run query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect query plan")
+            .join("\n")
+            .to_lowercase();
+        assert!(
+            plan.contains("idx_console_frames_mob_cursor"),
+            "the read must seek the mob's cursor index; plan was: {plan}"
+        );
+        assert!(
+            !plan.contains("temp b-tree"),
+            "the index order must serve the read without a sort; plan was: {plan}"
+        );
+    }
+
+    /// The schema domain of version 4 moves no log. Handed a log at version
+    /// 3 it refuses it, and the file keeps its version, its tables and its
+    /// indexes.
+    #[test]
+    fn the_version_4_domain_refuses_a_log_at_version_3_and_leaves_it() {
+        fn declared(conn: &Connection) -> Vec<String> {
+            conn.prepare(
+                "SELECT type || ' ' || name || ': ' || COALESCE(sql, '') FROM sqlite_master \
+                 ORDER BY type, name",
+            )
+            .expect("catalog")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("catalog rows")
+            .collect::<Result<_, _>>()
+            .expect("catalog rows")
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.sqlite3");
+        drop(SqliteConsoleLogStore::open(&path).expect("a log at version 3"));
+        let mut conn = meerkat_sqlite::open(&path, meerkat_sqlite::ConnectionProfile::PRIMARY)
+            .expect("sqlite");
+        let before = declared(&conn);
+
+        let refused = meerkat_sqlite::apply_domain_migrations(&mut conn, &META_CONSOLE_DOMAIN);
+
+        assert!(
+            matches!(
+                refused,
+                Err(
+                    meerkat_sqlite::SqliteStoreError::UnsupportedSchemaPredecessor {
+                        found: 3,
+                        supported: 4,
+                        ..
+                    }
+                )
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "meta-console").expect("ledger"),
+            Some(3)
+        );
+        assert_eq!(declared(&conn), before);
     }
 
     /// M3: the console store — previously opened with zero PRAGMAs — now

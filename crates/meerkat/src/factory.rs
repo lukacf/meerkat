@@ -2373,13 +2373,25 @@ impl RecordedToolOverrides {
 
 /// The session's say on running one of its recorded monitors again after a
 /// host restart, as its build resolves it: the execution policy (a denied
-/// name, a read-only profile, an allow list that leaves the name out) and
-/// the tool grant gate. The gate is formed after the tool dispatcher, so the
-/// build binds it once it exists; until then nothing is admitted.
+/// name, a read-only profile, an allow list that leaves the name out), the
+/// session's durable visibility layers (its own tool filter, an inherited
+/// filter) and the tool grant gate. The gate and the visibility owner exist
+/// only after the tool dispatcher, so the build binds them then; until then
+/// nothing is admitted.
 #[cfg(not(target_arch = "wasm32"))]
 struct BuildMonitorRerunAdmission {
     policy: Option<meerkat_core::ToolExecutionPolicy>,
-    gate: std::sync::OnceLock<Option<meerkat_core::tool_grant::ToolGrantGate>>,
+    bound: std::sync::OnceLock<MonitorRerunBindings>,
+}
+
+/// What the build binds to the re-run admission once it exists.
+#[cfg(not(target_arch = "wasm32"))]
+struct MonitorRerunBindings {
+    /// The build's grant gate (`None` for a build without one).
+    gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
+    /// The owner of the session's visibility state (`None` for a build
+    /// that is not session-owned and so has no durable filters).
+    visibility: Option<meerkat_core::GeneratedToolVisibilityOwner>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2389,14 +2401,15 @@ impl BuildMonitorRerunAdmission {
     fn new(policy: Option<meerkat_core::ToolExecutionPolicy>) -> Self {
         Self {
             policy,
-            gate: std::sync::OnceLock::new(),
+            bound: std::sync::OnceLock::new(),
         }
     }
 
-    /// Bind the build's grant gate (`None` for a build without one).
-    fn bind_gate(&self, gate: Option<meerkat_core::tool_grant::ToolGrantGate>) {
-        if self.gate.set(gate).is_err() {
-            tracing::warn!("the monitor re-run admission already has its grant gate");
+    /// Bind the build's grant gate and the owner of the session's
+    /// visibility state.
+    fn bind(&self, bindings: MonitorRerunBindings) {
+        if self.bound.set(bindings).is_err() {
+            tracing::warn!("the monitor re-run admission is already bound");
         }
     }
 }
@@ -2413,10 +2426,28 @@ impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunA
         }) {
             return false;
         }
-        let Some(gate) = self.gate.get() else {
+        let Some(bound) = self.bound.get() else {
             return false;
         };
-        let Some(gate) = gate else {
+        // The session's durable visibility layers. Where they hide the
+        // monitor, or `shell`, which bounds it, the session cannot call
+        // it, so its recorded monitor is not run again. The turn's own
+        // overlay is not a durable layer and is not asked.
+        if let Some(owner) = &bound.visibility {
+            let Ok(state) = owner.visibility_state() else {
+                return false;
+            };
+            let layers = meerkat_core::ToolScope::compose(&[
+                state.capability_base_filter,
+                state.inherited_base_filter,
+                state.policy_base_filter,
+                state.active_filter,
+            ]);
+            if !layers.allows(Self::MONITOR_START) {
+                return false;
+            }
+        }
+        let Some(gate) = &bound.gate else {
             return true;
         };
         // The monitor is never wider than `shell`: a grant gate that is
@@ -11754,6 +11785,8 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.tool_visibility_owner()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let monitor_rerun_visibility = grant_gate_owner.cloned();
         let ResolvedGrantGate {
             gate: tool_grant_gate,
             recorded: recorded_grant_gate,
@@ -11772,10 +11805,13 @@ impl AgentFactory {
         // build installed.
         let mut factory_metadata = factory_metadata;
         factory_metadata.tooling.grant_gated = recorded_grant_gate;
-        // A grant gate that closes `monitor_start` closes the re-run of a
-        // recorded monitor too.
+        // A grant gate that closes `monitor_start`, and a session filter
+        // that hides it, close the re-run of a recorded monitor too.
         #[cfg(not(target_arch = "wasm32"))]
-        monitor_rerun_admission.bind_gate(tool_grant_gate.clone());
+        monitor_rerun_admission.bind(MonitorRerunBindings {
+            gate: tool_grant_gate.clone(),
+            visibility: monitor_rerun_visibility,
+        });
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
             let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(

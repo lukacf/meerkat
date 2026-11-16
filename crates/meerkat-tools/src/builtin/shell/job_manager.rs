@@ -78,6 +78,30 @@ pub trait ShellJobDeliveryProjector: Send + Sync {
 /// session may no longer start one.
 const MONITOR_START_NOT_PERMITTED: &str = "monitor_start_not_permitted";
 
+/// The version of the `monitor_start` tool identity a job records when the
+/// session's own tool started the monitor. Every earlier release recorded
+/// `v1` for a monitor whoever started it, and the host's route still does,
+/// so `v1` reads as "the host's, or not known".
+const SESSION_TOOL_MONITOR_VERSION: &str = "v2";
+
+/// Who starts a monitor, as its job records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorStarter {
+    /// The session's own `monitor_start` tool.
+    SessionTool,
+    /// The host: an operator's monitor route for the session.
+    Host,
+}
+
+impl MonitorStarter {
+    const fn recorded_version(self) -> &'static str {
+        match self {
+            Self::SessionTool => SESSION_TOOL_MONITOR_VERSION,
+            Self::Host => "v1",
+        }
+    }
+}
+
 /// The session's say on running one of its recorded monitors again.
 ///
 /// A host restart loses a monitor's worker, and recovery runs a resumable
@@ -85,8 +109,10 @@ const MONITOR_START_NOT_PERMITTED: &str = "monitor_start_not_permitted";
 /// Whoever builds the session's tools binds this to answer, at that moment,
 /// whether the session may start a monitor: `monitor_start` enabled for it,
 /// not denied, not closed by a grant gate, and the session not read-only. A
-/// monitor that is not admitted is ended as needing attention instead of
-/// being run again.
+/// monitor that is not admitted is never run again by the session. If the
+/// session's own tool started it, it is ended as needing attention; a
+/// monitor the host's route started, or one recorded before jobs said who
+/// started them, is left as it is for the host's route.
 #[async_trait]
 pub trait MonitorRerunAdmission: Send + Sync {
     /// Whether the origin session may start a monitor now.
@@ -468,8 +494,9 @@ impl JobManager {
                 continue;
             }
             // A resumable monitor is run again only while its session may
-            // still start one. Otherwise its job ends here, so no later
-            // recovery runs it either.
+            // still start one. Otherwise the session's own tool's monitor
+            // ends here, so no later recovery runs it either, and any
+            // other monitor is left as it is for the host's route.
             if is_resumable_monitor_job(job) {
                 let admitted = match monitor_rerun_admitted {
                     Some(admitted) => admitted,
@@ -478,7 +505,9 @@ impl JobManager {
                     }
                 };
                 if !admitted {
-                    end_monitor_not_permitted(&service, &job.job_id, now).await?;
+                    if monitor_started_by_session_tool(job) {
+                        end_monitor_not_permitted(&service, &job.job_id, now).await?;
+                    }
                     continue;
                 }
             }
@@ -557,7 +586,9 @@ impl JobManager {
                 None => *monitor_rerun_admitted.insert(self.admits_monitor_rerun(durable).await),
             };
             if !admitted {
-                end_monitor_not_permitted(&service, &job.job_id, now).await?;
+                if monitor_started_by_session_tool(&job) {
+                    end_monitor_not_permitted(&service, &job.job_id, now).await?;
+                }
                 continue;
             }
             self.start_recovered_monitor(durable.clone(), job, runner_spec, monitor)
@@ -742,6 +773,7 @@ impl JobManager {
             tool_call_id,
             run_id,
             None,
+            None,
             RestartClass::NonResumable,
             entry,
         )
@@ -756,13 +788,17 @@ impl JobManager {
         tool_call_id: &str,
         options: MonitorStartOptions,
     ) -> Result<JobId, ShellError> {
-        self.spawn_monitor_for_call_in_run(
+        // The host's own route: the job records that the session's tool
+        // did not start this monitor.
+        self.spawn_monitor(
             command,
             working_dir,
             timeout_secs,
             tool_call_id,
             None,
             options,
+            None,
+            MonitorStarter::Host,
         )
         .await
     }
@@ -805,6 +841,32 @@ impl JobManager {
         options: MonitorStartOptions,
         entry: super::custody_spawn::EntryHook<'_>,
     ) -> Result<JobId, ShellError> {
+        // The session's own tool: the job records it.
+        self.spawn_monitor(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            run_id,
+            options,
+            entry,
+            MonitorStarter::SessionTool,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_monitor(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
+        options: MonitorStartOptions,
+        entry: super::custody_spawn::EntryHook<'_>,
+        starter: MonitorStarter,
+    ) -> Result<JobId, ShellError> {
         if options.restart_class == RestartClass::Adoptable {
             return Err(shell_io(
                 "agent-authored script monitors cannot claim adoptable restart semantics",
@@ -831,6 +893,7 @@ impl JobManager {
                 limits: options.limits,
                 delivery: options.delivery,
             }),
+            Some(starter),
             options.restart_class,
             entry,
         )
@@ -846,6 +909,7 @@ impl JobManager {
         tool_call_id: &str,
         run_id: Option<&meerkat_core::RunId>,
         monitor: Option<MonitorRunnerSpecification>,
+        monitor_starter: Option<MonitorStarter>,
         restart_class: RestartClass,
         entry: super::custody_spawn::EntryHook<'_>,
     ) -> Result<JobId, ShellError> {
@@ -910,7 +974,11 @@ impl JobManager {
         .map_err(shell_job_error)?;
         let (tool, runner) = if monitor.is_some() {
             (
-                ToolIdentity::new("monitor_start", "v1").map_err(shell_job_error)?,
+                ToolIdentity::new(
+                    "monitor_start",
+                    monitor_starter.map_or("v1", MonitorStarter::recorded_version),
+                )
+                .map_err(shell_job_error)?,
                 RunnerIdentity::new("meerkat.monitor_script", "v1").map_err(shell_job_error)?,
             )
         } else {
@@ -2950,6 +3018,14 @@ fn is_resumable_monitor_job(job: &meerkat_jobs::StoredJob) -> bool {
         }
 }
 
+/// Whether `job` records that the session's own `monitor_start` tool started
+/// it. A monitor the host's route started, and every monitor recorded before
+/// jobs said who started them, answers no.
+fn monitor_started_by_session_tool(job: &meerkat_jobs::StoredJob) -> bool {
+    job.spec.tool.name() == "monitor_start"
+        && job.spec.tool.version() == SESSION_TOOL_MONITOR_VERSION
+}
+
 /// End a recorded monitor whose session may no longer start one: it needs
 /// attention, with a reason that says so, and is never run again.
 async fn end_monitor_not_permitted(
@@ -3065,6 +3141,10 @@ async fn resubmit_under_recorded_specification(
     // The admitted job's origin member: a replay from a session its member
     // has since left no longer derives it (#1790).
     replay.origin_member_id = admitted.spec.origin_member_id;
+    // And the tool identity it recorded: joining a job never changes who
+    // started it, and a starting call recorded before jobs said so still
+    // joins its job.
+    replay.tool = admitted.spec.tool;
     service.submit(replay).await.map_err(shell_job_error)
 }
 
@@ -7112,12 +7192,16 @@ mod durable_tests {
 
     /// Plant a replayable monitor of `session` whose script writes
     /// `monitor-ran` and completes: claimed by a worker whose lease expired
-    /// long ago when `lost`, submitted and never claimed otherwise.
+    /// long ago when `lost`, submitted and never claimed otherwise. It is
+    /// recorded as the session's own tool records one when
+    /// `by_session_tool`, and as the host's route and every earlier release
+    /// record one otherwise.
     async fn plant_replayable_monitor(
         temp: &TempDir,
         service: &DetachedJobService,
         session: SessionId,
         lost: bool,
+        by_session_tool: bool,
     ) -> meerkat_jobs::JobId {
         let spec_blob = plant_shell_artifact(
             temp,
@@ -7130,6 +7214,10 @@ mod durable_tests {
         .await;
         let mut spec = test_monitor_job_spec_for_blob(session, "rerun-admission", &spec_blob);
         spec.restart_class = RestartClass::Replayable;
+        if by_session_tool {
+            spec.tool =
+                ToolIdentity::new("monitor_start", SESSION_TOOL_MONITOR_VERSION).expect("tool");
+        }
         let receipt = service.submit(spec).await.expect("submit");
         if lost {
             service
@@ -7176,7 +7264,8 @@ mod durable_tests {
         )
     }
 
-    /// A recorded monitor, lost with its worker or never claimed, is ended as
+    /// A monitor the session's own tool recorded, lost with its worker or
+    /// never claimed, is ended as
     /// needing attention and never started while the session may not start a
     /// monitor: its bound admission refuses, or its dispatcher does not
     /// enable `monitor_start`. A second recovery leaves the ended job alone.
@@ -7189,7 +7278,8 @@ mod durable_tests {
                 let session = SessionId::new();
                 let (runtime, store, config) = strict_durable_fixture(&temp, session.clone());
                 let service = DetachedJobService::new(store);
-                let job_id = plant_replayable_monitor(&temp, &service, session.clone(), lost).await;
+                let job_id =
+                    plant_replayable_monitor(&temp, &service, session.clone(), lost, true).await;
                 let ran = temp.path().join("monitor-ran");
 
                 let manager = JobManager::new(config).bind_canonical_async_ops(
@@ -7232,12 +7322,15 @@ mod durable_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_recorded_monitor_is_run_again_while_its_session_may_start_one() {
-        for lost in [true, false] {
+        for (lost, by_session_tool) in [(true, true), (false, true), (true, false), (false, false)]
+        {
             let temp = TempDir::new().expect("tempdir");
             let session = SessionId::new();
             let (runtime, store, config) = strict_durable_fixture(&temp, session.clone());
             let service = DetachedJobService::new(store);
-            let job_id = plant_replayable_monitor(&temp, &service, session.clone(), lost).await;
+            let job_id =
+                plant_replayable_monitor(&temp, &service, session.clone(), lost, by_session_tool)
+                    .await;
 
             let manager = JobManager::new(config)
                 .bind_canonical_async_ops(session, Arc::new(RuntimeOpsLifecycleRegistry::new()))
@@ -7249,12 +7342,76 @@ mod durable_tests {
             let terminal = terminal_of(&service, &job_id, Duration::from_secs(15)).await;
             assert!(
                 matches!(terminal, Some(JobTerminalResult::Succeeded { .. })),
-                "lost {lost}: {terminal:?}"
+                "lost {lost}, by the session's tool {by_session_tool}: {terminal:?}"
             );
             assert!(
                 temp.path().join("monitor-ran").exists(),
                 "the monitor's script ran"
             );
+        }
+    }
+
+    /// A monitor the session's own tool did not start (the host's route
+    /// started it, or it was recorded before jobs said who started them) is
+    /// left exactly as it is by a session that may not start a monitor: not
+    /// run, not ended, no new attempt, at a first and at a second recovery.
+    /// The host's route, a manager with no say of the session bound, then
+    /// runs it again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_monitor_the_sessions_tool_did_not_start_is_left_to_the_hosts_route() {
+        for lost in [true, false] {
+            for refused_by_admission in [true, false] {
+                let temp = TempDir::new().expect("tempdir");
+                let session = SessionId::new();
+                let (runtime, store, config) = strict_durable_fixture(&temp, session.clone());
+                let service = DetachedJobService::new(store);
+                let job_id =
+                    plant_replayable_monitor(&temp, &service, session.clone(), lost, false).await;
+                let before = service.get(&job_id).await.expect("read").expect("job");
+                let ran = temp.path().join("monitor-ran");
+
+                let member = JobManager::new(config.clone()).bind_canonical_async_ops(
+                    session.clone(),
+                    Arc::new(RuntimeOpsLifecycleRegistry::new()),
+                );
+                let member = if refused_by_admission {
+                    member.with_durable_job_runtime(
+                        runtime
+                            .clone()
+                            .with_monitor_rerun_admission(Arc::new(FixedMonitorAdmission(false))),
+                    )
+                } else {
+                    member
+                        .with_durable_job_runtime(runtime.clone())
+                        .with_monitor_tool_enabled(false)
+                };
+                member.ensure_recovered().await.expect("recover");
+                member.ensure_recovered().await.expect("recover again");
+                let after = service.get(&job_id).await.expect("read").expect("job");
+                assert_eq!(
+                    (
+                        after.terminal_result.clone(),
+                        after.attempt_count,
+                        after.current_fence
+                    ),
+                    (None, before.attempt_count, before.current_fence),
+                    "lost {lost}, admission {refused_by_admission}: left as it was"
+                );
+                assert!(member.active_attempts.lock().await.is_empty());
+                assert!(!ran.exists(), "the member must not start the script");
+
+                let host = JobManager::new(config)
+                    .bind_canonical_async_ops(session, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+                    .with_durable_job_runtime(runtime);
+                host.ensure_recovered().await.expect("the host's recovery");
+                let terminal = terminal_of(&service, &job_id, Duration::from_secs(15)).await;
+                assert!(
+                    matches!(terminal, Some(JobTerminalResult::Succeeded { .. })),
+                    "lost {lost}: the host's route runs it again: {terminal:?}"
+                );
+                assert!(ran.exists(), "the host's route started the script");
+            }
         }
     }
 }

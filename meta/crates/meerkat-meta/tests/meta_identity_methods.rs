@@ -3922,6 +3922,87 @@ async fn an_approved_change_the_launchs_policy_now_denies_is_not_carried_out() {
     let _ = runtime.shutdown().await;
 }
 
+/// The rules of the rows about a held create and a taken name: the host on
+/// the surface `seed` makes every change of an agent of the profile
+/// `worker` at once, and a person decides every create the host asks for
+/// on the surface `ops`.
+fn taken_name_policy() -> Arc<IdentityCreationPolicy> {
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "approval": {"rules": [
+                {"change": ["create", "archive", "remove"],
+                 "requester": {"kind": "host", "surface": "seed"},
+                 "target": {"profile": ["worker"]}, "outcome": {"kind": "allow"}},
+                {"change": ["create"], "requester": {"kind": "host", "surface": "ops"},
+                 "target": {"profile": ["worker"]},
+                 "outcome": {"kind": "require_approval", "approver": {"id": APPROVERS}}},
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// A create a person approved whose name was taken after it was held is
+/// refused when it is carried out, for good: what its operation reads
+/// says the name is taken and does not tell its requester to ask again,
+/// since the same create asked again is refused the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_create_whose_name_was_taken_meanwhile_does_not_say_ask_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(taken_name_policy(), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let mob = rig.runtime.mob_handle();
+    let seed = ChangeRequester::host("seed");
+    let host = ChangeRequester::host("ops");
+    let create = |name: &str| create_of(json!([{"name": name, "profile": "worker"}]));
+
+    let held = rig.change(&host, "late-1", create("late")).await;
+    let decision_id = decision_of(&held);
+    let made = rig.change(&seed, "s-1", create("late")).await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    approve(&rig.runtime, &decision_id).await;
+
+    let operation = OperationId::for_request(&host.recorded(), "late-1").expect("a request id");
+    let family = rig.family();
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    let ended = loop {
+        match family
+            .read(&mob, &host, IdentityRead::Operation(operation.clone()))
+            .await
+        {
+            Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome)))
+                if outcome.token() != "pending_decision" =>
+            {
+                break outcome;
+            }
+            Ok(_) => {}
+            Err(refusal) => panic!("the operation is read: {refusal}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approved create was neither carried out nor refused"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(ended.token(), "refused", "{ended:?}");
+    let said = ended.to_json().to_string();
+    assert!(said.contains("name_taken"), "the read says why: {said}");
+    assert!(
+        !said.contains("ask again"),
+        "a refusal that stands does not say to ask again: {said}"
+    );
+    rig.shutdown().await;
+}
+
 /// The issuer the Console's sign-in fixture trusts.
 const ISSUER: &str = "https://trusted.meta.localhost";
 

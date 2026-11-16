@@ -4559,11 +4559,12 @@ them.
   The admission still answers that the event is queued (REST `202`). Outside
   that instant the event waits as documented. After a run ends the runtime
   looks once more for queued input before it comes to rest, and the caller's
-  answer is released before that look. Nothing is lost and no event is
-  delivered twice. The same lines stand at 0.9.11, 0.9.14 and 0.9.15; other
-  releases were not read. Read from the source, not run as a host would meet
-  it; seen as one `meerkat-rest` test that fails in some runs on a machine
-  with one to four CPUs. No way round is established.
+  answer is released before that look. Nothing is lost: the event is taken
+  once and reaches one terminal state; a run that fails before completing
+  retries it, as for any queued input. The same lines stand at 0.9.11,
+  0.9.14 and 0.9.15; other releases were not read. Read from the source, not
+  run as a host would meet it; seen as one `meerkat-rest` test that fails in
+  some runs on a machine with one to four CPUs. No way round is established.
 
 ## [0.9.14] - 2026-11-11
 

@@ -1364,6 +1364,10 @@ mod shell_family_monitor {
     struct Profile {
         restriction: Option<meerkat_core::ops::DeclaredToolRestriction>,
         grant_gated: Option<meerkat_core::tool_grant::GrantGatedTools>,
+        /// The launch's own tool access policy, as a spawn or a fork gives one.
+        launch: Option<meerkat_core::ops::ToolAccessPolicy>,
+        /// The block list of the session's turn.
+        blocked: Vec<&'static str>,
     }
 
     impl Profile {
@@ -1376,7 +1380,7 @@ mod shell_family_monitor {
         fn restricted(read_only: bool, deny: &[&str]) -> Self {
             Self {
                 restriction: Some(restriction(read_only, deny)),
-                grant_gated: None,
+                ..Self::default()
             }
         }
 
@@ -1387,11 +1391,32 @@ mod shell_family_monitor {
                 tools.0.insert(meerkat_core::ToolName::new(*name));
             }
             Self {
-                restriction: None,
                 grant_gated: Some(meerkat_core::tool_grant::GrantGatedTools {
                     tools,
                     ..Default::default()
                 }),
+                ..Self::default()
+            }
+        }
+
+        /// A launch whose tool access policy is a deny list of the `names`,
+        /// as a spawn's or a fork's `tool_access_policy` gives one.
+        fn launch_denying(names: &[&str]) -> Self {
+            let mut deny = meerkat_core::ToolNameSet::default();
+            for name in names {
+                deny.0.insert(meerkat_core::ToolName::new(*name));
+            }
+            Self {
+                launch: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(deny)),
+                ..Self::default()
+            }
+        }
+
+        /// A session whose turn carries a block list of the `names`.
+        fn blocking(names: &[&'static str]) -> Self {
+            Self {
+                blocked: names.to_vec(),
+                ..Self::default()
             }
         }
     }
@@ -1481,6 +1506,7 @@ mod shell_family_monitor {
                 realm_id: Some(mob_realm()),
                 declared_tool_restriction: profile.restriction,
                 grant_gated_tools: profile.grant_gated,
+                tool_access_policy: profile.launch,
                 ..SessionBuildOptions::default()
             };
             let request = CreateSessionRequest {
@@ -1513,11 +1539,26 @@ mod shell_family_monitor {
             .await
             .expect("materialize session");
 
+            let turn_metadata = (!profile.blocked.is_empty()).then(|| {
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    turn_tool_overlay: Some(meerkat_core::TurnToolOverlay {
+                        blocked_tools: Some(
+                            profile
+                                .blocked
+                                .iter()
+                                .map(|name| meerkat_core::ToolName::new(*name))
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+            });
             let (_outcome, handle) = self
                 .adapter
                 .accept_input_with_completion(
                     &session_id,
-                    Input::Prompt(PromptInput::new("go on", None)),
+                    Input::Prompt(PromptInput::new("go on", turn_metadata)),
                 )
                 .await
                 .expect("accept prompt input");
@@ -1714,6 +1755,124 @@ mod shell_family_monitor {
             "a `{MONITOR}` call without shell is refused"
         );
         assert_eq!(met.monitor_jobs, 0, "a refused call records no job");
+    }
+
+    /// What a session meets whose `shell` is closed by name: neither `shell`
+    /// nor `monitor_start` is offered, the family's three job tools still
+    /// are, and a `monitor_start` call is refused and records nothing.
+    fn assert_monitor_start_closed_with_shell(met: &Met, why: &str) {
+        for name in ["shell", MONITOR] {
+            assert!(
+                !offers(met, name),
+                "{why}: `{name}` is not offered: {:?}",
+                met.offered
+            );
+        }
+        for name in &SHELL_FAMILY[1..4] {
+            assert!(
+                offers(met, name),
+                "{why}: `{name}` is still offered: {:?}",
+                met.offered
+            );
+        }
+        assert!(met.call_refused, "{why}: a `{MONITOR}` call is refused");
+        assert_eq!(met.monitor_jobs, 0, "{why}: a refused call records no job");
+    }
+
+    /// `monitor_start` is never wider than `shell`: a profile whose deny
+    /// list names only `shell` closes the monitor with it.
+    #[tokio::test]
+    async fn a_profile_deny_that_names_shell_closes_monitor_start_with_it() {
+        let met = session_meets(true, Profile::restricted(false, &["shell"])).await;
+        assert_monitor_start_closed_with_shell(&met, "the profile denies `shell`");
+    }
+
+    /// The same for a launch's own deny list, the road of a spawn's and of
+    /// a fork's `tool_access_policy`.
+    #[tokio::test]
+    async fn a_launch_deny_list_that_names_shell_closes_monitor_start_with_it() {
+        let met = session_meets(true, Profile::launch_denying(&["shell"])).await;
+        assert_monitor_start_closed_with_shell(&met, "the launch denies `shell`");
+    }
+
+    /// The same for a turn's block list.
+    #[tokio::test]
+    async fn a_turn_block_list_that_names_shell_closes_monitor_start_with_it() {
+        let met = session_meets(true, Profile::blocking(&["shell"])).await;
+        assert_monitor_start_closed_with_shell(&met, "the turn blocks `shell`");
+    }
+
+    /// The same for a grant gate on the name `shell` (not on the family)
+    /// before any grant.
+    #[tokio::test]
+    async fn a_grant_gate_on_the_name_shell_closes_monitor_start_with_it() {
+        let met = session_meets(true, Profile::gating(&["shell"])).await;
+        assert_monitor_start_closed_with_shell(&met, "a grant gate closes `shell`");
+    }
+
+    /// Run a session under `first`, stop the host, build the same session
+    /// again under `again` and answer what it meets then, its model
+    /// calling `monitor_start` once.
+    async fn session_meets_after_a_restart(first: Profile, again: Profile) -> Met {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = || {
+            OneCallScript::new(
+                MONITOR,
+                serde_json::json!({ "command": COMPLETES_AT_ONCE, "timeout_secs": 30 }),
+            )
+        };
+        let (script, _seen) = call();
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        lifetime.run_session(session, first).await;
+        lifetime.stand_down().await;
+
+        let (script, seen) = call();
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let stored = lifetime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the stored session")
+            .expect("the session survives the restart");
+        lifetime.run_session(stored, again).await;
+
+        let monitor_jobs = lifetime.monitor_jobs(&session_id).await.len();
+        let seen = seen.lock().expect("seen");
+        let offered = seen.tools.first().cloned().expect("a first request");
+        let call_refused = seen
+            .messages
+            .iter()
+            .find_map(call_answer_is_error)
+            .expect("the model is sent an answer to its monitor_start call");
+        Met {
+            offered,
+            call_refused,
+            monitor_jobs,
+        }
+    }
+
+    /// A restart does not bring the monitor back: the profile's deny of
+    /// `shell` is read again at the session's next build.
+    #[tokio::test]
+    async fn a_profile_deny_that_names_shell_still_closes_monitor_start_after_a_restart() {
+        let met = session_meets_after_a_restart(
+            Profile::restricted(false, &["shell"]),
+            Profile::restricted(false, &["shell"]),
+        )
+        .await;
+        assert_monitor_start_closed_with_shell(&met, "the profile denies `shell`, resumed");
+    }
+
+    /// Nor does a resume: the launch's deny list is the session's own
+    /// record, restored when the session is built again with none given.
+    #[tokio::test]
+    async fn a_launch_deny_list_that_names_shell_still_closes_monitor_start_after_a_restart() {
+        let met =
+            session_meets_after_a_restart(Profile::launch_denying(&["shell"]), Profile::open())
+                .await;
+        assert_monitor_start_closed_with_shell(&met, "the launch denied `shell`, resumed");
     }
 
     /// How often the monitor's script started: it appends one line to
@@ -1993,6 +2152,29 @@ mod shell_family_monitor {
             the_session_lists_its_jobs_after_a_restart(true, Profile::gating(&[MONITOR]), SETTLE)
                 .await;
         assert_ended_not_permitted(&after, "a grant gate closes `monitor_start`");
+    }
+
+    /// The re-run follows `shell` too: a profile that denies `shell` since
+    /// (and so closes `monitor_start` with it) still lists its jobs, and
+    /// the recorded monitor is not run again.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_shell_is_denied_since() {
+        let after = the_session_lists_its_jobs_after_a_restart(
+            true,
+            Profile::restricted(false, &["shell"]),
+            SETTLE,
+        )
+        .await;
+        assert_ended_not_permitted(&after, "the profile denies `shell`");
+    }
+
+    /// And a grant gate that closes the name `shell` since, with no grant.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_a_grant_gate_closes_shell_since() {
+        let after =
+            the_session_lists_its_jobs_after_a_restart(true, Profile::gating(&["shell"]), SETTLE)
+                .await;
+        assert_ended_not_permitted(&after, "a grant gate closes `shell`");
     }
 
     /// A session whose shell family was turned off has no shell job call, so

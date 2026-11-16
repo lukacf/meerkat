@@ -3326,7 +3326,7 @@ bodies. The tier `full` returns every active record in one answer.
 |-------|------|----------|-------------|
 | `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
 | `realm` | `string` | no | Memory realm, default `"default"` |
-| `tier` | `"working_set" \| "full"` | no | `"working_set"` (default): the ranked records up to `k` and the recent records not yet ranked, at most twice `k` together. `"full"`: every active record |
+| `tier` | `"working_set" \| "full"` | no | `"working_set"` (default): the ranked records up to `k` and the recent records that are not ranked or were changed since they were ranked, at most twice `k` together. `"full"`: every active record |
 | `k` | `integer` | no | Size of the working set, default `32`, max `512`. Refused with the tier `full` |
 </Accordion>
 

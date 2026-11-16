@@ -1101,7 +1101,11 @@ pub(crate) async fn reject_live_rpc_response_delivery_of_error(
         if let Some(custody) = left
             && let Err(error) = custody.rejected().await
         {
-            tracing::warn!(
+            // Not a fault by itself: an open superseded after it opened has
+            // closed its own channel before it answers the error, so this
+            // second attempt finds the channel closed. A failed first close
+            // is logged at warn where it happens.
+            tracing::debug!(
                 error = %error,
                 "the custody of a live response that answered an error could not be rejected"
             );

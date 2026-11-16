@@ -30,30 +30,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with `openai-live`, a loaded module named `live` no longer receives this
   one method name.
 
-- A live open with `execution_identity` and a WebRTC answer that name a
-  member by `identity` no longer fail over the stdio gateway of a build
-  with `openai-live` when the gateway's identity runtime holds that member
-  (an identity-first member). The gateway runs a live request for such a
-  member under the member's identity authority, on a task of its own, and
-  the custody of the request's response, which the gateway's writer
-  settles once it has written the answer, did not follow the request to
-  that task. A `meta/live/open` with `execution_identity` and a
-  `live/webrtc/answer` for such a member therefore answered `-32000`
-  "experimental live response requires a delivery-aware outer RPC writer":
-  the open was made and then undone, and the provider's answer was made
-  and then rejected. The SDK calls that send these always name the member:
-  `live_open_typed` with an execution identity, `live_connect` and
-  `live_webrtc_answer_pending` in Python, `liveOpenTyped`, `liveConnect`
-  and `liveWebrtcAnswerPending` in TypeScript. Meta 0.9.0 through 0.9.15
-  had this (by runs on 0.9.15's code; the earlier versions read from the
-  source). A request that names no member, a live open without
-  `execution_identity`, every other live method and the Console's own door
-  were not affected. Two things stay as they were: a member the gateway's
-  identity runtime does not hold is still refused these calls (the open
-  with `execution_identity`, the answer under its receipts and
-  `live_connect` / `liveConnect`), and every live open over stdio still
-  takes the gateway's voice path first, which ends a Console voice call in
-  progress on that gateway.
+- A live open with `execution_identity` that names a member by `identity`
+  no longer fails over the stdio gateway of a build with `openai-live`
+  when the gateway's identity runtime holds that member (an identity-first
+  member), and a WebRTC answer for such a member, which the entry above
+  lets through, does not fail the same way. The gateway runs a live
+  request for such a member under the member's identity authority, on a
+  task of its own, and the custody of the request's response, which the
+  gateway's writer settles once it has written the answer, did not follow
+  the request to that task. A `meta/live/open` with `execution_identity`
+  for such a member therefore answered `-32000` "experimental live
+  response requires a delivery-aware outer RPC writer": the open was made
+  and then undone. A `live/webrtc/answer` for such a member would have
+  failed the same way once it reached the live handler, its provider
+  answer made and then rejected; in the released versions it never reached
+  the handler and answered `-32601` (the entry above). The SDK calls that
+  send these always name the member: `live_open_typed` with an execution
+  identity, `live_connect` and `live_webrtc_answer_pending` in Python,
+  `liveOpenTyped`, `liveConnect` and `liveWebrtcAnswerPending` in
+  TypeScript. Meta 0.9.0 through 0.9.15 had this for the open (by runs on
+  0.9.15's code; the earlier versions read from the source). A request
+  that names no member, a live open without `execution_identity`, every
+  other live method and the Console's own door were not affected. Two
+  things stay as they were: a member the gateway's identity runtime does
+  not hold is still refused these calls (the open with
+  `execution_identity`, the answer under its receipts and `live_connect` /
+  `liveConnect`), and every live open over stdio still takes the gateway's
+  voice path first, which ends a Console voice call in progress on that
+  gateway.
 
 ## [0.9.15] - 2026-11-15
 

@@ -107,11 +107,6 @@
       "reason": "Each connector version's support record names the wheels its verification ran with."
     },
     {
-      "path": "connect/BUILDING.md",
-      "match": "meerkat-connect release v0\\.9\\.0|^meerkat-connect-0\\.9\\.0$|meerkat_toolkit-0\\.9\\.0|rkat-toolkit-0\\.9\\.0",
-      "reason": "The build instructions for the v0.9.0 checkout name that release's own assets."
-    },
-    {
       "path": "docs/guides/upgrading.mdx",
       "match": "^meerkat-meta==0\\.9\\.10$",
       "reason": "The upgrade notes of 0.9.10 describe the pins that release shipped with."

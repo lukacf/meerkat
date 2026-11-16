@@ -905,9 +905,10 @@ entry names a run.
   created at run time:
   - The start is as on 0.9.11. A 0.9.13 gateway refuses the unchanged 0.9.15
     launch at init, naming `archive` (or `adopt`, where a rule names only
-    that). The remedy that was run is taking the values `archive` and
-    `adopt` out of the rules' `change`, or removing the whole
-    `identity_creation` option.
+    that), and a key for either under `approval.timeouts_ms` the same way.
+    The remedy that was run is taking the values `archive` and `adopt` out
+    of the rules' `change`, or removing the whole `identity_creation`
+    option.
   - A 0.9.13 gateway serves the agents created on 0.9.15: both were
     registered, a send to one was accepted and its turn completed.
   - The return to 0.9.15 finds the same records, sessions and peers. A turn
@@ -918,38 +919,40 @@ entry names a run.
   - 0.9.12 was not built. Between the Meta tags of 0.9.12 and 0.9.13 the
     only change in the Rust source is the version number, so the run stands
     for 0.9.12's code.
-  - As run: the stdio `rpc_gateway`, one mob, two created agents, the
-    gateway up for seconds, turns answered by a test client so that no tool
-    was called. Not run: `meta_gateway`; archived, removed, adopted, held or
-    updated agents; schedules; memory; nested mobs; a peer message; a held
-    question before the rollback; a turn in flight at the stop.
+  - As run: the stdio `rpc_gateway` built from the 0.9.13 tag, two starting
+    states, one mob, two created agents, the gateway up for seconds, turns
+    answered by a test client so that no tool was called. Not run:
+    `meta_gateway`; archived, removed, adopted, held or updated agents;
+    schedules; memory; nested mobs; a peer message; a held question before
+    the rollback; a turn in flight at the stop.
 - **Meta, 0.9.11.** Not read against every item. Three differences are
   known.
   - A 0.9.11 gateway refuses to start (`-32602`) on a launch that carries a
     0.9.15 identity policy in which a rule's `change` names `archive` or
     `adopt` (each by a run); the stores are as they were after the refusal.
     The launch is accepted once those two values are taken out of the rules'
-    `change`, or with no identity policy at all (both by a run). Keys for
-    them, under `approval.timeouts_ms` for example, were not run on 0.9.11;
-    0.9.11 reads the policy with the same code as 0.9.14 (read from the
-    source), so take them out as well, as the item "Identity policy" below
-    says for 0.9.14. Add all of them again after the return.
-  - A 0.9.11 gateway does not serve agents created at run time, and it
-    leaves them as they are. Its roster pass retires none of them, a send to
-    one answers `-32001` (unknown identity), and nothing of theirs changes
-    in the stores: 0.9.11 writes only what a restart writes (the mob's stop
-    and start events, a Console start frame, cursors and the schedule
-    lease). After the return to 0.9.15 they are listed with the same
-    records, sessions and peers, and a send to one that had a conversation
-    appends to that conversation. This is by two runs of the stdio
-    `rpc_gateway`, built from the two releases' tags and not the published
-    binaries, with one mob and two created agents: in the first both were
-    dormant, in the second one of them had a conversation (a scripted model
-    in place of a provider); the 0.9.11 gateway was up for seconds (one
-    roster pass). Not run: `meta_gateway`; archived, removed, adopted or
-    held agents; an agent changed after its creation; schedules; memory;
-    nested mobs; a peer message to a created agent, or a turn of a
-    configured agent, while 0.9.11 runs.
+    `change`, or with no identity policy at all (both by a run). A key for
+    either of them under `approval.timeouts_ms` is refused the same way
+    (each by a run), so take those out as well, as the item "Identity
+    policy" below says for 0.9.14. 0.9.11 reads the policy with the same
+    code as 0.9.14 (read from the source). Add all of them again after the
+    return.
+  - A 0.9.11 gateway does not serve agents created at run time, and it leaves
+    them as they are. Its roster pass retires none of them, a send to one
+    answers `-32001` (unknown identity), and nothing of theirs changes in the
+    stores: 0.9.11 writes only what a restart writes (the mob's stop and start
+    events, a Console start frame, cursors, the schedule lease and the gating
+    state's owner epoch). After the return to 0.9.15 they are listed with the
+    same records, sessions and peers, and a send to one that had a
+    conversation appends to that conversation. This is by two runs of the
+    stdio `rpc_gateway`, built from the two releases' tags and not the
+    published binaries, with one mob and two created agents: in the first both
+    were dormant, in the second one of them had a conversation (a scripted
+    model in place of a provider); the 0.9.11 gateway was up for seconds (one
+    roster pass). Not run: `meta_gateway`; archived, removed, adopted or held
+    agents; an agent changed after its creation; schedules; memory; nested
+    mobs; a peer message to a created agent, or a turn of a configured agent,
+    while 0.9.11 runs.
   - A `meta_gateway` launched with `persistent_sessions: true` keeps its
     metadata and its console log in memory (see "Rolling back to 0.9.11"
     below).
@@ -1325,8 +1328,9 @@ enabled or not (confirmed by a run for `archive`: in a rule's `change` of an
 enabled policy and under `approval.timeouts_ms` of a disabled one; the other
 combinations and `adopt` were read from the source). In runs, a 0.9.11
 gateway refused a launch in which a rule's `change` named either of them
-(`-32602`; see the entry on Meta 0.9.11 at the head of this subsection; keys
-under `approval.timeouts_ms` were not run there). **Do:** before
+(`-32602`), and one that set a key for either of them under
+`approval.timeouts_ms` (see the entry on Meta 0.9.11 at the head of this
+subsection). **Do:** before
 a rollback, remove those keys and values from
 `runtime_options.identity_creation`; add them again after the return.
 

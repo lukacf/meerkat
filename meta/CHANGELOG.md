@@ -476,6 +476,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   check's call and what it shows: by two runs on released 0.9.15 gateways; the
   rest by reading.)
 
+- Copying or backing up a state directory: copy each database together with its side files. After a clean shutdown the content of a store can lie in the `-wal` file beside its database file and not in the database file itself. In a run, a gateway started on a copy that left the `-wal` and `-shm` files out started without a warning and had lost every agent memory record; its agents, their sessions and the Console's timeline were still there. Stop the gateway and copy the whole state directory, every database with its `-wal` and `-shm` files: a gateway started on such a copy had everything. The state directory is not the whole of a backup: the 0.9.6 upgrade note lists what lies beside it (the credentials store, the session comms identity directory, a host store realm). Upgrade notes gave the instruction for their own step (0.8.8, 0.9.6); no page said what a copy without the side files loses. It is not new in this release. (By runs on the released 0.9.15 `rpc_gateway`, stopped by the SDK's shutdown: one copy of the database files alone and one of the directory without its side files, each started; one copy of the whole directory, started. After that shutdown `continuity.sqlite3` likewise held no table without its `-wal`; no loss was run for it. Not tested: a copy taken while a gateway writes, `meta_gateway`, a gateway stopped by a signal or by its input closing.)
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

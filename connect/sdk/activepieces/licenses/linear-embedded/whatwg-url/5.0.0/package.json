@@ -17,7 +17,7 @@
     "eslint": "^2.6.0",
     "istanbul": "~0.4.3",
     "mocha": "^2.2.4",
-    "recast": "~0.10.29",
+    "recast": "~0.24.0",
     "request": "^2.55.0",
     "webidl2js": "^3.0.2"
   },

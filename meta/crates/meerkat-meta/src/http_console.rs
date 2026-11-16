@@ -2938,19 +2938,24 @@ async fn console_send_handler(
         return console_json_error(StatusCode::BAD_REQUEST, "reserved_origin_kind", &refusal);
     }
     let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
-    match Box::pin(send_as_admitted_console_caller(
+    // A send that names a member the caller may not know of goes on as one
+    // that names a name no member holds, and its answer is spelled back
+    // with the name as sent.
+    let absent = ConsoleAbsentNames::fresh();
+    match Box::pin(send_as_admitted(
         &ConsoleSendPath::of_state(&state),
         Some(&auth_context.audience),
         &governance,
         request,
+        Some(&absent),
     ))
     .await
     {
         Ok(accepted) => (
             StatusCode::OK,
-            Json::<Value>(
+            Json::<Value>(absent.restore(
                 serde_json::to_value(accepted).unwrap_or_else(|_| json!({ "accepted": true })),
-            ),
+            )),
         )
             .into_response(),
         // A candidate launch admits no member input: 409 `candidate_launch`,
@@ -2969,7 +2974,30 @@ async fn console_send_handler(
         Err(AdmittedConsoleSendError::CallerNotCurrent) => {
             ConsoleCallerRefusal::NotCurrent.into_response()
         }
-        Err(AdmittedConsoleSendError::Send(err)) => console_send_error_response(err),
+        Err(AdmittedConsoleSendError::Send(err)) => {
+            console_rest_answer_spelled_back(&absent, console_send_error_response(err)).await
+        }
+    }
+}
+
+/// A REST answer with every name `absent` stands for spelled back as the
+/// caller spelled it ([`ConsoleAbsentNames::restore`]); an answer that is no
+/// JSON is left as it is.
+async fn console_rest_answer_spelled_back(
+    absent: &ConsoleAbsentNames,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return console_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "the console's answer could not be read",
+        );
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(answer) => (parts.status, Json::<Value>(absent.restore(answer))).into_response(),
+        Err(_) => axum::response::Response::from_parts(parts, axum::body::Body::from(bytes)),
     }
 }
 
@@ -3114,13 +3142,34 @@ pub(crate) async fn send_as_admitted_console_caller(
     governance: &ConsoleSendGovernance,
     request: ConsoleSendRequest,
 ) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, AdmittedConsoleSendError> {
+    Box::pin(send_as_admitted(
+        path,
+        access_view,
+        governance,
+        request,
+        None,
+    ))
+    .await
+}
+
+/// [`send_as_admitted_console_caller`], for a door that answers a member the
+/// caller may not know of as a name no member holds when it gives `absent`:
+/// the send then goes on under the name `absent` gives that member, and the
+/// door spells its answer back ([`ConsoleAbsentNames::restore`]).
+async fn send_as_admitted(
+    path: &ConsoleSendPath<'_>,
+    access_view: Option<&AccessView>,
+    governance: &ConsoleSendGovernance,
+    mut request: ConsoleSendRequest,
+    absent: Option<&ConsoleAbsentNames>,
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, AdmittedConsoleSendError> {
     if path
         .runtime
         .is_some_and(|runtime| !runtime.speaks_for_composition())
     {
         return Err(AdmittedConsoleSendError::CandidateLaunch);
     }
-    console_send_gate(
+    match console_send_gate(
         path.decisions,
         path.runtime,
         path.aggregator,
@@ -3129,7 +3178,20 @@ pub(crate) async fn send_as_admitted_console_caller(
         request.identity.as_str(),
     )
     .await
-    .map_err(AdmittedConsoleSendError::Gate)?;
+    {
+        Ok(()) => {}
+        // The gate answers so for a member the caller may not know of, and
+        // for no other target.
+        Err(ConsoleSendGateRefusal::UnknownIdentity(detail)) => match absent {
+            Some(absent) => request.identity = absent.absent_spelling(&request.identity),
+            None => {
+                return Err(AdmittedConsoleSendError::Gate(
+                    ConsoleSendGateRefusal::UnknownIdentity(detail),
+                ));
+            }
+        },
+        Err(refusal) => return Err(AdmittedConsoleSendError::Gate(refusal)),
+    }
     // The caller is checked after the gate's reads, and again right before
     // the send is reserved or sent.
     governance
@@ -3199,7 +3261,7 @@ async fn console_send_recover_handler(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    if let Err(refusal) = console_send_gate(
+    match console_send_gate(
         &state.decisions,
         state.runtime.as_ref(),
         state.console_aggregator.as_ref(),
@@ -3209,7 +3271,15 @@ async fn console_send_recover_handler(
     )
     .await
     {
-        return refusal.into_response();
+        Ok(()) => {}
+        // A recovery that names a member the caller may not know of goes on
+        // as one that names a name no member holds: it finds no send.
+        Err(ConsoleSendGateRefusal::UnknownIdentity(_)) => {
+            if let Some(named) = params.get_mut("identity") {
+                *named = Value::String(absent_member_spelling(&identity, &absent_name_nonce()));
+            }
+        }
+        Err(refusal) => return refusal.into_response(),
     }
     let Some(aggregator) = &state.console_aggregator else {
         return console_json_error(
@@ -3386,7 +3456,8 @@ pub enum ConsoleSendGateRefusal {
     /// validation message.
     InvalidTarget(String),
     /// The Console's access policy does not let the caller send to the
-    /// target (`agent.send`).
+    /// target (`agent.send`), or, where the target is a member the caller
+    /// may not know of, to a name no member holds.
     AccessDenied,
     /// The target is a member the caller may not know of: it is private to
     /// another person ([`crate::access::PRIVATE_TO_LABEL`]). Answered as a
@@ -3429,11 +3500,17 @@ impl ConsoleSendGateRefusal {
     }
 }
 
-/// The Console's stock send gate, the one implementation `/console/send` and
-/// [`ConsoleSendPrecheck`] run: the Console is writable, the target is a
+/// The Console's stock send gate, the one implementation its four runners
+/// share: `/console/send`, `/console/send/recover`, [`ConsoleSendPrecheck`]
+/// and a console schedule's fire (`crate::console_schedules`, as the
+/// schedule's sender). The Console is writable, the target is a
 /// valid public member alias, it is no member the caller may not know of
-/// ([`AccessView::hides_agent`], answered as an unknown member, enforced
-/// access or not), and the caller's access view allows `agent.send` to it,
+/// ([`AccessView::hides_agent`], answered as the caller's view answers a
+/// name no member holds, enforced access or not: the view is asked about
+/// such a name, so a rule that names the member itself is not asked, and
+/// the answer is the rules' refusal where they refuse the caller a send to
+/// such a name, and an unknown member otherwise), and the
+/// caller's access view allows `agent.send` to it,
 /// decided after the attribute cache is primed from the live roster: the
 /// local runtime's, else the runtimes of the Console's aggregator, each in
 /// its identity namespace.
@@ -3477,7 +3554,14 @@ async fn console_send_gate(
             (None, None) => {}
         }
     }
-    if access_view.is_some_and(|view| view.hides_agent(identity)) {
+    if let Some(view) = access_view.filter(|view| view.hides_agent(identity)) {
+        // A member the caller may not know of is answered as a name no
+        // member holds is: by the access rules where they refuse the caller
+        // a send to such a name, and as an unknown member otherwise.
+        let absent = absent_member_spelling(identity, &absent_name_nonce());
+        if view.enforced() && !view.allows_agent(ACTION_AGENT_SEND, &absent) {
+            return Err(ConsoleSendGateRefusal::AccessDenied);
+        }
         return Err(ConsoleSendGateRefusal::UnknownIdentity(
             ConsoleSendError::UnknownIdentity(identity.to_string()).to_string(),
         ));
@@ -4108,6 +4192,10 @@ mod console_private_member_schedule_end_tests;
 #[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
+
+#[cfg(test)]
+#[path = "console_absent_answer_tests.rs"]
+mod console_absent_answer_tests;
 
 #[cfg(test)]
 #[path = "console_malformed_params_tests.rs"]
@@ -6527,8 +6615,10 @@ const TOPOLOGY_APPLY_ENDPOINTS: &[ConsoleMemberField] = &[
 /// The member a method creates.
 const NEW_MEMBER: &[ConsoleMemberField] = &[recorded(&["agent_identity"])];
 
-/// The identity a method records something for under its `identity`.
-const RECORDED_IDENTITY: &[ConsoleMemberField] = &[recorded(&["identity"])];
+/// The identity a method remembers a fact for or defines a console schedule
+/// for, named under `identity` alone: a member the method acts on, so a
+/// member hidden from the caller is answered as a name no member holds.
+const IDENTITY_SUBJECT: &[ConsoleMemberField] = &[subject(&["identity"])];
 
 /// The agent a change or a read of the identity family names.
 const NAMED_AGENT: &[ConsoleMemberField] = &[subject(&["name"])];
@@ -6581,9 +6671,10 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
     let fields: &'static [ConsoleMemberField] = match method {
         // Methods that create the member they name.
         "meta/ensure_member" | "meta/spawn_helper" | "meta/attach_existing_session" => NEW_MEMBER,
-        // A remembered fact and a schedule are recorded for the identity
-        // they name.
-        "meta/agent_memory/remember" | "meta/schedule/create" => RECORDED_IDENTITY,
+        // A remembered fact and a console schedule are for the identity
+        // they name, under `identity` alone. Each handler refuses a name no
+        // member holds itself, before anything is written.
+        "meta/agent_memory/remember" | "meta/schedule/create" => IDENTITY_SUBJECT,
         // A fork creates its child and reads its source.
         "meta/fork_member" | "meta/fork_helper" => FORK_MEMBERS,
         // A role-targeted run's bound members.
@@ -7026,7 +7117,8 @@ fn console_rpc_resolve_members_with(
         );
     let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
     let mut nonce: Option<String> = None;
-    for field in console_method_member_fields_or_subject(method) {
+    let fields = console_method_member_fields_or_subject(method);
+    for field in fields {
         visit_member_field(params, field.path, &mut |slot| {
             let Some(spelling) = slot.as_str().map(str::trim) else {
                 return Ok(());
@@ -7047,6 +7139,34 @@ fn console_rpc_resolve_members_with(
                 }
             }
         })?;
+    }
+    // The access rules judge every subject spelling a request carries
+    // ([`console_rpc_member_targets`]), one its method's entry does not
+    // list included. For a method that reads or acts on a member, a hidden
+    // member named under such a spelling is swapped too, under the same
+    // suffix, so the rules judge a name no member holds there as well. A
+    // value that is no string stays as it is.
+    if fields
+        .iter()
+        .any(|field| field.kind == ConsoleMemberFieldKind::Subject)
+    {
+        for spelling in SUBJECT_MEMBER {
+            let [key] = spelling.path else { continue };
+            if fields.iter().any(|field| field.path == spelling.path) {
+                continue;
+            }
+            let Some(slot) = params.get_mut(*key) else {
+                continue;
+            };
+            let Some(name) = slot.as_str().map(str::trim) else {
+                continue;
+            };
+            if !name.is_empty() && view.hides_agent(name) {
+                let nonce = nonce.get_or_insert_with(absent_name_nonce);
+                let absent = absent_member_spelling(name, nonce);
+                *slot = Value::String(absent);
+            }
+        }
     }
     Ok(ConsoleAbsentNames { nonce })
 }
@@ -13127,7 +13247,8 @@ async fn handle_console_aggregator_rpc(
         && let Some(error) =
             console_rpc_access_violation(access_view, request.method.as_str(), &request.params)
     {
-        return response_value(response_id, None, Some(error));
+        // The refusal names the member as the caller spelled it.
+        return absent.restore(response_value(response_id, None, Some(error)));
     }
     let response = Box::pin(async {
     // Each awaiting arm runs as its own boxed future, built in
@@ -13762,7 +13883,8 @@ async fn handle_console_runtime_rpc_with_visibility(
     if let Some(error) =
         console_rpc_access_violation(access_view, request.method.as_str(), &request.params)
     {
-        return response_value(response_id, None, Some(error));
+        // The refusal names the member as the caller spelled it.
+        return absent.restore(response_value(response_id, None, Some(error)));
     }
     // The method arms answer in one boxed future, so the answer is spelled
     // back with the caller's names whichever arm answers.
@@ -21556,6 +21678,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    mod refusal_form;
 
     /// §10.3 fail-closed panel guard. Operator-scope rows are cross-mob
     /// personal facts, so they need their OWN grant: folding the operator

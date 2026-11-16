@@ -213,8 +213,10 @@ a map that binds nobody to the rule's approver id, the change is held and
 nobody can decide it: `meta/decisions/list` notices it as `held` and not as
 `presented`, the stdio operator's `meta/decisions/decide` is refused
 `not_eligible`, and the change stays `pending_decision` until it is withdrawn
-or lapses at its deadline. A change held that way can still be decided once
-the gateway is started again with an access file that binds the approver.
+or lapses at its deadline, when its operation answers `refused` with
+`decision_closed` and the change has to be asked again. Until then a change
+held that way can still be decided: start the gateway again with an access
+file that binds the approver.
 
 A person's approval is evidence, never authority over the policy. When an
 approved change is carried out, the policy the launch has then is asked

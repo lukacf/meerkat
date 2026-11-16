@@ -3114,6 +3114,21 @@ Security, Upgrade and Changed.
   source; earlier versions read from the source). A fix is planned for the
   next release.
 
+- Added 2026-11-16, after the release. Approvals: a change that a rule holds
+  for approval can be decided only by a person bound to the rule's approver
+  id in the approver map of the gateway's access file. The map is read
+  whether or not the access file has `enabled = true`. When the gateway was
+  started with no access file, or with one whose map does not bind that id,
+  the change is held, a decide is refused (`-32602`, `decision_refused`,
+  `not_eligible`), and nobody can decide it: left so, it ends at its
+  deadline. Nothing is lost: start the gateway again with an access file
+  whose approver map binds the id, and the held change is presented and can
+  be decided. Run on the released 0.9.15 gateway for a host's create under a
+  rule that requires approval, decided by the stdio operator; not run: a
+  decide attested by another declared ingress, a held change of another
+  kind, and an edit of the map without a restart. See
+  [Approval rules](docs/reference/identity-policy.mdx#approval-rules).
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

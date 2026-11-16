@@ -3271,8 +3271,9 @@ Agent-memory methods are available over the SDK JSON-RPC gateway and over
 console `POST /console/rpc` when the identity runtime has an agent-memory
 provider configured. With ABAC enforced, console `recall` and `manifest`
 require both `agent.view` and `agent.memory.read` on the target identity;
-`remember` and `forget` also require mutating console access plus
-`agent.memory.write` and `agent.memory.delete` respectively.
+`remember`, `update` and `forget` also require mutating console access plus
+`agent.memory.write` (`remember`, `update`) or `agent.memory.delete`
+(`forget`).
 Older memory-naive policies receive
 [compatibility normalization](/concepts/access-control#what-gets-enforced);
 explicit memory policies are applied literally.
@@ -3295,6 +3296,12 @@ Write an identity-scoped agent memory record for later per-turn and build-contex
 
 Read identity-scoped agent memory records from the configured agent memory provider. This exposes the same durable record set used for per-turn and build-context injection. Unlike automatic injection, explicit recall reports provider errors to the caller.
 
+A recall is a selection, not a listing: it returns at most `max_entries`
+active records of the identity and takes no cursor. What each `selection`
+returns is under
+[Reading agent memory](/concepts/memory#reading-agent-memory); to enumerate,
+use [`meta/agent_memory/manifest`](#meta%2Fagent_memory%2Fmanifest).
+
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -3304,6 +3311,54 @@ Read identity-scoped agent memory records from the configured agent memory provi
 | `query_text` | `string` | no | Raw query text for contextual providers, max 16 KiB |
 | `query_terms` | `string[]` | no | Additional deterministic terms for contextual providers |
 | `max_entries` | `integer` | no | Maximum records, default `8`, max `64` |
+</Accordion>
+
+The result is `{ "records": [...] }`; a record has `memory_id`, `title`,
+`body`, `tags`, `created_at_ms` and `updated_at_ms`.
+
+### `meta/agent_memory/manifest`
+
+List the metadata of an identity's active agent memory records, never their
+bodies. The tier `full` returns every active record in one answer.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tier` | `"working_set" \| "full"` | no | `"working_set"` (default): the ranked records up to `k` and the recent records not yet ranked, at most twice `k` together. `"full"`: every active record |
+| `k` | `integer` | no | Size of the working set, default `32`, max `512`. Refused with the tier `full` |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `records` | `object[]` | One entry per record: `id`, `kind`, `title`, `description`, `age_days` and, for a ranked record, `rank` |
+</Accordion>
+
+### `meta/agent_memory/update`
+
+Replace an active agent memory record. The new title, body and tags become a
+new active record; the replaced one is no longer recalled or listed. A
+`memory_id` that is unknown, is not active (already replaced or forgotten)
+or belongs to another identity is refused invalid params (`-32602`).
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `memory_id` | `string` | yes | The active record to replace |
+| `title` | `string` | yes | Short record title, max 200 bytes |
+| `body` | `string` | yes | Memory body, max 64 KiB |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tags` | `string[]` | no | Optional labels, max 32 entries and 64 bytes each |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `memory_id` | `string` | Id of the new active record |
+| `supersedes` | `string` | Id of the record it replaced |
 </Accordion>
 
 ### `meta/agent_memory/forget`

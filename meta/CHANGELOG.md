@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an entry of an approver's `people` or `ingress_subjects` is refused since
   0.9.11.
 
-- Behaviour-only (not measured by the gate): An agent's `mob_spawn_member`,
+- Behaviour-only (not measured by the gate): an agent's `mob_spawn_member`,
   `delegate` and `fork_off` refuse a call that supplies the label
   `agent_identity`, in its own `labels` or in a `specs` or `members` entry, as
   invalid arguments.

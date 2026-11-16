@@ -455,6 +455,39 @@ as for a name no agent holds, so the answer tells nothing about it.
 
 All three are reads: they never wake an agent and load nothing.
 
+## Where no person answers questions
+
+From 0.9.15 every member is offered the `ask_user` tool (see
+[Question sets](/concepts/gating#question-sets)), an agent an agent created
+included, also on a host where no person will see its questions:
+
+- Where the gateway's Console signs nobody in (`console_auth_required(False)`
+  without access control), a call answers `no_human_surface` and holds
+  nothing.
+- Where the Console requires sign-in, as an SDK-launched gateway does unless
+  told otherwise, the questions are held until their deadline (one hour
+  unless the call says otherwise), also when nobody ever signs in. The host
+  reads the open sets with `gating_questions()` (`gatingQuestions()` in
+  TypeScript).
+
+A host that shows the questions to nobody keeps the tool from its agents by
+listing it in the profile's `tools.deny`:
+
+```toml
+[profiles.worker.tools]
+comms = true
+deny = ["ask_user"]
+```
+
+A member of that profile is not offered the tool. In a stored mob
+definition the change is declared as an
+[update](/reference/configuration#one-shot-mob-definition-update); from the
+start that commits it, the profile's members are built without the tool,
+an agent that existed before included. Do not deny it in a profile used
+for members whose host decides their tool surface itself (a host with a
+member registration hook, as Connect's native host is): their build is then
+refused (see Known limitations in the Meta changelog).
+
 ## Tool list size
 
 The eight tools may wait behind the deferred tool catalog. In a session whose

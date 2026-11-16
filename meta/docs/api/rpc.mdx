@@ -3981,6 +3981,16 @@ handlingMode: "steer" })` in TypeScript), and refuse the steer with
 | Scoped `meta/dispatch` (`expected_scope`) | The host-persisted exact scope | Refused: the scope moved | None | `meta/recover_delivery`, from the scope's original session |
 | Keyed `meta/send` | The identity, for good | The same key answers the first receipt | Defang; recall skipped | The receipt's status, then `meta/send_status` on the admitted pair |
 
+A `meta/dispatch` carries `idempotency_key` and `correlation_id` together or
+not at all. One without the other is refused before anything is delivered
+(`-32603`, `dispatch to <identity> refused before bridge admission: invalid
+delivery identity (idempotency key without a correlation id (half-pair))`,
+or `(correlation id without an idempotency key (half-pair))`). With the
+origin `connector` or `system` the correlation id may be any text, which
+the gateway maps to a UUID of its own; with another origin it must be a
+canonical UUID (`correlation_id must be a canonical UUID`). `meta/send`
+takes an `idempotency_key` by itself.
+
 Prefer a keyed `meta/send` for host sends that must survive retries over the
 identity's whole life.
 

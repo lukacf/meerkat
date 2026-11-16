@@ -445,9 +445,25 @@ class MyRoster:
 
 ```python
 DispatchInput.system("text")
-DispatchInput.connector("event from slack", correlation_id="msg-1")
+DispatchInput.connector("event from slack")
 DispatchInput.scheduler("nightly sync")
+
+# A dispatch that is safe to repeat carries both keys.
+DispatchInput(
+    content="event from slack", origin="connector",
+    idempotency_key="evt-1", correlation_id="msg-1",
+)
 ```
+
+`idempotency_key` and `correlation_id` go together: a repeat of the same
+pair to the same identity starts no second turn in its session, and a
+dispatch that carries one of the two without the other is refused with
+nothing delivered (`invalid delivery identity (... (half-pair))`).
+`DispatchInput.connector(text, correlation_id=...)` sets a correlation id
+and no key, so an input built that way is refused: build a keyed input with
+the full constructor, or pass both to `dispatch_text`. With the origin
+`connector` or `system` the correlation id may be any text; the other
+origins need a canonical UUID.
 
 ### Scope-bound dispatch
 

@@ -7,7 +7,8 @@ targets outside fenced code blocks gain the /connect prefix (Markdown links `](/
 
 usage:
   render-docs-mirror.py            regenerate the copies, the manifest and the navigation
-  render-docs-mirror.py --check    change nothing; exit 1 when anything would change
+  render-docs-mirror.py --check    change nothing; exit 1 when anything would change or the
+                                   navigation cannot be decided
 
 Regeneration writes only what differs: the copies of changed pages, the manifest
 docs/connect/_source.json (page count, link and fenced block counts, a source and a
@@ -17,6 +18,11 @@ docs/docs.json, taken from the source site's docs.json with the connect/ prefix.
 whose source page is gone is removed. The manifest's descriptive fields are kept as they
 are. It records no source commit: a tool that reads working files cannot know one, and
 the tree id is what binds the copies to their source.
+
+The navigation is handled only when docs/docs.json is in the JSON form this tool writes
+(the form of the site's other tool that writes that file) and holds exactly one Connect
+product. Otherwise a regeneration leaves the file as it is and says so, and the check
+counts it as a difference: one row `undecided docs.json`, exit 1.
 
 --site, --mirror, --nav and --crates name other directories and files; the tests use
 them. Standard library only.
@@ -126,8 +132,10 @@ def git_tree(directory: Path) -> bytes:
     return git_object("tree", body)
 
 
-def dump(value: object, ascii_only: bool) -> str:
-    return json.dumps(value, indent=2, ensure_ascii=ascii_only) + "\n"
+def dump(value: object) -> str:
+    """The JSON form of every file this tool writes: an indent of two and ASCII escapes.
+    The site's docs.json is also written by scripts/sync-meta-docs.py, in this same form."""
+    return json.dumps(value, indent=2) + "\n"
 
 
 def prefixed(value: object) -> object:
@@ -144,8 +152,11 @@ def prefixed(value: object) -> object:
 def navigation(site: Path, nav: Path) -> tuple[str | None, str | None]:
     """The text docs.json should have, and a refusal when it cannot be decided."""
     raw = nav.read_text(encoding="utf-8")
-    document = json.loads(raw)
-    if dump(document, False) != raw:
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return None, f"{nav.name} is not JSON; it is left as it is"
+    if dump(document) != raw:
         return None, f"{nav.name} is not in the form this tool writes; it is left as it is"
     source = json.loads((site / "docs.json").read_text(encoding="utf-8"))
     products = [product for product in document["navigation"]["products"] if product.get("product") == "Connect"]
@@ -157,7 +168,7 @@ def navigation(site: Path, nav: Path) -> tuple[str | None, str | None]:
         redirects.append({"source": PREFIX + entry["source"], "destination": PREFIX + entry["destination"]})
     if redirects or "redirects" in document:
         document["redirects"] = redirects
-    return dump(document, False), None
+    return dump(document), None
 
 
 def plan(site: Path, mirror: Path, nav: Path | None, crates: Path) -> tuple[dict[str, bytes], list[str], str, list[str]]:
@@ -191,12 +202,13 @@ def plan(site: Path, mirror: Path, nav: Path | None, crates: Path) -> tuple[dict
     notes = []
     if nav is not None and not nav.is_file():
         notes.append(f"no {nav.name}: the navigation is not handled")
-    return wanted, stale, dump(manifest, True), notes
+    return wanted, stale, dump(manifest), notes
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render Connect's documentation pages into docs/connect.")
-    parser.add_argument("--check", action="store_true", help="change nothing; exit 1 when anything would change")
+    parser.add_argument("--check", action="store_true",
+                        help="change nothing; exit 1 when anything would change or the navigation cannot be decided")
     parser.add_argument("--site", type=Path, default=SITE, help="the source pages (default: connect/docs/site)")
     parser.add_argument("--mirror", type=Path, default=MIRROR, help="the published copies (default: docs/connect)")
     parser.add_argument("--nav", type=Path, default=NAV, help="the site's docs.json (default: docs/docs.json)")
@@ -209,7 +221,7 @@ def main() -> int:
     try:
         wanted, stale, manifest, notes = plan(site, mirror, nav, args.crates)
     except ValueError as refusal:
-        print(f"render-docs-mirror: Connect's version cannot be read: {refusal}", file=sys.stderr)
+        print(f"render-docs-mirror: an input cannot be read: {refusal}", file=sys.stderr)
         return 2
     changed = []
     for page, data in wanted.items():
@@ -223,22 +235,30 @@ def main() -> int:
     if not manifest_path.is_file() or manifest_path.read_text(encoding="utf-8") != manifest:
         changed.append(("differs", MANIFEST))
     nav_text = None
+    # What the check cannot decide counts as a difference; a regeneration only notes it.
+    undecided = []
     if nav.is_file():
         nav_text, refusal = navigation(site, nav)
         if refusal:
             notes.append(refusal)
+            undecided.append(nav.name)
         elif nav.read_text(encoding="utf-8") != nav_text:
             changed.append(("differs", nav.name))
         else:
             nav_text = None
+    else:
+        undecided.append(nav.name)
     for note in notes:
         print(f"note: {note}")
     same = len(wanted) - sum(1 for kind, name in changed if name in wanted)
     if args.check:
         for kind, name in changed:
             print(f"{kind} {name}")
-        print(f"same {same}, differ {len(wanted) - same}; other differences {sum(1 for _kind, name in changed if name not in wanted)}")
-        return 1 if changed else 0
+        for name in undecided:
+            print(f"undecided {name}")
+        other = sum(1 for _kind, name in changed if name not in wanted) + len(undecided)
+        print(f"same {same}, differ {len(wanted) - same}; other differences {other}")
+        return 1 if changed or undecided else 0
     for kind, name in changed:
         if name in wanted:
             target = mirror / name

@@ -3096,9 +3096,13 @@ Security, Upgrade and Changed.
   - the strict open: `live_open_typed` / `liveOpenTyped` called with an
     execution identity. For a member of an identity-first launch it answers
     `-32000`, "experimental live response requires a delivery-aware outer
-    RPC writer", and the channel it had opened is taken back; for any other
-    member it is refused, because it needs the identity authority;
+    RPC writer", and the channel it had opened is closed again; for any
+    other member it is refused, because it needs the identity authority;
   - `live_connect` / `liveConnect`, which begins with the strict open.
+
+  Before it fails, a strict open over stdio takes the gateway's voice path,
+  which ends a Console voice call in progress on that gateway (read from the
+  source, not run).
 
   Not affected: `live_open` / `liveOpen`, and the typed open without an
   execution identity, which open a channel with a WebSocket transport, also

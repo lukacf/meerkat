@@ -977,7 +977,11 @@ async fn create_first_start_marker(path: &Path, realm_id: &str) -> Result<(), st
 
 /// Age-based takeover check so a crashed first start cannot brick the
 /// realm: payload timestamp first, mtime as the fallback for a torn write.
-async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
+async fn first_start_marker_is_stale(path: &Path, windows: bool) -> Result<bool, StoreError> {
+    // A read or a probe refused because somebody else has the marker (see
+    // `classify_lock_file_error`) found no stale marker.
+    let held =
+        |err: &std::io::Error| classify_lock_file_error(err.kind(), windows) == LockFileError::Held;
     match tokio::fs::read(path).await {
         Ok(bytes) => {
             if let Ok(marker) = serde_json::from_slice::<FirstStartMarker>(&bytes) {
@@ -986,6 +990,7 @@ async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if held(&err) => return Ok(false),
         Err(err) => return Err(StoreError::Io(err)),
     }
     match tokio::fs::metadata(path).await {
@@ -997,6 +1002,7 @@ async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
             Ok(age > MANIFEST_LOCK_STALE_AFTER)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) if held(&err) => Ok(false),
         Err(err) => Err(StoreError::Io(err)),
     }
 }
@@ -1030,7 +1036,7 @@ impl FirstStartReservation {
     async fn try_acquire_with<F, Fut>(
         candidates: &[PathBuf],
         realm_id: &str,
-        _windows: bool,
+        windows: bool,
         mut create: F,
     ) -> Result<Option<Self>, StoreError>
     where
@@ -1054,19 +1060,23 @@ impl FirstStartReservation {
                         acquired.markers.push(marker_path);
                         break;
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                        if !takeover_attempted && first_start_marker_is_stale(&marker_path).await? {
-                            takeover_attempted = true;
-                            let _ = tokio::fs::remove_file(&marker_path).await;
-                            continue;
+                    Err(err) => match classify_lock_file_error(err.kind(), windows) {
+                        LockFileError::Held => {
+                            if !takeover_attempted
+                                && first_start_marker_is_stale(&marker_path, windows).await?
+                            {
+                                takeover_attempted = true;
+                                let _ = tokio::fs::remove_file(&marker_path).await;
+                                continue;
+                            }
+                            acquired.release().await;
+                            return Ok(None);
                         }
-                        acquired.release().await;
-                        return Ok(None);
-                    }
-                    Err(err) => {
-                        acquired.release().await;
-                        return Err(StoreError::Io(err));
-                    }
+                        LockFileError::Fatal => {
+                            acquired.release().await;
+                            return Err(StoreError::Io(err));
+                        }
+                    },
                 }
             }
         }

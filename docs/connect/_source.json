@@ -5,7 +5,7 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "b398f0a985decafb062aaa725c9d3ab0beee1e63",
+  "source_docs_tree": "0d628bcb2edfb17d4a8da88310f81c13151fa1cf",
   "connect_source_commit": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
   "connect_source_tree": "245cf826ee78d6f60c098dc9d8856b100448fa23",
   "connect_source_state": "monorepo_sync",
@@ -36,8 +36,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "8e1064e02a14e512b2603cfe4315b7e0ef002a6688c43bd1c5b265ddb3e3334f",
-      "rendered_sha256": "fd32b3753c2ac76e7f48c33eddb9fffe855f7be7acde8798032495f44828dfe9"
+      "source_sha256": "bf4c20c121d5011cf005ae05200df0f704667ff40e9abbca448a358f9fdb77fb",
+      "rendered_sha256": "4a8a15172ebe22bfd27c7312a16838353958381e86e76a7834ea8292f4080139"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -166,8 +166,8 @@
     },
     {
       "path": "library/playwright.mdx",
-      "source_sha256": "40607420ae522962aa8e642066d5e0602141206957e6d9d5df9743e504cf2d8d",
-      "rendered_sha256": "3691d8cd8234b8c3dfbbda8a6f27bc45223da0692b9ad6dadb9ee92116dcb7f8"
+      "source_sha256": "d9f274a63fac3d9cbb13dd54b22bd08f047c907c9e9c5a6f93642341716b603f",
+      "rendered_sha256": "5700e5ec1c09a28c4b4f7e7fef06ee6d7ffd1c49682fd7aa7b323b0c37c114c4"
     },
     {
       "path": "library/slack-gmail.mdx",

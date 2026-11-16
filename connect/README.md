@@ -87,8 +87,8 @@ qualify the published release or a deployed provider flow.
 
 ## Scope
 
-- The adopted library contains 101 integration identities on macOS and 100 on
-  Linux, which excludes Playwright. Support covers the declared operations and
+- The adopted library contains 100 integration identities in this release, which
+  has Linux products only and excludes Playwright. Support covers the declared operations and
   setup profiles; the counts do not claim live authentication with every provider.
 - Agents can research integrations outside the catalog and propose supported
   packages. Installation, credentials and access are validated before use.

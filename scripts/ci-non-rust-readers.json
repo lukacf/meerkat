@@ -2103,19 +2103,6 @@
         ]
       }
     ],
-    "meta/docs/concepts/access-control.mdx": [
-      {
-        "package": "meerkat-meta",
-        "target": "test:access_control",
-        "scope": "target",
-        "tests": [
-          "the_access_control_page_examples_load_as_files"
-        ],
-        "sources": [
-          "meta/crates/meerkat-meta/tests/access_control.rs"
-        ]
-      }
-    ],
     "meta/docs/rct/console-rest-sse-contract-v0.5.0.json": [
       {
         "package": "meerkat-meta",

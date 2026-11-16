@@ -16,7 +16,7 @@ export ANTHROPIC_API_KEY=sk-...
 ./scripts/repo-cargo build -p rkat --bin rkat
 ```
 
-Every command that starts a session passes `--model claude-sonnet-4-6` (the
+Every command that starts a session passes `--model claude-sonnet-5-5` (the
 `MODEL` variable set just before step 1 in `examples.sh`), so the Anthropic key is the
 only credential the script needs. Step 3 resumes the session from step 2
 without `--model` and keeps that session's model. To run against another
@@ -29,7 +29,7 @@ fresh configuration selects `gpt-6-astra`, which needs an OpenAI key.
 ./examples/004-cli-one-liners-sh/examples.sh
 ```
 
-Fresh turns explicitly select `claude-sonnet-4-6` (Anthropic), matching the
+Fresh turns explicitly select `claude-sonnet-5-5` (Anthropic), matching the
 credential above. Resume keeps the session's model; it does not force a new one.
 State and config roots are example-local under `.work/`; no global config is
 modified. Re-running creates new example sessions and resumes the one just created.

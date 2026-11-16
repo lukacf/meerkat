@@ -34,7 +34,7 @@ export ANTHROPIC_API_KEY=sk-...
 ```
 
 The script checks `ANTHROPIC_API_KEY` and its live step runs
-`rkat run --model claude-sonnet-4-6`, so the Anthropic key is the only
+`rkat run --model claude-sonnet-5-5`, so the Anthropic key is the only
 credential it needs. To run the live step against another provider, change
 both the `--model` argument and the key guard in `setup.sh`: setting an API key
 alone does not select its provider. The script redirects its state, context
@@ -43,7 +43,7 @@ user or realm configuration does not apply to it.
 
 If `rkat` is not on your `PATH`, the script automatically falls back to
 repo-local binaries built by `./scripts/repo-cargo`.
-Fresh turns select `claude-sonnet-4-6` explicitly, matching the Anthropic key.
+Fresh turns select `claude-sonnet-5-5` explicitly, matching the Anthropic key.
 `RKAT` can name an executable on `PATH`, or a literal absolute/relative path
 (including spaces). Relative overrides resolve from your invocation directory,
 not from the example's internal working directory. Do not include shell flags
@@ -61,7 +61,7 @@ in `RKAT`.
 2. Registers a real project-scoped stdio MCP server
 3. Prints the generated `.work/project/.rkat/mcp.toml`
 4. Verifies the server with `rkat mcp list` and `rkat mcp get`
-5. Runs a live `rkat run --model claude-sonnet-4-6 --wait-for-mcp --verbose ...` prompt that should call the MCP tools
+5. Runs a live `rkat run --model claude-sonnet-5-5 --wait-for-mcp --verbose ...` prompt that should call the MCP tools
 6. Prints a shell-escaped cleanup command and removes this run's registration on
    exit, including on a failed agent turn
 

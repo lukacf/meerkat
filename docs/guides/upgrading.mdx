@@ -60,23 +60,6 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 This section is for systems running 0.9.14 or 0.9.13. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
-Until Connect 0.9.15 is published, the Connect release to
-use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
-with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
-take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
-requires `meerkat-meta==0.9.14`. In that pairing:
-
-- Connect 0.9.14's archives are built with Core 0.9.14 and Meta 0.9.14. What
-  0.9.15 changes in Core and Meta is not in the Connect CLI or the Connect
-  gateway until Connect 0.9.15.
-- `@rkat/toolkit` 0.9.14 accepts `@rkat/sdk` 0.9.15 and `@rkat/meta-sdk`
-  0.9.15 beside it: its optional peers accept 0.9.14 and later below 0.10.0.
-- Without that extra, the Python `meerkat-toolkit` 0.9.14 puts no
-  requirement on `meerkat-meta`.
-
-That pairing was not run as a whole, in either direction: it rests on the
-version requirements Connect 0.9.14 published.
-
 State that 0.9.14 or 0.9.13 persisted loads under 0.9.15 as it is. What
 that rests on differs by store:
 
@@ -1644,7 +1627,9 @@ What no step removes (beside the event replay above):
   0.9.14 cannot read: it is refused when a session is created, or before
   the turn's input is stored, on a live session and on a stored one; a
   turn judged only at its start is refused there, and its stored input
-  ends as abandoned with the reason `stopped` (confirmed by a run).
+  ends as abandoned: in 0.9.15 with the reason `stopped` (confirmed by a
+  run), from 0.9.16 with the reason `never_executed` (confirmed by tests
+  of the runtime, on both of its drivers). 0.9.14 reads both values.
   The record is another case: a turn is admitted, and its request is then
   refused, before anything is sent to the model, because the session
   holds a level that its model does not support. The shape that was run:

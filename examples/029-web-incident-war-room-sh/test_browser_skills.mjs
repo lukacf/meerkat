@@ -67,7 +67,7 @@ async function verifyBrowserBootstrap(bundle, version) {
     assert.equal(providerCalls.length, 0, "generated bootstrap must remain deferred");
     const result = await page.evaluate(async glue => {
       const wasm = await import(`/${glue}`);
-      const handle = await wasm.create_session_simple(JSON.stringify({ model: "claude-sonnet-4-6", comms_name: "pack-browser", keep_alive: true }));
+      const handle = await wasm.create_session_simple(JSON.stringify({ model: "claude-sonnet-5-5", comms_name: "pack-browser", keep_alive: true }));
       const turn = JSON.parse(await wasm.start_turn(handle, JSON.stringify({ text: "Return the synthetic browser pack answer." })));
       const state = JSON.parse(await wasm.get_session_state(handle));
       await wasm.destroy_session(handle);
@@ -228,7 +228,7 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
     const bootstrap = () => wasm.init_runtime(readFileSync(path.join(bundle, "mobpack.bin")), JSON.stringify({
       anthropic_api_key: "synthetic-no-network",
       anthropic_base_url: "http://127.0.0.1:1",
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5-5",
       mobpack_trust: { policy: "permissive" },
     }));
     await bootstrap();

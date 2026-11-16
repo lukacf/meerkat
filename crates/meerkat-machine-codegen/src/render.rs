@@ -686,6 +686,23 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingAttached",
     "ResolveRuntimeCompletionCleanupInputTerminatedWhileServingRunning",
     "ResolveRuntimeCompletionCleanupInputTerminatedWhileDrainingRetired",
+    "ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing",
+    "ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle",
+    "ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached",
+    "ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning",
+    "ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired",
+    "ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped",
+    "ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing",
+    "ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle",
+    "ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached",
+    "ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning",
+    "ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired",
+    "ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped",
+    "DeferInputBehindBacklogEndedWithRefusedRunIdle",
+    "DeferInputBehindBacklogEndedWithRefusedRunAttached",
+    "DeferInputBehindBacklogEndedWithRefusedRunRunning",
+    "DeferInputBehindBacklogEndedWithRefusedRunRetired",
+    "DeferInputBehindBacklogEndedWithRefusedRunStopped",
 ];
 
 /// One published `TransitionId` variant whose transition no longer exists.

@@ -52,20 +52,25 @@ them.
   length in bytes as an 8-byte big-endian integer), and is listed, answered,
   replayed and told its result as any other. What still bounds the asking
   agent's key: the held request carries the key and the questions and is at
-  most 256 KiB, and a call whose request is larger is still refused. Every
-  call 0.9.15 held keeps its key and its decision id byte for byte, so the
+  most 256 KiB, and a call whose request is larger is still refused. A
+  control character in the asking agent's key is held by the hold of
+  `meerkat-runtime` only: a host that names the asking agent as a principal
+  (Meta does) still refuses such a key before the hold, as in 0.9.15,
+  because a principal id takes no control character; on such a host, of the
+  control characters, only one in the tool-call id is newly held. Every call
+  0.9.15 held keeps its key and its decision id byte for byte, so the
   question sets of a 0.9.15 store are found, listed, answered and settled as
   before, and nothing is migrated. What a reader of decisions sees: for such
   a call `subject_key` (`decision/list`, `decision/get`) reads the bounded
   form, which names the run and not the asker or the call id; the asker
   stays in the held request. The limit of a subject key is unchanged.
   Affected: 0.9.15 (the tool is new in 0.9.15). Measured by tests of this
-  change, with a 2,000-byte tool-call id and a 2,000-byte agent key. Not
-  measured, read from 0.9.15's reader code, which this change does not
-  touch (no 0.9.15 host was run on such a store): after a downgrade to
-  0.9.15, a set held for such a call is still listed and answerable there,
-  and a replay of that call is refused there, as every such call is in
-  0.9.15.
+  change, with a 2,000-byte tool-call id, a 2,000-byte agent key, and a
+  request of exactly 256 KiB and of one byte more. Not measured, read from
+  0.9.15's reader code, which this change does not touch (no 0.9.15 host
+  was run on such a store): after a downgrade to 0.9.15, a set held for such
+  a call is still listed and answerable there, and a replay of that call is
+  refused there, as every such call is in 0.9.15.
 
 ## [0.9.15] - 2026-11-15
 

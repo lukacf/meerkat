@@ -647,6 +647,57 @@ fn the_decision_list_shows_a_long_id_set() {
     );
 }
 
+/// What still bounds an asker's key is the held request, which carries the
+/// key and the questions: at most 256 KiB (262,144 bytes). A call whose
+/// request is exactly that is held, under the bounded key; one byte more is
+/// refused as invalid, and nothing is held for it.
+#[test]
+fn an_asker_that_takes_the_held_request_past_256_kib_is_refused() {
+    const REQUEST_MAX_BYTES: usize = 262_144;
+    let (_clock, service) = fixture();
+    let run_id = run();
+    let without_asker = serde_json::to_string(&AskUserBody {
+        body: "ask_user.questions.v1".to_owned(),
+        asker: String::new(),
+        questions: question_set(),
+    })
+    .expect("the body")
+    .len();
+    let largest = "a".repeat(REQUEST_MAX_BYTES - without_asker);
+
+    let held = hold_ask_user(&service, ASKED_AT, hold_for(&largest, &run_id, "call-1"))
+        .expect("a request of exactly 256 KiB is held");
+    assert_eq!(held.descriptor.request.get().len(), REQUEST_MAX_BYTES);
+    assert_bounded(&held, &largest, &run_id, "call-1");
+    assert_eq!(
+        AskUserBody::of(&held).expect("the held body").asker,
+        largest
+    );
+
+    let mut one_more = largest.clone();
+    one_more.push('a');
+    let error = hold_ask_user(&service, ASKED_AT, hold_for(&one_more, &run_id, "call-2"))
+        .expect_err("a request one byte over 256 KiB is refused");
+    assert_eq!(
+        error,
+        AskUserError::Invalid("the request exceeds 262144 bytes".to_owned())
+    );
+    let far_over = "a".repeat(300_000);
+    let error = hold_ask_user(&service, ASKED_AT, hold_for(&far_over, &run_id, "call-3"))
+        .expect_err("a 300,000-byte asker is refused");
+    assert_eq!(
+        error,
+        AskUserError::Invalid("the request exceeds 262144 bytes".to_owned())
+    );
+    assert_eq!(
+        service
+            .count(&DecisionListFilter::default())
+            .expect("count"),
+        1,
+        "a refused call holds nothing"
+    );
+}
+
 /// An answer for a decision id nothing holds is refused as not found, as
 /// before: so for the id a bounded key nothing was held under derives.
 #[test]

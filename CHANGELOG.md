@@ -42,8 +42,9 @@ them.
   `tools.shell_enabled` and a mob profile's `tools.shell` keep their shape
   and now also turn on `monitor_start`; and a shell job manager whose
   dispatcher does not enable `monitor_start`, or whose session may not
-  start a monitor, ends a recorded resumable monitor as `needs_attention`
-  where it ran it again. See Changed, Fixed and the Upgrade notes.
+  start a monitor, no longer runs a recorded resumable monitor again, and
+  ends as `needs_attention` the ones that session's own tool started. See
+  Changed, Fixed and the Upgrade notes.
 
 ### Changed
 
@@ -109,19 +110,21 @@ them.
   after a host restart. A recorded resumable monitor is run again only while
   its session may still start one: `monitor_start` enabled for it, not
   denied by name, not closed by its grant gate, and its profile not
-  read-only, as the session's current build resolves them. Otherwise, at
-  the session's next shell job call, the job ends as `needs_attention` with
-  the failure code `monitor_start_not_permitted` and is never run again.
-  Earlier releases ran such a monitor again whatever the session's tools
-  said. A session whose shell family was turned off has no shell job call,
-  so nothing of its own runs a recorded monitor again.
+  read-only, as the session's current build resolves them, and not hidden
+  by the session's own tool filter or an inherited filter. Otherwise the
+  session never runs it again. At its next shell job call, a monitor its
+  own tool started ends as `needs_attention` with the failure code
+  `monitor_start_not_permitted`; a monitor the host's route started, and
+  one recorded before this release, is left as it is for the host's
+  route. Earlier releases ran such a monitor again whatever the session's
+  tools said. A session whose shell family was turned off has no shell job
+  call, so nothing of its own runs a recorded monitor again.
 
-  What the re-run asks is the session's execution policy and its grant
-  gate. The re-run happens outside any run, so a grant scoped to one run
-  does not admit it. A session tool filter, an inherited filter and a
-  turn's block list hide the tool but are not asked at the re-run, and
-  neither are a governed application tool policy or a host's dispatch
-  admission.
+  What the re-run asks is the session's execution policy, its durable
+  tool filters and its grant gate. The re-run happens outside any run, so
+  a grant scoped to one run does not admit it. A turn's block list, a
+  governed application tool policy and a host's dispatch admission are not
+  asked.
 
 ### Added
 
@@ -134,6 +137,10 @@ them.
 - The job failure code `monitor_start_not_permitted`, the `reason` of a
   `needs_attention` monitor job that was not run again. Failure codes are
   open strings.
+- A monitor job records who started it. The session's own `monitor_start`
+  tool records the job's tool identity at version `v2`; the host's
+  `monitors/start` route records `v1`, as every earlier release did for
+  both. No wire type changes.
 
 ### Upgrade notes
 
@@ -143,7 +150,7 @@ them.
   closes `shell` closes `monitor_start` with it, at every build and after a
   restart, and the grant that opens `shell` opens it. A session whose
   `shell` is closed by name is therefore not offered the monitor by the
-  upgrade, and where a deny list or a grant gate closes it, its recorded
+  upgrade, and, unless only a turn's block list closes it, its recorded
   monitors are not run again. An allow list that names `monitor_start` and
   not `shell` no longer admits the monitor.
 - A pre-tool hook or a host's dispatch admission that refuses or inspects
@@ -156,8 +163,11 @@ them.
   rewritten; the tool list sent to the provider gains one definition.
 - A store that holds a recorded monitor: a session that may start a monitor
   runs it again after a restart, as before. One that may not (a denied name,
-  a closed grant gate, a read-only profile) now sees the job end as
-  `needs_attention`, whoever started the monitor.
+  a closed grant gate, a read-only profile, a tool filter that hides it) no
+  longer runs it again, and does not end it either: every monitor recorded
+  before this release is left for the host's route, as is every monitor an
+  operator starts. Only a monitor the session's own tool starts from this
+  release on is ended as `needs_attention`.
 
 ### Known limitations
 
@@ -167,11 +177,11 @@ them.
 - The host's own monitor route is not bound by a member's deny: an
   operator's `monitors/start` or job cancel for a session runs that
   session's recorded resumable monitors again under the host's authority.
-- A stored monitor job does not say who started it. After a restart, a
-  session that may not start a monitor (denied, gated without a grant, or
-  read-only) ends every recorded resumable monitor of its own at its next
-  shell job call, an operator's `monitors/start` monitor for that session
-  included, unless the host's route recovered the session's jobs first.
+- A monitor that an agent started before this release, which only a Rust
+  host's own tool policy could allow, is recorded as the host's monitors
+  are. After a later deny the session neither runs it again nor ends it:
+  it stays lost until the host's route recovers the session's jobs or
+  cancels it.
 - A deny does not stop a monitor that is already running; cancel its job.
   `jobs/list` with the session's id lists its jobs (a monitor's
   `runner.name` is `meerkat.monitor_script`) and `jobs/cancel` with the

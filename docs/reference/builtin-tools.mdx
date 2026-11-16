@@ -1212,17 +1212,19 @@ must implement the corresponding idempotency/checkpoint behavior.
 **A later deny holds for the re-run.** A recorded monitor is run again only
 while its session may still start one: `monitor_start` enabled for it, not
 denied, not closed by its grant gate, its profile not read-only, as the
-session's current build resolves them. Otherwise, at the session's next
-shell job call, the job ends as `needs_attention` with the failure code
-`monitor_start_not_permitted` and is never run again. A session whose shell
+session's current build resolves them, and not hidden by the session's own
+tool filter or an inherited filter. Otherwise the session never runs it
+again. At its next shell job call, a monitor its own tool started ends as
+`needs_attention` with the failure code `monitor_start_not_permitted`; a
+monitor the host's route started, and one recorded before jobs said who
+started them, is left as it is for the host's route. A session whose shell
 family was turned off has no shell job call, so nothing of its own runs a
 recorded monitor again.
 
-What the re-run asks is the session's execution policy and its grant gate.
-It happens outside any run, so a grant scoped to one run does not admit it.
-A session tool filter, an inherited filter and a turn's block list hide the
-tool but are not asked at the re-run, and neither are a governed application
-tool policy or a host's dispatch admission.
+What the re-run asks is the session's execution policy, its durable tool
+filters and its grant gate. It happens outside any run, so a grant scoped to
+one run does not admit it. A turn's block list, a governed application tool
+policy and a host's dispatch admission are not asked.
 
 A monitor that is already running is not stopped by a deny: cancel its job
 (`shell_job_cancel`, or the host's `jobs/cancel` with the job's id; the
@@ -1234,10 +1236,9 @@ resumable monitor starts it once more before it cancels it.
 The host's own route is separate. An operator's `monitors/start` or job
 cancel for a session runs that session's recorded resumable monitors again
 under the host's authority; a member's deny does not bind the operator's
-route. A stored monitor job does not say who started it, so a session that
-may not start a monitor ends an operator's monitor for it too, at its next
-shell job call after a restart, unless the host's route recovered the
-session's jobs first.
+route. A monitor job says who started it, so a session that may not start a
+monitor ends only the ones its own tool started and leaves an operator's
+monitor for it untouched.
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/monitor_tool.rs`
 </Accordion>

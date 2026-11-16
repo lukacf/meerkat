@@ -39,9 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gained after the member started a script monitor now holds for the
   monitor's re-run after a gateway restart: at the member's next shell job
   call the monitor is not run again and its job ends as `needs_attention`
-  (`monitor_start_not_permitted`). The host's own monitor route is not
-  bound by the member's deny. See Fixed and Known limitations in the
-  Meerkat changelog.
+  (`monitor_start_not_permitted`). A tool filter that hides the tool stops
+  the re-run too. An operator's own monitor for the member, and one
+  recorded before this release, is not the member's to end: the member
+  neither runs nor ends it, and the host's own monitor route, which the
+  member's deny does not bind, decides. See Fixed and Known limitations in
+  the Meerkat changelog.
 
 ### Upgrade
 

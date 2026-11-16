@@ -28303,6 +28303,93 @@ mod prompt_tests {
         build_config
     }
 
+    fn build_config_refusal(result: Result<DynAgent, BuildAgentError>) -> String {
+        match result {
+            Err(BuildAgentError::Config(text)) => text,
+            Err(other) => panic!("expected a configuration refusal, got {other:?}"),
+            Ok(_) => panic!("expected a configuration refusal, and the agent was built"),
+        }
+    }
+
+    /// A build that was given no context root looks for project instructions
+    /// in its project root. That root is a default: when the directory does
+    /// not exist there are no project instructions, and the agent is built
+    /// with the prompt it gets for a directory that holds no AGENTS.md.
+    #[tokio::test]
+    async fn default_convention_root_that_does_not_exist_yields_no_project_instructions() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        let absent = temp.path().join("absent");
+
+        let with_existing = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(&existing)
+            .builtins(false)
+            .build_agent(external_only_build_config(), &Config::default())
+            .await
+            .unwrap();
+        let with_absent = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(&absent)
+            .builtins(false)
+            .build_agent(external_only_build_config(), &Config::default())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("a default root that does not exist is absence, not a fault: {error:?}")
+            });
+
+        assert_eq!(
+            system_prompt_of(with_absent.session().messages()),
+            system_prompt_of(with_existing.session().messages()),
+        );
+    }
+
+    /// A context root the host named is a statement: when the directory does
+    /// not exist the build is refused, and the refusal names it.
+    #[tokio::test]
+    async fn named_context_root_that_does_not_exist_refuses_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("absent");
+
+        let refusal = build_config_refusal(
+            AgentFactory::new(temp.path().join("sessions"))
+                .project_root(&absent)
+                .context_root(&absent)
+                .builtins(false)
+                .build_agent(external_only_build_config(), &Config::default())
+                .await,
+        );
+        assert!(
+            refusal.contains("project AGENTS.md")
+                && refusal.contains("is not readable")
+                && refusal.contains(&absent.display().to_string()),
+            "{refusal}"
+        );
+    }
+
+    /// An AGENTS.md that exists in the default root and cannot be read is a
+    /// fault, not absence: the build is refused.
+    #[tokio::test]
+    async fn unreadable_agents_md_in_the_default_convention_root_refuses_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        // Not UTF-8: the file is there and its content cannot be read as text.
+        std::fs::write(&agents_md, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let refusal = build_config_refusal(
+            AgentFactory::new(temp.path().join("sessions"))
+                .project_root(temp.path())
+                .builtins(false)
+                .build_agent(external_only_build_config(), &Config::default())
+                .await,
+        );
+        assert!(
+            refusal.contains("project AGENTS.md")
+                && refusal.contains("is not readable")
+                && refusal.contains(&agents_md.display().to_string()),
+            "{refusal}"
+        );
+    }
+
     /// Item A3: the mob family reaches a `tools.mob` member through two
     /// dispatchers, the agent-facing mob surface (19 tools, ~15.8 KB of
     /// descriptions; `delegate` alone is 2,464 bytes) and the 12-tool operator

@@ -2253,6 +2253,273 @@ mod tests {
         );
     }
 
+    /// The realm manifest lock is one file in the realm's directory. A
+    /// holder that has returned has released it: its lock file is gone, so
+    /// the next taker acquires without waiting, even when the holder's
+    /// runtime (its process) ends right after it returned.
+    ///
+    /// RED before, for the four rows about a holder that has returned: the
+    /// guard removed its file on a task it spawned at drop and did not
+    /// await. A current-thread runtime polls that task only once the caller
+    /// awaits again, so the file was still there when the holder returned;
+    /// a runtime dropped at that point never polled it, the file stayed,
+    /// and the next taker waited its five seconds and failed with
+    /// `RealmManifestLockTimeout` until the file was thirty seconds old.
+    ///
+    /// The three controls hold before and after: a held lock and a leftover
+    /// file younger than the takeover age make a taker wait and time out,
+    /// and a leftover file older than that age is taken over.
+    mod manifest_lock {
+        use super::*;
+
+        const REALM: &str = "lab";
+
+        fn lock_path(realms_root: &Path) -> PathBuf {
+            realm_paths_in(realms_root, REALM)
+                .root
+                .join(".realm_manifest.lock")
+        }
+
+        /// A current-thread runtime with a paused clock: a taker's bounded
+        /// wait elapses virtually, and a taker that did not wait leaves the
+        /// clock where it was.
+        fn paused_runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .expect("a runtime")
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+        }
+
+        /// Materialize the realm, in a runtime of its own that is driven
+        /// until the manifest lock of that first open is gone.
+        fn materialized_realm(realms_root: &Path) {
+            runtime().block_on(async {
+                ensure_realm_manifest_in(
+                    realms_root,
+                    REALM,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                )
+                .await
+                .expect("the realm");
+                let lock = lock_path(realms_root);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while lock.exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert!(!lock.exists(), "the first open's lock is released");
+            });
+        }
+
+        /// The next taker after a holder: governing takes the manifest lock
+        /// whether or not the realm is governed already. It must acquire on
+        /// its first attempt: on the paused clock, no retry delay elapsed.
+        async fn the_next_taker_acquires_at_once(realms_root: &Path) {
+            let started = Instant::now();
+            let governed = govern_realm_in(realms_root, REALM).await;
+            assert!(
+                governed.is_ok(),
+                "the next taker acquires the manifest lock: {governed:?}"
+            );
+            assert_eq!(
+                started.elapsed(),
+                Duration::ZERO,
+                "the next taker did not wait for the manifest lock"
+            );
+        }
+
+        #[test]
+        fn a_first_open_that_has_returned_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                ensure_realm_manifest_in(
+                    &realms_root,
+                    REALM,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                )
+                .await
+                .expect("the first open");
+                // Nothing is awaited between the holder's return and this.
+                assert!(
+                    !lock.exists(),
+                    "the first open released the manifest lock before it returned"
+                );
+                the_next_taker_acquires_at_once(&realms_root).await;
+            });
+        }
+
+        #[test]
+        fn a_provider_first_open_that_has_returned_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                ensure_realm_manifest_pin_in(&realms_root, REALM, Some("bigquery"), None, None)
+                    .await
+                    .expect("the first open of a provider realm");
+                // Nothing is awaited between the holder's return and this.
+                assert!(
+                    !lock.exists(),
+                    "the first open released the manifest lock before it returned"
+                );
+                the_next_taker_acquires_at_once(&realms_root).await;
+            });
+        }
+
+        #[test]
+        fn a_governing_that_has_returned_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                govern_realm_in(&realms_root, REALM)
+                    .await
+                    .expect("the selection");
+                // Nothing is awaited between the holder's return and this.
+                assert!(
+                    !lock.exists(),
+                    "governing released the manifest lock before it returned"
+                );
+                the_next_taker_acquires_at_once(&realms_root).await;
+            });
+        }
+
+        /// What a command line does: one command runs to its end and its
+        /// runtime is dropped, then the next command starts in a runtime of
+        /// its own.
+        #[test]
+        fn a_holder_whose_runtime_ends_at_once_leaves_no_manifest_lock_file() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            let first_command = runtime();
+            first_command
+                .block_on(ensure_realm_manifest_in(
+                    &realms_root,
+                    REALM,
+                    Some(supported_backend()),
+                    Some(RealmOrigin::Explicit),
+                ))
+                .expect("the first command creates the realm");
+            drop(first_command);
+
+            paused_runtime().block_on(the_next_taker_acquires_at_once(&realms_root));
+            assert!(
+                !lock_path(&realms_root).exists(),
+                "no command left a manifest lock file"
+            );
+            assert_eq!(
+                runtime()
+                    .block_on(read_realm_posture_in(&realms_root, REALM))
+                    .expect("the posture"),
+                RealmPosture::Governed
+            );
+        }
+
+        #[test]
+        fn a_held_manifest_lock_makes_a_taker_wait_and_time_out() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            paused_runtime().block_on(async {
+                let held = ManifestLockGuard::acquire(&lock, REALM)
+                    .await
+                    .expect("the holder");
+                let started = Instant::now();
+                let refused = govern_realm_in(&realms_root, REALM).await;
+                assert!(
+                    matches!(
+                        refused,
+                        Err(StoreError::RealmManifestLockTimeout { ref realm_id }) if realm_id == REALM
+                    ),
+                    "a taker times out behind a held manifest lock: {refused:?}"
+                );
+                assert!(
+                    started.elapsed() >= MANIFEST_LOCK_TIMEOUT,
+                    "the taker waited its whole bounded wait: {:?}",
+                    started.elapsed()
+                );
+                assert!(lock.exists(), "the taker left the holder's lock file");
+                assert_eq!(
+                    read_realm_posture_in(&realms_root, REALM)
+                        .await
+                        .expect("the posture"),
+                    RealmPosture::Ungoverned,
+                    "the refused taker changed nothing"
+                );
+
+                drop(held);
+                govern_realm_in(&realms_root, REALM)
+                    .await
+                    .expect("the taker acquires once the holder has released");
+            });
+        }
+
+        /// What a killed holder leaves: a lock file nobody holds. Until it
+        /// reaches the takeover age it refuses takers like a held lock.
+        #[test]
+        fn a_leftover_manifest_lock_younger_than_the_takeover_age_still_blocks() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            std::fs::write(&lock, b"realm-manifest-lock").expect("a leftover lock file");
+            paused_runtime().block_on(async {
+                let refused = govern_realm_in(&realms_root, REALM).await;
+                assert!(
+                    matches!(
+                        refused,
+                        Err(StoreError::RealmManifestLockTimeout { ref realm_id }) if realm_id == REALM
+                    ),
+                    "a taker times out behind a young leftover lock file: {refused:?}"
+                );
+            });
+            assert!(lock.exists(), "the young leftover lock file is not removed");
+        }
+
+        #[test]
+        fn a_leftover_manifest_lock_older_than_the_takeover_age_is_taken_over() {
+            let temp = tempfile::tempdir().unwrap();
+            let realms_root = temp.path().join("realms");
+            materialized_realm(&realms_root);
+            let lock = lock_path(&realms_root);
+            std::fs::write(&lock, b"realm-manifest-lock").expect("a leftover lock file");
+            let leftover = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&lock)
+                .expect("the leftover lock file");
+            leftover
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    SystemTime::now() - MANIFEST_LOCK_STALE_AFTER - Duration::from_secs(5),
+                ))
+                .expect("an old modification time");
+            drop(leftover);
+            runtime().block_on(async {
+                let governed = govern_realm_in(&realms_root, REALM)
+                    .await
+                    .expect("a taker takes an old leftover lock file over");
+                assert_eq!(governed.governance(), Some(RealmGovernance::Governed));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while lock.exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                assert!(!lock.exists(), "the taker released the lock it took over");
+            });
+        }
+    }
+
     mod first_start_reservation {
         use super::*;
 

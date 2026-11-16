@@ -192,6 +192,8 @@ actions = ["agent.*"]
 agents = ["identity:auditor"]
 ```
 
+An `agents` entry is an agent's exact name as the agent list shows it, compared as written (or `*`, or the agent's runtime member id): it is not a pattern and takes no prefix. The names in these examples have the form the [quickstart](/quickstart) gives its agents (`identity:person`); for an agent named `ops-lead` the entry is `ops-lead`. An entry that names no agent selects nothing: an allow rule with it grants nothing, and a deny rule with it refuses nothing.
+
 Enabling requires at least one admin subject — the config layer refuses any state that would lock every administrator out.
 
 Programmatic embedders use the builder instead:

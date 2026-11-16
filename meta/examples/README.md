@@ -1,6 +1,6 @@
 # Examples
 
-This repo now has a repo-root `examples/` surface for multi-language packs that prove the shipped Meta surfaces end to end.
+Meta's `meta/examples/` directory holds multi-language packs that prove the shipped Meta surfaces end to end.
 
 Numbered packs are intentionally browser-first and can include:
 
@@ -24,7 +24,8 @@ One example is a host program and not a browser pack:
 
 ## Prerequisites
 
-From the repository root, install the separate console and example JavaScript
+The commands on this page are relative to `meta/` in the repository. From
+`meta/`, install the separate console and example JavaScript
 dependencies before running packs that build the console:
 
 ```bash
@@ -33,6 +34,9 @@ npm --prefix examples ci
 ```
 
 Installing only `examples/` does not install the console's build tools.
+The packs build their Rust binaries through the wrapper at the repository
+root (`scripts/repo-cargo`), into the build directory every other build of
+the checkout uses, so a gateway that is already built is not built again.
 The structural `--smoke` modes in packs 002 and 003 exit before the console
 build; they only need the example JavaScript dependencies.
 
@@ -52,7 +56,7 @@ key. Pack 003's real browser/live lanes require `GEMINI_API_KEY` or
 
 ## Running packs
 
-After the setup above, enter `examples/` for the following commands:
+After the setup above, enter `meta/examples/` for the following commands:
 
 ```bash
 cd examples

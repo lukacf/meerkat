@@ -1223,9 +1223,10 @@ mod mob_realm_shell_delivery {
 /// The shell family as one session meets it: `shell` turns on the whole
 /// family, `monitor_start` included. Each row is a runtime-backed service on
 /// a persistent realm with a scripted model that reads the tool list it is
-/// sent and calls `monitor_start` once.
+/// sent and makes one tool call.
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 mod shell_family_monitor {
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -1233,14 +1234,19 @@ mod shell_family_monitor {
         build_runtime_backed_service, default_persistent_executor, materialize_session,
     };
     use meerkat::{
-        AgentFactory, Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
-        Session,
+        AgentFactory, AttemptWriteAuthority, Config, CreateSessionRequest, DetachedJobService,
+        DetachedJobStore, FactoryAgentBuilder, JobTerminalResult, PersistentSessionService,
+        Session, SessionId,
     };
     use meerkat_client::types::LlmStream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
-    use meerkat_core::{Message, SessionBuildOptions};
+    use meerkat_core::{BlobStore, Message, SessionBuildOptions};
     use meerkat_runtime::completion::CompletionOutcome;
-    use meerkat_runtime::{Input, PromptInput};
+    use meerkat_runtime::{Input, MeerkatMachine, PromptInput, RuntimeDeliveryInbox};
+    use meerkat_tools::builtin::shell::{
+        DurableShellJobRuntime, JobManager, MonitorOutputProtocol, MonitorProtocolLimits,
+        MonitorStartOptions, ShellConfig, ShellJobDeliveryProjector,
+    };
     use tokio::time::Duration;
 
     const SHELL_FAMILY: [&str; 5] = [
@@ -1251,7 +1257,13 @@ mod shell_family_monitor {
         "monitor_start",
     ];
     const MONITOR: &str = "monitor_start";
-    const MONITOR_CALL_ID: &str = "toolu_monitor_start";
+    const CALL_ID: &str = "toolu_scripted_call";
+    const NOT_PERMITTED: &str = "monitor_start_not_permitted";
+    /// How long a row waits for a monitor to run again or for its job to end.
+    const SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
+    /// How long a row whose session has no shell job call watches for a
+    /// run that must not come.
+    const QUIET: std::time::Duration = std::time::Duration::from_secs(3);
 
     /// What the scripted model was sent, request by request.
     #[derive(Default)]
@@ -1262,14 +1274,28 @@ mod shell_family_monitor {
         messages: Vec<serde_json::Value>,
     }
 
-    /// Scripted model: the first request calls `monitor_start` with a script
-    /// that completes at once; every later request ends the turn with text.
-    struct MonitorScript {
+    /// Scripted model: the first request makes one tool call; every later
+    /// request ends the turn with text.
+    struct OneCallScript {
         seen: Arc<Mutex<Seen>>,
+        name: &'static str,
+        args: serde_json::Value,
+    }
+
+    impl OneCallScript {
+        fn new(name: &'static str, args: serde_json::Value) -> (Arc<Self>, Arc<Mutex<Seen>>) {
+            let seen = Arc::new(Mutex::new(Seen::default()));
+            let script = Arc::new(Self {
+                seen: Arc::clone(&seen),
+                name,
+                args,
+            });
+            (script, seen)
+        }
     }
 
     #[async_trait::async_trait]
-    impl LlmClient for MonitorScript {
+    impl LlmClient for OneCallScript {
         fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
             Ok(messages.to_vec())
         }
@@ -1298,12 +1324,9 @@ mod shell_family_monitor {
             let events = if first {
                 vec![
                     LlmEvent::ToolCallComplete {
-                        id: MONITOR_CALL_ID.to_string(),
-                        name: MONITOR.to_string(),
-                        args: serde_json::json!({
-                            "command": "printf '%s\\n' '{\"type\":\"complete\"}'",
-                            "timeout_secs": 30,
-                        }),
+                        id: CALL_ID.to_string(),
+                        name: self.name.to_string(),
+                        args: self.args.clone(),
                         meta: None,
                     },
                     usage,
@@ -1335,14 +1358,41 @@ mod shell_family_monitor {
         }
     }
 
-    /// What one session met.
-    struct Met {
-        /// The tool names of the first request.
-        offered: Vec<String>,
-        /// Whether the answer to the `monitor_start` call was an error.
-        call_refused: bool,
-        /// The monitor jobs the session's realm recorded.
-        monitor_jobs: usize,
+    /// What the session's profile declares for one build.
+    #[derive(Default)]
+    struct Profile {
+        restriction: Option<meerkat_core::ops::DeclaredToolRestriction>,
+        grant_gated: Option<meerkat_core::tool_grant::GrantGatedTools>,
+    }
+
+    impl Profile {
+        /// A profile that narrows nothing.
+        fn open() -> Self {
+            Self::default()
+        }
+
+        /// A profile with `read_only` and the `deny` names.
+        fn restricted(read_only: bool, deny: &[&str]) -> Self {
+            Self {
+                restriction: Some(restriction(read_only, deny)),
+                grant_gated: None,
+            }
+        }
+
+        /// A profile whose grant gate closes the `names` until a grant.
+        fn gating(names: &[&str]) -> Self {
+            let mut tools = meerkat_core::ToolNameSet::default();
+            for name in names {
+                tools.0.insert(meerkat_core::ToolName::new(*name));
+            }
+            Self {
+                restriction: None,
+                grant_gated: Some(meerkat_core::tool_grant::GrantGatedTools {
+                    tools,
+                    ..Default::default()
+                }),
+            }
+        }
     }
 
     /// The restriction a mob profile's `read_only` and `deny` lower to.
@@ -1361,15 +1411,13 @@ mod shell_family_monitor {
         }
     }
 
-    /// Whether the answer to the call `MONITOR_CALL_ID` in `messages` is an
-    /// error; `None` when the messages carry no answer to it.
+    /// Whether the answer to the scripted call in `messages` is an error;
+    /// `None` when the messages carry no answer to it.
     fn call_answer_is_error(messages: &serde_json::Value) -> Option<bool> {
         match messages {
             serde_json::Value::Array(items) => items.iter().find_map(call_answer_is_error),
             serde_json::Value::Object(map) => {
-                if map.get("tool_use_id").and_then(serde_json::Value::as_str)
-                    == Some(MONITOR_CALL_ID)
-                {
+                if map.get("tool_use_id").and_then(serde_json::Value::as_str) == Some(CALL_ID) {
                     return Some(
                         map.get("is_error")
                             .and_then(serde_json::Value::as_bool)
@@ -1382,90 +1430,168 @@ mod shell_family_monitor {
         }
     }
 
-    /// Run one session with `shell` switched as given and the profile
-    /// restriction `declared`, let its model call `monitor_start` once and
-    /// answer what the session met.
-    async fn session_meets(
-        shell: bool,
-        declared: Option<meerkat_core::ops::DeclaredToolRestriction>,
-    ) -> Met {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (_manifest, persistence) = meerkat::open_realm_persistence_in(
-            temp.path(),
-            "default",
-            Some(meerkat_store::RealmBackend::Sqlite),
-            Some(meerkat_store::RealmOrigin::Explicit),
-        )
-        .await
-        .expect("open realm persistence");
-        let job_store = persistence.job_store();
+    fn mob_realm() -> meerkat_core::RealmId {
+        meerkat_core::mob_realm_id("shell-family-mob").expect("mob realm id")
+    }
 
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let factory = AgentFactory::new(temp.path().join("sessions")).shell(shell);
-        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-        builder.default_llm_client = Some(Arc::new(MonitorScript {
-            seen: Arc::clone(&seen),
-        }));
-        let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
-            .expect("compose the runtime-backed service");
-        let service: Arc<PersistentSessionService<FactoryAgentBuilder>> = Arc::new(service);
+    /// One host lifetime over the realm under `root`.
+    struct Lifetime {
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        adapter: Arc<MeerkatMachine>,
+        job_store: Arc<dyn DetachedJobStore>,
+        blob_store: Arc<dyn BlobStore>,
+        runtime_inbox: RuntimeDeliveryInbox,
+    }
 
-        let mob_realm = meerkat_core::mob_realm_id("shell-family-mob").expect("mob realm id");
-        let session = Session::new();
-        let session_id = session.id().clone();
-        let build = SessionBuildOptions {
-            realm_id: Some(mob_realm.clone()),
-            declared_tool_restriction: declared,
-            ..SessionBuildOptions::default()
-        };
-        let request = CreateSessionRequest {
-            injected_context: Vec::new(),
-            model: "gpt-5.4".to_string(),
-            prompt: meerkat_core::ContentInput::Text(String::new()),
-            system_prompt: meerkat::SystemPromptOverride::Set("shell family".to_string()),
-            max_tokens: None,
-            event_tx: None,
-            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-            build: Some(build),
-            labels: None,
-        };
-        let service_for_executor = Arc::clone(&service);
-        let adapter_for_executor = Arc::clone(&adapter);
-        materialize_session(&service, &adapter, session, request, move |session_id| {
-            default_persistent_executor(service_for_executor, adapter_for_executor, session_id)
-        })
-        .await
-        .expect("materialize session");
-
-        let (_outcome, handle) = adapter
-            .accept_input_with_completion(
-                &session_id,
-                Input::Prompt(PromptInput::new("start a monitor", None)),
+    impl Lifetime {
+        /// Open the realm under `root` with `shell` switched as given and
+        /// `script` as every session's model.
+        async fn open(root: &Path, shell: bool, script: Arc<OneCallScript>) -> Self {
+            let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+                root,
+                "default",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                Some(meerkat_store::RealmOrigin::Explicit),
             )
             .await
-            .expect("accept prompt input");
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(60),
-            handle.expect("completion handle").wait(),
-        )
-        .await
-        .expect("the prompt completes in time")
-        .expect("the completion waiter resolves");
-        assert!(
-            matches!(outcome, CompletionOutcome::Completed(_)),
-            "unexpected completion outcome: {outcome:?}"
-        );
+            .expect("open realm persistence");
+            let job_store = persistence.job_store();
+            let blob_store = persistence.blob_store();
+            let runtime_inbox = RuntimeDeliveryInbox::new(persistence.runtime_store());
+            let factory = AgentFactory::new(root.join("sessions")).shell(shell);
+            let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+            builder.default_llm_client = Some(script);
+            let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the runtime-backed service");
+            Self {
+                service: Arc::new(service),
+                adapter,
+                job_store,
+                blob_store,
+                runtime_inbox,
+            }
+        }
 
-        let monitor_jobs = job_store
-            .list_all(16)
+        /// Build `session` (a new one, or one a former lifetime stored) under
+        /// `profile` and run one prompt on it.
+        async fn run_session(&self, session: Session, profile: Profile) {
+            let session_id = session.id().clone();
+            let build = SessionBuildOptions {
+                realm_id: Some(mob_realm()),
+                declared_tool_restriction: profile.restriction,
+                grant_gated_tools: profile.grant_gated,
+                ..SessionBuildOptions::default()
+            };
+            let request = CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: meerkat_core::ContentInput::Text(String::new()),
+                system_prompt: meerkat::SystemPromptOverride::Set("shell family".to_string()),
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(build),
+                labels: None,
+            };
+            let service_for_executor = Arc::clone(&self.service);
+            let adapter_for_executor = Arc::clone(&self.adapter);
+            Box::pin(materialize_session(
+                &self.service,
+                &self.adapter,
+                session,
+                request,
+                move |session_id| {
+                    default_persistent_executor(
+                        service_for_executor,
+                        adapter_for_executor,
+                        session_id,
+                    )
+                },
+            ))
             .await
-            .expect("list jobs")
-            .iter()
-            .filter(|job| {
-                job.spec.origin_session_id == session_id && job.spec.tool.name() == MONITOR
-            })
-            .count();
+            .expect("materialize session");
+
+            let (_outcome, handle) = self
+                .adapter
+                .accept_input_with_completion(
+                    &session_id,
+                    Input::Prompt(PromptInput::new("go on", None)),
+                )
+                .await
+                .expect("accept prompt input");
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(60),
+                handle.expect("completion handle").wait(),
+            )
+            .await
+            .expect("the prompt completes in time")
+            .expect("the completion waiter resolves");
+            assert!(
+                matches!(outcome, CompletionOutcome::Completed(_)),
+                "unexpected completion outcome: {outcome:?}"
+            );
+        }
+
+        /// The monitor jobs of `session_id`.
+        async fn monitor_jobs(&self, session_id: &SessionId) -> Vec<meerkat_jobs::StoredJob> {
+            self.job_store
+                .list_all(16)
+                .await
+                .expect("list jobs")
+                .into_iter()
+                .filter(|job| {
+                    &job.spec.origin_session_id == session_id && job.spec.tool.name() == MONITOR
+                })
+                .collect()
+        }
+
+        /// End this lifetime as a host stop does, so a successor can serve
+        /// its sessions.
+        async fn stand_down(self) {
+            for registration in self.adapter.current_session_registration_witnesses().await {
+                assert!(
+                    self.adapter
+                        .unregister_session_registration_until_terminal_if_current(&registration)
+                        .await
+                        .expect("unregister the lifetime's runtime registration"),
+                    "the lifetime's current registration is torn down"
+                );
+            }
+            self.service
+                .try_shutdown()
+                .await
+                .expect("shut the lifetime's session service down");
+        }
+    }
+
+    /// What one session met.
+    struct Met {
+        /// The tool names of the first request.
+        offered: Vec<String>,
+        /// Whether the answer to the `monitor_start` call was an error.
+        call_refused: bool,
+        /// The monitor jobs the session's realm recorded.
+        monitor_jobs: usize,
+    }
+
+    /// Run one session with `shell` switched as given under `profile`, let
+    /// its model call `monitor_start` once and answer what the session met.
+    async fn session_meets(shell: bool, profile: Profile) -> Met {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (script, seen) = OneCallScript::new(
+            MONITOR,
+            serde_json::json!({
+                "command": "printf '%s\\n' '{\"type\":\"complete\"}'",
+                "timeout_secs": 30,
+            }),
+        );
+        let lifetime = Lifetime::open(temp.path(), shell, script).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        lifetime.run_session(session, profile).await;
+
+        let monitor_jobs = lifetime.monitor_jobs(&session_id).await.len();
         let seen = seen.lock().expect("seen");
         let offered = seen.tools.first().cloned().expect("a first request");
         let call_refused = seen
@@ -1488,7 +1614,7 @@ mod shell_family_monitor {
     /// and a `monitor_start` call starts a durable monitor job.
     #[tokio::test]
     async fn a_shell_session_is_offered_the_whole_family_and_can_start_a_monitor() {
-        let met = session_meets(true, None).await;
+        let met = session_meets(true, Profile::open()).await;
         for name in SHELL_FAMILY {
             assert!(
                 offers(&met, name),
@@ -1510,7 +1636,7 @@ mod shell_family_monitor {
     /// hides `monitor_start` and refuses a call by name.
     #[tokio::test]
     async fn a_denied_monitor_start_is_hidden_and_refused_by_name() {
-        let met = session_meets(true, Some(restriction(false, &[MONITOR]))).await;
+        let met = session_meets(true, Profile::restricted(false, &[MONITOR])).await;
         for name in &SHELL_FAMILY[..4] {
             assert!(
                 offers(&met, name),
@@ -1531,7 +1657,7 @@ mod shell_family_monitor {
     /// with its family, and every call refused.
     #[tokio::test]
     async fn a_read_only_session_is_refused_monitor_start_like_shell() {
-        let met = session_meets(true, Some(restriction(true, &[]))).await;
+        let met = session_meets(true, Profile::restricted(true, &[])).await;
         assert!(
             offers(&met, "shell") && offers(&met, MONITOR),
             "read-only hides no shell tool, `{MONITOR}` included: {:?}",
@@ -1547,7 +1673,7 @@ mod shell_family_monitor {
     /// Without `shell` the session has no tool of the family.
     #[tokio::test]
     async fn a_session_without_shell_has_no_monitor_start() {
-        let met = session_meets(false, None).await;
+        let met = session_meets(false, Profile::open()).await;
         for name in SHELL_FAMILY {
             assert!(
                 !offers(&met, name),
@@ -1560,5 +1686,290 @@ mod shell_family_monitor {
             "a `{MONITOR}` call without shell is refused"
         );
         assert_eq!(met.monitor_jobs, 0, "a refused call records no job");
+    }
+
+    /// How often the monitor's script started: it appends one line to
+    /// `marker` each time it runs.
+    fn runs(marker: &Path) -> usize {
+        std::fs::read_to_string(marker)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// A script that records each start in `marker` and then stays alive.
+    fn recording_script(marker: &Path) -> String {
+        format!("printf 'run\\n' >> '{}'; sleep 20", marker.display())
+    }
+
+    /// One host lifetime in which a shell session starts a replayable
+    /// monitor, and whose stop loses the monitor's worker: the job is left
+    /// with its lease recorded as expired, as an abrupt stop leaves it once
+    /// the lease ran out. Answers the session and the monitor's job.
+    async fn a_lifetime_that_loses_a_resumable_monitor(
+        root: &Path,
+        marker: &Path,
+    ) -> (SessionId, meerkat::JobId) {
+        let (script, seen) = OneCallScript::new(
+            MONITOR,
+            serde_json::json!({
+                "command": recording_script(marker),
+                "timeout_secs": 60,
+                "restart_class": "replayable",
+            }),
+        );
+        let lifetime = Lifetime::open(root, true, script).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        lifetime.run_session(session, Profile::open()).await;
+        let refused = seen
+            .lock()
+            .expect("seen")
+            .messages
+            .iter()
+            .find_map(call_answer_is_error);
+        assert_eq!(
+            refused,
+            Some(false),
+            "the session's `{MONITOR}` call is answered without an error"
+        );
+        let jobs = lifetime.monitor_jobs(&session_id).await;
+        assert_eq!(jobs.len(), 1, "the call recorded one durable monitor job");
+        let job_id = jobs[0].job_id.clone();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while runs(marker) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the monitor's script never started"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let jobs = DetachedJobService::new(lifetime.job_store.clone());
+        let running = jobs.get(&job_id).await.expect("read job").expect("job");
+        jobs.observe_lease_expired(
+            &job_id,
+            AttemptWriteAuthority {
+                attempt_id: running.current_attempt_id.expect("a claimed attempt"),
+                fence: running.current_fence,
+            },
+            u64::MAX / 2,
+        )
+        .await
+        .expect("record the worker as lost");
+        lifetime.stand_down().await;
+        (session_id, job_id)
+    }
+
+    /// What became of a lost monitor in the next host lifetime.
+    struct After {
+        /// How often the monitor's script started, the first run included.
+        runs: usize,
+        /// The job's terminal result, when it has one.
+        terminal: Option<JobTerminalResult>,
+    }
+
+    /// Poll until the monitor ran again, its job ended, or `settle` passed.
+    async fn settled(
+        job_store: &Arc<dyn DetachedJobStore>,
+        job_id: &meerkat::JobId,
+        marker: &Path,
+        settle: std::time::Duration,
+    ) -> After {
+        let jobs = DetachedJobService::new(job_store.clone());
+        let deadline = std::time::Instant::now() + settle;
+        loop {
+            let terminal = jobs
+                .get(job_id)
+                .await
+                .expect("read job")
+                .expect("job")
+                .terminal_result;
+            let runs = runs(marker);
+            if runs > 1 || terminal.is_some() || std::time::Instant::now() >= deadline {
+                return After { runs, terminal };
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The next host lifetime: the session is built again with `shell`
+    /// switched as given under `profile`, and its model lists its shell
+    /// jobs, the read-only call that recovers them.
+    async fn the_session_lists_its_jobs_after_a_restart(
+        shell: bool,
+        profile: Profile,
+        settle: std::time::Duration,
+    ) -> After {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("monitor-runs");
+        let (session_id, job_id) =
+            a_lifetime_that_loses_a_resumable_monitor(temp.path(), &marker).await;
+
+        let (script, _seen) = OneCallScript::new("shell_jobs", serde_json::json!({}));
+        let lifetime = Lifetime::open(temp.path(), shell, script).await;
+        let stored = lifetime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the stored session")
+            .expect("the session survives the restart");
+        lifetime.run_session(stored, profile).await;
+        settled(&lifetime.job_store, &job_id, &marker, settle).await
+    }
+
+    fn assert_ended_not_permitted(after: &After, why: &str) {
+        assert_eq!(
+            after.runs, 1,
+            "{why}: the recorded monitor is not run again"
+        );
+        assert!(
+            matches!(
+                &after.terminal,
+                Some(JobTerminalResult::NeedsAttention { reason }) if reason.as_str() == NOT_PERMITTED
+            ),
+            "{why}: the job ends as needing attention, `{NOT_PERMITTED}`: {:?}",
+            after.terminal
+        );
+    }
+
+    /// Nothing changed: after a restart the session's next shell job call
+    /// runs its recorded replayable monitor again.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_run_again_after_a_restart_when_nothing_changed() {
+        let after = the_session_lists_its_jobs_after_a_restart(true, Profile::open(), SETTLE).await;
+        assert_eq!(
+            after.runs, 2,
+            "the recorded monitor is run again once: terminal {:?}",
+            after.terminal
+        );
+    }
+
+    /// A deny the profile gained since the monitor started holds for its
+    /// re-run: the monitor is not run again and its job ends.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_its_name_is_denied_since() {
+        let after = the_session_lists_its_jobs_after_a_restart(
+            true,
+            Profile::restricted(false, &[MONITOR]),
+            SETTLE,
+        )
+        .await;
+        assert_ended_not_permitted(&after, "the profile denies `monitor_start`");
+    }
+
+    /// A profile that became read-only since holds for the re-run too.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_the_profile_is_read_only_since() {
+        let after = the_session_lists_its_jobs_after_a_restart(
+            true,
+            Profile::restricted(true, &[]),
+            SETTLE,
+        )
+        .await;
+        assert_ended_not_permitted(&after, "the profile is read-only");
+    }
+
+    /// A grant gate that closes the name since, with no grant, holds for the
+    /// re-run as well: the session can still list its jobs, and the
+    /// recorded monitor is not run again.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_a_grant_gate_closes_its_name_since() {
+        let after =
+            the_session_lists_its_jobs_after_a_restart(true, Profile::gating(&[MONITOR]), SETTLE)
+                .await;
+        assert_ended_not_permitted(&after, "a grant gate closes `monitor_start`");
+    }
+
+    /// A session whose shell family was turned off has no shell job call, so
+    /// nothing of its own runs the recorded monitor again.
+    #[tokio::test]
+    async fn a_recorded_monitor_is_not_run_again_when_the_shell_family_is_off_since() {
+        let after = the_session_lists_its_jobs_after_a_restart(false, Profile::open(), QUIET).await;
+        assert_eq!(
+            after.runs, 1,
+            "the shell family is off: the recorded monitor is not run again"
+        );
+    }
+
+    /// The host's own monitor route is not bound by a member's deny: an
+    /// operator's monitor start for a session runs that session's recorded
+    /// resumable monitors again under the host's authority, whoever started
+    /// them and whatever the session's profile denies. The row's level: it
+    /// builds a job manager exactly as the host's monitor route builds its
+    /// own, on the realm's real stores; it does not go through the RPC
+    /// handler. The recorded monitor is one the session's own recovery has
+    /// not ended yet: its turn here makes no shell job call.
+    #[tokio::test]
+    async fn an_operators_monitor_start_runs_a_recorded_monitor_again_whatever_the_profile_denies()
+    {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("monitor-runs");
+        let (session_id, job_id) =
+            a_lifetime_that_loses_a_resumable_monitor(temp.path(), &marker).await;
+
+        // The next lifetime builds the session with the deny; its turn makes
+        // a foreground shell call, which recovers no job. Then the operator
+        // starts a monitor of its own for the session.
+        let (script, _seen) = OneCallScript::new("shell", serde_json::json!({ "command": "true" }));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let stored = lifetime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the stored session")
+            .expect("the session survives the restart");
+        lifetime
+            .run_session(stored, Profile::restricted(false, &[MONITOR]))
+            .await;
+        assert_eq!(
+            runs(&marker),
+            1,
+            "the denied session's own turn runs nothing again"
+        );
+
+        let projector: Arc<dyn ShellJobDeliveryProjector> = Arc::new(
+            meerkat::JobOutboxProjector::new(
+                lifetime.job_store.clone(),
+                lifetime.runtime_inbox.clone(),
+            )
+            .bound_to_realm(mob_realm().to_string()),
+        );
+        let durable = DurableShellJobRuntime::new(
+            mob_realm().as_str(),
+            session_id.clone(),
+            lifetime.job_store.clone(),
+            lifetime.blob_store.clone(),
+            projector,
+        )
+        .expect("the operator route's durable runtime");
+        let operator = JobManager::new(ShellConfig::with_project_root(temp.path().to_path_buf()))
+            .bind_canonical_async_ops(
+                session_id,
+                Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
+            )
+            .with_durable_job_runtime(durable);
+        operator
+            .spawn_monitor_for_call(
+                "printf '%s\\n' '{\"type\":\"complete\"}'",
+                None,
+                30,
+                "operator-submission",
+                MonitorStartOptions {
+                    protocol: MonitorOutputProtocol::FramedJsonl,
+                    restart_class: meerkat::RestartClass::NonResumable,
+                    limits: MonitorProtocolLimits::default(),
+                    delivery: meerkat::JobDeliveryKind::Record,
+                },
+            )
+            .await
+            .expect("the operator's monitor start");
+
+        let after = settled(&lifetime.job_store, &job_id, &marker, SETTLE).await;
+        assert_eq!(
+            after.runs, 2,
+            "the operator's start runs the session's recorded monitor again: terminal {:?}",
+            after.terminal
+        );
     }
 }

@@ -451,6 +451,28 @@ fn spawn_arg_record(value: &Value, default_mob_id: Option<&str>) -> Option<Spawn
     })
 }
 
+/// The refusal of an `agent_identity` label a spawn-tool call supplies.
+pub(crate) const SPAWN_IDENTITY_LABEL_REFUSAL: &str = "labels.agent_identity is reserved: only \
+     Meta says which identity a member is; a caller may not supply it";
+
+/// Whether a spawn-tool call supplies an `agent_identity` label: among its
+/// own `labels`, or those of an entry of its `specs` or `members` array.
+/// Which identity a member is, is never a caller's to say: member creation
+/// refuses the label
+/// ([`crate::member_comms_id::validate_raw_identity_labels`]), and an
+/// agent's spawn refuses it too.
+pub(crate) fn identity_label_in_spawn_args(args: &Value) -> bool {
+    std::iter::once(args)
+        .chain(
+            ["specs", "members"]
+                .into_iter()
+                .filter_map(|key| args.get(key).and_then(Value::as_array))
+                .flatten(),
+        )
+        .filter_map(|value| value.get("labels").and_then(Value::as_object))
+        .any(|labels| labels.contains_key("agent_identity"))
+}
+
 /// The first label only Meta writes
 /// ([`crate::member_comms_id::RESERVED_AUTHORITY_LABELS`]) among the labels a
 /// spawn-tool call supplies: its own `labels`, or those of an entry of its
@@ -1064,6 +1086,31 @@ mod tests {
         }
         assert!(!is_console_spawn_tool("mob_retire_member"));
         assert!(!is_console_spawn_tool("send_message"));
+    }
+
+    /// The `agent_identity` label is found among a spawn's own labels and
+    /// those of each `specs` and `members` entry, whatever its value; the
+    /// member's own `agent_identity` field and other labels are not it.
+    #[test]
+    fn the_identity_label_is_found_in_every_label_map_of_a_spawn() {
+        for args in [
+            json!({ "member_id": "w", "labels": { "agent_identity": "another" } }),
+            json!({ "member_id": "w", "labels": { "agent_identity": "w" } }),
+            json!({ "member_id": "w", "labels": { "agent_identity": 7 } }),
+            json!({ "specs": [{ "member_id": "a" }, { "labels": { "agent_identity": "b" } }] }),
+            json!({ "members": [{ "labels": { "team": "x", "agent_identity": "" } }] }),
+        ] {
+            assert!(identity_label_in_spawn_args(&args), "{args}");
+        }
+        for args in [
+            json!({ "member_id": "w" }),
+            json!({ "agent_identity": "w", "labels": { "team": "x" } }),
+            json!({ "specs": [{ "agent_identity": "a", "labels": {} }] }),
+            json!({ "member_id": "w", "labels": "agent_identity" }),
+            json!({ "member_id": "w", "labels": { "Agent_Identity": "another" } }),
+        ] {
+            assert!(!identity_label_in_spawn_args(&args), "{args}");
+        }
     }
 
     #[test]

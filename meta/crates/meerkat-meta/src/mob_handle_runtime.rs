@@ -2861,6 +2861,17 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     ),
                 ));
             }
+            // Which identity a member is, is never a caller's to say: an
+            // agent's spawn that supplies the `agent_identity` label is
+            // refused, as member creation refuses it.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && crate::console_spawn::identity_label_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    crate::console_spawn::SPAWN_IDENTITY_LABEL_REFUSAL,
+                ));
+            }
             // Only Meta writes a side chat's lineage and creator labels and a
             // private owner: an agent's spawn naming one is refused, as member
             // creation refuses it.
@@ -14969,6 +14980,147 @@ mod tests {
             matches!(passed, meerkat_core::ToolError::NotFound { .. }),
             "the launch binding reaches the mob tools: {passed:?}"
         );
+    }
+
+    /// Meta's agent tool wrapper refuses the reserved label `agent_identity`
+    /// on the spawn tools it serves (`mob_spawn_member`, `delegate`,
+    /// `fork_off`), as member creation requests do: a call that supplies it
+    /// in its own labels, a batch spec's, or a member spec's, whatever the
+    /// label's value, answers invalid arguments naming the label before the
+    /// mob tools see it. A call whose arguments name the member in their own
+    /// `agent_identity` field and carry no such label reaches them.
+    #[tokio::test]
+    async fn the_agent_tool_wrapper_refuses_the_identity_label_on_the_spawn_tools_it_serves() {
+        let dispatcher = wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default());
+        let label = serde_json::json!({ "agent_identity": "another-agent" });
+        let refused_spawns = [
+            (
+                "mob_spawn_member",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-1",
+                    "labels": label,
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-2",
+                    "labels": { "agent_identity": "worker-2", "team": "blue" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [
+                        { "profile": "worker", "member_id": "worker-3" },
+                        { "profile": "worker", "member_id": "worker-4", "labels": label },
+                    ],
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-5",
+                    "members": [{ "labels": { "agent_identity": 7 } }],
+                }),
+            ),
+            (
+                "delegate",
+                serde_json::json!({ "task": "look it up", "labels": label }),
+            ),
+            (
+                "fork_off",
+                serde_json::json!({ "task": "look it up", "labels": label }),
+            ),
+        ];
+        for (tool, args) in refused_spawns {
+            let refused = identity_label_dispatch(&dispatcher, tool, args)
+                .await
+                .expect_err("the identity label is refused");
+            assert!(
+                matches!(&refused, meerkat_core::ToolError::InvalidArguments { name, reason }
+                    if name == tool && reason.contains("labels.agent_identity")),
+                "{tool} meets the refusal typed, naming the label: {refused:?}"
+            );
+        }
+
+        let passed = identity_label_dispatch(
+            &dispatcher,
+            "mob_spawn_member",
+            serde_json::json!({
+                "mob_id": "child",
+                "profile": "worker",
+                "agent_identity": "worker-6",
+                "labels": { "team": "blue" },
+            }),
+        )
+        .await
+        .expect_err("the empty mob tools know no tool");
+        assert!(
+            matches!(passed, meerkat_core::ToolError::NotFound { .. }),
+            "a spawn without the identity label reaches the mob tools: {passed:?}"
+        );
+    }
+
+    /// The wrapper's own match holds the member spawn tool names too
+    /// (`spawn_member`, `spawn_many_members`): a call it is handed under
+    /// either name with the reserved label `agent_identity` answers the same
+    /// invalid arguments. This row drives the wrapper itself; in a launch
+    /// those two names are Core's member tools, which are not dispatched
+    /// through it.
+    #[tokio::test]
+    async fn the_agent_tool_wrapper_matches_the_member_spawn_tool_names_for_the_identity_label() {
+        let dispatcher = wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default());
+        let label = serde_json::json!({ "agent_identity": "another-agent" });
+        let handed = [
+            (
+                "spawn_member",
+                serde_json::json!({ "profile": "worker", "member_id": "worker-1", "labels": label }),
+            ),
+            (
+                "spawn_many_members",
+                serde_json::json!({
+                    "specs": [{ "profile": "worker", "member_id": "worker-2", "labels": label }],
+                }),
+            ),
+        ];
+        for (tool, args) in handed {
+            let refused = identity_label_dispatch(&dispatcher, tool, args)
+                .await
+                .expect_err("the identity label is refused");
+            assert!(
+                matches!(&refused, meerkat_core::ToolError::InvalidArguments { name, reason }
+                    if name == tool && reason.contains("labels.agent_identity")),
+                "the wrapper answers {tool} the refusal typed, naming the label: {refused:?}"
+            );
+        }
+    }
+
+    /// One call of `tool` with `args` through the wrapper.
+    async fn identity_label_dispatch(
+        dispatcher: &AutoWireParentMobToolDispatcher,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        use meerkat_core::AgentToolDispatcher as _;
+        let args = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "spawn-identity-label",
+                    name: tool,
+                    args: &args,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+            )
+            .await
     }
 
     /// An agent's spawn naming a label only Meta writes (a side chat's

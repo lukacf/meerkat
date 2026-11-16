@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): the answers to a request that
+  names an agent the caller may not see because it is private to another
+  person. Each is now the answer the same door gives for a name no agent
+  holds, so a client that matched the old answer must match the new one.
+  `meta/agent_memory/remember`: `-32602`
+  `agent memory write failed: invalid agent memory config: unknown identity: <id>`
+  with no access rules or under rules that allow the caller, and `-32030`
+  `access denied: agent.memory.write` where the rules refuse; before, `-32001`
+  `unknown identity: <id>` in both cases. `meta/schedule/create`: `-32001` now
+  with the data `{kind: unknown_identity}` (before: no data), and `-32030`
+  `access denied: agent.send` where the rules refuse (before: `-32001`).
+  `POST /console/send`: `403` `access_denied` where the rules refuse the
+  caller the send (before: `404` `unknown_identity`); otherwise unchanged.
+  `POST /console/send/recover`: `404` `send_not_found` (before: `404`
+  `unknown_identity`), and `403` `access_denied` where the rules refuse. On a
+  Console with no aggregator both routes answer `404` `unavailable`, or `403`
+  `access_denied` where the rules refuse (before: `404` `unknown_identity`).
+  On `POST /console/send`, for a request that names such an agent on a Console
+  that has an aggregator and where the access rules do not refuse the caller,
+  a send whose idempotency key is empty now answers `400` `invalid_request`,
+  and a Console whose sends are governed `403` `governed_send_refused`, where
+  both answered `404` `unknown_identity`. `ConsoleSendPrecheck::check` (Rust;
+  signature and error type unchanged) returns `Err(AccessDenied)` where the
+  rules refuse the viewer a send to a name no agent holds (before:
+  `Err(UnknownIdentity(..))`). A Console schedule's fire that the rules refuse
+  records
+  `the Console refused the scheduled send: you are not allowed to send to this agent`
+  (before: `... unknown identity: <id>`); nothing is sent in either case.
+  Console RPC methods that take their member under `name`
+  (`meta/identity/get`, `meta/identity/plan`, `meta/identity/update`,
+  `meta/identity/archive`, `meta/identity/unarchive`, `meta/identity/adopt`,
+  `meta/identity/remove`) or under `role_targets` (`meta/run_flow`) answer a
+  request that also names a member private to another person under `identity`,
+  `member_id`, `agent_id` or `agent_identity` as they answer a name no member
+  holds there: before, where the rules allow the caller the action on the
+  method's own member, `-32030` `access denied: <action>` with that member's
+  name as `data.resource`, under enforced access rules; now, the method's own
+  answer for the member it acts on where the rules allow the caller that
+  action for a name no member holds, and `-32030` `access denied: <action>`
+  with the data `{action, kind: access_denied, resource}`, `resource` being
+  the name as the caller spelled it, where they do not. The action per method:
+  `agent.view` (get); `agent.identity.manage` (update, archive, unarchive,
+  adopt, a plan of one of them); `agent.identity.remove` (remove, a plan of
+  it); `agent.send` (run_flow). See Security.
+
+- An access file with an unknown key is refused. A gateway whose access file
+  holds a key that the access configuration does not define, in the
+  configuration itself, in a group, in a rule or in an approver, is not
+  started: the gateway binary and the Rust builder refuse the load, and the
+  stdio gateway and the SDK hosts refuse the runtime options. The refusal
+  names the file, each table (a rule by its `id`, or by its position when it
+  has none) and every unknown key, in one message, and changes nothing on
+  disk. The Console's save methods refuse such a key with `-32602`, name each
+  table and key, and apply nothing. Through 0.9.15 the key was dropped and the
+  rest applied; one exception: an unknown key in an entry of an approver's
+  `people` or `ingress_subjects` is refused since 0.9.11.
+
+### Security
+
+- Console: a request that names an agent hidden from the caller because it is
+  private to another person is now answered exactly as the same door answers a
+  name no agent holds, on `meta/agent_memory/remember`,
+  `meta/schedule/create`, `POST /console/send`, `POST /console/send/recover`
+  and the host's send precheck: for a caller the access rules refuse, for one
+  they allow, and with no access rules; and on a Console schedule's fire where
+  the access rules refuse its sender. Before, the two answers differed on
+  these doors, so a caller who guessed a name could learn that an agent
+  private to another person held it; nothing of the agent was shown. An access
+  refusal (`-32030`) for a Console RPC request that names such an agent now
+  names the agent as the caller spelled it; before, its `data.resource` could
+  carry the name the agent is answered under. No answer for a name no agent
+  holds changed; the answers that changed are listed under Breaking. Affects
+  Meta 0.9.11 through 0.9.15 (read from the source at each tag; pinned by rows
+  on this release).
+
+- A key the access file does not define could weaken a rule without a word
+  (every release that has the access file, through 0.9.15). The loader of the
+  access file and the Console's save methods (`meta/access/set`,
+  `meta/access/rules/upsert`, `meta/access/groups/set`) dropped a key they did
+  not know and applied the rest of its table. A deny rule whose `effect` was
+  misspelt was loaded as an allow rule. A rule whose only selector (`agents`,
+  `roles` or `match_labels`) was misspelt applied to every agent, and one
+  whose only `subjects` or `groups` key was misspelt applied to every caller.
+  A misspelt `enabled` left the whole configuration unenforced. Neither the
+  log nor the Console said so. No caller without access administration could
+  bring this about; it took a slip in the operator's own file or in an
+  administrator's own save request. From this release the load and the save
+  methods refuse such a key and name it. See Breaking and the upgrade step.
+
+### Upgrade
+
+- Before you upgrade a gateway that has an access file, read the configuration
+  as the running gateway loaded it. As an access administrator call
+  `meta/access/get` (`POST <http_base_url>/console/rpc` with the body
+  `{"jsonrpc": "2.0", "id": 1, "method": "meta/access/get", "params": {}}`);
+  `result.config` is the configuration in force. Read it rule by rule. Look at
+  whether `enabled` is `true`; at every rule meant as a deny, whose `effect`
+  must read `deny`; at every rule with no `agents`, `roles` and
+  `match_labels`, which applies to every agent; and at every rule with no
+  `subjects` and `groups`, which applies to every caller. A rule that does not
+  say what you meant may have lost a key at a load or a save. Do this even if
+  the file looks right: a save from the Console writes the file from the
+  configuration in force, so the misspelt key is gone from the file while its
+  rule stays as it was loaded, and neither release reports that.
+
+  Then compare the file with the answer. A key that the file holds with a
+  value and the answer lacks was dropped by the running gateway, and the new
+  release refuses to start on it. A known key written with an empty list or
+  table can also be absent from the answer; the new release starts on those.
+  The answer's `actions` can hold more than the file's: `schedule.manage` is
+  added where a rule covers `agent.send`, and `agent.memory.read` where one
+  covers `agent.view`. If you upgrade without the check and the gateway
+  refuses to start, its message lists every such key.
+
+  Correcting a key or a rule changes what the rule does: it then applies as
+  written, so a deny rule that was loaded as an allow rule starts to deny.
+
+  0.9.15 starts on the same file as before and again drops such a key without
+  a word. The refusal stores nothing.
+
+- Reload open Console pages after an upgrade. A Console page that was opened
+  before the gateway was upgraded keeps running the earlier front end until it
+  is reloaded. An earlier front end on a 0.9.15 or later gateway cannot answer
+  an agent's questions (`ask_user`), and to most people it does not show them
+  at all: only a person who administers decisions under enforced access
+  control, or who holds the `ask_user` approver id, sees them, as a read-only
+  card (front ends of 0.9.11 to 0.9.14). The agent was told that its questions
+  were asked; they time out unless someone answers from a current page. An
+  application that mounts the Console package builds it from the source of its
+  gateway's release.
+
 ### Added
 
 - Python SDK: `Meta.builder().max_sessions(n)` sets the gateway's session
@@ -126,7 +259,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `host tools`. Affected: 0.9.15 only. Releases through 0.9.14 have no
   stock `ask_user` (read from the 0.9.14 tags: neither Meta nor Meerkat
   has the tool there, and the deny check is the same), so there a profile
-  had no reason to deny the name.
+  had no reason to deny the name. A host that only adds tools under other
+  names to a member build through an agent customizer was not affected: there
+  the deny hid the tool, as on a Meta gateway (a host's run on the published
+  0.9.15).
 
 - A member's `ask_user` call is held whatever the length of the tool-call
   id its model provider issues. In 0.9.15 a call whose agent name and
@@ -142,6 +278,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that names the run and a digest instead of the agent and the call id; see
   Fixed in the Meerkat changelog for its form. Affected: 0.9.15 (members
   get the tool since 0.9.15).
+
+### Known limitations
+
+- Adopted agents on a host with an agent customizer or agent memory (added
+  2026-11-16). On a host that registers an agent customizer or configures
+  agent memory, an agent that is configured in the roster and adopted into the
+  identity store (`meta/identity/adopt`) is refused the next time it is built:
+  after a restart, or when a message, a peer send or a scheduled prompt
+  reaches it while it is not live. An agent that is live at the adoption goes
+  on serving until then. The agent is refused for good as it stands and reads
+  `broken`; the reason names label keys (`agent_identity` and `profile_name`
+  among those dropped), and the agent then serves nothing. Its conversation
+  and its record are not changed. Not affected: a host that registers no agent
+  customizer and configures no agent memory, and an agent created with
+  `meta/identity/create`. One committed update of the agent
+  (`meta/identity/update`, as a new request; it may set a value the agent
+  already has, its display name for example) lets it build again on the same
+  conversation, and it stays so across restarts. The update must commit: where
+  the host's identity policy requires approval for it, the agent builds again
+  once the update is decided; where the policy denies the host a `descriptive`
+  change, allow it first. Until the fix, follow each adoption on such a host
+  with such an update. A fix is planned for 0.9.17. (The cause by reading the
+  0.9.15 source; the remedy for a refused agent by a host's run on the
+  published 0.9.15 gateway; the update right after an adoption by reading.)
+
+- Agent memory of private side chats (0.9.11 through 0.9.16). The known issue
+  published with 0.9.15 is unchanged in this release. On a Console that
+  several people sign in to, with agent memory on (it is off unless
+  `runtime_options.agent_memory` is set at the gateway's start), what a
+  private side chat, or a member it created, stored in agent memory can become
+  readable to others after that member has ended, once a later member takes
+  the same name.
+
+  Until a fix, on such a gateway leave agent memory out (do not set
+  `runtime_options.agent_memory`) and restart. Leaving agent memory out costs
+  every agent its memory. While it is out, every memory read through the
+  Console is refused, no agent has the memory tool, and nothing more is given
+  to any agent from the store. This deletes nothing and takes nothing back.
+  The stored records stay on disk, and they are served, and given to agents,
+  again as soon as agent memory is turned back on. An agent that was built
+  while agent memory was on keeps what it was already given: the list of
+  titles and descriptions in its instructions, and every note text and recall
+  result already in its conversation, and it sends them to its model on every
+  later turn. While agent memory is out, resetting such an agent
+  (`meta/reset`) ends its conversation and removes them with it; taking it off
+  the roster and declaring it again does not. With agent memory on, under any
+  of the narrower settings below, a reset does not help: the agent is built
+  with the list again and is given the notes again on its turns.
+
+  Three narrower settings each close a part.
+  `agent_memory.per_turn_injection: "off"` stops the notes that are added to
+  agents' turns, for every agent of the gateway, and nothing else: an agent
+  whose profile has the memory tools is still given the list when it starts,
+  and the whole text of a note that names it.
+  `agent_memory.recorder_tool: false` stops members storing, recalling,
+  changing and removing with their own tool; it does not remove what is
+  already stored, does not stop the Console's memory panel from showing it,
+  and does not stop what agents are given when they start and on their turns.
+  Where access control is already enabled, a deny rule on `agent.memory.read`
+  with no `subjects` or `groups` and no resource selector closes the Console's
+  memory panel, the memory recall and manifest reads through the Console, and
+  the memory quarantine decisions, to everyone who is not listed under
+  `admins`, and keeps the agents' own memory; it does not stop a member's own
+  memory tool, nor what agents are given when they start and on their turns.
+  Where a memory steward is configured (`agent_memory.steward`), turn it off
+  as well (leave the `steward` key out, or set `"enabled": false` in it; a
+  `steward` block without `enabled` turns it on): once a later member or agent
+  holds such a name, the steward's next run can copy the ended member's notes
+  into the mob's shared memory, where they stay; every agent of the gateway is
+  then given their titles and descriptions, and an administrator, a person
+  granted `mob.memory.read`, or anyone where access control is off, can read
+  them whole in the Console. Before an agent is registered or created, an
+  administrator looks for its name in the memory panel. What a member's tool
+  changed or removed is kept in the store, marked as superseded or removed,
+  and is not deleted.
+
+  The fix is planned for 0.9.17.
 
 ## [0.9.15] - 2026-11-15
 
@@ -633,7 +846,9 @@ Security, Upgrade and Changed.
   changed or removed is kept in the store, marked as superseded or removed,
   and is not deleted.
 
-  A fix is planned as the first change of the next release.
+  A fix is planned as the first change of the next release. Added 2026-11-16:
+  this fix is not in 0.9.16. It is planned for 0.9.17. The measures above
+  apply until then.
 
 ### Upgrade
 

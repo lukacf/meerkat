@@ -96,6 +96,19 @@ them.
   value itself, but an embedder that serializes its own kernel state after
   passing the new value in writes a value an older kernel refuses to read.
 
+- `meerkat_mob_profile_create` and `meerkat_mob_profile_update` refuse a
+  profile that carries `tools.mcp_servers`, `tools.rust_bundles`,
+  `tools.bundles`, `auth_binding` or an undefined key (JSON-RPC error
+  `-32602`, invalid params; the message names the field). A client that set
+  them through these tools uses the host methods instead.
+
+- `meerkat_mob_spawn`, `meerkat_mob_spawn_many` and `meerkat_run` refuse a
+  reserved key in `labels` or in the context with JSON-RPC error `-32602` and
+  no `data`. The message names the key: "metadata label key '<key>' is
+  reserved for Meerkat-owned runtime facts", or "app_context key '<key>' is
+  reserved for Meerkat-owned runtime facts". The raw mob dispatcher refuses it
+  as invalid arguments. A client that sent such a key stops sending it.
+
 ### Added
 
 - `meerkat-core`: `ToolVocabularySource::HostTools`, one more source of
@@ -186,6 +199,70 @@ them.
   and Upgrade notes describe the earlier behaviour); no earlier release
   refuses a level.
 
+### Security
+
+- The shell job tools answered for jobs of other sessions (0.8.8 through
+  0.9.15). `shell_job_status` and `shell_job_cancel` looked a background job
+  up by its id alone, and a realm's job store is shared by all its sessions,
+  mob members included. An agent that had these tools and held the id of
+  another session's job could read that job's status, command and output, and
+  cancel it. A job id (`job_` and a UUID) is given by the tools to the session
+  that started the job; a fork receives its source's conversation and can hold
+  one. From this release both tools answer only for the shell jobs and
+  monitors that the calling session started. Any other id is answered exactly
+  as an id that does not exist.
+
+- The MCP profile tools stored host-only profile fields (0.5.2 through 0.9.15;
+  a stored server from 0.7.19, a binding from 0.9.11).
+  `meerkat_mob_profile_create` and `meerkat_mob_profile_update`, served by
+  `rkat-mcp` and `rkat-mob-mcp`, accepted a profile in its raw form. A caller
+  of these tools, which can be a model, could store `tools.mcp_servers`,
+  `tools.rust_bundles` and `auth_binding` in a profile, and the read-back did
+  not show them. On `rkat-mcp`, when a mob's role named the profile, a stored
+  stdio server was started as a process on the host at the member's spawn, and
+  the binding was recorded in the member's session. The released Linux and
+  macOS archives start such a server (Linux x86_64 by a run, the others by
+  their build records); the released Windows archive, by its build record, has
+  no MCP client support and refuses the spawn. A Meta gateway, the Console and
+  the REST server do not serve these tools. From this release the tools take
+  the public profile input and refuse these fields, `tools.bundles` and any
+  key that input does not define; nothing is stored, and on an update the
+  stored profile is unchanged. The host methods `mob/profile/create` and
+  `mob/profile/update` are unchanged.
+
+  Profiles stored before the upgrade keep such fields. Read each realm profile
+  back through the profile tools (with its revision) and update it with
+  exactly what was read: the stored profile then holds none of them. Respawn
+  every member of the roles that use it. A member spawned before keeps its
+  recorded binding through a respawn: retire it and spawn it anew.
+
+  Handing `rkat-mcp` to a model. An MCP client that lets a model call this
+  server's tools should not offer it the following tools, unless that model
+  may start processes on the host and change the server's configuration:
+  `meerkat_mob_profile_create`, `meerkat_mob_profile_update`,
+  `meerkat_mob_create`, `meerkat_mob_spawn`, `meerkat_mob_spawn_many`,
+  `meerkat_mob_respawn`, `meerkat_mob_member_send`, `meerkat_config`,
+  `meerkat_schedule_create`, `meerkat_schedule_update`. The server has no
+  setting of its own that withholds a tool; the filter is the client's. This
+  list is what is known at this release. Independently of the tool list, start
+  the server with the confinement flags (`--confinement workspace`; see OS
+  process confinement): they apply to every process the server launches, and
+  where the platform cannot enforce them the launch is refused.
+
+- The MCP spawn tools and `meerkat_run` accepted keys the runtime reserves.
+  `meerkat_mob_spawn` and `meerkat_mob_spawn_many`, served by `rkat-mcp` and
+  `rkat-mob-mcp`, passed a member's `labels` and context on as sent (v0.5.1
+  through v0.9.15). The reserved label keys are `mob_id`, `role`,
+  `meerkat_id`, `agent_identity` and those under `meerkat.`; in a context, the
+  keys of the `meerkat` namespace. The JSON-RPC spawn methods have refused
+  them since v0.6.0. `meerkat_run` passed a session's `labels` and application
+  context on in the same way (v0.4.1 through v0.9.15), where the JSON-RPC and
+  REST session create refuse them. From this release the spawn tools refuse a
+  reserved key and spawn nothing, a batch whole, and `meerkat_run` refuses one
+  and creates no session. Affected: a caller of those tools, and a Rust
+  embedder that composes the raw mob dispatcher, which passed the fields on
+  since v0.4.6 and now applies the same rule.
+
 ### Upgrade notes
 
 - Rollback to 0.9.15: an input that 0.9.16 ended as never executed
@@ -194,6 +271,14 @@ them.
   never began executing. Nothing is refused. Where a Meta notice names
   the reason, it says 'without running' where 0.9.15 would have said
   'stopped'.
+
+### Known limitations
+
+- Shell jobs after a respawn or reset. A member's new session does not reach
+  the jobs its earlier session started: they are not cancelled, and their ids
+  are answered as unknown. A fork does not reach its source's jobs. A monitor
+  that the host started is answered as unknown to a member whose build carries
+  another realm tag.
 
 ## [0.9.15] - 2026-11-15
 
@@ -4751,8 +4836,24 @@ them.
   `rkat-rpc`, the server the Python and TypeScript SDKs start, is not
   affected (run on 0.9.14 and 0.9.15); `rkat-mcp`, the `rkat` command and
   the Meta gateway take their context directory from elsewhere and are not
-  affected, by a reading of the source. macOS and Windows were not run. A
-  fix is planned for the next release.
+  affected, by a reading of the source. macOS and Windows were not run.
+  Fixed in the next release: a default context directory that does not exist
+  then holds no project instructions and the session is created; a
+  `--context-root` that does not exist is still refused.
+- Known limitation (added 2026-11-16). Mob: an adoption into store custody
+  (`MobHandle::adopt_identity`, 0.9.11 through 0.9.15) from a roster spec
+  whose labels are not the labels its member was seated with leaves the seat
+  as it was and records no owed label restamp. On 0.9.15 a host that composes
+  that member's seat from its row
+  (`MemberBuildPreparer::prepare_store_owned_seat`) or sets labels in its
+  spawn customizer is refused the member's next build for good, naming the
+  label keys that differ; a member that is live goes on serving until its next
+  build. `IdentityRecordCensus::seats_stale` counts such a seat. Way out: one
+  update of the identity (`MobHandle::update_store_owned_identity`, any
+  field), which records the restamp and seats a broken member again on its
+  session, or a respawn with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`). By reading; not run for an
+  adopted identity.
 
 ## [0.9.14] - 2026-11-11
 

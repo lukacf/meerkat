@@ -52,8 +52,8 @@ pub use custody_types::{
 };
 pub use job_cancel_tool::ShellJobCancelTool;
 pub use job_manager::{
-    CancelJobDisposition, DurableShellJobRuntime, JobManager, MonitorStartOptions,
-    ShellJobDeliveryProjector,
+    CancelJobDisposition, DurableShellJobRuntime, JobManager, MonitorRerunAdmission,
+    MonitorStartOptions, ShellJobDeliveryProjector,
 };
 pub use job_status_tool::ShellJobStatusTool;
 pub use jobs_list_tool::ShellJobsListTool;

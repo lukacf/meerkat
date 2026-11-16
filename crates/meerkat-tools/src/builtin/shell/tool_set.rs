@@ -28,7 +28,7 @@ pub struct ShellToolSet {
     pub jobs_list: ShellJobsListTool,
     /// Tool for cancelling jobs
     pub job_cancel: ShellJobCancelTool,
-    /// High-trust durable script monitor tool.
+    /// Durable script monitor tool.
     pub monitor_start: MonitorStartTool,
     /// Shared job manager (for external access if needed)
     pub job_manager: Arc<JobManager>,
@@ -83,7 +83,7 @@ You have access to tools for executing shell commands. Use these carefully and r
 - `shell_job_status` - Check the status of a background job
 - `shell_jobs` - List all background jobs
 - `shell_job_cancel` - Cancel a running background job
-- `monitor_start` - Start a high-trust durable script monitor with typed output frames
+- `monitor_start` - Start a durable script monitor with typed output frames (offered where background jobs are available)
 
 ## Best Practices
 

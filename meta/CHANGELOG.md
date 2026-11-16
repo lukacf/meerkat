@@ -3145,16 +3145,16 @@ Security, Upgrade and Changed.
   taken (an agent of the roster, an agent created earlier, the name of a
   removed agent) is not refused at once. It is held for approval,
   `meta/identity/plan` answers `require_approval` for it, and it is refused
-  `name_taken` only when the approved change is carried out; the closed
-  operation then reads "ask again" although the refusal is not retryable
+  only when the approved change is carried out: the operation then answers
+  `refused` with the kind `decision_closed`, and its text names `name_taken`
+  and says "ask again" although the refusal is not retryable
   (`retryable: false`). Nothing is created and no agent is changed. The
   pages said such a create is refused `name_taken` without this condition.
-  Before approving a create, check its name against the list of agents. The
-  hold and the plan's answer are by a run on a build of this release's
-  source for the three kinds of taken name; the refusal at the carry-out by
-  that run for a name taken between the hold and the approval, and by a
-  host's report on the released gateway for a name taken before the create.
-  A fix is planned for the next release.
+  Before approving a create, check its name against the list of agents. Run
+  on the released 0.9.15 gateway for the three kinds of name taken before
+  the create, with the approver bound to the stdio operator; a name taken
+  between the hold and the approval ends the same way, by a run on a build
+  of this release's source. A fix is planned for the next release.
 
 ## [0.9.14] - 2026-11-11
 

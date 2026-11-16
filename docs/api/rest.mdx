@@ -850,10 +850,13 @@ curl -X POST http://localhost:8080/sessions/01936f8a-7b2c-7000-8000-000000000001
 <Note>
 When `RKAT_WEBHOOK_SECRET` is configured on the server, this route requires
 the `X-Webhook-Secret` header. Admission queues the event without waking an
-idle session: the event waits for the session's next turn. There is one
-exception. In the instant after a turn's call has answered, the session is
-still finishing that turn, and it takes an event admitted then at once, as a
-turn of its own (see Known limitations of 0.9.15 in the CHANGELOG).
+idle session: the event waits for the session's next turn. That holds only
+while the session is idle. While the session is running a turn or still
+finishing one, including the instant after that turn's call (or the create
+call) has answered, an event admitted then is taken as soon as that turn
+ends, as a new turn: the session makes a model call that no caller started.
+The answer is `202` and `{"queued": true}` in both cases (see Known
+limitations of 0.9.15 in the CHANGELOG).
 Correlated terminal peer responses use
 `POST /sessions/{id}/peer-response-terminal`, not this generic event route.
 </Note>

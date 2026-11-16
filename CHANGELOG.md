@@ -4552,19 +4552,25 @@ them.
 
 - Added 2026-11-16, after the release. External events admitted without a
   wake (REST `POST /sessions/{id}/external-events`, JSON-RPC
-  `session/external_event`): such an event is said to wait queued for the
-  session's next turn. In the instant after a turn's call has answered it
-  does not wait: the runtime takes it at once as a turn of its own, so the
-  session makes one model call and one run that the caller did not start.
-  The admission still answers that the event is queued (REST `202`). Outside
-  that instant the event waits as documented. After a run ends the runtime
-  looks once more for queued input before it comes to rest, and the caller's
-  answer is released before that look. Nothing is lost: the event is taken
-  once and reaches one terminal state; a run that fails before completing
-  retries it, as for any queued input. The same lines stand at 0.9.11,
-  0.9.14 and 0.9.15; other releases were not read. Read from the source, not
-  run as a host would meet it; seen as one `meerkat-rest` test that fails in
-  some runs on a machine with one to four CPUs. No way round is established.
+  `session/external_event`): such an event waits queued for the session's
+  next turn only while the session is idle. Admitted over REST while a turn
+  is running, it is queued behind that turn, and the runtime takes it at
+  once when the turn ends, as a new turn: one model call and one run that
+  the caller did not start. The same happens in the instant after a turn's
+  call has answered: after a run ends the runtime looks once more for queued
+  input before it comes to rest, and the caller's answer is released before
+  that look. The admission answers that the event is queued in every case
+  (REST `202`). Nothing is lost: the event is taken once and reaches one
+  terminal state; a run that fails before completing retries it, as for any
+  queued input. To keep an event for the next turn, post it while the
+  session is idle; how long after a turn's answer a session counts as idle
+  is not established. The running turn and the idle session are by a run on
+  the released 0.9.15 `rkat-rest`; the instant after a turn's answer is read
+  from the source and seen as one `meerkat-rest` test that fails in some
+  runs on a machine with one to four CPUs. On JSON-RPC the event is admitted
+  only after the running turn has ended; whether it is then taken at once
+  was not run. The same lines stand at every tag from 0.9.11 to 0.9.15;
+  earlier releases were not read.
 
 ## [0.9.14] - 2026-11-11
 

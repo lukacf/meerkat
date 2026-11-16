@@ -238,12 +238,28 @@ impl ToolExecutionPolicy {
     /// Name-list policies ignore the class; read-only intent decides on the
     /// class alone and admits nothing but a positive
     /// [`ToolMutationClass::ReadOnly`] declaration.
+    ///
+    /// A tool that is never wider than another
+    /// ([`crate::tool_scope::tool_never_wider_than`]) is permitted only where
+    /// the name lists also admit that other tool: a deny list that names
+    /// `shell` refuses `monitor_start` too.
     #[must_use]
     pub fn permits_call(&self, name: &str, declared: ToolMutationClass) -> bool {
         self.constraints.iter().all(|constraint| match constraint {
             crate::ops::ToolAccessConstraint::AllowNames(names) => names.contains(name),
             crate::ops::ToolAccessConstraint::DenyNames(names) => !names.contains(name),
             crate::ops::ToolAccessConstraint::ReadOnly => declared.is_declared_read_only(),
+        }) && crate::tool_scope::tool_never_wider_than(name)
+            .is_none_or(|bound| self.name_lists_admit(bound))
+    }
+
+    /// Whether the policy's name lists admit `name`, whatever its mutation
+    /// class.
+    fn name_lists_admit(&self, name: &str) -> bool {
+        self.constraints.iter().all(|constraint| match constraint {
+            crate::ops::ToolAccessConstraint::AllowNames(names) => names.contains(name),
+            crate::ops::ToolAccessConstraint::DenyNames(names) => !names.contains(name),
+            crate::ops::ToolAccessConstraint::ReadOnly => true,
         })
     }
 
@@ -1580,6 +1596,27 @@ pub(crate) mod tests {
         assert!(ToolExecutionPolicy::unrestricted().is_unrestricted());
         assert!(!allow_list(&["a"]).is_unrestricted());
         assert!(!deny_list(&["a"]).is_unrestricted());
+    }
+
+    /// `monitor_start` is never wider than `shell`: a name list that leaves
+    /// `shell` out refuses a `monitor_start` call too, and read-only intent
+    /// still decides on the call's own class.
+    #[test]
+    fn a_name_list_that_leaves_shell_out_refuses_monitor_start() {
+        use crate::ToolMutationClass::{Mutating, ReadOnly};
+
+        assert!(!deny_list(&["shell"]).permits_call("monitor_start", Mutating));
+        assert!(!deny_list(&["shell"]).permits("monitor_start"));
+        assert!(deny_list(&["shell"]).permits("shell_jobs"));
+        assert!(!allow_list(&["monitor_start"]).permits_call("monitor_start", Mutating));
+        assert!(allow_list(&["monitor_start", "shell"]).permits_call("monitor_start", Mutating));
+        assert!(deny_list(&["monitor_start"]).permits("shell"));
+        assert!(deny_list(&["other"]).permits_call("monitor_start", Mutating));
+        assert!(ToolExecutionPolicy::unrestricted().permits_call("monitor_start", Mutating));
+        // Read-only refuses the monitor for its own class, and would admit a
+        // read-only tool of that name whatever `shell` declares.
+        assert!(!read_only().permits_call("monitor_start", Mutating));
+        assert!(read_only().permits_call("monitor_start", ReadOnly));
     }
 
     // ── List preservation ────────────────────────────────────────────────

@@ -1593,6 +1593,24 @@ impl ToolScopeTurnOverlay {
     }
 }
 
+/// Tools that are never offered, and so never callable, more widely than
+/// another tool. Where a rule that works by name leaves the second out (a
+/// deny or an allow list, a session filter, a turn's block list, a grant gate
+/// that is closed for it), the first is out with it, whatever the rule says
+/// of the first's own name. `monitor_start` runs a script as `shell` runs a
+/// command, so a rule that closes `shell` must not leave it open.
+const NEVER_WIDER_THAN: &[(&str, &str)] = &[("monitor_start", "shell")];
+
+/// The tool that bounds `name`: `name` is never offered or callable where a
+/// rule by name leaves that tool out.
+#[must_use]
+pub fn tool_never_wider_than(name: &str) -> Option<&'static str> {
+    NEVER_WIDER_THAN
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, bound)| *bound)
+}
+
 /// Composed filter representation using most-restrictive semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedToolFilter {
@@ -1601,7 +1619,17 @@ pub struct ComposedToolFilter {
 }
 
 impl ComposedToolFilter {
+    /// Whether the composed filters let the model see and call `name`: its
+    /// own name is admitted, and so is the tool it is never wider than
+    /// ([`tool_never_wider_than`]). Every layer that works by name is
+    /// composed here, so this one rule holds for all of them.
     pub fn allows(&self, name: &str) -> bool {
+        self.admits_name(name)
+            && tool_never_wider_than(name).is_none_or(|bound| self.admits_name(bound))
+    }
+
+    /// Whether the composed filters admit `name` taken alone.
+    fn admits_name(&self, name: &str) -> bool {
         let allowed = self.allow.as_ref().is_none_or(|set| set.contains(name));
         allowed && !self.deny.contains(name)
     }
@@ -4391,6 +4419,47 @@ mod tests {
         let composed_precedence = ToolScope::compose(&[allow_a_b, deny_b]);
         assert!(composed_precedence.allows("a"));
         assert!(!composed_precedence.allows("b"));
+    }
+
+    /// `monitor_start` is never wider than `shell`: a filter that leaves
+    /// `shell` out by name leaves `monitor_start` out with it, whatever it
+    /// says of the monitor's own name. Nothing else changes: a filter that
+    /// names only the monitor leaves `shell` in, and other names are judged
+    /// alone.
+    #[test]
+    fn a_tool_is_never_allowed_where_the_tool_that_bounds_it_is_not() {
+        assert_eq!(super::tool_never_wider_than("monitor_start"), Some("shell"));
+        assert_eq!(super::tool_never_wider_than("shell"), None);
+        assert_eq!(super::tool_never_wider_than("shell_jobs"), None);
+
+        let open = ToolScope::compose(&[ToolFilter::All]);
+        assert!(open.allows("shell") && open.allows("monitor_start"));
+
+        let shell_denied = ToolScope::compose(&[ToolFilter::Deny(set(&["shell"]))]);
+        assert!(!shell_denied.allows("shell"));
+        assert!(!shell_denied.allows("monitor_start"));
+        assert!(shell_denied.allows("shell_jobs"));
+
+        let monitor_allowed_alone =
+            ToolScope::compose(&[ToolFilter::Allow(set(&["monitor_start", "shell_jobs"]))]);
+        assert!(!monitor_allowed_alone.allows("monitor_start"));
+        assert!(monitor_allowed_alone.allows("shell_jobs"));
+
+        let both_allowed =
+            ToolScope::compose(&[ToolFilter::Allow(set(&["monitor_start", "shell"]))]);
+        assert!(both_allowed.allows("shell") && both_allowed.allows("monitor_start"));
+
+        let monitor_denied = ToolScope::compose(&[ToolFilter::Deny(set(&["monitor_start"]))]);
+        assert!(monitor_denied.allows("shell"));
+        assert!(!monitor_denied.allows("monitor_start"));
+
+        // A later layer that closes `shell` closes the monitor an earlier
+        // layer allowed by name.
+        let layered = ToolScope::compose(&[
+            ToolFilter::Allow(set(&["monitor_start", "shell"])),
+            ToolFilter::Deny(set(&["shell"])),
+        ]);
+        assert!(!layered.allows("monitor_start"));
     }
 
     #[cfg(feature = "workspace-tests")]

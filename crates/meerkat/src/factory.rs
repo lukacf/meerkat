@@ -2419,21 +2419,41 @@ impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunA
         let Some(gate) = gate else {
             return true;
         };
+        // The monitor is never wider than `shell`: a grant gate that is
+        // closed for either name closes the re-run. (The execution policy
+        // above already refuses the monitor where its name lists leave
+        // `shell` out.)
+        for name in std::iter::once(Self::MONITOR_START).chain(
+            meerkat_core::tool_scope::tool_never_wider_than(Self::MONITOR_START),
+        ) {
+            if !Self::gate_is_open_for(gate, name).await {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BuildMonitorRerunAdmission {
+    /// Whether `gate` leaves the shell tool `name` open at this moment: not
+    /// gated, or gated and opened by a live grant.
+    async fn gate_is_open_for(gate: &meerkat_core::tool_grant::ToolGrantGate, name: &str) -> bool {
         let provenance = meerkat_core::ToolProvenance {
             kind: meerkat_core::ToolSourceKind::Shell,
-            source_id: Self::MONITOR_START.into(),
+            source_id: name.into(),
             artifact: None,
         };
-        if !gate.is_gated(Self::MONITOR_START, Some(&provenance)) {
+        if !gate.is_gated(name, Some(&provenance)) {
             return true;
         }
         let view = meerkat_core::tool_grant::GatedToolView::new(
-            BTreeSet::from([meerkat_core::ToolName::new(Self::MONITOR_START)]),
+            BTreeSet::from([meerkat_core::ToolName::new(name)]),
             BTreeMap::new(),
         );
         gate.open_names(&view, None)
             .await
-            .is_ok_and(|open| open.contains(Self::MONITOR_START))
+            .is_ok_and(|open| open.contains(name))
     }
 }
 

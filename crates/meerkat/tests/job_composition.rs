@@ -1243,8 +1243,8 @@ mod shell_family_monitor {
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, MeerkatMachine, PromptInput, RuntimeDeliveryInbox};
     use meerkat_tools::builtin::shell::{
-        DurableShellJobRuntime, JobManager, MonitorOutputProtocol, MonitorProtocolLimits,
-        MonitorStartOptions, ShellConfig, ShellJobDeliveryProjector,
+        DurableShellJobRuntime, JobId as ShellJobId, JobManager, MonitorOutputProtocol,
+        MonitorProtocolLimits, MonitorStartOptions, ShellConfig, ShellJobDeliveryProjector,
     };
     use tokio::time::Duration;
 
@@ -1258,6 +1258,8 @@ mod shell_family_monitor {
     const MONITOR: &str = "monitor_start";
     const CALL_ID: &str = "toolu_scripted_call";
     const NOT_PERMITTED: &str = "monitor_start_not_permitted";
+    /// A monitor script that completes at once.
+    const COMPLETES_AT_ONCE: &str = "printf '%s\\n' '{\"type\":\"complete\"}'";
     /// How long a row waits for a monitor to run again or for its job to end.
     const SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
     /// How long a row whose session has no shell job call watches for a
@@ -1545,6 +1547,33 @@ mod shell_family_monitor {
                 .collect()
         }
 
+        /// A job manager for `session_id` built exactly as the host's
+        /// monitor route builds its own: the realm's stores, the session as
+        /// origin, and no say of the session on a monitor's re-run.
+        fn operator_route_manager(&self, root: &Path, session_id: &SessionId) -> JobManager {
+            let projector: Arc<dyn ShellJobDeliveryProjector> = Arc::new(
+                meerkat::JobOutboxProjector::new(
+                    self.job_store.clone(),
+                    self.runtime_inbox.clone(),
+                )
+                .bound_to_realm(mob_realm().to_string()),
+            );
+            let durable = DurableShellJobRuntime::new(
+                mob_realm().as_str(),
+                session_id.clone(),
+                self.job_store.clone(),
+                self.blob_store.clone(),
+                projector,
+            )
+            .expect("the operator route's durable runtime");
+            JobManager::new(ShellConfig::with_project_root(root.to_path_buf()))
+                .bind_canonical_async_ops(
+                    session_id.clone(),
+                    Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
+                )
+                .with_durable_job_runtime(durable)
+        }
+
         /// End this lifetime as a host stop does, so a successor can serve
         /// its sessions.
         async fn stand_down(self) {
@@ -1581,7 +1610,7 @@ mod shell_family_monitor {
         let (script, seen) = OneCallScript::new(
             MONITOR,
             serde_json::json!({
-                "command": "printf '%s\\n' '{\"type\":\"complete\"}'",
+                "command": COMPLETES_AT_ONCE,
                 "timeout_secs": 30,
             }),
         );
@@ -1923,6 +1952,84 @@ mod shell_family_monitor {
         );
     }
 
+    /// The operator starts a monitor of its own for the manager's session,
+    /// which first recovers that session's recorded jobs.
+    async fn operator_starts_a_monitor(operator: &JobManager, command: &str) -> ShellJobId {
+        operator
+            .spawn_monitor_for_call(
+                command,
+                None,
+                30,
+                "operator-submission",
+                MonitorStartOptions {
+                    protocol: MonitorOutputProtocol::FramedJsonl,
+                    restart_class: meerkat::RestartClass::NonResumable,
+                    limits: MonitorProtocolLimits::default(),
+                    delivery: meerkat::JobDeliveryKind::Record,
+                },
+            )
+            .await
+            .expect("the operator's monitor start")
+    }
+
+    /// A monitor the session's recovery ended stays ended. When the host's
+    /// monitor route next recovers that session's jobs (an operator's
+    /// monitor start, then a cancel of that operator's job), the ended
+    /// monitor is not run again and its job is not touched: the same
+    /// terminal result, the same attempt count, the same fence. The row's
+    /// level is the pin row's below: the route's own manager construction
+    /// on the realm's real stores, not the RPC handler.
+    #[tokio::test]
+    async fn a_monitor_ended_as_not_permitted_stays_ended_under_the_operators_route() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("monitor-runs");
+        let (session_id, job_id) =
+            a_lifetime_that_loses_a_resumable_monitor(temp.path(), &marker).await;
+
+        // The next lifetime builds the session with the deny and its model
+        // lists its shell jobs: the session's recovery ends the monitor.
+        let (script, _seen) = OneCallScript::new("shell_jobs", serde_json::json!({}));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let stored = lifetime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the stored session")
+            .expect("the session survives the restart");
+        lifetime
+            .run_session(stored, Profile::restricted(false, &[MONITOR]))
+            .await;
+        let ended = settled(&lifetime.job_store, &job_id, &marker, SETTLE).await;
+        assert_ended_not_permitted(&ended, "the profile denies `monitor_start`");
+        let jobs = DetachedJobService::new(lifetime.job_store.clone());
+        let before = jobs.get(&job_id).await.expect("read job").expect("job");
+
+        // The operator's route recovers the session's jobs twice.
+        let operator = lifetime.operator_route_manager(temp.path(), &session_id);
+        let started = operator_starts_a_monitor(&operator, "sleep 30").await;
+        operator
+            .cancel_job(&started)
+            .await
+            .expect("the operator's job cancel");
+        tokio::time::sleep(QUIET).await;
+
+        let after = jobs.get(&job_id).await.expect("read job").expect("job");
+        assert_eq!(
+            runs(&marker),
+            1,
+            "the operator's route does not run the ended monitor again"
+        );
+        assert_eq!(
+            after.terminal_result, before.terminal_result,
+            "the ended job keeps its terminal result"
+        );
+        assert_eq!(
+            (after.attempt_count, after.current_fence),
+            (before.attempt_count, before.current_fence),
+            "the ended job gets no new attempt"
+        );
+    }
+
     /// The host's own monitor route is not bound by a member's deny: an
     /// operator's monitor start for a session runs that session's recorded
     /// resumable monitors again under the host's authority, whoever started
@@ -1959,42 +2066,8 @@ mod shell_family_monitor {
             "the denied session's own turn runs nothing again"
         );
 
-        let projector: Arc<dyn ShellJobDeliveryProjector> = Arc::new(
-            meerkat::JobOutboxProjector::new(
-                lifetime.job_store.clone(),
-                lifetime.runtime_inbox.clone(),
-            )
-            .bound_to_realm(mob_realm().to_string()),
-        );
-        let durable = DurableShellJobRuntime::new(
-            mob_realm().as_str(),
-            session_id.clone(),
-            lifetime.job_store.clone(),
-            lifetime.blob_store.clone(),
-            projector,
-        )
-        .expect("the operator route's durable runtime");
-        let operator = JobManager::new(ShellConfig::with_project_root(temp.path().to_path_buf()))
-            .bind_canonical_async_ops(
-                session_id,
-                Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
-            )
-            .with_durable_job_runtime(durable);
-        operator
-            .spawn_monitor_for_call(
-                "printf '%s\\n' '{\"type\":\"complete\"}'",
-                None,
-                30,
-                "operator-submission",
-                MonitorStartOptions {
-                    protocol: MonitorOutputProtocol::FramedJsonl,
-                    restart_class: meerkat::RestartClass::NonResumable,
-                    limits: MonitorProtocolLimits::default(),
-                    delivery: meerkat::JobDeliveryKind::Record,
-                },
-            )
-            .await
-            .expect("the operator's monitor start");
+        let operator = lifetime.operator_route_manager(temp.path(), &session_id);
+        operator_starts_a_monitor(&operator, COMPLETES_AT_ONCE).await;
 
         let after = settled(&lifetime.job_store, &job_id, &marker, SETTLE).await;
         assert_eq!(

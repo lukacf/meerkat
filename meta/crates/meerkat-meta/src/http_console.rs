@@ -21557,6 +21557,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    mod refusal_form;
+
     /// §10.3 fail-closed panel guard. Operator-scope rows are cross-mob
     /// personal facts, so they need their OWN grant: folding the operator
     /// arm into the unscoped `agent.memory.read` action would silently

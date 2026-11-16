@@ -2797,7 +2797,7 @@ mod tests {
             assert_eq!(pin.realm().as_str(), "a_b");
         }
 
-        fn marker_files(roots: &[&Path], realm_id: &str) -> Vec<PathBuf> {
+        fn markers_left(roots: &[&Path], realm_id: &str) -> Vec<PathBuf> {
             roots
                 .iter()
                 .map(|root| first_start_marker_path(root, realm_id))
@@ -2831,7 +2831,7 @@ mod tests {
                 );
             });
             assert_eq!(
-                marker_files(&[root_a, root_b], "team"),
+                markers_left(&[root_a, root_b], "team"),
                 Vec::<PathBuf>::new(),
                 "no first start left a marker"
             );

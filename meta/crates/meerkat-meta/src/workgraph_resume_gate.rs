@@ -41,7 +41,9 @@
 //! A candidate launch binds no gate ([`launch_resume_gate`]): it holds every
 //! stored member's run starts, and Meerkat asks the gate before it checks
 //! the hold, so a verdict on a candidate could settle the authoritative
-//! launch's run.
+//! launch's run. A launch whose backend has no WorkGraph binds none either:
+//! there is no item and no claim to check, and the run resumes unchecked, as
+//! on a launch without a WorkGraph service.
 //!
 //! Known limit: take a run with no attention projection whose claim lapsed
 //! and was taken by another worker while it was down. It holds no claim any
@@ -196,8 +198,12 @@ pub(crate) struct WorkGraphResumeGate {
 }
 
 /// The resume gate a launch binds over its mob realm's `service`: none
-/// without a service, and none on a candidate launch. With no gate bound
-/// Meerkat asks no resumed-run admission, so a run a candidate holds stays
+/// without a service, none over a backend that has no WorkGraph, and none
+/// on a candidate launch. With no gate bound Meerkat asks no resumed-run
+/// admission. A store without a WorkGraph refuses every read, so a gate
+/// over it could only answer unavailable until Meerkat settles the run as
+/// superseded; it holds no item and no claim, so there is nothing to
+/// check, as without a service. On a candidate, a run it holds stays
 /// parked with its mark: the gate's verdict, and the lease expiry it
 /// commits, belong to the authoritative launch.
 pub(crate) fn launch_resume_gate(
@@ -207,7 +213,9 @@ pub(crate) fn launch_resume_gate(
     if !authority.speaks_for_composition() {
         return None;
     }
-    service.map(WorkGraphResumeGate::new)
+    service
+        .filter(|service| service.store().kind() != meerkat::WorkGraphStoreKind::Disabled)
+        .map(WorkGraphResumeGate::new)
 }
 
 impl WorkGraphResumeGate {

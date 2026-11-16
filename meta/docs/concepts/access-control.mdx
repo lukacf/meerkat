@@ -192,7 +192,7 @@ actions = ["agent.*"]
 agents = ["identity:auditor"]
 ```
 
-An `agents` entry is an agent's exact name as the agent list shows it, compared as written (or `*`, or the agent's runtime member id): it is not a pattern and takes no prefix. The names in these examples have the form the [quickstart](/quickstart) gives its agents (`identity:person`); for an agent named `ops-lead` the entry is `ops-lead`. An entry that names no agent selects nothing: an allow rule with it grants nothing, and a deny rule with it refuses nothing.
+An `agents` entry is an agent's exact name as the agent list shows it, compared as written (or `*`, or the agent's runtime member id): it is not a pattern, and `identity:` in these examples is part of the names, not something an entry needs. The names in these examples have the form of the [quickstart](/quickstart)'s `identity:person`; for an agent named `ops-lead` the entry is `ops-lead` (in a multi-runtime Console the listed name carries its runtime's prefix, `b/ops-lead`). An entry that names no agent matches no agent: an allow rule with it grants nothing, and a deny rule with it denies no agent by name. Like every deny rule that names another agent, it still keeps back what the name alone cannot decide (see [Timeline frames of members that changed or left](#timeline-frames-of-members-that-changed-or-left)).
 
 Enabling requires at least one admin subject — the config layer refuses any state that would lock every administrator out.
 

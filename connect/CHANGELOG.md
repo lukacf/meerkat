@@ -33,6 +33,16 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+### Fixed
+
+- Release tooling: the request that adds a file to a Connect release now
+  states the length of the file. The upload host refuses a request without
+  one ("Bad Content-Length"), so neither the publication command nor the
+  release upload tool could add a file. The tooling of 0.9.10 through 0.9.15
+  sends the earlier request (the release upload tool exists since 0.9.15). An
+  empty file is now refused before any request is made. The installed product
+  is unchanged.
+
 ## [0.9.15] - 2026-11-15
 
 ### Fixed

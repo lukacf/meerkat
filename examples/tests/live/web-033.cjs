@@ -9,7 +9,8 @@ const after = Number(process.argv[4] || 60) * 1000;
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   const calls = {}, bad = [], errors = [], models = {};
-  let aborted = 0;
+  let aborted = 0, abandoned = 0;
+  const answered = new WeakSet();
   page.on("request", (request) => {
     if (!/\/(anthropic|openai|gemini)\//.test(request.url())) return;
     let model = null;
@@ -20,18 +21,21 @@ const after = Number(process.argv[4] || 60) * 1000;
   page.on("response", (response) => {
     const match = /\/(anthropic|openai|gemini)\//.exec(response.url());
     if (!match) return;
+    answered.add(response.request());
     const key = match[1] + " " + response.status();
     calls[key] = (calls[key] || 0) + 1;
     if (response.status() >= 400 && bad.length < 5) response.text().then((t) => bad.push(match[1] + " " + response.status() + " " + t.slice(0, 300))).catch(() => {});
   });
   // A provider request that never got a response (a network error) raises
   // this event and no response event, so it joins the same list. A request
-  // the page cancelled itself is not a failure of the provider.
+  // the page cancelled after its response arrived (a stream it stopped
+  // reading) is not a failure. One it gave up on before any response is.
   page.on("requestfailed", (request) => {
     const match = /\/(anthropic|openai|gemini)\//.exec(request.url());
     if (!match) return;
     const reason = (request.failure() || {}).errorText || "request failed";
-    if (reason === "net::ERR_ABORTED") { aborted += 1; return; }
+    if (reason === "net::ERR_ABORTED" && answered.has(request)) { aborted += 1; return; }
+    if (reason === "net::ERR_ABORTED") abandoned += 1;
     if (bad.length < 5) bad.push(match[1] + " " + reason);
   });
   page.on("pageerror", (error) => errors.push(error.message.slice(0, 200)));
@@ -74,7 +78,7 @@ const after = Number(process.argv[4] || 60) * 1000;
   console.log("OUTCOME:", outcome, "| provider 200 responses:", ok);
   console.log("provider responses (provider status: count):", JSON.stringify(calls));
   console.log("models named in requests:", JSON.stringify(models));
-  console.log("failed responses and requests:", JSON.stringify(bad), "| requests the page cancelled:", aborted);
+  console.log("failed responses and requests:", JSON.stringify(bad), "| cancelled after a response:", aborted, "| given up before a response:", abandoned);
   console.log("page errors:", JSON.stringify(errors));
   console.log("log sample:", JSON.stringify(log));
   // Decide before the pause and the close: both cancel what is still open.

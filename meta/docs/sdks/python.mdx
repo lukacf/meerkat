@@ -1948,9 +1948,10 @@ subject_digest = decision["subject_digest"]
 
 # Show the person the whole text of the rendering.
 rendering = await mob.decisions_rendering(decision_id)
-shown_at_ms = int(time.time() * 1000)
-# ... post rendering["rendering"] to the chat and wait for the answer ...
-observed_at_ms = int(time.time() * 1000)
+# ... post rendering["rendering"] to the chat ...
+shown_at_ms = int(time.time() * 1000)  # once the post has succeeded
+# ... wait for the answer ...
+observed_at_ms = int(time.time() * 1000)  # the time of the answer's event
 
 await mob.decisions_decide(
     decision_id,

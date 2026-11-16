@@ -200,8 +200,10 @@ const subjectDigest = decision.subject_digest;
 
 // Show the person the whole text of the rendering.
 const rendering = await mob.decisionsRendering(decisionId);
-const shownAtMs = Date.now();
-// ... post rendering.rendering to the chat and wait for the answer ...
+// ... post rendering.rendering to the chat ...
+const shownAtMs = Date.now(); // once the post has succeeded
+// ... wait for the answer ...
+const observedAtMs = Date.now(); // the time of the answer's event
 
 await mob.decisionsDecide(decisionId, {
   approve: true,
@@ -211,7 +213,7 @@ await mob.decisionsDecide(decisionId, {
     subject: "U123",
     scope: "chat-session-1",
     eventRef: "chat:event-1",
-    observedAtMs: Date.now(),
+    observedAtMs,
     presentation: {
       audience: { kind: "approver", approver_id: decision.approver_id },
       subject_digest: subjectDigest,

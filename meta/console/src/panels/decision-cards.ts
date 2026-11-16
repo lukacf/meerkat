@@ -213,12 +213,21 @@ export function decisionCardsBesideQuestions(
 
 /** What the card of a question set says in place of an answer form: why the
  *  form is not here, and where the set is answered. `askedBy` is the name of
- *  the agent that asked, where the decision says it. */
+ *  the agent that asked, where the decision says it. The conversation draws
+ *  its card from the same list as the Approvals view, so the one condition
+ *  stands for both places.
+ *
+ *  Two cases the words do not fit exactly. In the instant before the read of
+ *  the question list has started (the console does not know its caller yet)
+ *  the card says "could not be read" of a read that was not tried yet; the
+ *  first read replaces it. And a set this console can never list (one whose
+ *  body it cannot read) is never held by the list, so "once the list holds
+ *  it" does not come for it on this console. */
 export function questionSetStandInHint(why: QuestionSetUnanswerable, askedBy: string | undefined): string {
   const where = askedBy?.trim() ? `${askedBy.trim()}'s conversation` : "the asking agent's conversation";
   return why === "not_listed"
-    ? `This card has no answer form: the list of questions agents asked does not hold this set. It is answered in ${where}, or here once the list holds it.`
-    : `This card has no answer form: the questions agents asked could not be read here. This set is answered in ${where}, or here once they can be read.`;
+    ? `This card has no answer form: the list of questions agents asked does not hold this set. It is answered in ${where} or here, once the list holds it.`
+    : `This card has no answer form: the questions agents asked could not be read here. This set is answered in ${where} or here, once they can be read.`;
 }
 
 /** The params of one `meta/decisions/list` page of open decisions: at most

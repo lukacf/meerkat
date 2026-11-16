@@ -4100,17 +4100,13 @@ async fn asked_create(
         .await
 }
 
-/// A taken name refused before the hold reads as the one refused when a
-/// create is carried out. For a name held by an agent created earlier, by
-/// an agent the host's roster declares, by an archived agent, by a removed
-/// agent's name and by a worker member, a create the rules hold for a
-/// person and its plan answer the kind, the holder and the field that a
-/// create the rules allow at once is refused with at its commit.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_taken_name_refused_before_the_hold_reads_as_the_one_refused_at_the_commit() {
-    let temp = tempfile::tempdir().unwrap();
+/// A launch under [`taken_name_policy`] with every kind of taken name: an
+/// agent created earlier (`earlier`), an agent the host's roster declares
+/// ([`HOST_A`]), an archived agent (`shelved`), a removed agent's name
+/// (`former`) and a worker member (`temp`).
+async fn taken_names_rig(state: &Path) -> Rig {
     let (runtime, asked, fail_next_session) =
-        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+        launch_with(state, &fresh_mob_id(), false, true).await;
     assert!(runtime.attach_identity_policy(taken_name_policy(), IdentityFamilyOptions::new()));
     let rig = Rig {
         runtime,
@@ -4118,12 +4114,8 @@ async fn a_taken_name_refused_before_the_hold_reads_as_the_one_refused_at_the_co
         step: Arc::new(RecordingStep::default()),
         fail_next_session,
     };
-    let mob = rig.runtime.mob_handle();
-    let family = rig.family();
     let seed = ChangeRequester::host("seed");
-    let host = ChangeRequester::host("ops");
     let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
-
     for (request_id, name) in [("s-1", "earlier"), ("s-2", "shelved"), ("s-3", "former")] {
         let made = rig.change(&seed, request_id, create_of(one(name))).await;
         assert_eq!(made.token(), "done", "{made:?}");
@@ -4146,12 +4138,68 @@ async fn a_taken_name_refused_before_the_hold_reads_as_the_one_refused_at_the_co
         )
         .await;
     assert_eq!(removed.token(), "done", "{removed:?}");
-    Box::pin(mob.spawn_spec(SpawnMemberSpec::new(
+    Box::pin(rig.runtime.mob_handle().spawn_spec(SpawnMemberSpec::new(
         "worker",
         meerkat_mob::AgentIdentity::from("temp"),
     )))
     .await
     .expect("a worker member is spawned");
+    rig
+}
+
+/// A plan without what names its request: its digests, and the name
+/// `name` wherever it stands.
+fn plan_under(mut plan: Value, name: &str) -> Value {
+    for digest in ["request_digest", "subject_digest"] {
+        plan.as_object_mut().expect("a plan").remove(digest);
+    }
+    serde_json::from_str(&plan.to_string().replace(name, "NAME")).expect("a plan is JSON")
+}
+
+/// The plan of a create that the rules allow at once says what the rules
+/// give the create, under a taken name as under a free one: the outcome
+/// `allow` and the rendering. The create itself is then refused at its
+/// commit. No plan of such a create reads what holds a name.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_plan_of_a_create_the_rules_allow_is_the_same_plan_under_a_taken_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = taken_names_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let family = rig.family();
+    let seed = ChangeRequester::host("seed");
+    let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
+    let free = planned_create(&family, &mob, &seed, "p-free", one("nobody-yet"))
+        .await
+        .unwrap_or_else(|said| panic!("the plan under a free name: {said}"));
+    assert_eq!(free["outcome"], json!("allow"), "{free:#}");
+    let free = plan_under(free, "nobody-yet");
+
+    let mut wrong = Vec::new();
+    for name in ["earlier", HOST_A, "shelved", "former", "temp"] {
+        match planned_create(&family, &mob, &seed, &format!("p-{name}"), one(name)).await {
+            Ok(plan) if plan_under(plan.clone(), name) == free => {}
+            Ok(plan) => wrong.push(format!("the plan under {name} answers {plan}")),
+            Err(said) => wrong.push(format!("the plan under {name} is refused {said}")),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
+/// A taken name refused before the hold reads as the one refused when a
+/// create is carried out. For a name held by an agent created earlier, by
+/// an agent the host's roster declares, by an archived agent, by a removed
+/// agent's name and by a worker member, a create the rules hold for a
+/// person and its plan answer the kind, the holder and the field that a
+/// create the rules allow at once is refused with at its commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_taken_name_refused_before_the_hold_reads_as_the_one_refused_at_the_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = taken_names_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let family = rig.family();
+    let seed = ChangeRequester::host("seed");
+    let host = ChangeRequester::host("ops");
 
     let mut wrong = Vec::new();
     for (tag, name, holder) in [

@@ -242,6 +242,40 @@ struct Rig {
 /// `roster`, under the access rules `access` (TOML) when given, and attach
 /// the rows' policy to it.
 async fn boot(state: &Path, roster: Vec<DurableAgentSpec>, access: Option<&str>) -> Rig {
+    boot_under(state, roster, access, policy()).await
+}
+
+/// The identity policy of the rows about a create a person decides: the
+/// host makes every change of an agent of either profile at once, as under
+/// [`policy`], and a person decides every create a person asks for.
+fn holding_policy() -> Arc<IdentityCreationPolicy> {
+    let targets = json!({"profile": ["worker", "reviewer"]});
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [
+                {"change": ["create", "descriptive", "peers", "profile", "archive", "remove",
+                            "adopt"],
+                 "requester": {"kind": "host"}, "target": targets,
+                 "outcome": {"kind": "allow"}},
+                {"change": ["create"], "requester": {"kind": "human"}, "target": targets,
+                 "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// [`boot`], with the identity policy `rules` attached in place of the
+/// rows' own.
+async fn boot_under(
+    state: &Path,
+    roster: Vec<DurableAgentSpec>,
+    access: Option<&str>,
+    rules: Arc<IdentityCreationPolicy>,
+) -> Rig {
     let fail_sessions = Arc::new(FailSessions::default());
     let mut builder = UnifiedRuntimeBuilder::default()
         .definition(definition(&fresh_mob_id()))
@@ -263,7 +297,7 @@ async fn boot(state: &Path, roster: Vec<DurableAgentSpec>, access: Option<&str>)
         .await
         .expect("build the gateway-shaped UnifiedRuntime");
     assert!(
-        runtime.attach_identity_policy(policy(), IdentityFamilyOptions::new()),
+        runtime.attach_identity_policy(rules, IdentityFamilyOptions::new()),
         "the runtime serves identities and takes the policy"
     );
     Rig {
@@ -1973,12 +2007,59 @@ async fn the_console_plans_a_create_under_a_name_its_caller_is_not_shown_as_unde
     }
 }
 
-/// The Console's plan of a create under the name of an agent its caller is
-/// shown is refused `name_taken` at the agent that asked for the name, as
-/// the create is: an agent the caller may view, an agent private to the
-/// caller, and for an access administrator an agent private to a person.
+/// What a refused Console call says of a taken name: the kind, the holder
+/// and the field.
+fn console_taken_as(answer: &Value) -> Value {
+    let data = &answer["error"]["data"];
+    json!({"kind": data["kind"], "by": data["by"], "field": data["field"]})
+}
+
+/// Where a person decides the create, the Console refuses a create under
+/// the name of an agent its caller is shown `name_taken` at the agent that
+/// asked for the name, before anything is held, and refuses its plan the
+/// same way: an agent the caller may view, an agent private to the caller,
+/// and for an access administrator an agent private to a person.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_console_refuses_the_plan_of_a_create_under_the_name_of_an_agent_its_caller_is_shown() {
+async fn the_console_refuses_a_held_create_and_its_plan_under_the_name_of_an_agent_its_caller_is_shown()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot_under(
+        temp.path(),
+        roster_with_a_private_agent(),
+        Some(SCOPED_DENIES),
+        holding_policy(),
+    )
+    .await;
+    let app = rig.console();
+    let taken = json!({"kind": "name_taken", "by": "identity", "field": "agents[0].name"});
+    let mut wrong = Vec::new();
+    for (subject, name) in [(BOB, "clerk"), (ANN, "confidant"), (ROOT, "confidant")] {
+        let planned = console_plan_of_a_create(&app, subject, name).await;
+        if console_taken_as(&planned) != taken {
+            wrong.push(format!("the plan of {subject} under {name}: {planned}"));
+        }
+        let made = console_rpc(
+            &app,
+            subject,
+            "meta/identity/create",
+            json!({"request_id": format!("make-{name}"),
+                   "agents": [{"name": name, "profile": "worker"}]}),
+        )
+        .await;
+        if console_taken_as(&made) != taken {
+            wrong.push(format!("the create of {subject} under {name}: {made}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
+/// Where the rules allow the create at once, the Console's plan of it says
+/// what the rules give it, under the name of an agent its caller is shown
+/// as under a free name: the outcome `allow` and the rendering. The create
+/// itself is refused when it is asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_plans_a_create_the_rules_allow_the_same_under_a_taken_name() {
     let temp = tempfile::tempdir().unwrap();
     let rig = boot(
         temp.path(),
@@ -1987,15 +2068,40 @@ async fn the_console_refuses_the_plan_of_a_create_under_the_name_of_an_agent_its
     )
     .await;
     let app = rig.console();
-    let mut wrong = Vec::new();
-    for (subject, name) in [(BOB, "clerk"), (ANN, "confidant"), (ROOT, "confidant")] {
-        let planned = console_plan_of_a_create(&app, subject, name).await;
-        let data = &planned["error"]["data"];
-        let said = json!({"kind": data["kind"], "by": data["by"], "field": data["field"]});
-        if said != json!({"kind": "name_taken", "by": "identity", "field": "agents[0].name"}) {
-            wrong.push(format!("{subject} under {name}: {planned}"));
+    let without_digests = |answer: &Value| {
+        let mut plan = console_ok(answer).clone();
+        for digest in ["request_digest", "subject_digest"] {
+            plan.as_object_mut().expect("a plan").remove(digest);
         }
+        plan
+    };
+    for (subject, name) in [(BOB, "clerk"), (ANN, "confidant"), (ROOT, "confidant")] {
+        let free = console_plan_of_a_create(&app, subject, "nobody-yet").await;
+        let free = without_digests(&free);
+        assert_eq!(free["outcome"], json!("allow"), "{subject}: {free:#}");
+        let planned = console_plan_of_a_create(&app, subject, name).await;
+        assert!(
+            planned["error"].is_null(),
+            "the plan of {subject} under {name} answers a plan: {planned:#}"
+        );
+        assert_eq!(
+            renamed(&without_digests(&planned), name, "nobody-yet"),
+            free,
+            "the plan of {subject} under {name} is the plan under a free name"
+        );
+        let made = console_rpc(
+            &app,
+            subject,
+            "meta/identity/create",
+            json!({"request_id": format!("make-{name}"),
+                   "agents": [{"name": name, "profile": "worker"}]}),
+        )
+        .await;
+        assert_eq!(
+            console_taken_as(&made)["kind"],
+            json!("name_taken"),
+            "the create of {subject} under {name}: {made:#}"
+        );
     }
-    assert!(wrong.is_empty(), "{wrong:#?}");
     rig.shutdown().await;
 }

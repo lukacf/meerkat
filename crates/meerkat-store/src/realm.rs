@@ -1016,6 +1016,27 @@ impl FirstStartReservation {
         candidates: &[PathBuf],
         realm_id: &str,
     ) -> Result<Option<Self>, StoreError> {
+        Self::try_acquire_with(
+            candidates,
+            realm_id,
+            cfg!(windows),
+            |marker_path| async move { create_first_start_marker(&marker_path, realm_id).await },
+        )
+        .await
+    }
+
+    /// [`Self::try_acquire`] with the step that creates a marker, and the
+    /// platform its errors are read for, passed in.
+    async fn try_acquire_with<F, Fut>(
+        candidates: &[PathBuf],
+        realm_id: &str,
+        _windows: bool,
+        mut create: F,
+    ) -> Result<Option<Self>, StoreError>
+    where
+        F: FnMut(PathBuf) -> Fut,
+        Fut: Future<Output = std::io::Result<()>>,
+    {
         let mut acquired = Self {
             markers: Vec::new(),
         };
@@ -1028,7 +1049,7 @@ impl FirstStartReservation {
             // crashed first start must not brick the realm.
             let mut takeover_attempted = false;
             loop {
-                match create_first_start_marker(&marker_path, realm_id).await {
+                match create(marker_path.clone()).await {
                     Ok(()) => {
                         acquired.markers.push(marker_path);
                         break;

@@ -4223,6 +4223,9 @@ fn sanitize_create_session_request_llm_override(req: &mut CreateSessionRequest) 
     ));
 }
 
+/// The shell tools of a session without a durable job store: the family
+/// without `monitor_start`, which needs one (as `shell` needs one for
+/// `background`). A member on a gateway with persistent state lists all five.
 #[cfg(test)]
 const NATIVE_SHELL_TOOL_NAMES: [&str; 4] = [
     "shell",
@@ -17706,7 +17709,7 @@ shell = true
 
         assert_eq!(
             visible, expected,
-            "native shell must add exactly four shell tools without filtering MCP, mob, memory, schedule, or image surfaces"
+            "native shell without a durable job store must add exactly the four standard shell tools, no monitor_start, without filtering MCP, mob, memory, schedule, or image surfaces"
         );
         for broad_builtin in ["task_list", "task_create", "apply_patch", "browse_skills"] {
             assert!(!visible.contains(broad_builtin), "unexpected broad builtin");

@@ -10437,6 +10437,50 @@ shell = true
         Ok(())
     }
 
+    /// What a stdio `live/webrtc/answer` answers on a gateway with no live
+    /// handler and no module named `live`, by build. The released gateways
+    /// are built with `openai-live`: there it is a live method and answers
+    /// the typed `live_unavailable` refusal. A build without the feature has
+    /// no such live method and answers as a call of a module named `live`.
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_answers_by_the_build()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-by-build").await?;
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "channel_id": "no-such-channel",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+        let expected = if cfg!(feature = "openai-live") {
+            json!({
+                "code": -32050,
+                "message": "live sessions are not available on this gateway",
+                "data": {"kind": "live_unavailable"},
+            })
+        } else {
+            json!({"code": -32601, "message": "Module 'live' not loaded"})
+        };
+        assert_eq!(response["error"], expected, "{response}");
+        Ok(())
+    }
+
     /// The stdio dispatch gives a method with a slash to one arm only: a
     /// live method to the live arm, any other method outside `meta/` to the
     /// loaded-module arm. `live/webrtc/answer` is a live method on an

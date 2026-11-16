@@ -77,8 +77,8 @@ fn a_save_with_a_stray_key_is_refused_with_table_and_key_and_changes_nothing() {
                 "label": { "org": "payments" },
             }}),
             vec![
-                "rule \"ops-send-scout\": unknown key `agent`",
-                "rule \"ops-send-scout\": unknown key `label`",
+                "rule \"ops-send-scout\": unknown key \"agent\"",
+                "rule \"ops-send-scout\": unknown key \"label\"",
             ],
         ),
         (
@@ -92,24 +92,24 @@ fn a_save_with_a_stray_key_is_refused_with_table_and_key_and_changes_nothing() {
                 "agents": ["auditor"],
             }}),
             vec![
-                "rule \"protect-auditor\": unknown key `efect`",
-                "rule \"protect-auditor\": unknown key `group`",
-                "rule \"protect-auditor\": unknown key `subject`",
+                "rule \"protect-auditor\": unknown key \"efect\"",
+                "rule \"protect-auditor\": unknown key \"group\"",
+                "rule \"protect-auditor\": unknown key \"subject\"",
             ],
         ),
         (
             "meta/access/groups/set",
             json!({ "name": "contractors", "group": { "member": ["dave@example.test"] } }),
-            vec!["group \"contractors\": unknown key `member`"],
+            vec!["group \"contractors\": unknown key \"member\""],
         ),
         (
             "meta/access/set",
             json!({ "config": stray_config }),
             vec![
-                "the configuration: unknown key `enable`",
-                "the configuration: unknown key `rule`",
-                "group \"ops\": unknown key `member`",
-                "rule \"ops-send-lead\": unknown key `role`",
+                "the configuration: unknown key \"enable\"",
+                "the configuration: unknown key \"rule\"",
+                "group \"ops\": unknown key \"member\"",
+                "rule \"ops-send-lead\": unknown key \"role\"",
             ],
         ),
     ] {
@@ -128,6 +128,33 @@ fn a_save_with_a_stray_key_is_refused_with_table_and_key_and_changes_nothing() {
             "{method}: nothing is changed"
         );
     }
+}
+
+/// A refused save names a key quoted, as it names the table: a key that
+/// holds a line break, a control character or a quote does not stand raw in
+/// the answer.
+#[test]
+fn a_refused_save_names_a_key_quoted() {
+    let controller = console_controller();
+    let answer = save(
+        &controller,
+        "meta/access/rules/upsert",
+        json!({ "rule": {
+            "id": "ops-send-scout",
+            "actions": ["agent.send"],
+            "agent\nadmins = [\"x\"]\u{1b}[31m": ["scout"],
+        }}),
+    );
+    assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+    let message = answer["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(
+            "rule \"ops-send-scout\": unknown key \"agent\\nadmins = [\\\"x\\\"]\\u{1b}[31m\""
+        ),
+        "{message:?}"
+    );
+    assert!(!message.chars().any(char::is_control), "{message:?}");
+    assert_eq!(controller.snapshot().1, 0, "nothing is changed");
 }
 
 /// Control: the same saves with known keys apply as before.

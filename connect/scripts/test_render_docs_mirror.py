@@ -27,7 +27,9 @@ NAV = {"navigation": {"products": [{"product": "Core", "tabs": []}, {"product": 
 
 
 def dump(value):
-    return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+    # The form of the site's docs.json: the other tool that writes that file
+    # (scripts/sync-meta-docs.py) writes ASCII escapes with an indent of two.
+    return json.dumps(value, indent=2) + "\n"
 
 
 class RenderDocsMirrorTests(unittest.TestCase):
@@ -139,6 +141,66 @@ class RenderDocsMirrorTests(unittest.TestCase):
         after = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(after["canonical_url"], "https://example.com/connect")
         self.assertNotEqual(after["source_docs_tree"], manifest["source_docs_tree"])
+
+    def assert_check_cannot_decide_the_navigation(self):
+        """The check counts a navigation it cannot decide as a difference, and changes nothing."""
+        before = self.nav.read_bytes() if self.nav.is_file() else None
+        done = self.run_tool("--check")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("undecided docs.json", done.stdout.splitlines())
+        self.assertIn("same 2, differ 0; other differences 1", done.stdout)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(self.nav.read_bytes() if self.nav.is_file() else None, before)
+
+    def test_check_fails_when_the_navigation_file_is_not_in_the_form_the_tool_writes(self):
+        self.assertEqual(self.run_tool().returncode, 0)
+        self.nav.write_text(self.nav.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        self.assert_check_cannot_decide_the_navigation()
+        # A regeneration leaves such a file as it is and says so.
+        before = self.nav.read_bytes()
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("note: docs.json is not in the form this tool writes", done.stdout)
+        self.assertEqual(self.nav.read_bytes(), before)
+
+    def test_check_fails_when_the_navigation_does_not_hold_exactly_one_connect_product(self):
+        self.assertEqual(self.run_tool().returncode, 0)
+        connect = {"product": "Connect", "tabs": []}
+        for products in ([{"product": "Core", "tabs": []}], [connect, {"product": "Core", "tabs": []}, connect]):
+            with self.subTest(connect_products=len(products) - 1):
+                self.nav.write_text(dump({"navigation": {"products": products}}), encoding="utf-8")
+                self.assert_check_cannot_decide_the_navigation()
+
+    def test_check_fails_when_the_navigation_file_is_absent(self):
+        self.assertEqual(self.run_tool().returncode, 0)
+        self.nav.unlink()
+        self.assert_check_cannot_decide_the_navigation()
+
+    def test_check_fails_when_the_navigation_file_is_not_json(self):
+        self.assertEqual(self.run_tool().returncode, 0)
+        self.nav.write_text("{ not json\n", encoding="utf-8")
+        self.assert_check_cannot_decide_the_navigation()
+
+    def test_a_title_outside_ascii_in_another_products_navigation_keeps_the_shared_form(self):
+        # The site's docs.json is written by two tools. A title outside ASCII in another
+        # product's navigation is stored as an escape; this tool reads that form, handles
+        # Connect's navigation and writes the same form back.
+        title = "Caf" + chr(0xE9)
+        other = {"product": "Core", "tabs": [{"tab": title, "groups": []}]}
+        self.nav.write_text(dump({"navigation": {"products": [other, {"product": "Connect", "tabs": []}]}}), encoding="utf-8")
+        self.assertIn("Caf\\u00e9", self.nav.read_text(encoding="utf-8"))
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("note:", done.stdout)
+        raw = self.nav.read_text(encoding="utf-8")
+        navigation = json.loads(raw)
+        self.assertEqual(navigation["navigation"]["products"][1]["tabs"][0]["groups"][0]["pages"], ["connect/one", "connect/guides/two"])
+        self.assertEqual(navigation["navigation"]["products"][0], other)
+        self.assertTrue(raw.isascii())
+        self.assertEqual(raw, dump(navigation))
+        done = self.run_tool("--check")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("same 2, differ 0; other differences 0", done.stdout)
 
 
 if __name__ == "__main__":

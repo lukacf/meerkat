@@ -60,19 +60,20 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 This section is for systems running 0.9.15. The full list of changes is in
 the CHANGELOG under `## [0.9.16]`.
 
-Meerkat 0.9.16 is Core 0.9.16, Meta 0.9.16 and Connect 0.9.16, released
-together. What asks something of a 0.9.15 user, or tells them something,
-is in the subsections below.
+Meerkat 0.9.16 is Core 0.9.16, Meta 0.9.16 and Connect 0.9.16, built from one
+commit. What asks something of a 0.9.15 user, or tells them something, is in
+the subsections below.
 
-State that 0.9.15 persisted loads under 0.9.16 as it is: the release notes
-name no migration and no adoption step. Of the one machine that changes they
-say: "No input, effect, state field or outcome value of the machine changes,
-the machine's version stays `1`". Of the question sets a 0.9.15 store holds:
-"Every call 0.9.15 held keeps its key and its decision id byte for byte, so
-the question sets of a 0.9.15 store are found, listed, answered and settled
-as before, and nothing is migrated." This rests on the notes of the release,
-not on loading state that a 0.9.15 binary wrote. Connect's own stored forms
-were not compared.
+0.9.16 has no migration of stored state and no adoption step. The release
+notes name none, and no changed source line of the release touches a store
+schema, a store, journal or format version, or a migration (by a search of the
+changed lines of Core, Meta and Connect; not by loading state that a 0.9.15
+binary wrote). Of the one machine that changes the notes say: "No input,
+effect, state field or outcome value of the machine changes, the machine's
+version stays `1`". Of the question sets a 0.9.15 store holds: "Every call
+0.9.15 held keeps its key and its decision id byte for byte, so the question
+sets of a 0.9.15 store are found, listed, answered and settled as before, and
+nothing is migrated."
 
 ### Rust hosts: two enums gain variants
 
@@ -224,6 +225,20 @@ under `## [0.9.16]`.
   0.9.16) counts the agents as the request lists them, so a host that reads
   `agents[i]` gets name order from a create the rules allow and request
   order from a create refused before a hold."
+- **To know: a module named `live`.** "On a build with `openai-live`, a loaded
+  module named `live` no longer receives this one method name":
+  `live/webrtc/answer` now reaches the gateway's live handler.
+- **To know: `ask_user` under `tools.grant_gated`.** A profile that lists
+  `ask_user` under `tools.grant_gated` and also restricts tools (`tools.deny`
+  or `tools.read_only`), used for a member that is given no stock `ask_user`,
+  "is refused at the member's build as before, now with the grant gate's
+  refusal `tool_not_mounted`" where 0.9.15 answered `unknown_tool` (read from
+  the source, not run).
+- **To know: the subject key of a question set.** An `ask_user` call with a
+  very long tool-call id is now held. "In `meta/decisions/list` and
+  `meta/decisions/get` the `subject_key` of such a set is a 122-byte key that
+  names the run and a digest instead of the agent and the call id"; the same
+  holds for Core's `decision/list` and `decision/get`.
 
 ### Connect 0.9.16
 

@@ -18,6 +18,7 @@
 
 import { existsSync, lstatSync } from "node:fs";
 import type { SessionAgentBuilder, ErrorCallback } from "./agent-builder.js";
+import { GatewayStartupCleanupError, isRpcError } from "./errors.js";
 import {
   validateAuthBindingRef,
   validateNativeRealm,
@@ -261,6 +262,16 @@ function defaultConfig(): MetaBuilderConfig {
 export class MetaBuilder {
   /** @internal */
   readonly _config: MetaBuilderConfig = defaultConfig();
+
+  /**
+   * The files `_applyConventionDefaults` applied: the config field each one
+   * filled, its path, and what it configures.
+   */
+  private readonly _conventionApplied: Array<{
+    option: "consoleConfigPath" | "accessConfigPath" | "gatingConfigPath" | "routingConfigPath";
+    path: string;
+    what: string;
+  }> = [];
 
   mob(configPath: string): this {
     this._config.mobConfigPath = configPath;
@@ -1213,7 +1224,31 @@ export class MetaBuilder {
     this._applyConventionDefaults();
     // Dynamic import to break circular dep (runtime imports from builder config type)
     const { MetaRuntime } = await import("./runtime.js");
-    return MetaRuntime._create(this._config);
+    try {
+      return await MetaRuntime._create(this._config);
+    } catch (failure) {
+      this._sayConventionFilesOfARefusedStart(failure);
+      throw failure;
+    }
+  }
+
+  /**
+   * Say once which files this builder applied by convention, when the
+   * gateway refused the start: the program named none of them, so the
+   * refusal alone does not say where a refused file came from.
+   */
+  private _sayConventionFilesOfARefusedStart(failure: unknown): void {
+    const refusal = failure instanceof GatewayStartupCleanupError ? failure.startupError : failure;
+    const applied = this._conventionApplied
+      .filter(({ option, path }) => this._config[option] === path)
+      .map(({ path, what }) => `${path} (${what})`);
+    if (applied.length > 0 && isRpcError(refusal)) {
+      console.warn(
+        "[meta] the gateway refused this start. The builder applied these files by " +
+          "convention, from the working directory, because no builder method named one: " +
+          applied.join(", "),
+      );
+    }
   }
 
   private _validateConfig(): void {
@@ -1247,6 +1282,7 @@ export class MetaBuilder {
       const candidate = "config/console.toml";
       if (existsSync(candidate)) {
         this._config.consoleConfigPath = candidate;
+        this._conventionApplied.push({ option: "consoleConfigPath", path: candidate, what: "console" });
       }
     }
 
@@ -1254,6 +1290,11 @@ export class MetaBuilder {
       const candidate = "config/access.toml";
       if (entryPresent(candidate)) {
         this._config.accessConfigPath = candidate;
+        this._conventionApplied.push({
+          option: "accessConfigPath",
+          path: candidate,
+          what: "access control",
+        });
       }
     }
 
@@ -1261,6 +1302,7 @@ export class MetaBuilder {
       const candidate = "config/gating.toml";
       if (entryPresent(candidate)) {
         this._config.gatingConfigPath = candidate;
+        this._conventionApplied.push({ option: "gatingConfigPath", path: candidate, what: "gating" });
       }
     }
 
@@ -1268,6 +1310,7 @@ export class MetaBuilder {
       const candidate = "deployment/routing.toml";
       if (existsSync(candidate)) {
         this._config.routingConfigPath = candidate;
+        this._conventionApplied.push({ option: "routingConfigPath", path: candidate, what: "routing" });
       }
     }
 

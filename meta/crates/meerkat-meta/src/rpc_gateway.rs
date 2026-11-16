@@ -10061,10 +10061,14 @@ fn parse_gateway_runtime_options(
         None | Some(Value::Null) => {}
         Some(Value::String(path)) => {
             OptInConfigPath::Access.refuse_empty(path)?;
-            parsed.access =
-                Some(crate::AccessController::load(path).map_err(|err| {
-                    format!("runtime_options.access_config_path is invalid: {err}")
-                })?);
+            parsed.access = Some(crate::AccessController::load(path).map_err(|err| {
+                let refusal = format!("runtime_options.access_config_path is invalid: {err}");
+                // A read failure names the file itself.
+                match err {
+                    crate::AccessConfigError::Io(_) => refusal,
+                    _ => naming_the_file(refusal, path),
+                }
+            })?);
         }
         Some(_) => {
             return Err("runtime_options.access_config_path must be a string".to_string());
@@ -10076,7 +10080,16 @@ fn parse_gateway_runtime_options(
         parsed.access.as_ref(),
         &parsed.decision_ingresses.clone().unwrap_or_default(),
     )
-    .map_err(|err| format!("runtime_options.access_config_path is invalid: {err}"))?;
+    .map_err(|err| {
+        let refusal = format!("runtime_options.access_config_path is invalid: {err}");
+        match runtime_options
+            .get("access_config_path")
+            .and_then(Value::as_str)
+        {
+            Some(path) => naming_the_file(refusal, path),
+            None => refusal,
+        }
+    })?;
     // The account modes of MCP servers; absent or null keeps every server's
     // account the system's.
     match runtime_options.get("mcp_accounts") {
@@ -10503,17 +10516,36 @@ impl OptInConfigPath {
     }
 }
 
+/// `refusal` of the content of the configuration file at `path`, with the
+/// file named: a launch can apply such a file without its program naming
+/// it, and the option's name alone does not say which file was refused.
+fn naming_the_file(refusal: String, path: &str) -> String {
+    format!("{refusal} (file '{path}')")
+}
+
 fn read_gateway_config_file(path: &str, option_name: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read runtime_options.{option_name} '{path}': {err}"))?;
     if path.ends_with(".json") {
-        return serde_json::from_str(&text)
-            .map_err(|err| format!("invalid JSON in runtime_options.{option_name}: {err}"));
+        return serde_json::from_str(&text).map_err(|err| {
+            naming_the_file(
+                format!("invalid JSON in runtime_options.{option_name}: {err}"),
+                path,
+            )
+        });
     }
-    let toml_value: toml::Value = toml::from_str(&text)
-        .map_err(|err| format!("invalid TOML in runtime_options.{option_name}: {err}"))?;
-    serde_json::to_value(toml_value)
-        .map_err(|err| format!("failed to normalize runtime_options.{option_name}: {err}"))
+    let toml_value: toml::Value = toml::from_str(&text).map_err(|err| {
+        naming_the_file(
+            format!("invalid TOML in runtime_options.{option_name}: {err}"),
+            path,
+        )
+    })?;
+    serde_json::to_value(toml_value).map_err(|err| {
+        naming_the_file(
+            format!("failed to normalize runtime_options.{option_name}: {err}"),
+            path,
+        )
+    })
 }
 
 fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, String> {
@@ -10528,6 +10560,11 @@ fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, St
 
 fn parse_gateway_gating_config_path(path: &str) -> Result<GatewayGatingConfig, String> {
     let value = read_gateway_config_file(path, "gating_config_path")?;
+    gating_config_of(&value).map_err(|refusal| naming_the_file(refusal, path))
+}
+
+/// The gating configuration the content `value` of a gating file defines.
+fn gating_config_of(value: &Value) -> Result<GatewayGatingConfig, String> {
     let actions = value
         .get("actions")
         .and_then(Value::as_object)

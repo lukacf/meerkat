@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from ._transport import PersistentTransport
-from .errors import GatewayTransportConflictError
+from .errors import GatewayStartupCleanupError, GatewayTransportConflictError, RpcError
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
 from .models import AuthBindingRef, NativeRealm, ToolArtifactRef
+
+_log = logging.getLogger("meerkat_meta")
 
 if TYPE_CHECKING:
     # Named by the annotation of `MetaBuilder.build`, which imports it when
@@ -108,6 +111,9 @@ class MetaBuilder:
 
     def __init__(self) -> None:
         self._config = MetaBuilderConfig()
+        # The files `_apply_convention_defaults` applied: the config field
+        # each one filled, its path, and what it configures.
+        self._convention_applied: dict[str, tuple[str, str]] = {}
 
     def mob(self, config_path: str) -> MetaBuilder:
         """Set the mob definition from a TOML file path."""
@@ -1334,11 +1340,43 @@ class MetaBuilder:
         runtime that keeps that transport; for a cancelled or interrupted
         startup, the propagating exception carries it as ``gateway_cleanup``
         (see ``MetaRuntime.connect()``).
+
+        When the gateway refuses the start and this builder applied a file by
+        convention (one found in the working directory that no builder method
+        named), one warning on the ``meerkat_meta`` logger names those files.
         """
         self._validate()
         self._apply_convention_defaults()
         from .runtime import MetaRuntime
-        return await MetaRuntime._create(self._config)
+        try:
+            return await MetaRuntime._create(self._config)
+        except (RpcError, GatewayStartupCleanupError) as failure:
+            self._say_convention_files_of_a_refused_start(failure)
+            raise
+
+    def _say_convention_files_of_a_refused_start(self, failure: BaseException) -> None:
+        """Log once which files this builder applied by convention.
+
+        The program named none of them, so the gateway's refusal alone does
+        not say where a refused file came from.
+        """
+        refusal = (
+            failure.startup_error
+            if isinstance(failure, GatewayStartupCleanupError)
+            else failure
+        )
+        applied = [
+            f"{path} ({what})"
+            for option, (path, what) in self._convention_applied.items()
+            if getattr(self._config, option) == path
+        ]
+        if applied and isinstance(refusal, RpcError):
+            _log.warning(
+                "the gateway refused this start. The builder applied these files "
+                "by convention, from the working directory, because no builder "
+                "method named one: %s",
+                ", ".join(applied),
+            )
 
     def _validate(self) -> None:
         if self._config.mob_config_path and self._config.mob_config_inline:
@@ -1402,16 +1440,22 @@ class MetaBuilder:
             candidate = Path("config/gating.toml")
             if _entry_present(candidate):
                 self._config.gating_config_path = str(candidate)
+                self._convention_applied["gating_config_path"] = (str(candidate), "gating")
 
         if self._config.access_config_path is None:
             candidate = Path("config/access.toml")
             if _entry_present(candidate):
                 self._config.access_config_path = str(candidate)
+                self._convention_applied["access_config_path"] = (
+                    str(candidate),
+                    "access control",
+                )
 
         if self._config.routing_config_path is None:
             candidate = Path("deployment/routing.toml")
             if candidate.is_file():
                 self._config.routing_config_path = str(candidate)
+                self._convention_applied["routing_config_path"] = (str(candidate), "routing")
 
 
 def _entry_present(path: Path) -> bool:

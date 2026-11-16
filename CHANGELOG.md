@@ -3069,7 +3069,9 @@ them.
   start and the head is rebuilt from the event log (read from the source).
   Linux and macOS are unchanged. Found by a check added to this release's
   build, the first to start a Windows binary against a state directory.
-  Affected: every Windows binary from 0.3.4 through 0.9.14.
+  Affected: every Windows binary from 0.3.4 through 0.9.14. A first use of
+  the same new realm by several processes at once can still fail once: see
+  Known limitations.
 
 ### Security
 
@@ -4533,6 +4535,15 @@ them.
   and the tool-call id, joined by two slashes) exceeds 1,024 bytes is
   refused as invalid before the question set is held; this can meet a custom
   model provider that issues very long tool-call ids (read from the source).
+
+- Windows: when several processes or tasks use the same new realm for the
+  first time at the same moment (for example two `rkat-rpc --realm <name>`
+  started together, or parallel `rkat` commands in a new workspace), one of
+  them can fail once with "IO error: Access is denied. (os error 5)". Start
+  it again: the realm then exists and the start works (read from the
+  source). A single start is not affected. Seen in a test on a Windows
+  runner that creates one realm from 32 tasks at once. A fix is planned for
+  the next release.
 
 ## [0.9.14] - 2026-11-11
 

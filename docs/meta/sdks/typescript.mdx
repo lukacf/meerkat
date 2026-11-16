@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [fda523f1d63e](https://github.com/lukacf/meerkat/commit/fda523f1d63e529f3d0bdb6e0017e7291294dbfc) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -181,15 +181,32 @@ and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
 attestation})`. Each resolves to the gateway's result object.
 
 ```typescript
+import { Meta } from "@rkat/meta-sdk";
+
 const rt = await Meta.builder()
   .mob("config/mob.toml")
   .persistentState("./state")
   .accessControl("config/access.toml")
   .decisionIngresses([{ ingress: "chat", attests: "person", maxClockSkewMs: 5000 }])
   .build();
+const mob = rt.mobHandle();
+
+// The methods answer the gateway's result object, untyped.
+type OpenDecision = { decision_id: string; subject_digest: string; approver_id: string };
 
 rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
 const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
+const decision = (page.decisions as OpenDecision[])[0];
+const decisionId = decision.decision_id;
+const subjectDigest = decision.subject_digest;
+
+// Show the person the whole text of the rendering.
+const rendering = await mob.decisionsRendering(decisionId);
+// ... post rendering.rendering to the chat ...
+const shownAtMs = Date.now(); // once the post has succeeded
+// ... wait for the answer ...
+const observedAtMs = Date.now(); // the time of the answer's event
+
 await mob.decisionsDecide(decisionId, {
   approve: true,
   presentedDigest: subjectDigest,
@@ -198,10 +215,29 @@ await mob.decisionsDecide(decisionId, {
     subject: "U123",
     scope: "chat-session-1",
     eventRef: "chat:event-1",
-    observedAtMs: Date.now(),
+    observedAtMs,
+    presentation: {
+      audience: { kind: "approver", approver_id: decision.approver_id },
+      subject_digest: subjectDigest,
+      parts_shown: rendering.parts,
+      channel_ref: "chat:owners",
+      message_ref: "chat:message-1",
+      at_ms: shownAtMs,
+    },
   },
 });
 ```
+
+The approver map of `config/access.toml` lists `U123` on the `chat` ingress
+for the decision's approver id. An attested decide is accepted only for a
+decision that was presented to its approver: by the `presentation` the
+attestation carries, as here; by one recorded before with
+`decisionsPresent(decisionId, presentation)`, which takes the same object;
+or by the gateway's own showing to the stdio operator (its `presented`
+notice), where the approver map lists the operator for that approver id.
+With none of these, the decide is refused `presentation_incomplete`. The
+keys of a presentation are the gateway's own (snake_case) and are listed
+under [`meta/decisions/decide`](/meta/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.

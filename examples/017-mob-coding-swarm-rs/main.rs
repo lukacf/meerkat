@@ -37,7 +37,7 @@ id = "coding_swarm"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-8"
+model = "claude-opus-5-5"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -48,7 +48,7 @@ comms = true
 mob = true
 
 [profiles.worker]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["worker"]
 peer_description = "Worker"
 external_addressable = false
@@ -132,7 +132,7 @@ id = "my-dev-team"
 orchestrator = "architect"
 
 [profiles.architect]
-model = "claude-opus-4-8"
+model = "claude-opus-5-5"
 skills = ["system-design"]
 peer_description = "System architect and task coordinator"
 external_addressable = true
@@ -143,7 +143,7 @@ comms = true
 mob = true
 
 [profiles.frontend]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["react-specialist"]
 peer_description = "React/TypeScript frontend developer"
 
@@ -153,7 +153,7 @@ shell = true
 comms = true
 
 [profiles.backend]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["rust-specialist"]
 peer_description = "Rust backend developer"
 

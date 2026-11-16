@@ -184,9 +184,14 @@ export class LiveAttempt {
     const tracks = new Set([...this.streams].flatMap((stream) => stream.getTracks()));
     for (const track of tracks) track.stop();
     this.streams.clear();
-    this.dc.close();
-    this.pc.close();
-    this.disposePromise = this.closeChannel();
+    // Close the channel through the host first and the peer connection after
+    // it. When the peer goes away first, the runtime closes the channel
+    // itself (reason `client_disconnected`), and a close request that follows
+    // names a channel that is no longer there.
+    this.disposePromise = this.closeChannel().finally(() => {
+      this.dc.close();
+      this.pc.close();
+    });
     return this.disposePromise;
   }
 }

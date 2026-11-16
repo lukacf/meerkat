@@ -74,8 +74,10 @@ async function runSmoke(chromium, {
   let evidence = { startedAt: new Date().toISOString() };
   try {
     const work = async () => {
+      // The Chromium that Playwright bundles by default; set
+      // PLAYWRIGHT_CHROMIUM_CHANNEL=chrome to run against an installed Google Chrome.
       browser = await chromium.launch({
-        channel: "chrome", headless: true, timeout: 10_000,
+        channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || undefined, headless: true, timeout: 10_000,
         args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--no-sandbox"],
       });
       const context = await browser.newContext({ permissions: ["microphone"] });

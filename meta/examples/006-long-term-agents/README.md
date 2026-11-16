@@ -104,13 +104,15 @@ the first two `[4]` lines read `seat None` (TypeScript: `seat null`) and
 - `applies_at_next_run` is what the update answers here, where the agent has
   no conversation yet: its first run is built from the new instructions.
   For an agent that already has a conversation the answer depends on its
-  model. On a model that takes a system instruction only ahead of the
-  conversation (`claude-haiku-4-5`, which this example's profiles name, is
-  one) the update answers `applies_after_compaction`: the agent follows the
-  change only once that conversation is compacted or reset. Read the
-  agent's instruction status (`runtime.instruction_status(identity=...)`)
-  to see whether a change is in effect; the guide lists the models and says
-  what each outcome means.
+  model. On a model that takes a system instruction in the middle of a
+  conversation (`claude-haiku-5-5`, which the profiles of this example name,
+  is one) the answer is `applies_at_next_run` again, and the next run of the
+  agent follows the change. On a model that takes one only ahead of the
+  conversation (`claude-haiku-4-5`, for instance) the update answers
+  `applies_after_compaction`: the agent follows the change only once that
+  conversation is compacted or reset. Read the instruction status of the
+  agent (`runtime.instruction_status(identity=...)`) to see whether a change
+  is in effect; the guide lists the models and says what each outcome means.
 - If you archive or remove an agent within moments of changing its
   instructions while it has a conversation, the gateway log may show one or
   two `operator_instruction_delivery` warnings. This program does not cause

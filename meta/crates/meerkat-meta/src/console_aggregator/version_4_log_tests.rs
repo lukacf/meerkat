@@ -4,14 +4,14 @@
 //! mobs a gateway hosts beside the one it was launched with, and moves the
 //! log to schema version 4 when it stores the first of them: one added
 //! column, `mob_id` (empty for the launch mob's frames, so no stored row is
-//! rewritten), and an index by mob and identity in place of the index by
-//! identity. This release stores no such frame and never moves a log. It
-//! opens a log that was moved, and reads and changes the launch mob's
-//! frames alone: a moved log reads as the same log without the other mobs'
-//! frames.
+//! rewritten), an index by mob and identity in place of the index by
+//! identity, and an index by mob and cursor. This release stores no such
+//! frame and never moves a log. It opens a log that was moved, and reads
+//! and changes the launch mob's frames alone: a moved log reads as the same
+//! log without the other mobs' frames.
 //!
 //! The version 4 logs of these rows are written here, by SQL, from that
-//! description: a log this release wrote, the three statements of the move,
+//! description: a log this release wrote, the four statements of the move,
 //! the ledger row, and the frames of another mob.
 
 use super::*;
@@ -25,6 +25,8 @@ const MOVE_TO_VERSION_4: &str = "
     DROP INDEX idx_console_frames_identity_cursor;
     CREATE INDEX idx_console_frames_mob_identity_cursor
         ON console_frames (mob_id, identity, cursor_seq);
+    CREATE INDEX idx_console_frames_mob_cursor
+        ON console_frames (mob_id, cursor_seq);
     UPDATE meerkat_schema SET version = 4 WHERE domain = 'meta-console';
 ";
 
@@ -348,6 +350,67 @@ async fn a_version_4_log_is_opened_and_not_moved() -> TestResult {
     assert_eq!(ledger_version(&path)?, Some(4));
     assert_eq!(catalog(&path)?, declared);
     assert_eq!(another_mobs_rows(&path)?, another_mobs);
+    Ok(())
+}
+
+/// A log that is moved to schema version 4 while this release holds it open
+/// (another connection makes the move and stores another mob's frames) is
+/// served as a version 4 log from the next statement on, with no reopening:
+/// every read answers what it answered before the move, which is what the
+/// same log without the other mob's frames answers; a change by the id of
+/// another mob's frame finds nothing; an append stores the launch mob's
+/// frame. The log stays at version 4 with the other mob's rows as they were.
+#[tokio::test]
+async fn a_log_moved_while_it_is_open_is_served_as_a_version_4_log() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("console.sqlite3");
+    let stored = version_3_log(&path).await?;
+    let store = SqliteConsoleLogStore::open(&path)?;
+    let before = every_read(&store, &stored).await?;
+
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute_batch(MOVE_TO_VERSION_4)?;
+    conn.execute_batch(ANOTHER_MOBS_FRAMES)?;
+    drop(conn);
+    let another_mobs = another_mobs_rows(&path)?;
+    assert_eq!(another_mobs.len(), stored.len());
+    let alone = dir.path().join("alone.sqlite3");
+    without_another_mobs_frames(&path, &alone)?;
+
+    let reads = every_read(&store, &stored).await?;
+    let expected = every_read(&SqliteConsoleLogStore::open(&alone)?, &stored).await?;
+    assert_eq!(reads, expected, "{reads:#}");
+    assert_eq!(
+        reads, before,
+        "the reads are what they were before the move"
+    );
+    assert!(
+        !reads.to_string().contains("HOSTED") && !reads.to_string().contains("hosted-"),
+        "no read answers a frame of another mob: {reads:#}"
+    );
+
+    let launch_send = stored
+        .iter()
+        .find(|frame| frame.dedupe_key == "alice-send")
+        .expect("the launch mob's send");
+    assert_eq!(
+        store
+            .update_frame_status(
+                &format!("hosted-{}", launch_send.id),
+                ConsoleFrameStatus::DeliveryFailed
+            )
+            .await?,
+        None
+    );
+    let appended = store.append_if_absent(text("alice-3", "alice", 60)).await?;
+    assert_eq!(appended.disposition, AppendDisposition::Inserted);
+    assert_eq!(
+        rows(&path, "mob_id = '' AND dedupe_key = 'alice-3'")?.len(),
+        1,
+        "the appended frame is stored with the empty mob"
+    );
+    assert_eq!(another_mobs_rows(&path)?, another_mobs);
+    assert_eq!(ledger_version(&path)?, Some(4));
     Ok(())
 }
 

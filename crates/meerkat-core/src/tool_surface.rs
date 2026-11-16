@@ -60,13 +60,12 @@ impl PreparedToolSurface {
     pub fn of(tools: &dyn AgentToolDispatcher, filters: &[ToolFilter]) -> Self {
         let identities: Vec<ToolIdentity> =
             tools.tools().iter().map(|tool| tool.identity()).collect();
+        // The session's own rule for names, so the projection is the list
+        // the session would be offered under these filters.
+        let composed = crate::tool_scope::ToolScope::compose(filters);
         let projected = identities
             .iter()
-            .filter(|identity| {
-                filters
-                    .iter()
-                    .all(|filter| filter_admits(filter, identity.name.as_str()))
-            })
+            .filter(|identity| composed.allows(identity.name.as_str()))
             .cloned()
             .collect();
         let catalog = if tools.tool_catalog_capabilities().exact_catalog {
@@ -101,14 +100,6 @@ impl PreparedToolSurface {
         self.tools.contains(identity)
             || matches!(&self.catalog, PreparedToolCatalog::Complete(entries)
                 if entries.iter().any(|entry| &entry.identity == identity))
-    }
-}
-
-fn filter_admits(filter: &ToolFilter, name: &str) -> bool {
-    match filter {
-        ToolFilter::All => true,
-        ToolFilter::Allow(names) => names.contains(name),
-        ToolFilter::Deny(names) => !names.contains(name),
     }
 }
 

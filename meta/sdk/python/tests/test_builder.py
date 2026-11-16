@@ -311,6 +311,52 @@ class TestBuilderChain:
 
         assert params["runtime_options"]["console_fetch_timeout_ms"] == 120_000
 
+    def test_max_sessions_sets_runtime_option(self):
+        builder = Meta.builder()
+        result = builder.max_sessions(320)
+        params = MetaRuntime(builder._config)._build_init_params()
+
+        assert result is builder
+        assert builder._config.max_sessions == 320
+        assert params["runtime_options"]["max_sessions"] == 320
+        assert type(params["runtime_options"]["max_sessions"]) is int
+
+    def test_max_sessions_accepts_one(self):
+        b = Meta.builder().max_sessions(1)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["max_sessions"] == 1
+
+    def test_max_sessions_defaults_to_omitted(self):
+        b = Meta.builder()
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert b._config.max_sessions is None
+        assert "max_sessions" not in params["runtime_options"]
+
+    @pytest.mark.parametrize("value", [0, -1, -16])
+    def test_max_sessions_rejects_non_positive_values(self, value):
+        with pytest.raises(ValueError, match="max_sessions must be a positive integer"):
+            Meta.builder().max_sessions(value)
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_max_sessions_rejects_booleans(self, value):
+        with pytest.raises(ValueError, match="max_sessions must be a positive integer"):
+            Meta.builder().max_sessions(value)
+
+    @pytest.mark.parametrize("value", [1.5, 16.0, "16", None, [16]])
+    def test_max_sessions_rejects_non_integers(self, value):
+        with pytest.raises(ValueError, match="max_sessions must be a positive integer"):
+            Meta.builder().max_sessions(value)
+
+    def test_max_sessions_refusal_keeps_the_earlier_value(self):
+        b = Meta.builder().max_sessions(32)
+        with pytest.raises(ValueError):
+            b.max_sessions(0)
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["max_sessions"] == 32
+
     def test_console_read_only_sets_runtime_option(self):
         b = Meta.builder().console_read_only()
         params = MetaRuntime(b._config)._build_init_params()

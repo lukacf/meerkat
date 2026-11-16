@@ -43,9 +43,10 @@
 //!    person approved it, the decisions' driver commits it through the same
 //!    seam. The driver runs exactly while the launch serves changes. A
 //!    create under a taken name that its requester is shown is refused
-//!    `name_taken` before it is held, and its plan is refused the same
-//!    way; every other taken name is Core's to refuse when the change
-//!    commits.
+//!    `name_taken` before it is held, and the plan of a create that would
+//!    be held is refused the same way; every other taken name, and the
+//!    name of a create the rules allow at once, is Core's to refuse when
+//!    the change commits.
 //!
 //! A person's approval is evidence, never authority over the launch's
 //! policy: when a decided change is carried out, the policy the launch has
@@ -901,15 +902,16 @@ impl IdentityGate {
     }
 
     /// The refusal of a create under a taken name, said before the create
-    /// is held for a person and before it is planned: `name_taken` at the
-    /// agent of the request that asked for the name. Core decides every
-    /// name when a change commits and refuses a taken one there; this says
-    /// the same sooner, and only where it tells `requester` nothing it is
-    /// not shown already. The caller's view shows the name, and either an
-    /// agent holds it that `requester` is shown, or a removed agent's
-    /// name, a worker member or a record this build cannot read holds it
-    /// and the call has no view and is no agent's (the host's own call,
-    /// which is shown everything). A view decides agents, by their
+    /// is held for a person, and by the plan of a create that would be
+    /// held: `name_taken` at the agent of the request that asked for the
+    /// name. Core decides every name when a change commits and refuses a
+    /// taken one there; this says the same sooner, and only where it tells
+    /// `requester` nothing it is not shown already. The caller's view shows
+    /// the name, and either an agent holds it that `requester` is shown, or
+    /// a removed agent's name, a worker member or a record this build
+    /// cannot read holds it and the call has no view and is no agent's (a
+    /// call the host makes itself, for itself or for a person, which is
+    /// shown everything). A view decides agents, by their
     /// records: of what else holds a name it knows nothing to decide by,
     /// so a caller that has one is told of none of it here, whatever the
     /// view says of every agent. Every other taken name is left to the
@@ -2107,11 +2109,15 @@ impl IdentityGate {
         }
         self.refuse_while_owning_mobs(mob, requester, &call.operation_id, request)
             .await?;
-        // The plan of a create under a taken name that its requester is
-        // shown is the refusal the create answers.
-        self.refuse_shown_taken_names(mob, requester, &call.change)
-            .await
-            .map_err(|refusal| self.shown_refusal(requester, refusal))?;
+        // The plan of a create that would be held for a person, under a
+        // taken name that its requester is shown, is the refusal that
+        // create answers. A create the rules allow at once is planned as
+        // it always was: its name is the commit's to refuse.
+        if consent_of_plan(plan).is_none() && self.decisions.is_some() {
+            self.refuse_shown_taken_names(mob, requester, &call.change)
+                .await
+                .map_err(|refusal| self.shown_refusal(requester, refusal))?;
+        }
         let lines = |request: &IdentityRequest| match &self.hooks {
             Some(hooks) => hooks.consequences(request),
             None => Ok(Vec::new()),

@@ -32,9 +32,9 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
     `--context-root <an existing directory>`: in those releases, while that
     directory is missing, a `POST /sessions` that carries no `system_prompt`,
     such as the request in the next step, is answered HTTP 500 (see Known
-    limitations of 0.9.15 in the CHANGELOG). From the next release the step is
-    not needed: a default context directory that does not exist holds no
-    project instructions, and the session is created.
+    limitations of 0.9.15 in the CHANGELOG). From 0.9.16 the step is not
+    needed: a default context directory that does not exist holds no project
+    instructions, and the session is created.
   </Step>
   <Step title="Send a request">
     Leave the server running and use another terminal for `curl`. Select an

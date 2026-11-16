@@ -96,18 +96,20 @@ them.
   value itself, but an embedder that serializes its own kernel state after
   passing the new value in writes a value an older kernel refuses to read.
 
-- `meerkat_mob_profile_create` and `meerkat_mob_profile_update` refuse a
-  profile that carries `tools.mcp_servers`, `tools.rust_bundles`,
-  `tools.bundles`, `auth_binding` or an undefined key (JSON-RPC error
-  `-32602`, invalid params; the message names the field). A client that set
-  them through these tools uses the host methods instead.
+- Behaviour-only (not measured by the gate): `meerkat_mob_profile_create` and
+  `meerkat_mob_profile_update` refuse a profile that carries
+  `tools.mcp_servers`, `tools.rust_bundles`, `tools.bundles`, `auth_binding`
+  or an undefined key (JSON-RPC error `-32602`, invalid params; the message
+  names the field). A client that set them through these tools uses the host
+  methods instead.
 
-- `meerkat_mob_spawn`, `meerkat_mob_spawn_many` and `meerkat_run` refuse a
-  reserved key in `labels` or in the context with JSON-RPC error `-32602` and
-  no `data`. The message names the key: "metadata label key '<key>' is
-  reserved for Meerkat-owned runtime facts", or "app_context key '<key>' is
-  reserved for Meerkat-owned runtime facts". The raw mob dispatcher refuses it
-  as invalid arguments. A client that sent such a key stops sending it.
+- Behaviour-only (not measured by the gate): `meerkat_mob_spawn`,
+  `meerkat_mob_spawn_many` and `meerkat_run` refuse a reserved key in `labels`
+  or in the context with JSON-RPC error `-32602` and no `data`. The message
+  names the key: "metadata label key '<key>' is reserved for Meerkat-owned
+  runtime facts", or "app_context key '<key>' is reserved for Meerkat-owned
+  runtime facts". The raw mob dispatcher refuses it as invalid arguments. A
+  client that sent such a key stops sending it.
 
 ### Added
 
@@ -4837,9 +4839,9 @@ them.
   affected (run on 0.9.14 and 0.9.15); `rkat-mcp`, the `rkat` command and
   the Meta gateway take their context directory from elsewhere and are not
   affected, by a reading of the source. macOS and Windows were not run.
-  Fixed in the next release: a default context directory that does not exist
-  then holds no project instructions and the session is created; a
-  `--context-root` that does not exist is still refused.
+  Fixed in 0.9.16: a default context directory that does not exist then holds
+  no project instructions and the session is created; a `--context-root` that
+  does not exist is still refused.
 - Known limitation (added 2026-11-16). Mob: an adoption into store custody
   (`MobHandle::adopt_identity`, 0.9.11 through 0.9.15) from a roster spec
   whose labels are not the labels its member was seated with leaves the seat

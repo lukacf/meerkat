@@ -54,17 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   adopt, a plan of one of them); `agent.identity.remove` (remove, a plan of
   it); `agent.send` (run_flow). See Security.
 
-- An access file with an unknown key is refused. A gateway whose access file
-  holds a key that the access configuration does not define, in the
-  configuration itself, in a group, in a rule or in an approver, is not
-  started: the gateway binary and the Rust builder refuse the load, and the
-  stdio gateway and the SDK hosts refuse the runtime options. The refusal
-  names the file, each table (a rule by its `id`, or by its position when it
-  has none) and every unknown key, in one message, and changes nothing on
-  disk. The Console's save methods refuse such a key with `-32602`, name each
-  table and key, and apply nothing. Through 0.9.15 the key was dropped and the
-  rest applied; one exception: an unknown key in an entry of an approver's
-  `people` or `ingress_subjects` is refused since 0.9.11.
+- Behaviour-only (not measured by the gate): An access file with an unknown
+  key is refused. A gateway whose access file holds a key that the access
+  configuration does not define, in the configuration itself, in a group, in a
+  rule or in an approver, is not started: the gateway binary and the Rust
+  builder refuse the load, and the stdio gateway and the SDK hosts refuse the
+  runtime options. The refusal names the file, each table (a rule by its `id`,
+  or by its position when it has none) and every unknown key, in one message,
+  and changes nothing on disk. The Console's save methods refuse such a key
+  with `-32602`, name each table and key, and apply nothing. Through 0.9.15
+  the key was dropped and the rest applied; one exception: an unknown key in
+  an entry of an approver's `people` or `ingress_subjects` is refused since
+  0.9.11.
 
 ### Security
 
@@ -315,7 +316,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart, let the source agent take one turn before its side chats are used.
   (By a run on the published 0.9.15 `meta-rpc-gateway` archive for Linux
   x86_64 with a scripted model; the other platforms and `meta_gateway` were
-  not run.)
+  not run.) A fix is planned for 0.9.17.
 
 - Agent memory of private side chats (0.9.11 through 0.9.16). The known issue
   published with 0.9.15 is unchanged in this release. On a Console that

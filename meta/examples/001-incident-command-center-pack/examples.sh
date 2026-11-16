@@ -73,14 +73,22 @@ start_server() {
   (cd "$ROOT" && INCIDENT_COMMAND_CENTER_LISTEN_ADDR="127.0.0.1:0" cargo run -p meerkat-meta --example incident_command_center > "$SERVER_LOG" 2>&1) &
   SERVER_PID=$!
   set +m
-  SERVER_ADDR="$(wait_for_server)"
+  # A server that never became ready ends the leg here. Without the check the
+  # smoke would run against an empty address and report a misleading error.
+  if ! SERVER_ADDR="$(wait_for_server)"; then
+    echo "[incident-pack] the incident example server did not become ready; see ${SERVER_LOG}" >&2
+    return 1
+  fi
   echo "[incident-pack] incident example server listening at http://${SERVER_ADDR}"
 }
 
 run_leg() {
   local label="$1"
   shift
-  start_server
+  if ! start_server; then
+    cleanup
+    return 1
+  fi
   echo "[incident-pack] running ${label}"
   if ! "$@" "http://${SERVER_ADDR}"; then
     cleanup

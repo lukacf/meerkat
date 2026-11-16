@@ -4110,6 +4110,10 @@ mod console_private_member_schedule_end_tests;
 mod console_private_audience_tests;
 
 #[cfg(test)]
+#[path = "console_absent_answer_tests.rs"]
+mod console_absent_answer_tests;
+
+#[cfg(test)]
 #[path = "console_malformed_params_tests.rs"]
 mod console_malformed_params_tests;
 

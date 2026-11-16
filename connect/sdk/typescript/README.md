@@ -23,7 +23,7 @@ distinction between package checks and installed qualification.
 
 This optional ESM package exposes Home Assistant, [Gmail REST operations](GMAIL.md),
 [Slack history/thread reads](SLACK.md) and [Google Calendar Events operations](GOOGLE-CALENDAR.md). It runs
-without Meerkat, MobKit, a tool registry, or a model. The host supplies an already
+without Meerkat, Meta, a tool registry, or a model. The host supplies an already
 selected, authenticated Fetch function and an exact instance URL. The library
 borrows that function and never closes it, obtains credentials, infers a person,
 or decides permission. Node 22.12.0 or later is the supported execution profile.

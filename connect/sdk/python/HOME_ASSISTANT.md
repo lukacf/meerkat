@@ -13,7 +13,7 @@ one.
 python -m pip install "meerkat-toolkit[home-assistant] @ https://github.com/lukacf/meerkat/releases/download/connect-v$VERSION/meerkat_toolkit-$VERSION-py3-none-any.whl"
 ```
 Import `HomeAssistantOperations` from `meerkat_toolkit.connectors.home_assistant`.
-The package does not require MobKit for these operations.
+The package does not require Meta for these operations.
 
 The application supplies an authenticated `httpx.AsyncClient` with one selected
 Home Assistant base URL. The application continues to own that client, its

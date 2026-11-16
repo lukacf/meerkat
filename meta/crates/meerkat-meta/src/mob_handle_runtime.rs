@@ -2861,6 +2861,17 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     ),
                 ));
             }
+            // Which identity a member is, is never a caller's to say: an
+            // agent's spawn that supplies the `agent_identity` label is
+            // refused, as member creation refuses it.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && crate::console_spawn::identity_label_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    crate::console_spawn::SPAWN_IDENTITY_LABEL_REFUSAL,
+                ));
+            }
             // Only Meta writes a side chat's lineage and creator labels and a
             // private owner: an agent's spawn naming one is refused, as member
             // creation refuses it.

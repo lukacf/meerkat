@@ -93,8 +93,8 @@ async fn a_lift_observes_the_members_it_rebuilds_at_most_the_restore_concurrency
         lifted,
         Err(MobError::LifecycleOperationProgressStalled { .. })
     ) {
-        // The unit build's lift observer reports a stall after two seconds
-        // without progress; the lift stays joinable.
+        // The unit build's lift observer reports a stall after its inactivity
+        // window without progress; the lift stays joinable.
         lifted = tokio::time::timeout(STEP, handle.resume())
             .await
             .expect("the joined lift answers");

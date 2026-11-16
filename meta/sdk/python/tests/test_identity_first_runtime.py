@@ -644,6 +644,146 @@ class TestLifecycleMethods:
         assert transport.calls[0]["params"]["identity"] == "agent:1"
 
 
+class _RefusingTransport(FakeTransport):
+    """Answers every request with one JSON-RPC error."""
+
+    def __init__(self, error: dict):
+        super().__init__()
+        self._error = error
+
+    def send_sync(self, request):
+        self.calls.append(request)
+        return {"jsonrpc": "2.0", "id": request.get("id"), "error": self._error}
+
+
+# The gateway keeps observing for this long after ``timeout_ms`` before it
+# answers that the maintenance turn is still pending.
+_GATEWAY_COMPACT_SECONDARY_BUDGET_SECONDS = 5.0
+# The gateway's ``timeout_ms`` when the caller names none.
+_GATEWAY_COMPACT_DEFAULT_TIMEOUT_SECONDS = 60.0
+
+
+class TestCompactMember:
+    """compact_member sends meta/compact_member and waits longer than the gateway."""
+
+    @pytest.mark.asyncio
+    async def test_compact_member_sends_only_the_identity_by_default(self):
+        rt, transport = _make_runtime(result={"identity": "agent:1"})
+        await rt.compact_member("agent:1")
+        assert transport.calls[0]["method"] == "meta/compact_member"
+        assert transport.calls[0]["params"] == {"identity": "agent:1"}
+
+    @pytest.mark.asyncio
+    async def test_compact_member_sends_the_floor_and_the_timeout_given(self):
+        rt, transport = _make_runtime(result={"identity": "agent:1"})
+        await rt.compact_member("agent:1", floor_tokens=2048, timeout=120)
+        assert transport.calls[0]["method"] == "meta/compact_member"
+        assert transport.calls[0]["params"] == {
+            "identity": "agent:1",
+            "floor_tokens": 2048,
+            "timeout_ms": 120_000,
+        }
+        await rt.compact_member("agent:1", timeout=2.5)
+        assert transport.calls[1]["params"] == {"identity": "agent:1", "timeout_ms": 2500}
+        await rt.compact_member("agent:1", floor_tokens=4096)
+        assert transport.calls[2]["params"] == {"identity": "agent:1", "floor_tokens": 4096}
+
+    @pytest.mark.asyncio
+    async def test_compact_member_default_transport_wait_outlasts_the_gateway(self):
+        rt, transport = _make_runtime(result={"identity": "agent:1"})
+        await rt.compact_member("agent:1")
+        [waited] = transport.async_timeouts
+        # Never the transport's own request timeout: the gateway holds the
+        # call for its default 60 s and then its secondary budget.
+        assert waited is not None
+        assert waited > (
+            _GATEWAY_COMPACT_DEFAULT_TIMEOUT_SECONDS
+            + _GATEWAY_COMPACT_SECONDARY_BUDGET_SECONDS
+        )
+        assert waited > transport.request_timeout
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("timeout", [0.5, 30, 60, 120, 900.0])
+    async def test_compact_member_explicit_transport_wait_outlasts_the_gateway(
+        self, timeout
+    ):
+        rt, transport = _make_runtime(result={"identity": "agent:1"})
+        await rt.compact_member("agent:1", timeout=timeout)
+        [waited] = transport.async_timeouts
+        assert waited is not None
+        assert waited > timeout + _GATEWAY_COMPACT_SECONDARY_BUDGET_SECONDS
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "compact_member_busy",
+            "compact_member_timeout",
+            "compact_member_refused",
+            "compact_member_superseded",
+            "compact_member_completion_failed",
+        ],
+    )
+    async def test_compact_member_error_kind_reaches_the_caller(self, kind):
+        data = {
+            "kind": kind,
+            "stage": "terminal_pending",
+            "operation_id": "0198c0de-0000-7000-8000-000000000001",
+            "identity": "agent:1",
+        }
+        rt, transport = _make_runtime()
+        rt._transport = _RefusingTransport(
+            {"code": -32000, "message": "compaction did not complete", "data": data}
+        )
+        with pytest.raises(RpcError) as raised:
+            await rt.compact_member("agent:1")
+        assert type(raised.value) is RpcError
+        assert raised.value.code == -32000
+        assert raised.value.method == "meta/compact_member"
+        assert raised.value.data == data
+        assert raised.value.data["kind"] == kind
+
+    @pytest.mark.asyncio
+    async def test_compact_member_returns_the_gateway_result_fields(self):
+        result = {
+            "identity": "agent:1",
+            "session_id": "0198c0de-0000-7000-8000-0000000000aa",
+            "floor_tokens": 1024,
+            "messages_before": 42,
+            "messages_after": 7,
+            "compaction_applied": True,
+            "head_revision": "sha256:" + "a" * 64,
+            "last_rewrite_reason": "compaction",
+        }
+        rt, _ = _make_runtime(result=result)
+        assert await rt.compact_member("agent:1") == result
+        # A gateway without a transcript-edit service answers the counts and
+        # the revision facts as null: they stay null.
+        sparse = {
+            "identity": "agent:1",
+            "session_id": "0198c0de-0000-7000-8000-0000000000aa",
+            "floor_tokens": 2048,
+            "messages_before": None,
+            "messages_after": None,
+            "compaction_applied": None,
+            "head_revision": None,
+            "last_rewrite_reason": None,
+        }
+        rt, _ = _make_runtime(result=sparse)
+        assert await rt.compact_member("agent:1", floor_tokens=2048) == sparse
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "timeout",
+        [0, 0.0004, -0.1, True, "1", float("nan"), float("inf")],
+    )
+    async def test_compact_member_rejects_an_unusable_timeout_before_rpc(self, timeout):
+        rt, transport = _make_runtime(result={"identity": "agent:1"})
+        with pytest.raises(ValueError, match="timeout"):
+            await rt.compact_member("agent:1", timeout=timeout)
+        assert transport.calls == []
+
+
 class TestStatusMethod:
     """status() returns IdentityStatus."""
 

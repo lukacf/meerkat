@@ -105,11 +105,33 @@ impl meerkat_client::LlmClient for BindingProbeClient {
 #[derive(Default)]
 struct BindingCustomizer {
     auth_binding: Mutex<Option<meerkat_core::AuthBindingRef>>,
+    pause: Mutex<Option<CustomizerPause>>,
+}
+
+/// One scripted pause of the host's customizer: it says that it was asked,
+/// then waits for the row's word before it answers.
+struct CustomizerPause {
+    asked: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl BindingCustomizer {
     fn name_binding(&self, binding: meerkat_core::AuthBindingRef) {
         *self.auth_binding.lock().expect("auth binding") = Some(binding);
+    }
+
+    /// Pause the next customization. The receiver resolves once the
+    /// customizer was asked; the sender lets it answer.
+    fn pause_next_customization(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (asked, asked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        *self.pause.lock().expect("pause") = Some(CustomizerPause { asked, release });
+        (asked_rx, release_tx)
     }
 }
 
@@ -119,6 +141,11 @@ impl SpawnMemberCustomizer for BindingCustomizer {
         _ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
+        let pause = self.pause.lock().expect("pause").take();
+        if let Some(pause) = pause {
+            let _ = pause.asked.send(());
+            let _ = pause.release.recv_timeout(WAIT);
+        }
         if let Some(binding) = self.auth_binding.lock().expect("auth binding").clone() {
             spec.auth_binding = Some(binding);
         }
@@ -292,6 +319,56 @@ impl LiftFixture {
         }
     }
 
+    /// Lift the mob as a host does: a lift that answers one of the lift's
+    /// retryable refusals is asked again until the mob is lifted. A host with
+    /// no time to give can run out a lift's progress budget (two seconds in
+    /// this profile), and the lift's contract for that is a retryable
+    /// refusal, not a lifted mob. Returns how many refusals came first.
+    async fn lift(&self) -> usize {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let mut refusals = 0;
+        loop {
+            let answer = tokio::time::timeout(WAIT, self.handle.resume())
+                .await
+                .expect("the lift answers");
+            match answer {
+                Ok(()) => return refusals,
+                Err(
+                    error @ (MobError::LifecycleOperationProgressStalled { .. }
+                    | MobError::LifecycleOperationPending { .. }
+                    | MobError::LifecycleOperationAdmissionPending { .. }),
+                ) => {
+                    assert!(
+                        refusal_says_retryable(&error),
+                        "a lift's refusal says it is retryable: {error:?}"
+                    );
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "the lift kept answering a retryable refusal: {error:?}"
+                    );
+                    refusals += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("lift the mob: {error:?}"),
+            }
+        }
+    }
+
+    /// Send the member a delivery and wait for its answer.
+    async fn deliver(&self, identity: &AgentIdentity, content: &str) {
+        tokio::time::timeout(WAIT, async {
+            self.handle
+                .member(identity)
+                .await
+                .expect("the member's handle")
+                .internal_turn(content)
+                .await
+        })
+        .await
+        .expect("the delivery answers")
+        .expect("the member takes the delivery");
+    }
+
     async fn finish(self) {
         let _ = tokio::time::timeout(WAIT, self.handle.shutdown()).await;
     }
@@ -323,10 +400,25 @@ async fn a_lift_after_the_binding_changed_rebuilds_the_member_on_the_new_binding
         "precondition: the stop kept the member's live actor"
     );
     fixture.customizer.name_binding(binding.clone());
-    tokio::time::timeout(WAIT, fixture.handle.resume())
-        .await
-        .expect("the lift answers")
-        .expect("lift the mob");
+    let refusals = fixture.lift().await;
+    // A host with no time to give can run out one progress budget, and that
+    // can cost two refusals: the stalled answer, and then, when the next ask
+    // joins the attempt before it has ended, that attempt's own late answer.
+    // More than two is a lift that keeps refusing after a binding change,
+    // which this row must not pass.
+    assert!(
+        refusals <= 2,
+        "the lift after a binding change was refused {refusals} times before it lifted the mob"
+    );
+    if refusals > 0 {
+        // A lift that was refused first may have retired the member's old
+        // actor in the refused attempt. The lift that then succeeds finds
+        // the member Dormant and leaves its rebuild to its first delivery,
+        // as the default restore policy does for every Dormant member.
+        fixture
+            .deliver(&member, "first delivery after the lift")
+            .await;
+    }
 
     fixture.wait_live(&member).await;
     assert_eq!(
@@ -395,10 +487,15 @@ async fn a_run_queued_while_stopped_starts_only_on_the_new_binding() {
         "no run starts while the mob is stopped"
     );
     fixture.customizer.name_binding(binding.clone());
-    tokio::time::timeout(WAIT, fixture.handle.resume())
-        .await
-        .expect("the lift answers")
-        .expect("lift the mob");
+    // A lift that was refused first keeps the run queued: it starts after
+    // the lift that succeeds, on the binding that lift names. One stalled
+    // progress budget can cost two refusals (the stalled answer, then the
+    // joined attempt's own late answer); more than two fails the row.
+    let refusals = fixture.lift().await;
+    assert!(
+        refusals <= 2,
+        "the lift after a binding change was refused {refusals} times before it lifted the mob"
+    );
 
     let requests = fixture.wait_requests(1).await;
     assert!(
@@ -406,4 +503,272 @@ async fn a_run_queued_while_stopped_starts_only_on_the_new_binding() {
         "every model request of the queued run ran on the binding the lift names: {requests:?}"
     );
     fixture.finish().await;
+}
+
+/// The session's turn boundary, held by a row.
+type TurnBoundary = Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>;
+
+/// Whether a lift's refusal says, by its own structured data, that asking
+/// again can succeed.
+fn refusal_says_retryable(error: &MobError) -> bool {
+    error
+        .structured_data()
+        .and_then(|data| data.get("retryable").and_then(serde_json::Value::as_bool))
+        == Some(true)
+}
+
+/// A lift whose wait for the retirement of the member's old live actor ran
+/// out: the mob was stopped, the host named another binding, and the
+/// retirement the lift started cannot begin, because the row holds the
+/// session's turn boundary, which every retirement takes first.
+struct StalledLift {
+    fixture: LiftFixture,
+    member: AgentIdentity,
+    session: SessionId,
+    binding: meerkat_core::AuthBindingRef,
+    boundary: Option<TurnBoundary>,
+}
+
+impl StalledLift {
+    /// With `queue_input`, an input is queued on the member's runtime while
+    /// the mob is stopped, before the lift.
+    async fn new(label: &str, queue_input: bool) -> Self {
+        let fixture = LiftFixture::new(label).await;
+        let member = fixture.spawn(&format!("{label}-member")).await;
+        let session = fixture.session(&member).await;
+        let binding = configured_openai_binding();
+        fixture.client.probe(BindingProbe {
+            service: fixture.service.clone(),
+            member: member.clone(),
+            session: session.clone(),
+            binding: binding.clone(),
+        });
+        tokio::time::timeout(WAIT, fixture.handle.stop())
+            .await
+            .expect("the stop answers")
+            .expect("stop the mob");
+        if queue_input {
+            let runtime = MobSessionService::acquire_runtime_adapter(&*fixture.service, None)
+                .expect("the service's runtime")
+                .expect("a runtime-backed service");
+            let (admitted, _completion) = runtime
+                .accept_input_with_completion(
+                    &session,
+                    meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                        "queued while the mob is stopped",
+                        None,
+                    )),
+                )
+                .await
+                .expect("the member's runtime admits the input while the mob is stopped");
+            assert!(
+                matches!(admitted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+                "the input is queued: {admitted:?}"
+            );
+        }
+        fixture.customizer.name_binding(binding.clone());
+
+        // The lift asks the customizer after its takeover step and before
+        // its binding check. From that answer on, the row holds the turn
+        // boundary: the retirement the binding check starts waits for it.
+        let (asked, release) = fixture.customizer.pause_next_customization();
+        let lifting = fixture.handle.clone();
+        let lift = tokio::spawn(async move { tokio::time::timeout(WAIT, lifting.resume()).await });
+        tokio::time::timeout(WAIT, asked)
+            .await
+            .expect("the lift asks the customizer")
+            .expect("the customizer is asked");
+        let boundary = tokio::time::timeout(
+            WAIT,
+            MobSessionService::acquire_runtime_turn_finalization_guard(&*fixture.service, &session),
+        )
+        .await
+        .expect("the turn boundary is free")
+        .expect("the turn boundary");
+        // The lift's progress budget has been running since before the
+        // customizer was asked; its retirement budget, of the same length,
+        // starts after the answer. Holding the answer back makes the progress
+        // budget the first to run out, as on a host with no time to give.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        release.send(()).expect("the customizer waits for the row");
+
+        let first = lift
+            .await
+            .expect("the lift task")
+            .expect("the stalled lift answers")
+            .expect_err("a lift whose retirement cannot begin does not lift the mob");
+        assert!(
+            matches!(
+                first,
+                MobError::LifecycleOperationProgressStalled { .. }
+                    | MobError::LifecycleOperationPending { .. }
+            ) && refusal_says_retryable(&first),
+            "the stalled lift answers a retryable refusal: {first:?}"
+        );
+        let stalled = Self {
+            fixture,
+            member,
+            session,
+            binding,
+            boundary: Some(boundary),
+        };
+        stalled.wait_late_answer_kept(&first).await;
+        stalled
+    }
+
+    /// A lift answered at its progress budget leaves its attempt running; the
+    /// attempt's own answer arrives later, with no caller left to read it.
+    /// Wait until the handle keeps that answer.
+    async fn wait_late_answer_kept(&self, answered: &MobError) {
+        if !matches!(answered, MobError::LifecycleOperationProgressStalled { .. }) {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while !self.fixture.handle.explicit_resume_operations_for_test().1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the stalled lift's attempt never answered"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Give the turn boundary back and wait until the retirement has ended
+    /// by itself: the member is Dormant.
+    async fn let_the_retirement_end(&mut self) {
+        drop(self.boundary.take());
+        let key = mob_dsl::AgentIdentity::from_domain(&self.member);
+        let mut state = self.fixture.handle.machine_state_watch_rx.clone();
+        let reached = tokio::time::timeout(
+            WAIT,
+            state.wait_for(|state| {
+                state.member_materialization.get(&key)
+                    == Some(&mob_dsl::MemberMaterializationPhase::Dormant)
+            }),
+        )
+        .await;
+        assert!(
+            matches!(reached, Ok(Ok(_))),
+            "the retirement never ended: member {} is not Dormant",
+            self.member
+        );
+    }
+
+    /// How many explicit resume attempts the handle started.
+    fn lifts_started(&self) -> u64 {
+        self.fixture.handle.explicit_resume_operations_for_test().0
+    }
+
+    /// The mob runs, and the member serves its first delivery from a live
+    /// actor on the binding the lift named.
+    async fn assert_lifted_and_serving_on_the_new_binding(&self) {
+        assert_eq!(
+            tokio::time::timeout(WAIT, self.fixture.handle.status())
+                .await
+                .expect("the status answers")
+                .expect("the mob's status"),
+            MobState::Running,
+            "the lift left the mob running"
+        );
+        self.fixture
+            .deliver(&self.member, "first delivery after the lift")
+            .await;
+        self.fixture.wait_live(&self.member).await;
+        assert_eq!(
+            self.fixture.session(&self.member).await,
+            self.session,
+            "the member serves on its own session"
+        );
+        assert!(
+            self.fixture
+                .live_actor_runs(&self.member, &self.session, &self.binding)
+                .await,
+            "the member's live actor runs the binding the lift named"
+        );
+    }
+}
+
+/// A lift whose wait for the retirement of a member's old live actor ran out
+/// answers a retryable refusal, and the retirement then ends by itself. The
+/// next lift is a lift of its own: it is not answered with the earlier
+/// lift's late refusal, the mob runs, and the member serves on the binding
+/// the lift named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lift_after_a_stalled_lifts_retirement_ended_lifts_the_mob() {
+    let mut stalled = StalledLift::new("lift-after-stall", false).await;
+    stalled.let_the_retirement_end().await;
+    let started = stalled.lifts_started();
+
+    tokio::time::timeout(WAIT, stalled.fixture.handle.resume())
+        .await
+        .expect("the second lift answers")
+        .expect("a lift asked after the retirement ended lifts the mob");
+    assert_eq!(
+        stalled.lifts_started(),
+        started + 1,
+        "the second lift ran an attempt of its own"
+    );
+    stalled.assert_lifted_and_serving_on_the_new_binding().await;
+    stalled.fixture.finish().await;
+}
+
+/// While that retirement is still wedged, the next lift is a lift of its own
+/// too: it runs a fresh attempt, which waits for the same retirement inside
+/// its own budget and answers its own retryable refusal, never the earlier
+/// lift's kept one. The lift asked once the retirement ended lifts the mob.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lift_over_a_still_wedged_retirement_runs_its_own_attempt() {
+    let mut stalled = StalledLift::new("lift-over-wedge", false).await;
+    let started = stalled.lifts_started();
+
+    let second = tokio::time::timeout(WAIT, stalled.fixture.handle.resume())
+        .await
+        .expect("the second lift answers")
+        .expect_err("no lift completes while the retirement is wedged");
+    assert!(
+        matches!(
+            second,
+            MobError::LifecycleOperationProgressStalled { .. }
+                | MobError::LifecycleOperationPending { .. }
+        ) && refusal_says_retryable(&second),
+        "the second lift answers a retryable refusal: {second:?}"
+    );
+    assert_eq!(
+        stalled.lifts_started(),
+        started + 1,
+        "the second lift ran an attempt of its own; it answered {second:?}"
+    );
+    stalled.wait_late_answer_kept(&second).await;
+
+    stalled.let_the_retirement_end().await;
+    tokio::time::timeout(WAIT, stalled.fixture.handle.resume())
+        .await
+        .expect("the third lift answers")
+        .expect("a lift asked after the retirement ended lifts the mob");
+    stalled.assert_lifted_and_serving_on_the_new_binding().await;
+    stalled.fixture.finish().await;
+}
+
+/// A run queued while the mob was stopped is not lost to a stalled lift: the
+/// retirement keeps it queued, and after the next lift it starts on the
+/// binding that lift named, never on the old one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_queued_while_stopped_starts_on_the_new_binding_after_a_stalled_lift() {
+    let mut stalled = StalledLift::new("lift-queued-after-stall", true).await;
+    stalled.let_the_retirement_end().await;
+    assert!(
+        stalled.fixture.client.requests().is_empty(),
+        "no run starts while the mob is stopped"
+    );
+
+    tokio::time::timeout(WAIT, stalled.fixture.handle.resume())
+        .await
+        .expect("the second lift answers")
+        .expect("a lift asked after the retirement ended lifts the mob");
+    let requests = stalled.fixture.wait_requests(1).await;
+    assert!(
+        requests.iter().all(|on_binding| *on_binding),
+        "every model request of the queued run ran on the binding the lift named: {requests:?}"
+    );
+    stalled.fixture.finish().await;
 }

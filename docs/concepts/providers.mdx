@@ -337,11 +337,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.14", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.15", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.14", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.15", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -366,8 +366,6 @@ The transcript itself is not rewritten merely because a different provider
 wire has stricter placement rules.
 
 ## Reasoning Effort
-
-0.9.15 is not published yet; what is said here about 0.9.15 describes the coming release.
 
 `reasoning_effort` is one provider-neutral setting for how much reasoning a
 model spends: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`
@@ -495,12 +493,16 @@ never the message text.
 The refusal has the same shape wherever it is raised: when the session is
 created or resumed, on a turn that changes the level or the model, and before
 a provider request inside a turn (a Copilot account's list can change between
-turns). From 0.9.15, over JSON-RPC a turn that names a refused level is answered when it
+turns). One case is not recognisable by its data kind: a `meerkat_resume` of, or
+a `meerkat_comms_send` to, the session of a mob member that is not live, whose
+own build is refused for the level in its profile, is answered the generic agent
+error (`-32013`) with a message and no `reasoning_effort_refused` data.
+From 0.9.15, over JSON-RPC a turn that names a refused level is answered when it
 is asked, also while another turn of the session runs and for a stored
 session that is not loaded: it changes nothing, and the running turn and
 what is queued behind it go on. A turn that would change the session's
-model settings beside a provider-neutral level is taken when the session is
-idle: on a session that holds a level that is every turn that changes the
+model settings beside a provider-neutral level is taken when the session has
+no unfinished work: on a session that holds a level that is every turn that changes the
 model, the provider, the provider params, the auth binding or the level
 itself (setting, changing or clearing it; a level inside `provider_params`
 counts even when it equals the held one), and on a session that holds none
@@ -508,7 +510,10 @@ a turn that sets one. While the session has unfinished work such a turn is
 answered `SESSION_BUSY` (send it again when the session has no unfinished
 work; data kind `reasoning_effort_change_needs_idle_session`, the same kind when the
 request only changed the model) and changes nothing: wait for the running
-turn's answer, then send it again. That answer is not a level refusal.
+turn's answer, then send it again. If nothing is running, an event queued on the
+session counts: send a plain turn first (an autonomous mob member apart: see
+[Model settings on a busy session](/api/rpc#model-settings-on-a-busy-session)).
+That answer is not a level refusal.
 Plain turns and turns that repeat the session's level with
 `reasoning_effort` queue, and a session that holds no provider-neutral
 level queues its turns as before, a model change, a clear and a provider's
@@ -963,7 +968,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.14", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.15", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

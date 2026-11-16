@@ -636,6 +636,10 @@ pub fn resolve_effective_turn_config(
         // session metadata. Generic recovery cannot reconstruct one; a host
         // that enables WorkGraph must explicitly resupply the exact grant.
         workgraph_namespace_grant: None,
+        // A host's own tools are a dispatcher of its process, not durable
+        // session metadata: a host that mounts some sets them again on the
+        // recovered build.
+        host_tools: None,
         preload_skills: overrides
             .preload_skills
             .clone()

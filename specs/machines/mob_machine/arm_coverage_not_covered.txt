@@ -162,8 +162,7 @@ GrantOperator* operator grant scopes; no MobMachine audit drives them
 RevokeOperatorScopes* operator grant scopes; no MobMachine audit drives them
 ResolveCancel* work cancellation refusals; no audit drives them
 ResolveSubmit* work submission refusals of a stopped, completed or destroyed mob, a runtime not live, a retiring member and a stale session binding; created_identity_audit's doors run drives the identity member, addressability, member-not-found and stale-fence refusals
-CancelAll* work cancellation; no audit drives it
-ForceCancel* forced cancellation; no audit drives it
+ForceCancelMemberRunning the member terminal notice signal of a forced cancellation, which changes no state; no audit drives it (member_lifecycle_audit drives the three ForceCancel input arms and CancelAllWorkRunning)
 ResolveRuntime* runtime ingress and retire refusal feedback from MeerkatMachine; member_residency_audit drives the binding refusal and its stale twins
 ClassifyMemberWait* member wait classification over runtime material; no audit drives it
 ClassifyIdentity* identity reconciliation decisions; no audit drives them

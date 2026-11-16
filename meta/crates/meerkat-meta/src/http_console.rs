@@ -2,6 +2,7 @@
 
 pub(crate) mod audit;
 mod mcp_apps;
+mod question_sets;
 pub(crate) mod schedules;
 mod shared_panels;
 pub use mcp_apps::ConsoleToolApplicationIngress;
@@ -927,10 +928,10 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
 /// `identity`: only a caller that may view that agent, and, for a caller the
 /// console keeps apart from other people, only when the console knows the
 /// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
-/// know may have been private to a person. The pending list, the audit read
-/// and a decide by a request's id all ask it: a request withheld from a
-/// caller is not one the caller may decide.
-fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
+/// know may have been private to a person. The pending list, the audit read,
+/// the question-set read and a decide by a request's id all ask it: a
+/// request withheld from a caller is not one the caller may decide.
+pub(crate) fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
     access_view.is_none_or(|view| {
         view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
     })
@@ -4101,6 +4102,10 @@ mod console_side_chat_tests;
 mod console_private_side_chat_tests;
 
 #[cfg(test)]
+#[path = "console_private_member_schedule_end_tests.rs"]
+mod console_private_member_schedule_end_tests;
+
+#[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
 
@@ -4115,6 +4120,10 @@ mod console_frame_witness_tests;
 #[cfg(test)]
 #[path = "console_kept_apart_tests.rs"]
 mod console_kept_apart_tests;
+
+#[cfg(test)]
+#[path = "console_stored_session_seat_tests.rs"]
+mod console_stored_session_seat_tests;
 
 #[cfg(test)]
 #[path = "console_schedule_tests.rs"]
@@ -4159,6 +4168,10 @@ mod console_approver_tests;
 #[cfg(test)]
 #[path = "console_announcement_audience_tests.rs"]
 mod console_announcement_audience_tests;
+
+#[cfg(test)]
+#[path = "console_question_set_tests.rs"]
+mod console_question_set_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -6336,7 +6349,9 @@ fn console_rpc_access_requirements(
             one(ACTION_AGENT_SPAWN, None)
         }
         "meta/gating/decide" => one(ACTION_GATING_DECIDE, None),
-        "meta/gating/pending" | "meta/gating/audit" => one(ACTION_GATING_VIEW, None),
+        "meta/gating/pending" | "meta/gating/audit" | "meta/gating/questions" => {
+            one(ACTION_GATING_VIEW, None)
+        }
         crate::rpc::CONSOLE_AUDIT_METHOD => one(ACTION_AUDIT_VIEW, None),
         "meta/mob_events/query" | "meta/mob_events/subscribe" => one(ACTION_MOB_OBSERVE, None),
         "meta/reconcile_edges"
@@ -6697,6 +6712,7 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/delivery/history"
         | "meta/routing/routes/list"
         | "meta/gating/pending"
+        | "meta/gating/questions"
         | "meta/gating/audit"
         | "meta/gating/decide"
         | "meta/storage/doctor"
@@ -6969,8 +6985,10 @@ fn restore_absent_names(value: Value, suffix: &str) -> Value {
 /// [`console_method_member_fields`]; a method it does not list is read for
 /// the four subject spellings). A member hidden from the caller
 /// ([`AccessView::hides_agent`], which judges every spelling of a member as
-/// the member it names), and, for a read of an identity's memory scope, a
-/// member the console withholds from the caller because it does not know it
+/// the member it names), and, for a read of an identity's memory scope and
+/// for a read or a change of a member's console schedules
+/// ([`schedules::acts_on_member_schedules`]), a member the console withholds
+/// from the caller because it does not know it
 /// ([`AccessView::withholds_unknown_member`]), is answered as a member that
 /// does not exist: in a field naming a member the method reads or acts on,
 /// it is swapped for a name no member holds, so the method takes its own
@@ -6990,7 +7008,8 @@ pub(crate) fn console_rpc_resolve_members(
 /// the store's bare identities when `withhold_unknown_scopes` is false (a
 /// shared console): those reads leave a member the console does not know to
 /// the panel, which judges each identity under the name the console gives
-/// it.
+/// it. The schedule methods name a member as the console names it on every
+/// console.
 fn console_rpc_resolve_members_with(
     view: Option<&AccessView>,
     method: &str,
@@ -7005,6 +7024,7 @@ fn console_rpc_resolve_members_with(
             method,
             "meta/agent_memory/recall" | "meta/agent_memory/manifest" | "meta/memory/panel/records"
         );
+    let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
     let mut nonce: Option<String> = None;
     for field in console_method_member_fields_or_subject(method) {
         visit_member_field(params, field.path, &mut |slot| {
@@ -7013,7 +7033,7 @@ fn console_rpc_resolve_members_with(
             };
             let hidden = !spelling.is_empty()
                 && (view.hides_agent(spelling)
-                    || (reads_memory_scope && view.withholds_unknown_member(spelling)));
+                    || (withholds_unknown && view.withholds_unknown_member(spelling)));
             if !hidden {
                 return Ok(());
             }
@@ -11611,15 +11631,7 @@ async fn attached_session_decision(
             return SessionAttachDecision::Allowed;
         }
         if view.enforced() {
-            return SessionAttachDecision::Denied(JsonRpcError {
-                code: ACCESS_DENIED_RPC_CODE,
-                message: "access denied: the session has no established owner".to_string(),
-                data: Some(json!({
-                    "kind": "access_denied",
-                    "reason": "session_owner_unknown",
-                    "session_id": session_id.to_string(),
-                })),
-            });
+            return SessionAttachDecision::Denied(session_owner_unknown(session_id));
         }
         // A console that can identify a person keeps what it cannot
         // attribute from every caller who is not an admin, signed in or not.
@@ -11680,56 +11692,190 @@ impl StoredPrivateOwner {
     /// and has no private owner. One whose metadata is missing or does not
     /// decode, or that names a member binding without peer labels, cannot
     /// be decided.
+    #[cfg(test)]
     fn of_stored_session(session: &meerkat_core::Session) -> Self {
-        let Ok(view) = meerkat_core::PersistedSessionMetadataView::try_from_session(session) else {
-            return Self::Unreadable;
-        };
-        match view.session_metadata {
-            Some(metadata) => match (&metadata.peer_meta, &metadata.mob_member_binding) {
-                (Some(peer), _) => Self::of_labels(&peer.labels),
-                (None, None) => Self::NoOwner,
-                (None, Some(_)) => Self::Unreadable,
-            },
-            None => Self::Unreadable,
-        }
+        stored_document_member_labels(session)
+            .map_or(Self::Unreadable, |labels| Self::of_labels(&labels))
+    }
+}
+
+/// The member labels the stored document of a session carries, as
+/// [`StoredPrivateOwner::of_stored_session`] reads them: its peer labels,
+/// or none for a document built for no mob member. `None` for a document
+/// that cannot be decided.
+fn stored_document_member_labels(
+    session: &meerkat_core::Session,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let view = meerkat_core::PersistedSessionMetadataView::try_from_session(session).ok()?;
+    let metadata = view.session_metadata?;
+    match (metadata.peer_meta, metadata.mob_member_binding) {
+        (Some(peer), _) => Some(peer.labels),
+        (None, None) => Some(std::collections::BTreeMap::new()),
+        (None, Some(_)) => None,
+    }
+}
+
+/// The refusal of a session nothing attributes.
+fn session_owner_unknown(session_id: &meerkat_core::types::SessionId) -> JsonRpcError {
+    JsonRpcError {
+        code: ACCESS_DENIED_RPC_CODE,
+        message: "access denied: the session has no established owner".to_string(),
+        data: Some(json!({
+            "kind": "access_denied",
+            "reason": "session_owner_unknown",
+            "session_id": session_id.to_string(),
+        })),
     }
 }
 
 /// The private owner the labels of session `session_id` name: a private
-/// member's session keeps its owner after the member ended. A session Core
-/// serves is read through the runtime's session service. Core answers the
-/// read of an archived session as a session it does not hold, and a member
-/// that ended leaves its session archived, so such a session is read
-/// through the same service's resume read
-/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]): the read
-/// an attach loads the session through, so whatever an attach can load is
-/// decided by the labels it was created with, on every composition. The
-/// read builds, seats and wakes nothing. A session that read does not hold
-/// has no owner. A failed read, an archived session the read does not hand
-/// out, and a runtime with no session service (one taken from a bare
-/// handle) answer [`StoredPrivateOwner::Unreadable`].
+/// member's session keeps its owner after the member ended. The labels are
+/// the ones the session's own stores hold of the member it was built for
+/// ([`session_stored_member_labels`]): a served session's label map when it
+/// names an owner, else the stored document's member labels, read through
+/// the resume read an attach loads the session through
+/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]), which
+/// builds, seats and wakes nothing. A session Core neither serves nor holds
+/// a document of has no owner. A failed read, a document the read does not
+/// hand out or that cannot be decided, and a runtime with no session
+/// service (one taken from a bare handle) answer
+/// [`StoredPrivateOwner::Unreadable`].
 async fn session_stored_private_owner(
     runtime: &MobRuntime,
     session_id: &meerkat_core::types::SessionId,
 ) -> StoredPrivateOwner {
-    let Some(service) = runtime.session_service() else {
-        return StoredPrivateOwner::Unreadable;
-    };
-    match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
-        Ok(view) => return StoredPrivateOwner::of_labels(&view.state.labels),
-        Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
-        Err(_) => return StoredPrivateOwner::Unreadable,
-    }
+    session_stored_member_labels(runtime, session_id)
+        .await
+        .map_or(StoredPrivateOwner::Unreadable, |labels| {
+            StoredPrivateOwner::of_labels(&labels)
+        })
+}
+
+/// What the label map of a session Core serves says of the member the
+/// session was built for. That map can read empty while the session's
+/// labels are intact (the committed view, between a turn's commit and the
+/// live session's next publication, and a stored session no live actor
+/// holds), so it answers only when it names a private owner.
+fn served_session_member_labels(
+    labels: std::collections::BTreeMap<String, String>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    crate::access::private_owner(&labels)
+        .is_some()
+        .then_some(labels)
+}
+
+/// The labels session `session_id`'s own stores hold of the member it was
+/// built for: a served session's label map when it names an owner
+/// ([`served_session_member_labels`]), else its stored document's member
+/// labels, through the resume read [`session_stored_private_owner`] makes
+/// for a session Core does not serve. The document is asked for a served
+/// session too: a stored session no live actor holds is served with an
+/// empty label map while its document keeps the member's labels. A session
+/// Core neither serves nor holds a document of has no member labels; a
+/// served session whose document is not handed out cannot be decided.
+/// `None` when nothing could be read or decided.
+async fn session_stored_member_labels(
+    runtime: &MobRuntime,
+    session_id: &meerkat_core::types::SessionId,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let service = runtime.session_service()?;
+    let served =
+        match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
+            Ok(view) => match served_session_member_labels(view.state.labels) {
+                Some(labels) => return Some(labels),
+                None => true,
+            },
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => false,
+            Err(_) => return None,
+        };
     match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), session_id)
         .await
     {
         Ok(
             meerkat_mob::ResumeSessionLoad::Active(session)
             | meerkat_mob::ResumeSessionLoad::Revivable(session),
-        ) => StoredPrivateOwner::of_stored_session(&session),
-        Ok(meerkat_mob::ResumeSessionLoad::Absent) => StoredPrivateOwner::NoOwner,
-        Ok(_) | Err(_) => StoredPrivateOwner::Unreadable,
+        ) => stored_document_member_labels(&session),
+        Ok(meerkat_mob::ResumeSessionLoad::Absent) if !served => {
+            Some(std::collections::BTreeMap::new())
+        }
+        Ok(_) | Err(_) => None,
     }
+}
+
+/// The labels only Meta writes
+/// ([`crate::member_comms_id::RESERVED_AUTHORITY_LABELS`]) that a member
+/// seated on a stored session carries, decided from what each source holds
+/// of the member the session was built for (`None` for a source that could
+/// not answer: a member history that cannot be read or holds no binding of
+/// the session, stores that cannot be read or decided), Core's member
+/// history first:
+/// - no source answered, or two sources name different private owners:
+///   `None`, and nothing is seated;
+/// - a source names a private owner: that source's labels of those keys
+///   (the owner and, for a side chat, its source and creator);
+/// - a source answered and none names an owner: no label, a shared member.
+fn stored_member_labels(
+    sources: [Option<std::collections::BTreeMap<String, String>>; 2],
+) -> Option<std::collections::BTreeMap<String, String>> {
+    if sources.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut named = sources
+        .iter()
+        .flatten()
+        .filter(|labels| crate::access::private_owner(labels).is_some());
+    let Some(source) = named.next() else {
+        return Some(std::collections::BTreeMap::new());
+    };
+    let owner = crate::access::private_owner(source);
+    if named.any(|other| crate::access::private_owner(other) != owner) {
+        return None;
+    }
+    Some(
+        source
+            .iter()
+            .filter(|(key, _)| {
+                crate::member_comms_id::RESERVED_AUTHORITY_LABELS.contains(&key.as_str())
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+/// `spec`, which seats a member on the existing session `session_id`, as
+/// the member that session was built for: a session private to a person
+/// seats a member private to that person, whoever asks and on either method
+/// plane, exempt from the definition's wiring rules as its first seat was,
+/// and a session private to no one seats `spec` unchanged. The owner comes
+/// from Core's member history of the session
+/// ([`meerkat_mob::MobHandle::member_binding_for_session`]: the labels its
+/// member was spawned with) and from the session's own stores
+/// ([`session_stored_member_labels`]), never from the caller
+/// ([`stored_member_labels`]). A session neither source answers for, or
+/// whose sources name different owners, is refused: nothing says whose it
+/// was.
+pub(crate) async fn seat_on_stored_session(
+    runtime: &MobRuntime,
+    session_id: &meerkat_core::types::SessionId,
+    mut spec: SpawnMemberSpec,
+) -> Result<SpawnMemberSpec, JsonRpcError> {
+    let bound = runtime
+        .handle()
+        .member_binding_for_session(session_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|binding| binding.labels().clone());
+    let stored = session_stored_member_labels(runtime, session_id).await;
+    let carried =
+        stored_member_labels([bound, stored]).ok_or_else(|| session_owner_unknown(session_id))?;
+    if !carried.is_empty() {
+        spec.definition_wiring = meerkat_mob::DefinitionWiring::Exempt;
+        spec.labels
+            .get_or_insert_with(Default::default)
+            .extend(carried);
+    }
+    Ok(spec)
 }
 
 /// The session a console attach goes on with, and, for a session the caller
@@ -13355,6 +13501,41 @@ impl ConsoleDecideRefusal {
     }
 }
 
+/// The decision a `meta/gating/decide` request names: `approve`, `reject`
+/// (or `deny`), or `escalate`. Any other word is refused with the returned
+/// sentence.
+fn console_gating_decision(raw_decision: &str) -> Result<GatingDecision, String> {
+    match raw_decision {
+        "approve" => Ok(GatingDecision::Approve),
+        "reject" | "deny" => Ok(GatingDecision::Reject),
+        "escalate" => Ok(GatingDecision::Escalate),
+        _ => Err(format!("unsupported decision: {raw_decision}")),
+    }
+}
+
+/// The checks a Console decision of an approval or a question set passes
+/// right before it is applied, under the access fence when there is one:
+/// the person is still current, and while access control is enforced they
+/// still hold `gating.decide`. Whether the person is shown what they decide
+/// is not asked here: both decides ask [`gating_origin_shown_when_applied`].
+fn console_decide_fenced(
+    decider: &ConsoleApprovalDecider,
+    fence: Option<&crate::access::AccessDecisionFence<'_>>,
+) -> Result<(), ConsoleDecideRefusal> {
+    if !decider.still_current() {
+        return Err(ConsoleDecideRefusal::NotCurrent);
+    }
+    let Some(fence) = fence else {
+        return Ok(());
+    };
+    if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
+        return Err(ConsoleDecideRefusal::AccessDenied(
+            "access denied to gating decisions",
+        ));
+    }
+    Ok(())
+}
+
 /// Test hook: holds a Console decision right before its last step, until the
 /// test releases it: a gating decide once it holds the gating owner, a
 /// WorkGraph goal confirmation, a memory quarantine review or a durable
@@ -13806,6 +13987,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/routing/routes/list",
                     "meta/delivery/history",
                     "meta/gating/pending",
+                    "meta/gating/questions",
                     "meta/gating/audit",
                 ]);
                 if can_mutate && decides {
@@ -16080,6 +16262,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             response_value(response_id, Some(json!({ "pending": pending })), None)
         })
         .await,
+        "meta/gating/questions" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            if module_runtime.is_none() {
+                return response_value(
+                    response_id,
+                    None,
+                    Some(JsonRpcError {
+                        code: -32601,
+                        message: "Method not found".to_string(),
+                        data: None,
+                    }),
+                );
+            }
+            question_sets::list(runtime, access_view, response_id)
+        })
+        .await,
         "meta/gating/audit" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             let Some(module_runtime) = &module_runtime else {
                 return response_value(
@@ -16167,12 +16364,37 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "approver_id is not accepted: the console decides as the signed-in person",
                 );
             }
+            // A pending id that names a question set (`crate::ask_user`) is
+            // decided by the same person under the same checks, and handed
+            // to the decision owner. Any other id, a decision of another
+            // kind included, is the gating owner's. So is the id of a set
+            // the read does not list to this caller: the branch answers
+            // nothing for it, here or when its decision commits, and it
+            // takes every later step as an id that is not pending.
+            if let Some((decisions, set)) = question_sets::named(runtime, pending_id)
+                && let Some(answer) = question_sets::decide(
+                    decisions,
+                    set,
+                    &request.params,
+                    response_id.clone(),
+                    access,
+                    access_view,
+                    governance,
+                    authenticated_principal,
+                )
+                .await
+            {
+                return answer;
+            }
             // A request the pending list withholds from this caller is one
-            // it may not know of. Nothing on this route reads the request
-            // before the gating owner is held: every step up to there is the
-            // same for any id, and the owner answers a withheld request as
-            // an id that is not pending, so the caller cannot tell the two
-            // apart.
+            // it may not know of. The question-set branch above is called
+            // first, for any id: it reads the decision store only for an id
+            // of a decision's shape, and does more for a question set it
+            // finds than for an id it does not find. Nothing else
+            // on this route reads the request before the gating owner is
+            // held: every step up to there is the same for any id, and the
+            // owner answers a withheld request as an id that is not pending,
+            // so the caller cannot tell the two apart.
             let Some(decider) =
                 ConsoleApprovalDecider::of(governance, authenticated_principal, access_view)
             else {
@@ -16181,16 +16403,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             let Some(raw_decision) = request.params.get("decision").and_then(Value::as_str) else {
                 return invalid_params(response_id, "decision required");
             };
-            let decision = match raw_decision {
-                "approve" => GatingDecision::Approve,
-                "reject" | "deny" => GatingDecision::Reject,
-                "escalate" => GatingDecision::Escalate,
-                _ => {
-                    return invalid_params(
-                        response_id,
-                        format!("unsupported decision: {raw_decision}"),
-                    );
-                }
+            let decision = match console_gating_decision(raw_decision) {
+                Ok(decision) => decision,
+                Err(message) => return invalid_params(response_id, message),
             };
             let reason = request
                 .params
@@ -16243,23 +16458,14 @@ async fn handle_console_runtime_rpc_with_visibility(
                     )
                 },
                 |_| {
-                    if !decider.still_current() {
-                        return Err(ConsoleDecideRefusal::NotCurrent);
-                    }
-                    let Some(fence) = &fence else {
-                        return Ok(crate::runtime::GatingDecider {
+                    console_decide_fenced(&decider, fence.as_ref()).map(|()| {
+                        crate::runtime::GatingDecider {
                             principal: decider.principal.clone(),
-                            held_approver_ids: BTreeSet::new(),
-                        });
-                    };
-                    if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
-                        return Err(ConsoleDecideRefusal::AccessDenied(
-                            "access denied to gating decisions",
-                        ));
-                    }
-                    Ok(crate::runtime::GatingDecider {
-                        principal: decider.principal.clone(),
-                        held_approver_ids: fence.held_approver_ids(),
+                            held_approver_ids: fence
+                                .as_ref()
+                                .map(crate::access::AccessDecisionFence::held_approver_ids)
+                                .unwrap_or_default(),
+                        }
                     })
                 },
             );
@@ -16514,7 +16720,16 @@ async fn handle_console_runtime_rpc_with_visibility(
                 spec = spec.with_context(ctx);
             }
             if let Some(sid) = resume_session_id {
-                spec = spec.with_resume_bridge_session_id(sid);
+                spec = spec.with_resume_bridge_session_id(sid.clone());
+                // A session the caller may not know of goes on as a fresh id
+                // no store holds: nothing can be seated on it, and it is
+                // answered as a session that does not exist.
+                if absent_session.is_none() {
+                    spec = match seat_on_stored_session(runtime, &sid, spec).await {
+                        Ok(spec) => spec,
+                        Err(error) => return response_value(response_id, None, Some(error)),
+                    };
+                }
             }
             if let Some(instructions) = additional_instructions {
                 spec = spec.with_additional_instructions(instructions);
@@ -18169,9 +18384,20 @@ async fn handle_console_runtime_rpc_with_visibility(
                 MemberLaunchMode::Resume {
                     // 0.8.25: no migration authority on this path.
                     resume_from_role: None,
-                    bridge_session_id,
+                    bridge_session_id: bridge_session_id.clone(),
                 },
             );
+            // A session the caller may not know of goes on as a fresh id no
+            // store holds: nothing can be seated on it, and it is answered as
+            // a session that does not exist.
+            let spec = if absent_session.is_some() {
+                spec
+            } else {
+                match seat_on_stored_session(runtime, &bridge_session_id, spec).await {
+                    Ok(spec) => spec,
+                    Err(error) => return response_value(response_id, None, Some(error)),
+                }
+            };
             let handle = runtime.handle();
             let spawn_result = Box::pin(handle.spawn_spec(spec)).await;
             drop(raw_reservation);

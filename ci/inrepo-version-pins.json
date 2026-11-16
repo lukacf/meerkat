@@ -350,6 +350,60 @@
       "reason": "The upgrade notes of 0.9.15 say what the published Connect 0.9.14 requires: its native-host extra pins meerkat-meta 0.9.14 until Connect 0.9.15 is published. The entry requires that sentence around the pin. The hold is for the Meta 0.9.15 release alone: the next Meta version bump stops on the line and the hold is decided again."
     },
     {
+      "path": "connect/README.md",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "Connect's README downloads the published Connect 0.9.14 archive and links its release notes: Connect 0.9.14 is the Connect release to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "connect/docs/site/availability.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "Connect's availability page links the published Connect 0.9.14 release, the Connect release to use until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "docs/connect/availability.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "The docs site's copy of Connect's availability page: it links the published Connect 0.9.14 release, the Connect release to use until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "connect/docs/site/quickstart.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "Connect's quickstart downloads the published Connect 0.9.14 archive from its release page: Connect 0.9.14 is the Connect release to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "docs/connect/quickstart.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "The docs site's copy of Connect's quickstart: it downloads the published Connect 0.9.14 archive from its release page, the Connect release to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "connect/docs/site/sdks/python.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$|^meerkat_toolkit-0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "Connect's Python SDK page installs the published Connect 0.9.14 wheel from its release: the wheel to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "docs/connect/sdks/python.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$|^meerkat_toolkit-0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "The docs site's copy of Connect's Python SDK page: it installs the published Connect 0.9.14 wheel from its release, the wheel to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "connect/docs/site/sdks/typescript.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$|^rkat-toolkit-0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "Connect's TypeScript SDK page installs the published Connect 0.9.14 package from its release: the package to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
+      "path": "docs/connect/sdks/typescript.mdx",
+      "match": "^lukacf/meerkat release connect-v0\\.9\\.14$|^rkat-toolkit-0\\.9\\.14$",
+      "at": "0.9.15",
+      "reason": "The docs site's copy of Connect's TypeScript SDK page: it installs the published Connect 0.9.14 package from its release, the package to install until Connect 0.9.15 is published. The hold is for the Connect 0.9.15 version step alone: the next Connect version bump stops on the line and the hold is decided again."
+    },
+    {
       "path": "connect/sdk/python/HOME_ASSISTANT.md",
       "reason": "Installs the Connect 0.9.0 wheel from the standalone repository.",
       "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"

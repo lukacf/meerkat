@@ -5713,6 +5713,7 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "ClassifyStaleCompletionArrival",
                     "ResolveReclaimExhausted",
                     "ResolveUnprovenLateNotAdmitted",
+                    "ReleaseClaimBeforeDispatch",
                 ],
             ),
             NamedTypeBinding::string_enum(

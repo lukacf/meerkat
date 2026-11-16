@@ -1279,13 +1279,13 @@ fn a_policy_may_name_the_archive_and_adopt_change_classes() {
 /// value writes: the lists the SDKs' token files are compared with.
 #[test]
 fn the_closed_vocabularies_list_every_wire_token() {
-    assert_eq!(IdentityRefusalKind::ALL_TOKENS.len(), 57);
+    assert_eq!(IdentityRefusalKind::ALL_TOKENS.len(), 58);
     assert_eq!(
         IdentityRefusalKind::ALL_TOKENS
             .iter()
             .collect::<BTreeSet<_>>()
             .len(),
-        57,
+        58,
         "no token twice"
     );
     for token in [
@@ -1293,6 +1293,7 @@ fn the_closed_vocabularies_list_every_wire_token() {
         "private_requester",
         "unsupported",
         "change_denied",
+        "owns_mobs",
     ] {
         assert!(IdentityRefusalKind::ALL_TOKENS.contains(&token), "{token}");
     }

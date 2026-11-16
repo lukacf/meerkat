@@ -156,3 +156,82 @@ describe("queued-input recall wrapper", () => {
     assert.deepEqual(calls, ["session/recall_input"]);
   });
 });
+
+// The selector of `session/recall_input` is one-of: it names the input by
+// its input id or by its idempotency key. A selector object that names both,
+// or neither, is refused before anything is sent. A key that is `undefined`
+// or `null` is not named, as `None` is not in the Python wrapper.
+describe("the recall selector names exactly one of input id and idempotency key", () => {
+  const recall = { outcome: "abandoned", input_id: INPUT_ID, attempt_count: 0 };
+  const canned = {
+    "session/recall_input": { session_id: "s-1", recall },
+  };
+  const wrappers = [
+    {
+      name: "Session.recallInput",
+      call: (client, selector) => sessionOver(client).recallInput(selector),
+    },
+    {
+      name: "DeferredSession.recallInput",
+      call: (client, selector) => new DeferredSession(client, "s-1").recallInput(selector),
+    },
+  ];
+  const refused = [
+    ["both", { inputId: INPUT_ID, idempotencyKey: "inbox:msg-1" }],
+    ["both, the key empty", { inputId: INPUT_ID, idempotencyKey: "" }],
+    ["neither", {}],
+    ["neither, both undefined", { inputId: undefined, idempotencyKey: undefined }],
+    ["neither, both null", { inputId: null, idempotencyKey: null }],
+  ];
+  const sent = [
+    ["the input id", { inputId: INPUT_ID }, { by: "input_id", value: INPUT_ID }],
+    [
+      "the idempotency key",
+      { idempotencyKey: "inbox:msg-1" },
+      { by: "idempotency_key", value: "inbox:msg-1" },
+    ],
+    [
+      "the input id beside an undefined key",
+      { inputId: INPUT_ID, idempotencyKey: undefined },
+      { by: "input_id", value: INPUT_ID },
+    ],
+    [
+      "the idempotency key beside an undefined input id",
+      { inputId: undefined, idempotencyKey: "inbox:msg-1" },
+      { by: "idempotency_key", value: "inbox:msg-1" },
+    ],
+    [
+      "the idempotency key beside a null input id",
+      { inputId: null, idempotencyKey: "inbox:msg-1" },
+      { by: "idempotency_key", value: "inbox:msg-1" },
+    ],
+  ];
+
+  for (const { name, call } of wrappers) {
+    for (const [label, selector] of refused) {
+      it(`${name} refuses a selector that names ${label} and sends nothing`, async () => {
+        const { client, calls } = fakeClient(canned);
+        await assert.rejects(call(client, selector), (error) => {
+          assert.ok(error instanceof MeerkatError);
+          assert.equal(error.code, "INVALID_ARGS");
+          assert.equal(
+            error.message,
+            "recallInput needs exactly one of selector.inputId and selector.idempotencyKey",
+          );
+          return true;
+        });
+        assert.deepEqual(calls, []);
+      });
+    }
+
+    for (const [label, selector, wire] of sent) {
+      it(`${name} sends the one selector for ${label}`, async () => {
+        const { client, calls } = fakeClient(canned);
+        await call(client, selector);
+        assert.deepEqual(calls, [
+          { method: "session/recall_input", params: { session_id: "s-1", selector: wire } },
+        ]);
+      });
+    }
+  }
+});

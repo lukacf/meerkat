@@ -71,12 +71,14 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
     proc_macro_deps = all_crate_deps(
@@ -111,6 +113,8 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -124,7 +128,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
     proc_macro_deps = all_crate_deps(
@@ -165,12 +169,14 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
     tags = [
@@ -222,12 +228,14 @@ rust_binary(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "rkat-mob-mcp",
         "CARGO_MANIFEST_DIR": "crates/meerkat-mob-mcp",
     },
@@ -270,6 +278,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -279,7 +289,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "child_member_registration_hook",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -336,6 +346,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -345,7 +357,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "child_tool_bundles",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -402,6 +414,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -411,8 +425,76 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "child_tool_policy",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "council_mob_id_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "council_mob_id",
+    crate_root = "tests/council_mob_id.rs",
+    crate_features = [
+        "openai-live",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
+        "src/public_mcp.rs",
+    ],
+    srcs = [
+        "tests/council_mob_id.rs",
+        "tests/support/commit_gate.rs",
+        "tests/support/mod.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.15",
+        "CARGO_BIN_NAME": "council_mob_id",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
     tags = [
@@ -468,6 +550,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -477,8 +561,76 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "council_relink",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "creator_successor_management_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "creator_successor_management",
+    crate_root = "tests/creator_successor_management.rs",
+    crate_features = [
+        "openai-live",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
+        "src/public_mcp.rs",
+    ],
+    srcs = [
+        "tests/creator_successor_management.rs",
+        "tests/support/commit_gate.rs",
+        "tests/support/mod.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.15",
+        "CARGO_BIN_NAME": "creator_successor_management",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
     tags = [
@@ -534,6 +686,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -543,7 +697,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "delegate_identity_after_switch",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -600,6 +754,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -609,7 +765,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "delegate_profile_family_clamp",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -666,6 +822,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -675,7 +833,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "delegate_realm_custom_model",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -732,6 +890,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -741,7 +901,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "fork_child_dispatch_admission",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -798,6 +958,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -807,7 +969,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "fork_dispatch_admission_lineage",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -864,6 +1026,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -873,7 +1037,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "fork_off_surface",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -930,6 +1094,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -939,7 +1105,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "fork_relink",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -998,6 +1164,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1007,7 +1175,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "host_job_source",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1064,6 +1232,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1073,7 +1243,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "operator_spawn_creation_source",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1130,6 +1300,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1139,7 +1311,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "profile_reasoning_effort",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1196,6 +1368,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1205,7 +1379,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "profile_tool_deny",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1264,6 +1438,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1273,7 +1449,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "stop_after_turn_reaches_model",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1330,6 +1506,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1339,7 +1517,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "stop_cancels_a_staged_run",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1396,6 +1574,8 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/agent_tools.rs",
+        "src/fork_relink.rs",
         "src/public_mcp.rs",
     ],
     srcs = [
@@ -1405,7 +1585,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.14",
+        "CARGO_PKG_VERSION": "0.9.15",
         "CARGO_BIN_NAME": "temporary_council",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
     },
@@ -1452,7 +1632,9 @@ test_suite(
         ":child_member_registration_hook_test",
         ":child_tool_bundles_test",
         ":child_tool_policy_test",
+        ":council_mob_id_test",
         ":council_relink_test",
+        ":creator_successor_management_test",
         ":delegate_identity_after_switch_test",
         ":delegate_profile_family_clamp_test",
         ":delegate_realm_custom_model_test",

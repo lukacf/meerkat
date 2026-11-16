@@ -2,6 +2,7 @@
 //! and the changes of one agent as a whole (its archive, its unarchive and
 //! its removal). Each is one call of the mob's handle.
 
+use meerkat_core::approval::decision::APPROVAL_BRANCH_LABEL;
 use meerkat_mob::{
     CreatedIdentityObservation, CreatedIdentityRequest, CreatedIdentitySpec,
     IdentityAddressability, IdentityArchiveChange, IdentityChangeOutcome,
@@ -87,7 +88,11 @@ impl CoreChangeExecutor {
     /// operation id is `operation_reused`, as Core answers this request at
     /// its commit: this request committed nothing, and the step is told
     /// nothing. Without a receipt a member step in flight is the retryable
-    /// `admission_unsettled`, and anything else is the error it was. A
+    /// `admission_unsettled`, Core's reservation of its approval branches
+    /// is `reserved_key` at the labels of the request that carry Core's
+    /// key (`agents[i].labels`, `set.labels`) and `invalid_name` at the
+    /// name of a create's agent that takes their prefix
+    /// (`agents[i].name`), and anything else is the error it was. A
     /// receipt that cannot be read leaves the commit with no outcome.
     pub async fn after_core_error(
         &self,
@@ -110,6 +115,14 @@ impl CoreChangeExecutor {
             return Err(ExecutorError::Core(Box::new(error)));
         };
         let Some(receipt) = receipt else {
+            // Core's reservation of its approval branches' label and of
+            // the prefix of their names, about the member of the request
+            // that takes it. Core decides it; nothing here does.
+            if let meerkat_mob::MobError::ApprovalBranchReserved { identity } = &error
+                && let Some(refusal) = approval_branch_refusal(commit, identity)
+            {
+                return Ok(ChangeCommitted::refused(refusal));
+            }
             let refusal = refusal_of_error(error)?;
             return Ok(ChangeCommitted::refused(at_request_field(commit, refusal)));
         };
@@ -155,6 +168,84 @@ fn at_taken_name(
     }
 }
 
+/// Core's refusal of its approval branches' reservation for one agent,
+/// about what of that agent takes it: its labels carry Core's key
+/// (`reserved_key` naming the key, at `labels_field`), or else its name
+/// took the prefix (`invalid_name` at `name_field`). Core's rule reserves
+/// the label and a prefix of names, nothing else, and Core decides it:
+/// nothing here holds the prefix.
+fn agent_reservation_refusal(
+    labels: &std::collections::BTreeMap<String, String>,
+    labels_field: String,
+    name_field: String,
+) -> IdentityRefusal {
+    if labels.contains_key(APPROVAL_BRANCH_LABEL) {
+        IdentityRefusal::new(IdentityRefusalKind::ReservedKey {
+            key: APPROVAL_BRANCH_LABEL.to_owned(),
+        })
+        .at(labels_field)
+    } else {
+        IdentityRefusal::new(IdentityRefusalKind::InvalidName).at(name_field)
+    }
+}
+
+/// Core's refusal of its approval branches' reservation (their label, and
+/// the prefix of their names) for the member `refused`, about the member
+/// of the request that takes it. The agent of a create Core refused is
+/// answered by [`agent_reservation_refusal`] at `agents[i].labels` or
+/// `agents[i].name`; an update whose labels carry Core's key is
+/// `reserved_key` naming it at `set.labels`. `None` for a request that
+/// takes neither. An adoption names its agent alone, and is answered
+/// where the agent's configured spec is in hand
+/// ([`adoption_reservation_refusal`]).
+fn approval_branch_refusal(
+    commit: &ChangeCommit<'_>,
+    refused: &meerkat_mob::AgentIdentity,
+) -> Option<IdentityRefusal> {
+    match &commit.request.action {
+        super::RequestAction::Create { identities } => identities
+            .iter()
+            .enumerate()
+            .find(|(_, created)| {
+                core_member_name(created.spec.identity.as_str()).as_ref() == Some(refused)
+            })
+            .map(|(index, created)| {
+                agent_reservation_refusal(
+                    &created.spec.labels,
+                    format!("agents[{index}].labels"),
+                    format!("agents[{index}].name"),
+                )
+            }),
+        super::RequestAction::Update(update) => {
+            [&update.descriptive_labels, &update.authority_fields]
+                .into_iter()
+                .flatten()
+                .any(|labels| labels.contains_key(APPROVAL_BRANCH_LABEL))
+                .then(|| {
+                    IdentityRefusal::new(IdentityRefusalKind::ReservedKey {
+                        key: APPROVAL_BRANCH_LABEL.to_owned(),
+                    })
+                    .at("set.labels")
+                })
+        }
+        _ => None,
+    }
+}
+
+/// `error` of an adoption, when it is Core's refusal of its approval
+/// branches' reservation: about the agent's name, the one member an
+/// adoption names. `labels` are the labels of the spec the agent's host
+/// configures, which the adoption would have recorded: `reserved_key`
+/// naming Core's key when they carry it, `invalid_name` otherwise (the
+/// agent's name took the prefix). `None` for any other error.
+pub(super) fn adoption_reservation_refusal(
+    error: &meerkat_mob::MobError,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Option<IdentityRefusal> {
+    matches!(error, meerkat_mob::MobError::ApprovalBranchReserved { .. })
+        .then(|| agent_reservation_refusal(labels, "name".to_owned(), "name".to_owned()))
+}
+
 /// `refusal`, about the request field it concerns when the request has one
 /// for its kind: the spec digest the requester read for a stale spec.
 fn at_request_field(commit: &ChangeCommit<'_>, refusal: IdentityRefusal) -> IdentityRefusal {
@@ -190,7 +281,19 @@ pub(super) async fn requester_input(
     operation: &IdentityOperation,
     grant: Option<IdentityGrantRequest>,
 ) -> Step<IdentityChangeRequesterInput> {
-    match commit.requester {
+    requester_input_in(commit.mob, commit.requester, operation, grant).await
+}
+
+/// [`requester_input`], of `requester` in `mob`: what a commit is given, and
+/// what the family asks before a commit exists
+/// ([`whole_change_grant_refusal`]).
+async fn requester_input_in(
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+    operation: &IdentityOperation,
+    grant: Option<IdentityGrantRequest>,
+) -> Step<IdentityChangeRequesterInput> {
+    match requester {
         ChangeRequester::Host { surface, operator } => Ok(Ok(if *operator {
             IdentityChangeRequesterInput::host_operator(surface.as_str())
         } else {
@@ -212,22 +315,17 @@ pub(super) async fn requester_input(
             };
             let admitted = match admission {
                 AgentAdmission::Session(session) => {
-                    if let Some(refusal) = commit.requester.refused_by_its_session(commit.mob).await
-                    {
+                    if let Some(refusal) = requester.refused_by_its_session(mob).await {
                         return Ok(Err(refusal));
                     }
-                    commit
-                        .mob
-                        .admit_identity_change_grant(session, operation, &grant)
+                    mob.admit_identity_change_grant(session, operation, &grant)
                         .await
                 }
                 AgentAdmission::Recorded => {
                     let Some(member) = core_member_name(identity) else {
                         return Ok(Err(IdentityRefusal::new(IdentityRefusalKind::InvalidName)));
                     };
-                    commit
-                        .mob
-                        .identity_change_grant_for(&member, operation, &grant)
+                    mob.identity_change_grant_for(&member, operation, &grant)
                         .await
                 }
             };
@@ -237,6 +335,29 @@ pub(super) async fn requester_input(
             }
         }
     }
+}
+
+/// The refusal an agent requester's grant answers a change of `member` as a
+/// whole (its archive, its unarchive, its removal), asked as `operation`:
+/// what [`entry_change`] answers before it asks anything else of the
+/// change. `None` when the grant admits it, and for the host and a person,
+/// who ask under no grant.
+pub(super) async fn whole_change_grant_refusal(
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+    operation: &IdentityOperation,
+    member: &meerkat_mob::AgentIdentity,
+) -> Result<Option<IdentityRefusal>, ExecutorError> {
+    if !matches!(requester, ChangeRequester::Agent { .. }) {
+        return Ok(None);
+    }
+    let grant = match target_grant_in(mob, member).await? {
+        Ok(grant) => grant,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    Ok(requester_input_in(mob, requester, operation, Some(grant))
+        .await?
+        .err())
 }
 
 /// One agent of a create as Core's commit takes it: its spec, field for
@@ -373,8 +494,15 @@ async fn target_grant(
     commit: &ChangeCommit<'_>,
     member: &meerkat_mob::AgentIdentity,
 ) -> Step<IdentityGrantRequest> {
-    let record = commit
-        .mob
+    target_grant_in(commit.mob, member).await
+}
+
+/// [`target_grant`], of the agent `member` of `mob`.
+async fn target_grant_in(
+    mob: &meerkat_mob::MobHandle,
+    member: &meerkat_mob::AgentIdentity,
+) -> Step<IdentityGrantRequest> {
+    let record = mob
         .identity_record(member)
         .await
         .map_err(|error| ExecutorError::Core(Box::new(error)))?;
@@ -390,8 +518,11 @@ async fn target_grant(
 
 /// Commit a change of one agent as a whole, decided against the spec whose
 /// digest the requester read: Core refuses it `stale_spec` when the
-/// agent's spec moved since. After a committed removal, and after its
-/// replay, the executor's instruction step is told the agent was removed.
+/// agent's spec moved since. An archive and a removal of an agent whose
+/// session still owns mobs are refused `owns_mobs` before Core is called
+/// ([`CoreChangeExecutor::refused_while_owning_mobs`]). After a committed
+/// removal, and after its replay, the executor's instruction step is told
+/// the agent was removed.
 pub(super) async fn entry_change(
     executor: &CoreChangeExecutor,
     commit: &ChangeCommit<'_>,
@@ -416,6 +547,16 @@ pub(super) async fn entry_change(
         Ok(requester) => requester,
         Err(refusal) => return Ok(ChangeCommitted::refused(refusal)),
     };
+    // The last thing before Core's archive or removal: the agent's session
+    // owns no mob that would end with its member's retirement. The grant
+    // was judged above, here as where the family asks before a commit
+    // exists: a requester whose grant does not admit the change is answered
+    // by its grant, and is told nothing of the mobs.
+    if matches!(change_kind, EntryChange::Archive | EntryChange::Remove)
+        && let Some(refusal) = executor.refused_while_owning_mobs(commit, &member).await?
+    {
+        return Ok(ChangeCommitted::refused(refusal));
+    }
     let expected = expected_spec_digest.as_str();
     let answered = match change_kind {
         EntryChange::Archive => {

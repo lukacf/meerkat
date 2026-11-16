@@ -290,6 +290,23 @@ machine! {
                 detail: Option<String>,
                 at_utc_ms: u64
             },
+            // The driver stops handling a claimed occurrence before its
+            // dispatch start is recorded (a schedule read, the target probe
+            // or the dispatch-start write failed) and gives the claim back.
+            // Under the shipped defaults the claim lease outlasts the skip
+            // grace, so a claim left to lapse is always past its misfire
+            // deadline; giving it back lets the next scan decide while the
+            // window may still be open. Legal from Claimed only: nothing is
+            // in flight before DispatchStarted. It carries what the receipt
+            // history proves about earlier attempts, and gives back only a
+            // claim with no recorded dispatch: an occurrence whose earlier
+            // attempt recorded its dispatch may be reclaimed past its
+            // deadline for a bounded number of attempts, and those stay one
+            // per claim lease, never one per failed tick.
+            ReleaseClaimBeforeDispatch {
+                admission_evidence: Enum<AdmissionEvidence>,
+                at_utc_ms: u64
+            },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -624,7 +641,10 @@ machine! {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
             on input ClassifyTransitionFailure { refusal_kind, trigger }
             guard "not_claimed" {
-                trigger == OccurrenceLifecycleInputVariant::DispatchStarted
+                (
+                    trigger == OccurrenceLifecycleInputVariant::DispatchStarted
+                    || trigger == OccurrenceLifecycleInputVariant::ReleaseClaimBeforeDispatch
+                )
                 && (
                     refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
                     || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
@@ -2508,6 +2528,53 @@ machine! {
             update {}
             to Superseded
         }
+
+        // --- Claim given back before dispatch start ---
+        //
+        // The occurrence returns to Pending with its attempt count as it is;
+        // the next claim counts the next attempt, as after an expiry. The
+        // misfire deadline is not widened: ClaimPending still refuses a
+        // Pending occurrence with no recorded dispatch past its deadline, and
+        // ClassifyDue then requires its misfire. There is no arm from
+        // Dispatching or AwaitingCompletion: once the dispatch start is
+        // recorded the expiry and reclaim rules own the occurrence. For the
+        // same reason a claim of an occurrence whose earlier attempt recorded
+        // its dispatch (evidence Started or Accepted) is refused: its claim
+        // stays and lapses with its lease, so the reclaim attempts past the
+        // deadline are spent at lease pace. Inside the window every claim
+        // counts an attempt, a claim that follows a release too.
+
+        transition ReleaseClaimBeforeDispatchFromClaimed {
+            on input ReleaseClaimBeforeDispatch { admission_evidence, at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Claimed
+                && admission_evidence == AdmissionEvidence::Unrecorded
+            }
+            update {
+                self.claimed_by = None;
+                self.lease_expires_at_utc_ms = None;
+                self.claim_token = None;
+                self.delivery_correlation_id = None;
+                self.claimed_at_utc_ms = None;
+                self.dispatched_at_utc_ms = None;
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::LeaseExpired);
+                self.receipt_failure_class = Some(OccurrenceFailureClass::LeaseLost);
+                self.receipt_detail = Some("claim released because dispatch could not start");
+            }
+            to Pending
+            emit LeaseExpired
+        }
+
+        // A supersession that lands between the claim and the release already
+        // revoked the claim: a benign no-op, as for the paused-schedule
+        // release.
+        transition ReleaseClaimBeforeDispatchAfterSupersession {
+            on input ReleaseClaimBeforeDispatch { admission_evidence, at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Superseded }
+            update {}
+            to Superseded
+        }
     }
 }
 
@@ -2793,6 +2860,10 @@ pub enum OccurrenceTransitionFailureClassKind {
     CompletionSupersessionClassificationRejected,
     ClaimRejected,
     NotPendingForClaim,
+    /// The class of a refused `DispatchStarted` or `ReleaseClaimBeforeDispatch`:
+    /// it is keyed by the input, so it is imprecise for a release refused on
+    /// an occurrence that is claimed but whose earlier attempt recorded its
+    /// dispatch.
     NotClaimed,
     NotDispatching,
     NotLeaseHolding,

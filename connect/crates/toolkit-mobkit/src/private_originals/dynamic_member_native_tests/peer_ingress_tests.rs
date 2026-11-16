@@ -357,9 +357,20 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
 /// Whether the native tool `name` prepared once in `audit` and returned a
 /// success, with no refused or unavailable answer for its operation but
 /// Core's own refusal to rebuild a preparation that met an owner change
-/// (`ReprepareRequired`, read while the publication changed), recorded
-/// before the operation's preparation: Core waits that change out and
-/// prepares the operation again under the same id.
+/// (`ReprepareRequired`, read while the publication changed), in one of the
+/// two shapes Core's waited re-preparation leaves:
+/// - recorded before the operation's preparation: Core waits that change out
+///   and prepares the operation again under the same id;
+/// - recorded after the operation's preparation, by a check made again
+///   during an owner change (an adapter's or a gate's check around the
+///   tool's effect), when the bounded wait settled: a later preparation of
+///   the same operation follows the refusal, and the operation's success
+///   follows that preparation.
+///
+/// Every other refusal stays a failure: one of another reason, an
+/// unavailable answer, and a refusal to rebuild after the preparation that
+/// no later preparation and success follow (a wait that ran out, or a check
+/// answered at once: the tool call ended refused).
 fn tool_succeeded_in(
     audit: &[StoredAuthorizationAuditObservation],
     name: &str,
@@ -376,7 +387,7 @@ fn tool_succeeded_in(
             operations.len()
         ));
     }
-    if !audit.iter().any(|row| {
+    let succeeded = |row: &StoredAuthorizationAuditObservation| {
         operations.contains(&row.observation.operation_id)
             && matches!(
                 &row.observation.observation,
@@ -388,16 +399,26 @@ fn tool_succeeded_in(
                     }
                 }
             )
-    }) {
+    };
+    if !audit.iter().any(succeeded) {
         return Err("the tool's operation returned no success".to_string());
     }
-    let prepared_at = audit.iter().position(|row| {
+    let prepared = |row: &StoredAuthorizationAuditObservation| {
         operations.contains(&row.observation.operation_id)
             && matches!(
                 row.observation.observation,
                 AuditObservation::Prepared { .. }
             )
-    });
+    };
+    let prepared_at = audit.iter().position(prepared);
+    // The waited re-preparation after `at`: the operation's next preparation,
+    // and its success after that preparation.
+    let prepared_again_and_succeeded = |at: usize| {
+        audit[at + 1..]
+            .iter()
+            .position(prepared)
+            .is_some_and(|again| audit[at + 1 + again..].iter().any(succeeded))
+    };
     let refused = audit
         .iter()
         .enumerate()
@@ -406,8 +427,9 @@ fn tool_succeeded_in(
                 && match &row.observation.observation {
                     AuditObservation::Refused { reason, read, .. } => {
                         // Core's waited re-preparation: refused to rebuild at a
-                        // read the publication changed under, before the
-                        // operation's preparation.
+                        // read the publication changed under, either before
+                        // the operation's preparation or, after it, with the
+                        // re-preparation and its success recorded behind it.
                         let reprepared = *reason
                             == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
                             && read.as_ref().is_some_and(|read| {
@@ -417,7 +439,8 @@ fn tool_succeeded_in(
                                         | meerkat_authorization_contracts::audit::AuditRefusalBasis::PublicationChanged
                                 )
                             })
-                            && prepared_at.is_some_and(|prepared| *at < prepared);
+                            && (prepared_at.is_some_and(|prepared| *at < prepared)
+                                || prepared_again_and_succeeded(*at));
                         !reprepared
                     }
                     AuditObservation::AuthorizationUnavailable { .. } => true,
@@ -482,26 +505,61 @@ fn memory_tool() -> serde_json::Value {
     })
 }
 
+/// Another tool call of the same run, which prepares under an operation of
+/// its own.
+fn other_tool() -> serde_json::Value {
+    let arguments_digest = vec![1_u8; 32];
+    serde_json::json!({
+        "arguments_digest": arguments_digest,
+        "call_id": "project-list-call",
+        "kind": "tool",
+        "owners": [{"authority_key": "root-dispatcher", "owner_key": "files"}],
+        "tool_name": "files",
+    })
+}
+
 const PUBLICATION: &str = "bfd436ef-da2f-496a-8166-b11e090236d4";
 
 /// A refusal of the memory tool's operation, of `reason`, decided while an
 /// owner change was in progress on the publication.
 fn refused_in_a_change(reason: &str) -> serde_json::Value {
-    serde_json::json!({
+    refused_at(reason, Some("change_in_progress"))
+}
+
+/// A refusal of the memory tool's operation, of `reason`, decided at a read
+/// of `basis`, as Core records each: an owner change in progress names the
+/// odd live sequence it read as the attempt ended, a completed change the
+/// even one past the sequence the attempt read, and an owner answer no live
+/// sequence. `None` is a refusal whose read could not be taken.
+fn refused_at(reason: &str, basis: Option<&str>) -> serde_json::Value {
+    let mut refused = serde_json::json!({
         "kind": "refused",
-        "read": {
-            "basis": "change_in_progress",
-            "live_sequence": 65,
-            "observed_at_ms": 1_794_087_699_016_u64,
-            "publication_instance": PUBLICATION,
-            "publication_sequence": 65,
-        },
         "reason": reason,
         "target": memory_tool(),
-    })
+    });
+    if let Some(basis) = basis {
+        let (publication_sequence, live_sequence) = match basis {
+            "change_in_progress" => (65, Some(65)),
+            "publication_changed" => (64, Some(66)),
+            _ => (64, None),
+        };
+        refused["read"] = serde_json::json!({
+            "basis": basis,
+            "live_sequence": live_sequence,
+            "observed_at_ms": 1_794_087_699_016_u64,
+            "publication_instance": PUBLICATION,
+            "publication_sequence": publication_sequence,
+        });
+    }
+    refused
 }
 
 fn prepared_memory_tool() -> serde_json::Value {
+    prepared(memory_tool())
+}
+
+/// The preparation of the tool call `target`.
+fn prepared(target: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "kind": "prepared",
         "policy": {
@@ -511,7 +569,7 @@ fn prepared_memory_tool() -> serde_json::Value {
             "publication_instance": PUBLICATION,
             "publication_sequence": 66,
         },
-        "target": memory_tool(),
+        "target": target,
     })
 }
 
@@ -541,8 +599,8 @@ fn decoded(rows: Vec<serde_json::Value>) -> Vec<StoredAuthorizationAuditObservat
 /// preparation was recorded; Core waited the change out and prepared it
 /// again under the same operation id, and the tool ran once and succeeded.
 /// The success check accepts that refusal, and still refuses the same
-/// refusal after the operation's preparation, a refusal of another kind and
-/// an unavailable answer.
+/// refusal after the operation's preparation when no re-preparation follows
+/// it, a refusal of another kind and an unavailable answer.
 ///
 /// RED before the fix: the check refuses Core's own refusal to rebuild.
 #[test]
@@ -593,6 +651,180 @@ fn a_tool_prepared_again_after_an_owner_change_still_succeeded() {
             tool_succeeded_in(&decoded(rows), "memory").is_err(),
             "{what} is never a success"
         );
+    }
+}
+
+/// The waited re-preparation after the operation's preparation, as a peer
+/// delivery's memory tool leaves it when a check made again around its
+/// effect meets an owner change on the authorization publication: the check
+/// is refused `ReprepareRequired` (once for the check, once more when its one
+/// rebuild meets the same change), the bounded wait settles, the operation is
+/// prepared again under the same id and its success is recorded behind that.
+/// These are the rows of an actual run whose dispatch gate checked during a
+/// change, after the tool's effect and at its admission.
+///
+/// The success check accepts exactly that shape, at either read basis of a
+/// changed publication: the change still in progress as the check ended, or
+/// completed by then. A refusal to rebuild after the preparation stays a
+/// failure when no later preparation follows it or no success follows that
+/// preparation (a wait that ran out, or a check answered at once), and so
+/// does a refusal of another kind or an unavailable answer, whatever follows
+/// it. Its limits, each a failure:
+/// - the later preparation and the success behind it must be the checked
+///   operation's own: another operation's preparation or success never
+///   excuses the refusal;
+/// - the read must be one the publication changed under: an owner answer
+///   and a refusal with no read are final;
+/// - the success must sit behind the later preparation: one recorded between
+///   the refusal and that preparation is not the re-prepared call's.
+///
+/// RED before the fix: the check refuses every refusal recorded after the
+/// operation's preparation.
+#[test]
+fn a_tool_checked_again_during_an_owner_change_after_its_preparation_still_succeeded() {
+    const TOOL: &str = "01a1b7f5-c23c-77e9-928e-feb1626e6a75";
+    const OTHER: &str = "01a1b7f5-c23d-7c10-8a4f-3d0c5e9b7a12";
+    let row = |observation: serde_json::Value| audit_row(TOOL, observation);
+    let other = |observation: serde_json::Value| audit_row(OTHER, observation);
+    for (what, rows) in [
+        (
+            "a check after the tool's effect",
+            vec![
+                row(prepared_memory_tool()),
+                row(entered("tool_dispatch")),
+                row(entered("tool_execution_policy")),
+                row(returned_success()),
+                row(refused_in_a_change("reprepare_required")),
+                row(refused_in_a_change("reprepare_required")),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a check at the tool's admission",
+            vec![
+                row(prepared_memory_tool()),
+                row(entered("tool_dispatch")),
+                row(entered("tool_execution_policy")),
+                row(refused_in_a_change("reprepare_required")),
+                row(prepared_memory_tool()),
+                row(entered("tool_execution_policy")),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a check that read the change completed",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_at(
+                    "reprepare_required",
+                    Some("publication_changed"),
+                )),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+    ] {
+        if let Err(failure) = tool_succeeded_in(&decoded(rows), "memory") {
+            panic!("{what}, waited out and prepared again, is a success: {failure}");
+        }
+    }
+    let unavailable = serde_json::json!({
+        "kind": "authorization_unavailable",
+        "target": memory_tool(),
+    });
+    for (what, rows) in [
+        (
+            "a refusal to rebuild after the preparation with no later preparation",
+            vec![
+                row(prepared_memory_tool()),
+                row(returned_success()),
+                row(refused_in_a_change("reprepare_required")),
+            ],
+        ),
+        (
+            "a refusal to rebuild after the preparation with a later preparation and no success behind it",
+            vec![
+                row(prepared_memory_tool()),
+                row(returned_success()),
+                row(refused_in_a_change("reprepare_required")),
+                row(prepared_memory_tool()),
+            ],
+        ),
+        (
+            "a refusal to rebuild after the preparation with its only success before the later preparation",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_in_a_change("reprepare_required")),
+                row(returned_success()),
+                row(prepared_memory_tool()),
+            ],
+        ),
+        (
+            "a refusal to rebuild that only another operation's preparation follows",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_in_a_change("reprepare_required")),
+                other(prepared(other_tool())),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a refusal to rebuild, prepared again, with only another operation's success behind it",
+            vec![
+                row(prepared_memory_tool()),
+                row(returned_success()),
+                row(refused_in_a_change("reprepare_required")),
+                row(prepared_memory_tool()),
+                other(returned_success()),
+            ],
+        ),
+        (
+            "a refusal to rebuild decided at an owner answer, prepared again",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_at("reprepare_required", Some("owner_answer"))),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a refusal to rebuild with no read, prepared again",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_at("reprepare_required", None)),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a refusal of another kind after the preparation, prepared again",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_in_a_change("denied")),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "an unavailable answer after the preparation, prepared again",
+            vec![
+                row(prepared_memory_tool()),
+                row(unavailable),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+    ] {
+        // Each shape fails as the refusal it holds, not as a tool that
+        // prepared twice or returned no success.
+        match tool_succeeded_in(&decoded(rows), "memory") {
+            Ok(()) => panic!("{what} is never a success"),
+            Err(failure) => assert!(
+                failure.starts_with("the tool's operation was refused or unavailable"),
+                "{what} fails as a refusal: {failure}"
+            ),
+        }
     }
 }
 
@@ -1734,6 +1966,57 @@ async fn queued_peer_retries_after_actual_held_turn_without_replacing_source_cus
     }
 }
 
+/// The grant lineages of a delivery are current for its admitted route: each
+/// resolves from the owners for `executor`, and the owner observation that
+/// resolved it is still current.
+///
+/// A bare read made while another actor changes the owners of the grant
+/// authority's publication answers unavailable (the resolution) or changed
+/// (the observation's check), whatever the lineage: a record write of the
+/// source makes such a change about 15 ms after a dispatch's outcome. A read
+/// that met one waits while the authority names a change in progress, within
+/// Core's owner-change bound, and is made again from the owners; once none is
+/// in progress it is made again at once, up to Core's free rebuilds. A
+/// lineage the owners refuse is not current: that fails at once, with the
+/// owners' answer, and so does a read that still fails with no change in
+/// progress.
+async fn lineages_current<'a>(
+    grants: &meerkat_authorization::grants::LocalGrantAuthority,
+    lineages: impl IntoIterator<Item = &'a [meerkat_authorization_contracts::grant::GrantLineageRef]>,
+    executor: &meerkat_core::PrincipalRef,
+    represented_subject: Option<&meerkat_core::PrincipalRef>,
+) {
+    use meerkat_authorization::grants::GrantRefusal;
+    let deadline =
+        tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let mut settled_reads = 0_u8;
+    for lineage in lineages {
+        loop {
+            let met = match grants.resolve_lineage(lineage, executor, represented_subject) {
+                Ok(resolved) => match resolved.check_current() {
+                    Ok(()) => break,
+                    Err(changed) => format!("{changed:?}"),
+                },
+                Err(GrantRefusal::Unavailable) => "Unavailable".to_owned(),
+                Err(refused) => panic!("a delivery grant lineage is not current: {refused:?}"),
+            };
+            if grants.owner_change_in_progress().is_some() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "an owner change outlasted Core's bound while a delivery grant lineage was read: {met}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            } else {
+                settled_reads += 1;
+                assert!(
+                    settled_reads <= meerkat_core::authorization::OWNER_CHANGE_FREE_REBUILDS,
+                    "a delivery grant lineage is not current with no owner change in progress: {met}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn completed_peer_run_refuses_its_prepared_model_check_without_revoking_grants() {
     let fixture = Box::pin(start()).await;
@@ -1781,10 +2064,9 @@ async fn completed_peer_run_refuses_its_prepared_model_check_without_revoking_gr
         let context = fixture.source.callback_grant_context().unwrap();
         let basis = &record.final_association.as_ref().unwrap().candidate().authority_basis;
         let WorkAuthorityBasis::TargetedGrantLineages { base: None, targets } = basis else { panic!("exact delivery targets"); };
-        for target in targets {
-            context.grants.resolve_lineage(&target.lineage, &admission.route.as_ref().unwrap().logical_executor,
-                admission.route.as_ref().unwrap().represented_subject.as_ref()).unwrap().check_current().unwrap();
-        }
+        lineages_current(&context.grants, targets.iter().map(|target| &target.lineage[..]),
+            &admission.route.as_ref().unwrap().logical_executor,
+            admission.route.as_ref().unwrap().represented_subject.as_ref()).await;
         hold.release();
         let terminal = completed(&fixture, &receiver, 1).await;
         assert_eq!(terminal.state.input_id, input.state.input_id);
@@ -1807,9 +2089,10 @@ async fn completed_peer_run_refuses_its_prepared_model_check_without_revoking_gr
             "a prepared check used after its run's terminal archive is refused as observation unavailable: {late:?}");
         assert_eq!(fixture.source.store.get(&settled_row.key).await.unwrap(), Some(settled_row));
         assert_eq!(fixture.policy.member_class_admission(&instance(ADDED).member.member).unwrap(), Some(admission.clone()));
+        lineages_current(&context.grants, targets.iter().map(|target| &target.lineage[..]),
+            &admission.route.as_ref().unwrap().logical_executor,
+            admission.route.as_ref().unwrap().represented_subject.as_ref()).await;
         for target in targets {
-            context.grants.resolve_lineage(&target.lineage, &admission.route.as_ref().unwrap().logical_executor,
-                admission.route.as_ref().unwrap().represented_subject.as_ref()).unwrap().check_current().unwrap();
             for reference in &target.lineage {
                 assert_eq!(context.grants.issued_reference(&reference.grant_id).unwrap().as_ref(), Some(reference));
             }
@@ -2031,8 +2314,16 @@ pub(super) struct RecorderTicketCapture {
     ticket: Mutex<Option<meerkat_core::ReviewedEntryTicket>>,
     run: Mutex<Option<meerkat_core::RunId>>,
     after_effect: tokio::sync::Notify,
+    /// What the gate met, for the body that `after_effect` wakes: the first
+    /// refusal of either gate step, or the post-effect check that passed.
+    met: Mutex<Option<Result<(), meerkat_core::ToolError>>>,
     release: tokio::sync::watch::Sender<bool>,
     outcomes: AtomicUsize,
+    /// A row's control: the publication on which the gate begins an owner
+    /// change of its own right before its check after the effect, once
+    /// (`current_in_an_owner_change`). `None`, the default, forces nothing.
+    owner_change_at_outcome:
+        Mutex<Option<meerkat_authorization::publication::LocalAuthorizationPublication>>,
 }
 impl RecorderTicketCapture {
     pub(super) fn new() -> Self {
@@ -2041,9 +2332,104 @@ impl RecorderTicketCapture {
             ticket: Mutex::new(None),
             run: Mutex::new(None),
             after_effect: tokio::sync::Notify::new(),
+            met: Mutex::new(None),
             release: tokio::sync::watch::channel(false).0,
             outcomes: AtomicUsize::new(0),
+            owner_change_at_outcome: Mutex::new(None),
         }
+    }
+    /// Wake the body with what a gate step met. The body waits on
+    /// `after_effect` with no bound of its own, so a step that returned
+    /// without waking it left the row parked until its outer deadline. The
+    /// first report stands.
+    fn wake(&self, met: Result<(), meerkat_core::ToolError>) {
+        let mut reported = self.met.lock().unwrap();
+        if reported.is_none() {
+            *reported = Some(met);
+        }
+        drop(reported);
+        self.after_effect.notify_one();
+    }
+    /// The gate's wake and what it met: the row's body goes on only after a
+    /// post-effect check that passed, and fails at once with the refusal of
+    /// a step that did not.
+    pub(super) async fn effect_checked(&self) -> Result<(), meerkat_core::ToolError> {
+        self.after_effect.notified().await;
+        self.met
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the gate reports what it met before it wakes the body")
+    }
+    /// This call's current authorization at a gate step. A bare check
+    /// refuses to rebuild (`ReprepareRequired`) while another actor changes
+    /// the owners of the work's publication, as a record write of the source
+    /// does, and Core's own stagings of the dispatch wait such a change out.
+    /// The gate waits it out too, with the bounded wait Connect's own checks
+    /// use; every other answer is final at once.
+    async fn current(
+        context: &meerkat_core::ToolDispatchContext,
+        call: meerkat_core::ToolCallView<'_>,
+        site: &'static str,
+    ) -> Result<(), meerkat_core::ToolError> {
+        let mut churn = meerkat_core::authorization::OwnerChangeChurn::default();
+        crate::current_check::check_after_owner_change(context, call, None, &mut churn, site)
+            .await
+            .map(|_| ())
+    }
+    /// [`Self::current`] with an owner change that the check is certain to
+    /// meet: the control begins one on `publication` from a thread of its
+    /// own and holds it until the gate's first check has answered. The steps
+    /// are those of the waited check, in its order (`current_check::waiting`:
+    /// check, on a refusal to rebuild wait, check again), with the change
+    /// released between the first check and its wait, so the first check
+    /// meets the change on any host, whatever its load.
+    ///
+    /// A first check that did not refuse to rebuild is an error for the
+    /// body, never a pass: the row forced nothing then.
+    async fn current_in_an_owner_change(
+        context: &meerkat_core::ToolDispatchContext,
+        call: meerkat_core::ToolCallView<'_>,
+        publication: meerkat_authorization::publication::LocalAuthorizationPublication,
+        site: &'static str,
+    ) -> Result<(), meerkat_core::ToolError> {
+        let (begun, has_begun) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let change = publication.begin_owner_change();
+            let _ = begun.send(change.is_ok());
+            // Held until the gate's first check has answered, or the gate
+            // is gone.
+            let _ = released.recv();
+            drop(change);
+        });
+        let held = has_begun.await.unwrap_or(false);
+        let first = held.then(|| crate::current_check::check(context, call, None));
+        drop(release);
+        let _ = holder.join();
+        let refused = match first {
+            None => {
+                return Err(meerkat_core::ToolError::outcome_uncertain(
+                    call.name,
+                    "the control's owner change did not begin",
+                ));
+            }
+            Some(Err(error)) if crate::current_check::refuses_to_rebuild(&error) => error,
+            Some(Err(error)) => return Err(error),
+            Some(Ok(_)) => {
+                return Err(meerkat_core::ToolError::outcome_uncertain(
+                    call.name,
+                    "the check made inside the control's owner change did not refuse to rebuild",
+                ));
+            }
+        };
+        let mut churn = meerkat_core::authorization::OwnerChangeChurn::default();
+        if !crate::current_check::wait_after_refusal(context, &mut churn, site).await {
+            return Err(refused);
+        }
+        crate::current_check::check_after_owner_change(context, call, None, &mut churn, site)
+            .await
+            .map(|_| ())
     }
 }
 #[async_trait::async_trait]
@@ -2057,8 +2443,18 @@ impl meerkat_core::ToolDispatchAdmission for RecorderTicketCapture {
         assert_eq!(call.name, "memory");
         let context = context.expect("actual governed Recorder dispatch context");
         assert!(context.work_authorization().is_some());
-        context.check_tool_authorization(call, None)?;
-        let ticket = context.reviewed_entry_ticket(call, None)?;
+        let admitted = Self::current(context, call, "test.recorder_gate.admission")
+            .await
+            .and_then(|()| context.reviewed_entry_ticket(call, None));
+        let ticket = match admitted {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                // No effect and no outcome follow a refused admission: the
+                // body learns of it here.
+                self.wake(Err(error.clone()));
+                return Err(error);
+            }
+        };
         assert!(self.ticket.lock().unwrap().replace(ticket).is_none());
         *self.run.lock().unwrap() = Some(context.run_id().expect("actual native run").clone());
         Ok(())
@@ -2071,12 +2467,35 @@ impl meerkat_core::ToolDispatchAdmission for RecorderTicketCapture {
         outcome: meerkat_core::LiveBridgeEffectOutcome,
     ) -> Result<(), meerkat_core::ToolError> {
         assert_eq!(call.name, "memory");
+        if outcome != meerkat_core::LiveBridgeEffectOutcome::Committed {
+            // The assertion below ends this step: the body learns why first.
+            self.wake(Err(meerkat_core::ToolError::outcome_uncertain(
+                call.name,
+                format!("the Recorder's dispatch outcome was {outcome:?}"),
+            )));
+        }
         assert_eq!(outcome, meerkat_core::LiveBridgeEffectOutcome::Committed);
         // The real Recorder body has returned. Its exact prepared check is
         // still current; the stored single-use ticket has never been entered.
-        context.unwrap().check_tool_authorization(call, None)?;
-        assert_eq!(self.outcomes.fetch_add(1, Ordering::SeqCst), 0);
-        self.after_effect.notify_one();
+        let forced = self.owner_change_at_outcome.lock().unwrap().take();
+        let checked = match forced {
+            None => Self::current(context.unwrap(), call, "test.recorder_gate.outcome").await,
+            Some(publication) => {
+                Self::current_in_an_owner_change(
+                    context.unwrap(),
+                    call,
+                    publication,
+                    "test.recorder_gate.outcome",
+                )
+                .await
+            }
+        };
+        if checked.is_ok() {
+            assert_eq!(self.outcomes.fetch_add(1, Ordering::SeqCst), 0);
+        }
+        // Wake the body in either case: a refused check returns below.
+        self.wake(checked.clone());
+        checked?;
         let mut release = self.release.subscribe();
         while !*release.borrow_and_update() {
             release.changed().await.unwrap();
@@ -2154,7 +2573,10 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
             meerkat_core::SendReceipt::PeerMessageSent { delivery:
                 meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved { outcome:
                     meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted }, .. }));
-        capture.after_effect.notified().await;
+        capture
+            .effect_checked()
+            .await
+            .expect("the Recorder's dispatch passed the gate and its post-effect check");
         let run = capture.run.lock().unwrap().clone().unwrap();
         let ticket = capture.ticket.lock().unwrap().take().unwrap();
         let rows = native_input_states(&fixture, &receiver).await;
@@ -2179,10 +2601,12 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
         let association = own[0].association().clone();
         let WorkAuthorityBasis::TargetedGrantLineages { base: None, targets } = &association.candidate().authority_basis
             else { panic!("actual delivery target lineages"); };
-        for target in targets {
-            grants.grants.resolve_lineage(&target.lineage, &admission.route.as_ref().unwrap().logical_executor,
-                admission.route.as_ref().unwrap().represented_subject.as_ref()).unwrap().check_current().unwrap();
-        }
+        // The grants stay current while the dispatch is held. The source's
+        // own record write changes the publication about now, so the read
+        // waits such a change out; a lineage that is not current fails here.
+        lineages_current(&grants.grants, targets.iter().map(|target| &target.lineage[..]),
+            &admission.route.as_ref().unwrap().logical_executor,
+            admission.route.as_ref().unwrap().represented_subject.as_ref()).await;
         capture.release.send_replace(true);
         let terminal = completed(&fixture, &receiver, 1).await;
         assert_eq!(terminal.seed.last_run_id.as_ref(), Some(&run));
@@ -2205,9 +2629,10 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
         assert_eq!(capture.outcomes.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.source.store.get(&settled_row.key).await.unwrap(), Some(settled_row));
         assert_eq!(fixture.policy.member_class_admission(&instance(ADDED).member.member).unwrap(), Some(admission.clone()));
+        lineages_current(&grants.grants, targets.iter().map(|target| &target.lineage[..]),
+            &admission.route.as_ref().unwrap().logical_executor,
+            admission.route.as_ref().unwrap().represented_subject.as_ref()).await;
         for target in targets {
-            grants.grants.resolve_lineage(&target.lineage, &admission.route.as_ref().unwrap().logical_executor,
-                admission.route.as_ref().unwrap().represented_subject.as_ref()).unwrap().check_current().unwrap();
             for reference in &target.lineage {
                 assert_eq!(grants.grants.issued_reference(&reference.grant_id).unwrap().as_ref(), Some(reference));
             }
@@ -2223,6 +2648,245 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
     fixture.close().await;
     match checked {
         Ok(result) => result.expect("Recorder ticket control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The audit rows of the native tool `name` in `row`, when a check made
+/// after the tool's effect met an owner change: the shape
+/// `a_tool_checked_again_during_an_owner_change_after_its_preparation_still_succeeded`
+/// accepts as "a check after the tool's effect", here as a run leaves it.
+///
+/// A success entry is one layer's record that the dispatch call returned to
+/// it, not a count of effects: every layer of the dispatch chain appends its
+/// own once the one call comes back (each execution policy gate, then the
+/// root dispatch). The Recorder's chain in this fixture has three layers:
+/// the gate a row wraps around the Recorder (`RecorderTicketCapture`), the
+/// installed gate around that, and the root. The innermost gate records its
+/// success and only then settles its admission, which is where the row's
+/// gate checks. So the one return leaves one success before the refusal and
+/// two behind the re-preparation. A second return of the Recorder through
+/// the gate would leave a fourth.
+fn checked_after_its_effect_in_an_owner_change(row: &StoredInputState, name: &str) {
+    use meerkat_authorization_contracts::audit::AuditRefusalBasis;
+    use meerkat_core::authorization::OperationRefusalKind;
+    let audit: Vec<StoredAuthorizationAuditObservation> =
+        serde_json::from_value(serde_json::to_value(row).unwrap()["authorization_audit"].clone())
+            .unwrap();
+    let operation = audit
+        .iter()
+        .find_map(|row| match &row.observation.observation {
+            AuditObservation::Prepared { target, .. }
+                if matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == name) =>
+            {
+                Some(row.observation.operation_id.clone())
+            }
+            _ => None,
+        })
+        .expect("the tool prepared");
+    let own = audit
+        .iter()
+        .filter(|row| row.observation.operation_id == operation)
+        .map(|row| &row.observation.observation)
+        .collect::<Vec<_>>();
+    let shape = serde_json::to_string(&own).unwrap();
+    // One flag per row of the operation: this layer saw the dispatch call
+    // return a result that is not an error.
+    let succeeded = own
+        .iter()
+        .map(|observation| {
+            matches!(
+                observation,
+                AuditObservation::Outcome {
+                    outcome: OperationObservedOutcome::ToolDispatchReturned {
+                        result_is_error: false,
+                        terminal_error: None,
+                        ..
+                    }
+                }
+            )
+        })
+        .collect::<Vec<bool>>();
+    let successes = |flags: &[bool]| flags.iter().filter(|flag| **flag).count();
+    let first_success = succeeded
+        .iter()
+        .position(|flag| *flag)
+        .unwrap_or_else(|| panic!("the tool's operation returned a success: {shape}"));
+    // The gate's first check, made inside the owner change the control held.
+    let refused = first_success
+        + own[first_success..]
+            .iter()
+            .position(|observation| matches!(observation, AuditObservation::Refused { .. }))
+            .unwrap_or_else(|| panic!("a refusal follows the first success: {shape}"));
+    assert!(
+        matches!(
+            own[refused],
+            AuditObservation::Refused {
+                reason: OperationRefusalKind::ReprepareRequired,
+                read: Some(read),
+                ..
+            } if matches!(read.basis, AuditRefusalBasis::ChangeInProgress)
+        ),
+        "the check after the effect refused to rebuild inside an owner change in progress: {shape}"
+    );
+    assert_eq!(
+        successes(&succeeded[..refused]),
+        1,
+        "one success, the innermost gate's, precedes the check after the effect: {shape}"
+    );
+    // The waited re-preparation: the operation's last preparation.
+    let prepared_again = own
+        .iter()
+        .rposition(|observation| matches!(observation, AuditObservation::Prepared { .. }))
+        .unwrap();
+    assert!(
+        prepared_again > refused,
+        "the operation was prepared again behind the refusal: {shape}"
+    );
+    assert!(
+        own[refused..prepared_again]
+            .iter()
+            .all(|observation| matches!(
+                observation,
+                AuditObservation::Refused {
+                    reason: OperationRefusalKind::ReprepareRequired,
+                    ..
+                } | AuditObservation::Prepared { .. }
+            )),
+        "only refusals to rebuild and preparations lie between the check's refusal and the last preparation: {shape}"
+    );
+    assert_eq!(
+        successes(&succeeded[prepared_again..]),
+        2,
+        "the outer gate's and the root's successes follow the re-preparation: {shape}"
+    );
+    assert!(
+        succeeded[prepared_again + 1..].iter().all(|flag| *flag),
+        "nothing but those successes follows the re-preparation: {shape}"
+    );
+}
+
+/// The widened audit shape as a run leaves it, forced on every run, and the
+/// tool's effect counted beside it: the Recorder's gate makes its check
+/// after the effect inside an owner change that the row's control holds on
+/// the source's publication (`RecorderTicketCapture::current_in_an_owner_change`).
+/// The check refuses to rebuild, the change ends, the waited check prepares
+/// the operation again, and the audit shows the operation's success on both
+/// sides of the refusal.
+///
+/// That is one run of the Recorder, not two. The audit check does not say
+/// so (`tool_succeeded_in` counts neither successes nor effects), and the
+/// one memory record does not either (an identical write returns the
+/// existing record). The gate's counter does: it counts the Recorder
+/// dispatches that returned through the gate with a check after the effect
+/// that passed, is zero before the delivery and exactly one after the run's
+/// terminal. The success entries say the same: one per layer of the chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recorder_effect_checked_inside_an_owner_change_ran_once() {
+    let fixture = Box::pin(start()).await;
+    let capture = fixture.factory.recorder_ticket.clone();
+    capture.enabled.store(true, Ordering::SeqCst);
+    *capture.owner_change_at_outcome.lock().unwrap() =
+        Some(fixture.source.owner.publication_for_test().clone());
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let receiver = add(&fixture, ADDED).await;
+            let sender = add(&fixture, SENDER).await;
+            ready(&fixture, &receiver).await;
+            ready(&fixture, &sender).await;
+            wire_pair(&fixture).await;
+            let recipient = peer(&fixture, ADDED).await;
+            *fixture.factory.next_call.lock().unwrap() = Some("memory");
+            *fixture.factory.next_args.lock().unwrap() = serde_json::json!({
+                "action": "remember",
+                "title": "Effect checked inside an owner change",
+                "body": "One Recorder write, checked inside an owner change",
+            });
+            assert_eq!(
+                capture.outcomes.load(Ordering::SeqCst),
+                0,
+                "no Recorder dispatch has returned through the gate before the delivery"
+            );
+            assert!(matches!(
+                send(&fixture, &sender, &recipient).await.unwrap(),
+                meerkat_core::SendReceipt::PeerMessageSent {
+                    delivery: meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved {
+                        outcome:
+                            meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted
+                    },
+                    ..
+                }
+            ));
+            capture
+                .effect_checked()
+                .await
+                .expect("the gate's check after the effect met the owner change and waited it out");
+            assert!(
+                capture.owner_change_at_outcome.lock().unwrap().is_none(),
+                "the gate took the control's owner change"
+            );
+            assert_eq!(
+                capture.outcomes.load(Ordering::SeqCst),
+                1,
+                "the Recorder's dispatch returned through the gate once"
+            );
+            use meerkat_mobkit::identity_first::agent_memory::{
+                AgentMemoryProvider, AgentMemoryRecallRequest, AgentMemorySelection,
+            };
+            let memory = meerkat_mobkit::memory::SqliteAgentMemoryStore::open(
+                fixture._directory.path().join("selected-recorder"),
+            )
+            .unwrap();
+            let query = AgentMemoryRecallRequest {
+                realm: fixture
+                    .lifetime
+                    .selected_policy()
+                    .native_host
+                    .as_ref()
+                    .unwrap()
+                    .realm
+                    .to_string(),
+                identity: AgentIdentity::parse(ADDED).unwrap(),
+                query_text: None,
+                query_terms: vec![],
+                selection: AgentMemorySelection::Always,
+                max_entries: 16,
+            };
+            // The effect happened; how often is the counter's to say.
+            let written = memory.recall(query.clone()).await.unwrap();
+            assert_eq!(written.len(), 1);
+            assert_eq!(
+                written[0].body,
+                "One Recorder write, checked inside an owner change"
+            );
+            capture.release.send_replace(true);
+            let terminal = completed(&fixture, &receiver, 1).await;
+            assert_eq!(
+                terminal.seed.terminal_outcome,
+                Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed)
+            );
+            tool_succeeded(&terminal, "memory");
+            checked_after_its_effect_in_an_owner_change(&terminal, "memory");
+            assert_eq!(
+                capture.outcomes.load(Ordering::SeqCst),
+                1,
+                "the Recorder's effect ran once: one dispatch returned through the gate"
+            );
+            assert_eq!(memory.recall(query).await.unwrap(), written);
+            assert_eq!(native_input_states(&fixture, &receiver).await.len(), 1);
+            assert!(native_input_states(&fixture, &sender).await.is_empty());
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    // Release an outcome callback even if a preceding assertion failed; native
+    // shutdown then joins the real dispatch and the existing fixture owners.
+    capture.release.send_replace(true);
+    drop(capture.ticket.lock().unwrap().take());
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("the forced Recorder control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

@@ -175,6 +175,24 @@ fn refused_as_reserved(outcome: &Result<ToolDispatchOutcome, ToolError>) -> bool
     }
 }
 
+/// The mob refused the call, and the agent is answered the refusal's class.
+/// The host mob has a member tool audience, so an agent's mob tool is
+/// answered a refusal of the mob as one fixed text and its class, not the
+/// mob's own reason: a reserved name is refused like any other, and the
+/// rows that use this also read that the name was not seated.
+fn refused_by_the_mob_with_class(
+    outcome: &Result<ToolDispatchOutcome, ToolError>,
+    class: &str,
+) -> bool {
+    let answered = match outcome {
+        Err(error) => error.to_string(),
+        Ok(outcome) if outcome.result.is_error => outcome.result.text_content(),
+        Ok(_) => return false,
+    };
+    answered.contains("the mob refused the call")
+        && answered.contains(&format!("Refusal class: {class}."))
+}
+
 fn describe(outcome: &Result<ToolDispatchOutcome, ToolError>) -> String {
     match outcome {
         Err(error) => format!("refused: {error}"),
@@ -243,7 +261,7 @@ async fn agent_tool_spawn_into_the_host_mob_refuses_runtime_plane_identities() {
         )
         .await;
         assert!(
-            refused_as_reserved(&outcome),
+            refused_by_the_mob_with_class(&outcome, "wiring_error"),
             "{member_id} is refused: {}",
             describe(&outcome)
         );
@@ -330,7 +348,7 @@ async fn fork_off_refuses_runtime_plane_identities() {
     )
     .await;
     assert!(
-        refused_as_reserved(&outcome),
+        refused_by_the_mob_with_class(&outcome, "session_error"),
         "a `__console__` fork is refused: {}",
         describe(&outcome)
     );

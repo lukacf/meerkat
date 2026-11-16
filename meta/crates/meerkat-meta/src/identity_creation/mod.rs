@@ -123,7 +123,8 @@ pub use digest::Sha256Digest;
 pub use executor::{
     AGENT_SPECS_NOT_GIVEN, AgentAdmission, AgentSpecs, ChangeCommit, ChangeCommitted,
     ChangeConsent, ChangeRequester, CoreChangeExecutor, ExecutorError, IdentityChangeExecutor,
-    InstructionStep, committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
+    InstructionStep, OwnedMobs, committed_outcome, consent_of_plan, refusal_of_core,
+    refusal_of_error,
 };
 // The settle of an agent's preparation, as the seam and the family take it.
 pub use executor::{MOVE_INTO_PREPARED_PROFILE, PreparationSettle};

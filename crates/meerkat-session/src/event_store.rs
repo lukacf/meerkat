@@ -2358,16 +2358,22 @@ impl FileEventStore {
             file.sync_all().await?;
             drop(file);
             tokio::fs::rename(&temporary, &destination).await?;
-            let sync_directory = directory.clone();
-            tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-                std::fs::File::open(sync_directory)?.sync_all()
-            })
-            .await
-            .map_err(|error| {
-                EventStoreError::Store(format!(
-                    "event-log head directory sync task failed: {error}"
-                ))
-            })??;
+            // Fsync the head's directory so the rename survives a crash
+            // (unix; directory handles are not fsyncable elsewhere, and
+            // Windows refuses to open a directory as a file at all).
+            #[cfg(unix)]
+            {
+                let sync_directory = directory.clone();
+                tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+                    std::fs::File::open(sync_directory)?.sync_all()
+                })
+                .await
+                .map_err(|error| {
+                    EventStoreError::Store(format!(
+                        "event-log head directory sync task failed: {error}"
+                    ))
+                })??;
+            }
             Ok::<(), EventStoreError>(())
         }
         .await;
@@ -4769,6 +4775,115 @@ impl EventStore for FileEventStore {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The lines that open a file inside the functions of `source` whose
+    /// first line starts with `signature`: each line's number and whether it
+    /// stands under `#[cfg(unix)]`. Rustfmt's indentation is the structure
+    /// read here: what encloses a line is the nearest line above it with
+    /// less indentation, and an attribute is the line above what it governs.
+    fn file_opens_in(source: &str, signature: &str) -> Vec<(usize, bool)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let is_code = |line: &str| {
+            let text = line.trim_start();
+            !text.is_empty() && !text.starts_with("//")
+        };
+        let mut opens = Vec::new();
+        for (start, first) in lines.iter().enumerate() {
+            // A declaration without a body (a trait's) opens nothing.
+            if !first.trim_start().starts_with(signature) || first.trim_end().ends_with(';') {
+                continue;
+            }
+            let closing = format!("{}}}", &first[..indent(first)]);
+            let end = lines[start..]
+                .iter()
+                .position(|line| *line == closing)
+                .map_or(lines.len(), |offset| start + offset);
+            for at in start..end {
+                if !is_code(lines[at]) || !lines[at].contains("File::open(") {
+                    continue;
+                }
+                let mut level = indent(lines[at]);
+                let mut under_unix = false;
+                for above in (0..=at).rev() {
+                    let line = lines[above];
+                    if !is_code(line) || (above != at && indent(line) >= level) {
+                        continue;
+                    }
+                    level = indent(line);
+                    if above > 0 && lines[above - 1].trim() == "#[cfg(unix)]" {
+                        under_unix = true;
+                        break;
+                    }
+                }
+                opens.push((at + 1, under_unix));
+            }
+        }
+        opens
+    }
+
+    /// The event-log head is replaced by a rename, made durable by opening
+    /// its directory and syncing it, which only Unix offers: Windows refuses
+    /// to open a directory as a file ("Access is denied"). The head's writer
+    /// opens the directory under `#[cfg(unix)]` only, so no other platform
+    /// reports a head it has already written as failed.
+    #[test]
+    fn the_event_log_head_writer_opens_its_directory_only_under_a_unix_cfg() {
+        let signature = "async fn write_event_log_head(";
+        let opens = file_opens_in(include_str!("event_store.rs"), signature);
+        assert!(
+            !opens.is_empty(),
+            "`{signature}` opens no directory; has the directory sync moved?"
+        );
+        let unguarded: Vec<usize> = opens
+            .iter()
+            .filter(|(_, under_unix)| !under_unix)
+            .map(|(line, _)| *line)
+            .collect();
+        assert!(
+            unguarded.is_empty(),
+            "`{signature}` opens a directory outside `#[cfg(unix)]` at line(s) {unguarded:?}"
+        );
+    }
+
+    /// Writing the event-log head succeeds, and the head read back is the
+    /// one written. The append path only logs a failed head write, so this
+    /// row asks the writer itself. It runs on every platform; where a
+    /// directory cannot be opened as a file (Windows), it is the proof that
+    /// the writer does not try to.
+    #[tokio::test]
+    async fn writing_the_event_log_head_succeeds_and_is_read_back()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let session_id = SessionId::new();
+        let store = FileEventStore::new(temp.path().join("events"));
+        store
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
+            .await?;
+        let head = store
+            .read_exact_event_log_head(&session_id)
+            .await?
+            .expect("the append wrote an event-log head");
+
+        store
+            .write_event_log_head(&session_id, head.clone())
+            .await
+            .expect("writing the event-log head succeeds");
+
+        let read_back = store
+            .read_exact_event_log_head(&session_id)
+            .await?
+            .expect("the head is still there");
+        assert_eq!(read_back.through_log_seq, head.through_log_seq);
+        assert_eq!(read_back.covered_log_len, head.covered_log_len);
+        Ok(())
+    }
 
     struct LegacyEventStore;
 

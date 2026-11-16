@@ -88,6 +88,10 @@ pub struct ChannelTape {
     /// Every client event of the channel in recorded order, including those
     /// sent after the receiver end.
     pub client_events: Vec<ClientKey>,
+    /// Typed turns the recording marks after this channel's last provider
+    /// frame: turns made between this channel and the next. Recordings made
+    /// before the marker existed say 0 whatever the run did.
+    pub typed_turns_after: usize,
 }
 
 impl ChannelTape {
@@ -148,7 +152,8 @@ impl Fixture {
             let mut steps = Vec::new();
             let mut client_events = Vec::new();
             let mut ended = false;
-            for line in lines {
+            let mut typed_turns_after = 0;
+            for (index, line) in lines.iter().enumerate() {
                 match &line.entry {
                     Entry::CreateRequest { body } => create_request = Some(body.clone()),
                     Entry::CreateResponse { body } => create_response = Some(body.clone()),
@@ -162,6 +167,23 @@ impl Fixture {
                         if !ended {
                             steps.push(Step::Await(key));
                         }
+                    }
+                    // A typed turn made after the channel's last provider
+                    // frame fell between this channel and the next. The
+                    // journal marks it on the channel it still calls
+                    // current, before the receiver end when the recording
+                    // has none yet (a host close whose transport was gone)
+                    // and after it otherwise. Either way it caused no frame
+                    // of this channel, so it holds nothing, the end
+                    // included: it is not a tape step, the tape only says
+                    // that the turn was made.
+                    Entry::Marker { step }
+                        if step == crate::support::TYPED_TURN_STEP
+                            && !lines[index + 1..]
+                                .iter()
+                                .any(|later| matches!(later.entry, Entry::ServerFrame { .. })) =>
+                    {
+                        typed_turns_after += 1;
                     }
                     Entry::Marker { step } if !ended => steps.push(Step::Marker(step.clone())),
                     Entry::Marker { .. } => {}
@@ -182,6 +204,7 @@ impl Fixture {
                     .ok_or_else(|| format!("channel {ordinal} has no create response"))?,
                 steps,
                 client_events,
+                typed_turns_after,
             });
         }
         // Channels are created in recorded order; ordinals follow it.
@@ -201,6 +224,208 @@ impl Fixture {
                 _ => None,
             })
             .collect()
+    }
+
+    /// What the provider heard the user say on `ordinal`, in order: the text
+    /// of every input transcript delta on the channel's sideband. The
+    /// browser peer of a live run hears the same provider events on its data
+    /// channel, as a separately ordered copy; a replay has no browser, and
+    /// the sideband is the copy the runtime commits user rows from.
+    pub fn heard_user_text(&self, ordinal: u32) -> String {
+        self.transcript_text(ordinal, "session.input_transcript.delta")
+    }
+
+    /// What the provider's voice said on `ordinal`, in order: the text of
+    /// every output transcript delta on the channel's sideband.
+    pub fn spoken_assistant_text(&self, ordinal: u32) -> String {
+        self.transcript_text(ordinal, "session.output_transcript.delta")
+    }
+
+    fn transcript_text(&self, ordinal: u32, kind: &str) -> String {
+        self.lines
+            .iter()
+            .filter(|line| line.channel_ordinal == ordinal)
+            .filter_map(|line| match &line.entry {
+                Entry::ServerFrame { raw } if raw["type"] == kind => raw["delta"].as_str(),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The test step every constructed channel stands at once the frames it
+/// keeps from the recording have been served.
+pub const CONSTRUCTED_END_STEP: &str = "constructed:end";
+
+/// How a constructed channel ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructedEnd {
+    /// The host closes at the constructed step: its mute is awaited, then
+    /// the provider ends the sideband (the close is confirmed).
+    HostClose,
+    /// The host's close is never confirmed: the tape stays at the
+    /// constructed step and the sideband stays open, so the product retires
+    /// the channel on its own bound.
+    Unconfirmed,
+}
+
+impl Fixture {
+    /// A CONSTRUCTED tape, built in memory and never written back: `source`
+    /// with one test step marker appended to channel `ordinal`, after the
+    /// channel's last recorded line. It is the tape a capture writes when
+    /// the test takes that step after the channel's last provider frame (a
+    /// typed turn made after the host closed a channel whose recording has
+    /// no receiver end). No provider frame is invented or changed; the
+    /// captured fixture file is not touched.
+    pub fn with_step_marked_after(
+        source: &Fixture,
+        ordinal: u32,
+        step: &str,
+    ) -> Result<Fixture, String> {
+        let last = source
+            .lines
+            .iter()
+            .rposition(|line| line.channel_ordinal == ordinal)
+            .ok_or_else(|| format!("the source has no channel {ordinal}"))?;
+        Self::with_step_marked_at(source, last + 1, ordinal, step)
+    }
+
+    /// A CONSTRUCTED tape, built in memory and never written back: `source`
+    /// with one test step marker inserted in channel `ordinal` directly
+    /// before its test step named `before`, so the channel's provider
+    /// frames follow the new marker. It is the tape a capture writes when
+    /// the test takes that step while the channel is up. No provider frame
+    /// is invented or changed; the captured fixture file is not touched.
+    pub fn with_step_marked_before(
+        source: &Fixture,
+        ordinal: u32,
+        before: &str,
+        step: &str,
+    ) -> Result<Fixture, String> {
+        let at = source
+            .lines
+            .iter()
+            .position(|line| {
+                line.channel_ordinal == ordinal
+                    && matches!(&line.entry, Entry::Marker { step } if step == before)
+            })
+            .ok_or_else(|| {
+                format!("channel {ordinal} of the source has no test step named {before:?}")
+            })?;
+        Self::with_step_marked_at(source, at, ordinal, step)
+    }
+
+    fn with_step_marked_at(
+        source: &Fixture,
+        at: usize,
+        ordinal: u32,
+        step: &str,
+    ) -> Result<Fixture, String> {
+        let neighbour = &source.lines[at.saturating_sub(1)];
+        let mut lines = source.lines.clone();
+        lines.insert(
+            at,
+            Line {
+                seq: neighbour.seq,
+                channel_ordinal: ordinal,
+                elapsed_ms: neighbour.elapsed_ms,
+                entry: Entry::Marker {
+                    step: step.to_owned(),
+                },
+            },
+        );
+        let text = lines
+            .iter()
+            .map(|line| serde_json::to_string(line).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        Fixture::parse(&text)
+    }
+
+    /// A CONSTRUCTED tape, built in memory and never written back: one
+    /// channel per entry of `cut_before`, each replaying the start of
+    /// `source`'s channel `ordinal` (its create exchange and every line the
+    /// recording holds before the channel's test step of that NAME, so a
+    /// recapture that adds an earlier step cannot move the cut), standing
+    /// at [`CONSTRUCTED_END_STEP`], and ending as `end` says. `unanswered`
+    /// are client events a channel (by ordinal) may send that the provider
+    /// never answers. No provider frame is invented or changed; the
+    /// captured fixture file is not touched. A tape that needs an invented,
+    /// reordered or edited provider frame is not built here: it is a
+    /// committed, named file.
+    ///
+    /// The channels share the recorded provider session id. The cassette
+    /// resolves an attach to the newest created channel of that id, so the
+    /// opens of a constructed tape must be sequential (each attached before
+    /// the next is created), which a replay's opens are.
+    pub fn constructed(
+        source: &Fixture,
+        ordinal: u32,
+        cut_before: &[&str],
+        end: ConstructedEnd,
+        unanswered: &[(u32, ClientKey)],
+    ) -> Result<Fixture, String> {
+        let recorded: Vec<&Line> = source
+            .lines
+            .iter()
+            .filter(|line| line.channel_ordinal == ordinal)
+            .collect();
+        let step = || Entry::Marker {
+            step: CONSTRUCTED_END_STEP.to_owned(),
+        };
+        let mute = Entry::ClientEvent {
+            event: serde_json::json!({"type": "session.input_audio.mute"}),
+        };
+        let mut lines = Vec::new();
+        for (channel, name) in (1_u32..).zip(cut_before) {
+            let cut = recorded
+                .iter()
+                .position(
+                    |line| matches!(&line.entry, Entry::Marker { step } if step.as_str() == *name),
+                )
+                .ok_or_else(|| {
+                    format!("channel {ordinal} of the source has no test step named {name:?}")
+                })?;
+            let head = &recorded[..cut];
+            // Recorded after the receiver end, a client event is expected
+            // but not awaited. Each tail ends with the mute: the cassette
+            // lets a `session.close` follow a recording whose last client
+            // event is the host's mute.
+            let unanswered = unanswered
+                .iter()
+                .filter(|(of, _)| *of == channel)
+                .map(|(_, key)| Entry::ClientEvent {
+                    event: serde_json::json!({"type": key.kind, "event_id": key.event_id}),
+                });
+            let tail: Vec<Entry> = match end {
+                ConstructedEnd::HostClose => [step(), mute.clone()]
+                    .into_iter()
+                    .chain([Entry::ReceiverEnd { error: None }])
+                    .chain(unanswered)
+                    .chain([mute.clone()])
+                    .collect(),
+                // The step before the end is never released.
+                ConstructedEnd::Unconfirmed => [step(), Entry::ReceiverEnd { error: None }]
+                    .into_iter()
+                    .chain(unanswered)
+                    .chain([mute.clone()])
+                    .collect(),
+            };
+            for entry in head.iter().map(|line| line.entry.clone()).chain(tail) {
+                lines.push(Line {
+                    seq: lines.len() as u64,
+                    channel_ordinal: channel,
+                    elapsed_ms: 0,
+                    entry,
+                });
+            }
+        }
+        let text = lines
+            .iter()
+            .map(|line| serde_json::to_string(line).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        Fixture::parse(&text)
     }
 }
 
@@ -411,6 +636,22 @@ impl Cassette {
     /// tape is parked at exactly that marker (every frame recorded before it
     /// has been served), then let it continue.
     pub async fn release(&self, ordinal: u32, step: &str) -> Result<(), String> {
+        self.reached(ordinal, step).await?;
+        self.shared.update(|state| {
+            state
+                .released
+                .entry(ordinal)
+                .or_default()
+                .push_back(step.to_owned());
+        });
+        Ok(())
+    }
+
+    /// Wait until channel `ordinal`'s tape is parked at the marker `step`,
+    /// without letting it continue: every frame the recording holds before
+    /// that test step has been served, and none after it. A typed tape
+    /// state for a test that reads what Meerkat did up to that step.
+    pub async fn reached(&self, ordinal: u32, step: &str) -> Result<(), String> {
         let want = Parked::Marker(step.to_owned());
         let reached = timeout(
             STEP_BOUND,
@@ -426,13 +667,6 @@ impl Cassette {
                 self.parked(ordinal)
             ));
         }
-        self.shared.update(|state| {
-            state
-                .released
-                .entry(ordinal)
-                .or_default()
-                .push_back(step.to_owned());
-        });
         Ok(())
     }
 
@@ -455,6 +689,29 @@ impl Cassette {
         reached.map_err(|_| {
             format!(
                 "channel {ordinal} never received {key}; the replay is parked at {:?}",
+                self.parked(ordinal)
+            )
+        })
+    }
+
+    /// Wait until channel `ordinal`'s tape waits for Meerkat to send `key`:
+    /// every frame the recording holds before that client event has been
+    /// served, and the event has not been sent. A typed tape state for a
+    /// test that holds a scripted answer back to the latest point the
+    /// recording allows.
+    pub async fn waiting_for(&self, ordinal: u32, key: &ClientKey) -> Result<(), String> {
+        let want = Parked::Client(key.clone());
+        let reached = timeout(
+            STEP_BOUND,
+            self.shared.wait_until(|state| {
+                state.parked.get(&ordinal) == Some(&want) || !state.divergences.is_empty()
+            }),
+        )
+        .await;
+        self.diverged()?;
+        reached.map_err(|_| {
+            format!(
+                "channel {ordinal}'s tape never waited for {key}; the replay is parked at {:?}",
                 self.parked(ordinal)
             )
         })

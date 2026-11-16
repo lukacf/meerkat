@@ -148,7 +148,7 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # The BuildBuddy Native integration-fast lane (tools/buildbuddy/full_lane_test.sh):
 # fast's selection plus a kill bound. fast only reports a test still running
 # each minute, so a hang there ran until the 3000 s GCP SLO watchdog killed the
-# batch and named nothing. Four slow periods (240 s), eight for the tests below.
+# batch and named nothing. Four slow periods (240 s), sixteen for the tests below.
 #
 # nextest's `inherits` carries NEITHER `default-filter` (restated below;
 # measured: without it 30 e2e lane tests joined the run) NOR fast's own
@@ -158,7 +158,7 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # tests.
 #
 # Sizing (the lane's exact command, 30 threads, 2026-10-02): 9 slow tests, the
-# count the BuildBuddy lane reports. The four below take 132-159 s locally and
+# count the BuildBuddy lane reports. The first four below take 132-159 s locally and
 # compile nested Cargo projects or audit the whole workspace (CPU-bound, so
 # slower on the shared remote executor); the mob tests that wait out 120 s or
 # 60 s by design fit the default bound.
@@ -172,9 +172,13 @@ test(=downstream_unsafe_code_cannot_enter_factory_policy_finalizer)
 or test(=downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg)
 or (binary(compile_fail_tests) and test(=compile_fail))
 or test(=live_workspace_rmat_audit_is_strictly_clean)
+or test(=renders_composition_witness_fairness_in_tlc_safe_chunks)
 '''
 # Sixteen periods: on a cold hosted 4-vCPU runner (a release version bump
 # leaves no reusable units) the nested Cargo builds took 441 s to over 480 s.
+# The composition witness fairness render test ran 151 s in its own
+# integration job and was killed at 240 s in the closure row beside 463 other
+# tests on a hosted 4-vCPU runner (2026-11-15).
 slow-timeout = { period = "60s", terminate-after = 16 }
 
 [profile.fast]

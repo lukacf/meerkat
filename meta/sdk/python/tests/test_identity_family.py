@@ -842,7 +842,7 @@ def refusal_error(kind, **members):
 def test_every_refusal_kind_is_the_one_typed_error():
     from meerkat_meta import IDENTITY_REFUSAL_KINDS, IdentityRefusedError
 
-    assert len(IDENTITY_REFUSAL_KINDS) == 57
+    assert len(IDENTITY_REFUSAL_KINDS) == 58
     for kind in sorted(IDENTITY_REFUSAL_KINDS):
         error = _rpc_error_from_payload(
             refusal_error(
@@ -949,7 +949,7 @@ def test_an_archived_agents_refusal_is_the_gateway_wide_error_with_its_data():
     assert error.code == -32603
     assert error.data == data
     assert "identity_archived" not in IDENTITY_REFUSAL_KINDS
-    assert len(IDENTITY_REFUSAL_KINDS) == 57
+    assert len(IDENTITY_REFUSAL_KINDS) == 58
 
 
 def test_params_the_gateway_cannot_read_are_the_same_typed_error():
@@ -1013,6 +1013,29 @@ def test_a_kind_newer_than_this_sdk_is_still_the_typed_error():
     assert error.field == "agents"
     assert error.retryable is True
     assert error.details == {"quota": 3}
+
+
+def test_an_archive_refused_while_the_agent_owns_mobs_names_them_in_its_details():
+    """An archive of an agent whose session still owns mobs is refused
+    ``owns_mobs``, a kind of the family: the details carry how many mobs
+    there are and, for the host and an administrator, which."""
+    from meerkat_meta import IDENTITY_REFUSAL_KINDS, IdentityRefusedError
+
+    detail = "The agent still owns mobs: have it destroy them first. Nothing was changed."
+    for members in ({"count": 2, "mobs": ["team-a", "team-b"]}, {"count": 2}):
+        error = _rpc_error_from_payload(
+            refusal_error("owns_mobs", field="name", retryable=False, detail=detail, **members),
+            request_id="1",
+            method="meta/identity/archive",
+        )
+        assert isinstance(error, IdentityRefusedError)
+        assert error.kind == "owns_mobs"
+        assert error.kind in IDENTITY_REFUSAL_KINDS
+        assert error.known_kind is True
+        assert error.field == "name"
+        assert error.retryable is False
+        assert error.detail == detail
+        assert error.details == members
 
 
 @pytest.mark.asyncio
@@ -1099,7 +1122,7 @@ def test_the_refusal_kinds_are_the_gateways_closed_vocabulary():
     from meerkat_meta import IDENTITY_REFUSAL_KINDS
 
     tokens = _closed_tokens(_rust("refusal.rs"), "IdentityRefusalKind")
-    assert len(tokens) == len(set(tokens)) == 57
+    assert len(tokens) == len(set(tokens)) == 58
     assert "owner_read_only" in tokens
     assert IDENTITY_REFUSAL_KINDS == frozenset(tokens), (
         "meerkat_meta.errors.IDENTITY_REFUSAL_KINDS and IdentityRefusalKind::token "

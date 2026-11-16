@@ -519,6 +519,10 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireCanonicalPart",
     "WirePresentationLink",
     "WirePresentationRecord",
+    # One question's answer in a decision's typed answer. The alias that
+    # names it (`WireDecisionAnswer`) is emitted before this roster, so it is
+    # emitted with that alias (PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES).
+    "WireAskUserQuestionAnswer",
     "WireDecisionOutcome",
     "WireDecisionEffect",
     "WireDecision",
@@ -613,10 +617,28 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireDecisionAssurance",
     "WireDecisionReviewVerdict",
     "WirePresentationAudience",
+    # The typed answer a human decision's evidence can carry, and the answer
+    # to one question in it: both tolerant, both before the evidence.
+    "WireAskUserAnswer",
+    "WireDecisionAnswer",
     "WireDecisionEvidence",
     "WireDecisionRefusal",
     "WireDecisionErrorData",
 ]
+
+# Objects that an alias of PUBLIC_RPC_CATALOG_ALIAS_TYPES names. The aliases
+# are emitted before the object roster, and an alias keeps a reference by
+# name only to a type that is already emitted: one emitted later is widened
+# to `Record<string, unknown>` / `dict[str, Any]`. Each object listed here
+# is emitted just before its alias, after the aliases before it in the
+# roster (which the object may name itself), so the alias names it. The
+# object stays in PUBLIC_RPC_CATALOG_OBJECT_TYPES, where it is then skipped
+# as already emitted.
+PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES = {
+    # `WireDecisionAnswer::AskUser.answers` is a list of this object, which
+    # names the alias `WireAskUserAnswer`.
+    "WireDecisionAnswer": ["WireAskUserQuestionAnswer"],
+}
 
 # Request unions whose schemas live in the params roster rather than the wire
 # roster: the auth ones are serde-untagged with flattened targets.
@@ -4079,6 +4101,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireAuthErrorData", wire_schema, "error.data of an auth RPC error.")
     append_python_dataclass("WireAuthErrorBody", wire_schema, "Body of a REST auth endpoint error.")
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
+        for dependency in PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES.get(name, ()):
+            append_python_contract_dataclass(dependency)
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_python_alias(name, alias_root, f"Wire payload for {name}.")
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:
@@ -4955,6 +4979,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireAuthErrorData", wire_schema)
     append_typescript_interface("WireAuthErrorBody", wire_schema)
     for name in PUBLIC_RPC_CATALOG_ALIAS_TYPES:
+        for dependency in PUBLIC_RPC_CATALOG_ALIAS_OBJECT_DEPENDENCIES.get(name, ()):
+            append_typescript_contract_interface(dependency)
         alias_root = params_schema if name in PARAMS_UNION_ALIAS_TYPES else wire_schema
         append_typescript_alias(name, alias_root)
     for name in PUBLIC_RPC_CATALOG_OBJECT_TYPES:

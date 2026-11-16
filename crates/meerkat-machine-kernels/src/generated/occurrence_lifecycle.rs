@@ -993,6 +993,8 @@ pub enum OccurrenceLifecycleInputVariant {
     ResolveReclaimExhausted,
     #[serde(rename = "ResolveUnprovenLateNotAdmitted")]
     ResolveUnprovenLateNotAdmitted,
+    #[serde(rename = "ReleaseClaimBeforeDispatch")]
+    ReleaseClaimBeforeDispatch,
 }
 impl OccurrenceLifecycleInputVariant {
     pub fn as_str(&self) -> &'static str {
@@ -1022,6 +1024,7 @@ impl OccurrenceLifecycleInputVariant {
             Self::ClassifyStaleCompletionArrival => "ClassifyStaleCompletionArrival",
             Self::ResolveReclaimExhausted => "ResolveReclaimExhausted",
             Self::ResolveUnprovenLateNotAdmitted => "ResolveUnprovenLateNotAdmitted",
+            Self::ReleaseClaimBeforeDispatch => "ReleaseClaimBeforeDispatch",
         }
     }
 }
@@ -1054,6 +1057,7 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "ClassifyStaleCompletionArrival" => Ok(Self::ClassifyStaleCompletionArrival),
             "ResolveReclaimExhausted" => Ok(Self::ResolveReclaimExhausted),
             "ResolveUnprovenLateNotAdmitted" => Ok(Self::ResolveUnprovenLateNotAdmitted),
+            "ReleaseClaimBeforeDispatch" => Ok(Self::ReleaseClaimBeforeDispatch),
             other => Err(format!(
                 "invalid OccurrenceLifecycleInputVariant value `{other}`"
             )),
@@ -1836,6 +1840,11 @@ pub mod inputs {
         pub detail: Option<String>,
         pub at_utc_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseClaimBeforeDispatch {
+        pub admission_evidence: AdmissionEvidence,
+        pub at_utc_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1865,6 +1874,7 @@ pub enum Input {
     ClassifyStaleCompletionArrival(inputs::ClassifyStaleCompletionArrival),
     ResolveReclaimExhausted(inputs::ResolveReclaimExhausted),
     ResolveUnprovenLateNotAdmitted(inputs::ResolveUnprovenLateNotAdmitted),
+    ReleaseClaimBeforeDispatch(inputs::ReleaseClaimBeforeDispatch),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1898,6 +1908,7 @@ impl Input {
             Self::ClassifyStaleCompletionArrival(_) => InputKind::ClassifyStaleCompletionArrival,
             Self::ResolveReclaimExhausted(_) => InputKind::ResolveReclaimExhausted,
             Self::ResolveUnprovenLateNotAdmitted(_) => InputKind::ResolveUnprovenLateNotAdmitted,
+            Self::ReleaseClaimBeforeDispatch(_) => InputKind::ReleaseClaimBeforeDispatch,
         }
     }
 }
@@ -1928,6 +1939,7 @@ pub enum InputKind {
     ClassifyStaleCompletionArrival,
     ResolveReclaimExhausted,
     ResolveUnprovenLateNotAdmitted,
+    ReleaseClaimBeforeDispatch,
 }
 
 pub mod effects {
@@ -2281,6 +2293,8 @@ pub enum TransitionId {
     ReclaimExhaustedAfterUnprovenDispatch,
     UnprovenLateNotAdmittedFromClaimed,
     UnprovenLateNotAdmittedFromDispatching,
+    ReleaseClaimBeforeDispatchFromClaimed,
+    ReleaseClaimBeforeDispatchAfterSupersession,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

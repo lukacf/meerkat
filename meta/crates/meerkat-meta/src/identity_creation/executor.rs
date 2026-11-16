@@ -18,6 +18,12 @@
 //! - a change, other than an adoption, of an agent its host configures
 //!   (`owner_read_only`).
 //!
+//! An archive and a removal have one more refusal, made last, right before
+//! Core is called: of an agent whose session still owns mobs the agent
+//! created (`owns_mobs`), since those mobs end with the session's archive,
+//! and both changes retire the agent's member. The launch says which mobs a
+//! session owns ([`OwnedMobs`]).
+//!
 //! The first implementation, [`CoreChangeExecutor`], commits every change
 //! through Core's handle. An update reads the agent's record from Core and
 //! commits its spec whole, with what the update names replaced; an adoption
@@ -45,7 +51,7 @@ use meerkat_mob::{
     AdoptionSource, CreatedIdentityObservation, IdentityAddressability, IdentityAdoption,
     IdentityChangeEntryOutcome, IdentityChangeOutcome, IdentityChangeReceipt,
     IdentityChangeRefusal, IdentityGrantRequest, IdentityNameHolder, IdentityOperation,
-    IdentityPolicyOutcome, MobError, MobHandle, OwnedEdgeAdmission, OwnedIdentityEdge,
+    IdentityPolicyOutcome, MobError, MobHandle, MobId, OwnedEdgeAdmission, OwnedIdentityEdge,
     StoreOwnedIdentityUpdate,
 };
 
@@ -468,6 +474,120 @@ pub trait AgentSpecs: Send + Sync {
     fn is_authority_field(&self, key: &str) -> bool;
 }
 
+/// What the seam asks its launch about the mobs an agent's session owns:
+/// the mobs that end with the session's archive. An agent creates such a
+/// mob with its own `mob_create`. An archive and a removal of the agent
+/// both retire its member, which archives the session; at the host's next
+/// start after that the mob is removed with its store, and an unarchive
+/// does not bring it back. The seam refuses the archive and the removal of
+/// an agent whose session owns one (`owns_mobs`), before Core is called.
+/// The family's implementation gives it
+/// ([`CoreChangeExecutor::with_owned_mobs`]); it answers from where the
+/// mobs' owners are recorded and keeps nothing of its own.
+#[async_trait]
+pub trait OwnedMobs: Send + Sync {
+    /// The mobs whose owner is the session `session` and that end with its
+    /// archive: none for a session that owns none. Whether the session's
+    /// agent can still destroy such a mob is not asked: a mob it can no
+    /// longer manage counts all the same. The mob an agent's delegated
+    /// helpers run in is not one of them: no agent tool destroys it, and it
+    /// is made again when the agent next delegates. An error when the
+    /// launch cannot say which mobs it hosts: the change is then not made.
+    async fn ending_with_archive_of(&self, session: &SessionId) -> Result<Vec<MobId>, MobError>;
+}
+
+/// The refusal of an archive or a removal of the agent `member` of `mob`,
+/// asked by `requester`, while the session its member runs on owns mobs
+/// (`owned`): `owns_mobs`, about `name`, with how many they are. The mobs
+/// are named to the host and to a person, and not to an agent that asks:
+/// they are another agent's. `None` for an agent no member is seated for
+/// (an archived one, one that waits for its host) and for one whose session
+/// owns no such mob: the change is Core's to answer.
+///
+/// The answer is of the moment it is read. A mob the agent creates after
+/// it, in a run still going when the change commits, is not seen, and ends
+/// as the mobs of any archived session do.
+pub(crate) async fn refused_while_owning_mobs(
+    owned: &dyn OwnedMobs,
+    mob: &MobHandle,
+    requester: &ChangeRequester,
+    member: &meerkat_mob::AgentIdentity,
+) -> Result<Option<IdentityRefusal>, MobError> {
+    use meerkat_mob::{EntryStanding, IdentityEntryRead};
+
+    let session = match mob.identity_entry(member)? {
+        IdentityEntryRead::Entry(view) => match view.standing {
+            EntryStanding::Seated(seated) | EntryStanding::Retiring(seated) => seated.session_id,
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let mut mobs: Vec<String> = owned
+        .ending_with_archive_of(&session)
+        .await?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if mobs.is_empty() {
+        return Ok(None);
+    }
+    mobs.sort();
+    mobs.dedup();
+    let refusal = IdentityRefusal::new(IdentityRefusalKind::OwnsMobs {
+        count: mobs.len() as u64,
+        mobs: Some(mobs),
+    })
+    .at("name");
+    Ok(Some(match requester {
+        ChangeRequester::Agent { .. } => refusal.without_mob_list(),
+        _ => refusal,
+    }))
+}
+
+/// The correlation of the `admission_unsettled` that answers an archive or
+/// a removal while the launch cannot say which mobs it hosts.
+pub(crate) const OWNED_MOBS_UNREAD: &str = "owned_mobs";
+
+/// The refusal of an archive or a removal while the launch cannot say which
+/// mobs it hosts: the change is not made, and the same request may be asked
+/// again (`admission_unsettled`, retryable). Its sentence is the same for
+/// every caller: the launch's own error can say where the host keeps its
+/// mobs, so it goes to the host's log and to no answer.
+pub(crate) fn owned_mobs_unread(error: &MobError) -> IdentityRefusal {
+    tracing::error!(
+        %error,
+        "the mobs an agent owns could not be read: its archive or removal was not made"
+    );
+    IdentityRefusal::new(IdentityRefusalKind::AdmissionUnsettled {
+        correlation: OWNED_MOBS_UNREAD.to_owned(),
+    })
+    .with_detail(
+        "Which mobs the agent owns could not be read just now, so the agent was not archived or \
+         removed: nothing was changed. Ask the same request again later.",
+    )
+}
+
+/// The refusal an agent requester's grant answers a change of `member` as a
+/// whole that `request` asks as `operation_id` in `mob`: what the seam
+/// answers before it asks which mobs the agent owns. The family asks it
+/// first, so that an agent whose grant does not admit the change is
+/// answered by its grant and told nothing of the mobs. `None` when the
+/// grant admits the change, and for the host and a person.
+pub(crate) async fn whole_change_grant_refusal(
+    mob: &MobHandle,
+    operation_id: &OperationId,
+    requester: &ChangeRequester,
+    request: &IdentityRequest,
+    member: &meerkat_mob::AgentIdentity,
+) -> Result<Option<IdentityRefusal>, ExecutorError> {
+    let digest = request.request_digest().map_err(ExecutorError::Request)?;
+    let operation = IdentityOperation::new(operation_id.as_str(), digest.as_str());
+    core_commit::whole_change_grant_refusal(mob, requester, &operation, member).await
+}
+
 /// The executor over Core's change path: each change is one call of the
 /// mob's handle (`create_store_owned_identities`,
 /// `update_store_owned_identity`, `archive_identity`, `unarchive_identity`,
@@ -477,6 +597,7 @@ pub trait AgentSpecs: Send + Sync {
 pub struct CoreChangeExecutor {
     instructions: Option<Arc<dyn InstructionStep>>,
     specs: Option<Arc<dyn AgentSpecs>>,
+    owned_mobs: Option<Arc<dyn OwnedMobs>>,
 }
 
 impl CoreChangeExecutor {
@@ -500,6 +621,43 @@ impl CoreChangeExecutor {
     pub fn with_agent_specs(mut self, specs: Arc<dyn AgentSpecs>) -> Self {
         self.specs = Some(specs);
         self
+    }
+
+    /// This executor, asking `owned` which mobs an agent's session owns
+    /// before it archives or removes the agent: an archive and a removal of
+    /// an agent whose session still owns mobs are refused `owns_mobs`.
+    /// Without it neither is refused for the mobs an agent owns.
+    #[must_use]
+    pub fn with_owned_mobs(mut self, owned: Arc<dyn OwnedMobs>) -> Self {
+        self.owned_mobs = Some(owned);
+        self
+    }
+
+    /// The refusal of the archive or the removal of `member` this commit
+    /// asks for, while the agent's session owns mobs
+    /// ([`refused_while_owning_mobs`]). An operation that committed before
+    /// is not judged again: Core answers it from its receipt and writes
+    /// nothing. An executor that was given nothing to ask refuses neither.
+    /// When the launch cannot say which mobs it hosts, the commit ends with
+    /// no outcome: nothing was written, and the same request asked again is
+    /// judged again.
+    pub(super) async fn refused_while_owning_mobs(
+        &self,
+        commit: &ChangeCommit<'_>,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> Result<Option<IdentityRefusal>, ExecutorError> {
+        let Some(owned) = &self.owned_mobs else {
+            return Ok(None);
+        };
+        if committed_receipt(commit.mob, commit.operation_id)
+            .await?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        refused_while_owning_mobs(owned.as_ref(), commit.mob, commit.requester, member)
+            .await
+            .map_err(|error| ExecutorError::Core(Box::new(error)))
     }
 
     /// The instruction outcome of a committed update in `mob` that changed
@@ -530,6 +688,7 @@ impl std::fmt::Debug for CoreChangeExecutor {
             .debug_struct("CoreChangeExecutor")
             .field("instruction_step", &self.instructions.is_some())
             .field("agent_specs", &self.specs.is_some())
+            .field("owned_mobs", &self.owned_mobs.is_some())
             .finish()
     }
 }
@@ -901,6 +1060,9 @@ async fn commit_adopt(
         Ok(requester) => requester,
         Err(refusal) => return refused(refusal),
     };
+    // The labels the adoption would record, read back should Core refuse
+    // it its approval branches' reservation.
+    let configured_labels = row.labels.clone();
     match commit
         .mob
         .adopt_identity(
@@ -910,7 +1072,10 @@ async fn commit_adopt(
         .await
     {
         Ok(change) => core_commit::committed(commit, &change),
-        Err(error) => executor.after_core_error(commit, error).await,
+        Err(error) => match core_commit::adoption_reservation_refusal(&error, &configured_labels) {
+            Some(refusal) => refused(refusal),
+            None => executor.after_core_error(commit, error).await,
+        },
     }
 }
 

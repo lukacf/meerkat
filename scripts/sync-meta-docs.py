@@ -220,18 +220,23 @@ def released_anchor_corrections(source_docs: Path) -> dict[str, str]:
         page = source_docs / f"{page_id}.mdx"
         if not page.is_file():
             continue
-        slugs = Counter(
-            validate.slugify(match.group(2))
+        headings = [
+            match.group(2)
             for is_prose, segment in prose_segments(page.read_text(encoding="utf-8"))
             if is_prose
             for line in segment.splitlines()
             if (match := re.match(r"^(#{2,6})\s+(.+?)\s*$", line))
-        )
-        canonical = validate.slugify(heading)
+        ]
+        # The escaped slug tells the released heading (`%3B`) from a heading
+        # without the semicolon; the site id is the same for both.
+        escaped = Counter(validate.encoded_slug(text) for text in headings)
+        ids = Counter(validate.slugify(text) for text in headings)
+        canonical = validate.encoded_slug(heading)
         stable = validate.slugify(rendered_heading)
+        own_legacy = 1 if validate.slugify(heading) == legacy else 0
         # Unknown, missing, duplicate, or colliding targets remain untouched.
         # The normal site/link validators still decide whether they can publish.
-        if slugs[canonical] == 1 and slugs[legacy] == 0 and slugs[stable] == 0:
+        if escaped[canonical] == 1 and ids[legacy] == own_legacy and ids[stable] == 0:
             for old_anchor in (legacy, canonical):
                 corrections[f"/{page_id}#{old_anchor}"] = f"/{page_id}#{stable}"
     return corrections
@@ -260,7 +265,7 @@ def normalize_released_heading(
     text: str, page_id: str, corrections: dict[str, str]
 ) -> str:
     headings = {
-        validate.slugify(heading): rendered_heading
+        validate.encoded_slug(heading): rendered_heading
         for target_page, legacy, heading, rendered_heading in RELEASED_ANCHORS
         if target_page == page_id and f"/{page_id}#{legacy}" in corrections
     }
@@ -271,7 +276,7 @@ def normalize_released_heading(
         lines: list[str] = []
         for line in segment.splitlines(keepends=True):
             match = re.match(r"^(#{2,6}\s+)(.+?)(\s*)$", line)
-            if match and (anchor := validate.slugify(match.group(2))) in headings:
+            if match and (anchor := validate.encoded_slug(match.group(2))) in headings:
                 # Hosted Mintlify strips the semicolon; the pinned CLI encodes it.
                 # Punctuation-free wording gives both renderers the same anchor.
                 line = f"{match.group(1)}{headings[anchor]}{match.group(3)}"

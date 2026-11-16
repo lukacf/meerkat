@@ -33,6 +33,8 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-15
+
 ### Fixed
 
 - On macOS, a prompt whose input is a socket failed with "Operation not
@@ -55,6 +57,24 @@ guides give the conditional wording for Connect 0.9.14.
   Connect's own use is not known to be affected. The library kits built
   through 0.9.14 hold tools built with `rustix` 1.1.5; the kits are rebuilt
   at the next Connect release.
+
+### Known limitations
+
+- Agents hosted by Connect's native host are not offered Meta's `ask_user`
+  tool in 0.9.15, as in 0.9.14: a host that decides its members' tool
+  surface itself is given no stock `ask_user`. A member of a host's own Meta
+  runtime is offered it, as every member of a Meta runtime is from 0.9.15;
+  that includes the members built with the stock Console's setup customizer
+  (the preparation member and a recipe member). To keep the tool from such a
+  member, list it in the profile's `tools.deny` (`deny = ["ask_user"]`).
+
+- A profile used for agents hosted by Connect's native host must not list
+  `ask_user` in `tools.deny`. Those agents are not offered the tool, and
+  with the deny their build is refused
+  (`… denies tool 'ask_user', which is in none of its tool vocabularies`;
+  by a run on this release's code). This matters for a profile shared with a
+  Meta gateway, where the deny is the documented way to keep the tool from a
+  member.
 
 ## [0.9.14] - 2026-11-11
 

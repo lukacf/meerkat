@@ -1306,6 +1306,274 @@ mod completion_delivery {
         fixture.stop().await;
     }
 
+    /// Seat `member` in the fixture's mob as a member private to `owner`,
+    /// the way the host seats one: with that person's label.
+    async fn seat_private_member(fixture: &CompletionFixture, member: &str, owner: &str) {
+        let mut spawn = SpawnMemberSpec::new("general", member);
+        spawn.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        spawn.labels = Some(std::collections::BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            owner.to_string(),
+        )]));
+        tokio::time::timeout(WAIT, fixture.runtime.handle().spawn_spec(spawn))
+            .await
+            .expect("bounded private member spawn")
+            .expect("seat the private member");
+    }
+
+    /// `council` tool arguments naming `participants` (member, role) of the
+    /// fixture's mob.
+    fn council_tool_args(mob_id: &str, participants: &[(&str, &str)]) -> Value {
+        json!({
+            "topic": "Which of us remembers the code word?",
+            "participants": participants
+                .iter()
+                .map(|(member, role)| json!({
+                    "mob_id": mob_id, "member_id": member, "role": role,
+                }))
+                .collect::<Vec<_>>(),
+            "max_rounds": 1, "timeout_seconds": 120,
+        })
+    }
+
+    /// Who a temporary council's mob is private to follows who convened the
+    /// council, as for every other mob a member creates. The council's own
+    /// owner session names no member, so the create admission reads the
+    /// convener that meerkat's create request carries.
+    ///
+    /// A member private to a person convenes a council through meerkat's own
+    /// `council` tool (Meta's agent mob tool wrapper refuses that call
+    /// before the tool runs; this row calls the tool below the wrapper): the
+    /// council's mob is recorded as private to that person, read while the
+    /// council runs.
+    ///
+    /// Who each participant is private to does not follow the convener: a
+    /// participant is a fork built with its source's labels. The fork of a
+    /// shared member seated here is private to no one, and the fork of a
+    /// member private to the convener's own person is private to that
+    /// person.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_council_mob_is_private_to_whoever_its_convener_is_private_to() {
+        use meerkat_mob::temporary_council::TemporaryCouncilId;
+
+        const OWNER: &str = "console-caller:v1:convener-owner";
+
+        let gate = TurnGate::new();
+        let _release = ReleaseOnDrop(Arc::clone(&gate));
+        let fixture = CompletionFixture::start(Arc::clone(&gate), &["alice"]).await;
+        // The convener and another member of the same person, both private
+        // to that person.
+        for member in ["private-convener", "own-member"] {
+            seat_private_member(&fixture, member, OWNER).await;
+        }
+        let mob_id = fixture.runtime.handle().mob_id().to_string();
+        let owners = fixture.runtime.private_owners().clone();
+        for member in ["private-convener", "own-member"] {
+            assert_eq!(
+                owners.owner_of(&mob_id, member).as_deref(),
+                Some(OWNER),
+                "{member} is private to its owner"
+            );
+        }
+        let state = fixture
+            .runtime
+            .agent_mob_mcp_state()
+            .expect("final MCP state");
+
+        let surface = fixture.surface("private-convener", true).await;
+        let started = start_detached(
+            &surface,
+            "council",
+            council_tool_args(&mob_id, &[("alice", "analyst"), ("own-member", "critic")]),
+        )
+        .await;
+        let council_id = started["council_id"].as_str().expect("council identity");
+        let job_id = started["job_id"].as_str().expect("council job id");
+        fixture
+            .wait_for_council_participant(&gate, council_id, job_id)
+            .await;
+        let council = TemporaryCouncilId::new(council_id).expect("council identity");
+        let council_mob = council.temporary_mob_id();
+        let record = state
+            .temporary_council()
+            .load(&council)
+            .await
+            .expect("read council custody")
+            .expect("the council record");
+        assert_eq!(
+            record
+                .convener
+                .as_ref()
+                .map(|convener| &convener.session_id),
+            Some(&fixture.session("private-convener").await),
+            "the council records the member that convened it"
+        );
+        assert_eq!(
+            owners.recorded_mob_owner(council_mob.as_str()),
+            Some(Some(OWNER.to_string())),
+            "a private member's council mob is recorded as private to that member's owner"
+        );
+        {
+            let seated = state
+                .handle_for(&council_mob)
+                .await
+                .expect("the council's mob");
+            // A participant's seat keeps its source's privacy: the fork of
+            // a shared member is private to no one, the fork of a member
+            // private to a person is private to that person.
+            for (seat, source_owner) in [("council-p0", None), ("council-p1", Some(OWNER))] {
+                let entry = seated
+                    .get_member(&AgentIdentity::from(seat))
+                    .await
+                    .expect("read the council's roster")
+                    .expect("the participant is seated");
+                assert_eq!(
+                    entry
+                        .labels
+                        .get(crate::access::PRIVATE_TO_LABEL)
+                        .map(String::as_str),
+                    source_owner,
+                    "{seat} is private to whoever its source member is private to"
+                );
+            }
+        }
+        gate.release();
+        fixture
+            .assert_delivered("private-convener", job_id, COUNCIL_SUMMARY)
+            .await;
+        fixture.stop().await;
+    }
+
+    /// A shared member's council mob is private to no one, read while the
+    /// council runs: its convener has no owner.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shared_members_council_mob_is_private_to_no_one() {
+        use meerkat_mob::temporary_council::TemporaryCouncilId;
+
+        let gate = TurnGate::new();
+        let _release = ReleaseOnDrop(Arc::clone(&gate));
+        let fixture =
+            CompletionFixture::start(Arc::clone(&gate), &["shared-convener", "alice", "bob"]).await;
+        let mob_id = fixture.runtime.handle().mob_id().to_string();
+        let owners = fixture.runtime.private_owners().clone();
+        assert_eq!(owners.owner_of(&mob_id, "shared-convener"), None);
+        let state = fixture
+            .runtime
+            .agent_mob_mcp_state()
+            .expect("final MCP state");
+
+        let surface = fixture.surface("shared-convener", true).await;
+        let started = start_detached(
+            &surface,
+            "council",
+            council_tool_args(&mob_id, &[("alice", "analyst"), ("bob", "critic")]),
+        )
+        .await;
+        let council_id = started["council_id"].as_str().expect("council identity");
+        let job_id = started["job_id"].as_str().expect("council job id");
+        fixture
+            .wait_for_council_participant(&gate, council_id, job_id)
+            .await;
+        let council = TemporaryCouncilId::new(council_id).expect("council identity");
+        let record = state
+            .temporary_council()
+            .load(&council)
+            .await
+            .expect("read council custody")
+            .expect("the council record");
+        assert_eq!(
+            record.convener.map(|convener| convener.session_id),
+            Some(fixture.session("shared-convener").await),
+            "the council records the member that convened it"
+        );
+        assert_eq!(
+            owners.recorded_mob_owner(council.temporary_mob_id().as_str()),
+            Some(None),
+            "a shared member's council mob is private to no one"
+        );
+        gate.release();
+        fixture
+            .assert_delivered("shared-convener", job_id, COUNCIL_SUMMARY)
+            .await;
+        fixture.stop().await;
+    }
+
+    /// A council the host runs directly has no convener, so its mob has no
+    /// creator and is private to no one, read while the council runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_run_council_mob_is_private_to_no_one() {
+        use meerkat_mob::temporary_council::{
+            TemporaryCouncilDurability, TemporaryCouncilId, TemporaryCouncilStoreDurability,
+        };
+        use meerkat_mob_mcp::temporary_council::{
+            MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilParticipantSpec,
+            TemporaryCouncilRequest,
+        };
+
+        let gate = TurnGate::new();
+        let _release = ReleaseOnDrop(Arc::clone(&gate));
+        let fixture = CompletionFixture::start(Arc::clone(&gate), &["alice"]).await;
+        let mob_id = fixture.runtime.handle().mob_id().to_string();
+        let owners = fixture.runtime.private_owners().clone();
+        let state = fixture
+            .runtime
+            .agent_mob_mcp_state()
+            .expect("final MCP state");
+
+        let hosted = TemporaryCouncilId::new(format!("hosted-{}", uuid::Uuid::new_v4().simple()))
+            .expect("council identity");
+        let mut request = TemporaryCouncilRequest::new(
+            hosted.clone(),
+            definition("hosted-council-template"),
+            vec![TemporaryCouncilParticipantSpec::new(
+                0,
+                "analyst",
+                meerkat_mob::MobId::from(mob_id.as_str()),
+                AgentIdentity::from("alice"),
+                AgentIdentity::from("council-p0"),
+                meerkat_mob::ProfileName::from("general"),
+            )],
+            "Which of us remembers the code word?",
+            TemporaryCouncilBounds::relative(Duration::from_mins(2), 1, 4096),
+            MergeBackPolicy::NoMerge,
+        );
+        request.durability = match state.temporary_council_store_for_tests().durability() {
+            TemporaryCouncilStoreDurability::Durable => TemporaryCouncilDurability::Durable,
+            _ => TemporaryCouncilDurability::ProcessBound,
+        };
+        let coordinator = state.temporary_council();
+        let run = tokio::spawn(async move { coordinator.run(request).await });
+        gate.wait_entered(1).await;
+        let record = state
+            .temporary_council()
+            .load(&hosted)
+            .await
+            .expect("read council custody")
+            .expect("the council record");
+        assert_eq!(record.convener, None, "a host-run council has no convener");
+        assert_eq!(
+            owners.recorded_mob_owner(hosted.temporary_mob_id().as_str()),
+            Some(None),
+            "a host-run council mob is private to no one"
+        );
+        gate.release();
+        let outcome = tokio::time::timeout(WAIT, run)
+            .await
+            .expect("bounded host-run council")
+            .expect("the host-run council task ends")
+            .expect("the host-run council reaches a terminal outcome");
+        assert!(
+            outcome
+                .result
+                .participants
+                .iter()
+                .all(|participant| participant.seated),
+            "the host-run council seated its participant: {:?}",
+            outcome.result.exit_reason
+        );
+        fixture.stop().await;
+    }
+
     /// A continuation blocked on the host's owner custody is not retried when
     /// the custody is restored silently: up to an acknowledged cutpoint
     /// nobody asked the owner hook again and nothing was admitted. The
@@ -1441,4 +1709,7 @@ mod completion_delivery {
             "the announcer alone keeps nothing alive"
         );
     }
+
+    /// The console's rows over this module's council fixture.
+    mod console_council_participants;
 }

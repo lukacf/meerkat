@@ -654,6 +654,12 @@ pub trait ScheduleStore: Send + Sync {
         filter: OccurrenceFilter,
     ) -> Result<Vec<Occurrence>, ScheduleStoreError>;
 
+    /// Every receipt recorded for the occurrence. The driver derives
+    /// admission evidence from this list before it gives a claim back
+    /// (`ReleaseClaimBeforeDispatch`), so a custom store must answer the
+    /// complete list, at least as fresh as its last committed occurrence
+    /// write: a list that is cut, or read from a stale replica, would report
+    /// nothing recorded for an occurrence whose dispatch was recorded.
     async fn list_receipts(
         &self,
         occurrence_id: &OccurrenceId,

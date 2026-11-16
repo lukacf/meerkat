@@ -447,6 +447,11 @@ describe("where a refusal belongs", () => {
       .toBe("This name is taken. Choose another; a removed agent's name is never free again.");
     expect(refusalSentence(refusal("stale_spec"))).toBe("This agent changed since you opened it. Read it again, then make your change.");
     expect(refusalSentence(refusal("owner_read_only"))).toBe("This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.");
+    // An archive or a removal of an agent that still has teams it created: what to do
+    // first, in the console's words; the gateway's sentence is the detail.
+    expect(refusalSentence(refusal("owns_mobs", "The agent still owns mobs it created.")))
+      .toBe("This agent still has teams it created, and archiving or removing it would remove them. Have the agent end its teams first, or keep the agent.");
+    expect(refusalDetail(refusal("owns_mobs", "The agent still owns mobs it created."))).toBe("The agent still owns mobs it created.");
     // A kind the console does not know, or none: the plain sentence.
     expect(refusalSentence(refusal("quota_exceeded", "A sentence of a later gateway."))).toBe(UNKNOWN_REFUSAL_SENTENCE);
     expect(refusalSentence(refusal(""))).toBe(UNKNOWN_REFUSAL_SENTENCE);

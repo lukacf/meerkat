@@ -3140,6 +3140,22 @@ Security, Upgrade and Changed.
   restart. See
   [Approval rules](docs/reference/identity-policy.mdx#approval-rules).
 
+- Added 2026-11-16, after the release. Agents created at run time: where a
+  rule requires approval for a create, a create under a name that is already
+  taken (an agent of the roster, an agent created earlier, the name of a
+  removed agent) is not refused at once. It is held for approval,
+  `meta/identity/plan` answers `require_approval` for it, and it is refused
+  `name_taken` only when the approved change is carried out; the closed
+  operation then reads "ask again" although the refusal is not retryable
+  (`retryable: false`). Nothing is created and no agent is changed. The
+  pages said such a create is refused `name_taken` without this condition.
+  Before approving a create, check its name against the list of agents. The
+  hold and the plan's answer are by a run on a build of this release's
+  source for the three kinds of taken name; the refusal at the carry-out by
+  that run for a name taken between the hold and the approval, and by a
+  host's report on the released gateway for a name taken before the create.
+  A fix is planned for the next release.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

@@ -385,7 +385,7 @@ async function main() {
     !process.env.GOOGLE_API_KEY
   ) {
     throw new Error(
-      "Example 003 requires a real Gemini provider for gemini-3.1-flash-lite-preview. Set GEMINI_API_KEY or GOOGLE_API_KEY, or pass --demo-llm only for an explicitly shape-only smoke.",
+      "Example 003 requires a real Gemini provider for gemini-3.5-flash-lite. Set GEMINI_API_KEY or GOOGLE_API_KEY, or pass --demo-llm only for an explicitly shape-only smoke.",
     );
   }
   const stateDir = join(here, ".state");

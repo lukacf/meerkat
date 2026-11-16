@@ -222,7 +222,7 @@ function ensureParams(agent) {
       shard: agent.shard,
       wave: "burst",
       ordinal: String(agent.ordinal),
-      model: "gemini-3.1-flash-lite-preview",
+      model: "gemini-3.5-flash-lite",
       burst_cohort: `${agent.mob}-fanout`,
       parent_identity: agent.parentIdentity,
       parent_display_name: agent.parentDisplayName,

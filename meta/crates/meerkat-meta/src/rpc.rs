@@ -8503,11 +8503,14 @@ fn serialize_response(response: &JsonRpcResponse) -> String {
 )]
 mod turn_ticket_rpc_tests;
 
-/// Test-only: the identity-first member fixture of this module's tests, for
-/// the live wiring rows that drive a stdio live method through the gateway's
+/// Test-only: the identity-first member fixtures of this module's tests, for
+/// the live rows that drive a stdio live method through the gateway's
 /// delivery-aware dispatch.
 #[cfg(all(test, feature = "openai-live"))]
-pub(crate) use tests::{IdentityFirstLiveMember, identity_first_live_member_for_test};
+pub(crate) use tests::{
+    IdentityFirstLiveMember, identity_first_context_holding_for_test,
+    identity_first_live_member_for_test,
+};
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -10203,6 +10206,36 @@ shell = true
             )])),
         )
         .await?;
+        let session = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&crate::member_comms_id::mob_member_id(identity))
+            .await
+            .ok_or("the member's roster row has a bridge session")?;
+        let identity_ctx = identity_first_context_holding_for_test(
+            &runtime, namespace, identity, "worker", session,
+        )
+        .await?;
+        Ok(IdentityFirstLiveMember {
+            runtime: Arc::new(runtime),
+            identity_ctx,
+            identity,
+            _state: state,
+        })
+    }
+
+    /// The identity-first context of an identity runtime that holds
+    /// `identity`, a member of `runtime`'s mob under `profile`, live on
+    /// `session`: the live arm of the stdio dispatch runs a request that
+    /// names the member under its identity authority. The context is
+    /// refused if the identity runtime answers no such authority.
+    #[cfg(feature = "openai-live")]
+    pub(crate) async fn identity_first_context_holding_for_test(
+        runtime: &UnifiedRuntime,
+        namespace: &str,
+        identity: &str,
+        profile: &str,
+        session: meerkat_core::types::SessionId,
+    ) -> Result<IdentityFirstContext, Box<dyn std::error::Error + Send + Sync>> {
         let core_bridge = Arc::new(CoreReadsBridge::default());
         let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
             continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
@@ -10213,20 +10246,22 @@ shell = true
             bridge: Some(core_bridge.clone()),
             default_timeout: None,
         }));
-        let session = runtime
-            .mob_handle()
-            .resolve_bridge_session_id(&crate::member_comms_id::mob_member_id(identity))
-            .await
-            .ok_or("the member's roster row has a bridge session")?;
         register_live(
             &identity_runtime,
             &core_bridge.core,
-            rpc_durable_spec(identity, "worker"),
+            rpc_durable_spec(identity, profile),
             1,
             session,
         )
         .await?;
-        let identity_ctx = IdentityFirstContext {
+        if identity_runtime
+            .member_alias_lifecycle_target(identity)
+            .await?
+            .is_none()
+        {
+            return Err("the identity runtime must hold the member".into());
+        }
+        Ok(IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 identity_runtime,
                 runtime.mob_runtime().clone(),
@@ -10238,12 +10273,6 @@ shell = true
             mob_definition: Some(runtime.mob_handle().definition().clone()),
             transcript_edit_service: None,
             compaction_floors: None,
-        };
-        Ok(IdentityFirstLiveMember {
-            runtime: Arc::new(runtime),
-            identity_ctx,
-            identity,
-            _state: state,
         })
     }
 

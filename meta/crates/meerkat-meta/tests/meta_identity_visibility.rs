@@ -1856,3 +1856,119 @@ async fn a_deny_by_label_follows_a_label_change_of_a_seated_agent_at_once() {
     );
     rig.shutdown().await;
 }
+
+/// The access rules of the rows about a plan under a taken name, for a
+/// caller that administers the runtime and is no access administrator:
+/// every signed-in person may view, create and change agents; one person
+/// administers the runtime, and is denied the agents of the profile
+/// `reviewer`.
+const A_RUNTIME_ADMINISTRATOR_WITH_A_DENY: &str = r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "people"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+
+[[rules]]
+id = "runtime-administrator"
+subjects = ["bob@example.org"]
+actions = ["runtime.admin"]
+
+[[rules]]
+id = "no-reviewer"
+effect = "deny"
+subjects = ["bob@example.org"]
+actions = ["agent.view", "agent.identity.manage", "agent.identity.remove"]
+roles = ["reviewer"]
+"#;
+
+/// The host's roster of the rows about a plan under a taken name: an agent
+/// private to one person, an agent of the profile `reviewer` and an agent
+/// of the profile `worker`.
+fn roster_with_a_private_agent() -> Vec<DurableAgentSpec> {
+    let owner = meerkat_meta::private_owner_key(ISSUER, ANN);
+    vec![
+        roster_spec(
+            "confidant",
+            "worker",
+            &[("console.private_to", owner.as_str())],
+        ),
+        roster_spec("rev-a", "reviewer", &[]),
+        roster_spec("clerk", "worker", &[]),
+    ]
+}
+
+/// The Console's plan of the create of one agent `name` of the profile
+/// `worker`, as `subject` asks for it.
+async fn console_plan_of_a_create(app: &axum::Router, subject: &str, name: &str) -> Value {
+    console_rpc(
+        app,
+        subject,
+        "meta/identity/plan",
+        json!({"request_id": "plan-1", "change": "create",
+               "agents": [{"name": name, "profile": "worker"}]}),
+    )
+    .await
+}
+
+/// The Console's plan of a create under a name whose holder its caller is
+/// not shown is the plan of a create under a name no agent holds: an agent
+/// private to another person, and an agent the caller's access rules deny
+/// it the view of. That holds for a caller that administers the runtime
+/// and is no access administrator, too. The create under the name of the
+/// agent private to another person is answered as one that names an
+/// unknown agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_plans_a_create_under_a_name_its_caller_is_not_shown_as_under_a_free_name() {
+    for access in [SCOPED_DENIES, A_RUNTIME_ADMINISTRATOR_WITH_A_DENY] {
+        let temp = tempfile::tempdir().unwrap();
+        let rig = boot(temp.path(), roster_with_a_private_agent(), Some(access)).await;
+        let app = rig.console();
+        // The access administrator is listed every agent: the Console
+        // knows the three.
+        let all = console_listed(&app, ROOT).await;
+        assert_eq!(
+            all,
+            vec![
+                "clerk".to_owned(),
+                "confidant".to_owned(),
+                "rev-a".to_owned()
+            ],
+            "{all:?}"
+        );
+        // A plan without the digests of its request, which its name moves.
+        let without_digests = |answer: &Value| {
+            let mut plan = console_ok(answer).clone();
+            for digest in ["request_digest", "subject_digest"] {
+                plan.as_object_mut().expect("a plan").remove(digest);
+            }
+            plan
+        };
+        let free = console_plan_of_a_create(&app, BOB, "nobody-yet").await;
+        let free = without_digests(&free);
+        assert_eq!(free["outcome"], json!("allow"), "{free:#}");
+        for name in ["confidant", "rev-a"] {
+            let planned = console_plan_of_a_create(&app, BOB, name).await;
+            assert_eq!(
+                renamed(&without_digests(&planned), name, "nobody-yet"),
+                free,
+                "the plan under {name} is the plan under a free name: {planned:#}"
+            );
+        }
+        let made = console_rpc(
+            &app,
+            BOB,
+            "meta/identity/create",
+            json!({"request_id": "make-1",
+                   "agents": [{"name": "confidant", "profile": "worker"}]}),
+        )
+        .await;
+        assert_eq!(
+            console_refused(&made)["code"],
+            json!(-32001),
+            "the create names an unknown agent: {made:#}"
+        );
+        rig.shutdown().await;
+    }
+}

@@ -2538,7 +2538,7 @@ use meerkat_meta::identity_first::{
     AgentAddressability, AgentIdentity, DurableAgentSpec, RosterContext, RosterError,
 };
 use meerkat_meta::{SessionHook, UnifiedRuntime, UnifiedRuntimeBuilder};
-use meerkat_mob::{MobDefinition, ProfileName};
+use meerkat_mob::{MobDefinition, ProfileName, SpawnMemberSpec};
 use meerkat_runtime::input_authority::NativeAdmissionError;
 use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
 
@@ -4040,6 +4040,286 @@ async fn a_create_under_a_taken_name_is_refused_before_a_person_is_asked() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
+/// What a refused create, or the refused plan of one, says of a taken
+/// name: the kind, the holder and the field.
+fn taken_as(refusal: &meerkat_meta::identity_creation::IdentityRefusal) -> Value {
+    let data = refusal.to_data();
+    json!({"kind": data["kind"], "by": data["by"], "field": refusal.field})
+}
+
+/// The plan of the create of `agents` as `requester` asks `family` for it:
+/// the plan as a surface writes it, or what the refusal says of a taken
+/// name.
+async fn planned_create(
+    family: &Arc<dyn IdentityFamily>,
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+    request_id: &str,
+    agents: Value,
+) -> Result<Value, Value> {
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), request_id).expect("a request id");
+    match family
+        .read(
+            mob,
+            requester,
+            IdentityRead::Plan(Box::new(IdentityChangeCall::new(
+                operation_id,
+                create_of(agents),
+            ))),
+        )
+        .await
+    {
+        Ok(IdentityReadAnswer::Plan(plan)) => {
+            Ok(serde_json::to_value(&*plan).expect("a plan as a surface writes it"))
+        }
+        Ok(other) => panic!("a plan answers a plan: {other:?}"),
+        Err(refusal) => Err(taken_as(&refusal)),
+    }
+}
+
+/// The create of `agents` as `requester` asks `family` for it.
+async fn asked_create(
+    family: &Arc<dyn IdentityFamily>,
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+    request_id: &str,
+    agents: Value,
+) -> IdentityOutcome {
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), request_id).expect("a request id");
+    family
+        .change(
+            mob,
+            requester,
+            IdentityChangeCall::new(operation_id, create_of(agents)),
+        )
+        .await
+}
+
+/// The rules of the rows about a requester that is not shown every agent:
+/// the host on the surface `seed` makes every change of an agent of the
+/// profile `worker` at once, and a person decides every create of such an
+/// agent that an agent of the profile `planner` or a person asks for.
+fn limited_sight_policy() -> Arc<IdentityCreationPolicy> {
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "approval": {"rules": [
+                {"change": ["create", "archive", "remove"],
+                 "requester": {"kind": "host", "surface": "seed"},
+                 "target": {"profile": ["worker"]}, "outcome": {"kind": "allow"}},
+                {"change": ["create"], "requester": {"kind": "agent", "profile": ["planner"]},
+                 "target": {"profile": ["worker"]}, "outcome": approval},
+                {"change": ["create"], "requester": {"kind": "human"},
+                 "target": {"profile": ["worker"]}, "outcome": approval},
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// A launch over a roster with an agent private to a person, under
+/// [`limited_sight_policy`], with a removed agent's name (`zz-former`) and
+/// a worker member (`zz-temp`).
+async fn limited_sight_rig(state: &Path) -> Rig {
+    let (runtime, asked, fail_next_session) = launch_roster(
+        state,
+        &fresh_mob_id(),
+        false,
+        true,
+        Arc::new(RosterWithPrivate {
+            first_message: false,
+        }),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(limited_sight_policy(), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let seed = ChangeRequester::host("seed");
+    let made = rig
+        .change(
+            &seed,
+            "s-1",
+            create_of(json!([{"name": "zz-former", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    for (request_id, remove) in [("s-2", false), ("s-3", true)] {
+        let agent = agent_ref("zz-former", &rig.digest("zz-former").await);
+        let change = if remove {
+            IdentityChangeSpec::Remove(agent)
+        } else {
+            IdentityChangeSpec::Archive(agent)
+        };
+        let ended = rig.change(&seed, request_id, change).await;
+        assert_eq!(ended.token(), "done", "{ended:?}");
+    }
+    Box::pin(rig.runtime.mob_handle().spawn_spec(SpawnMemberSpec::new(
+        "worker",
+        meerkat_mob::AgentIdentity::from("zz-temp"),
+    )))
+    .await
+    .expect("a worker member is spawned");
+    rig
+}
+
+/// The principal key of the person `id`: a change held for a decision
+/// records the person who asked for it under such a key.
+fn person_key(id: &str) -> String {
+    meerkat_core::approval::decision::DecisionPrincipalKey::of(
+        &PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            id,
+            meerkat_core::TrustDomainId::new("people.example").expect("a trust domain"),
+        )
+        .expect("a person"),
+    )
+    .expect("a principal key")
+    .to_string()
+}
+
+/// The two requesters of the rows that are not shown every agent, each
+/// with the family as its calls reach it: an agent, and a person whose
+/// view of the mob shows two agents only.
+fn of_limited_sight(rig: &Rig) -> [(&'static str, Arc<dyn IdentityFamily>, ChangeRequester); 2] {
+    [
+        (
+            "an agent",
+            rig.family(),
+            ChangeRequester::agent_recorded(PLANNER),
+        ),
+        (
+            "a person of limited sight",
+            rig.runtime
+                .identity_family_seen_by(Arc::new(SeesOnly(&[HOST_A, PLANNER])))
+                .expect("the family as a caller that sees two agents"),
+            ChangeRequester::human(person_key("person-2")),
+        ),
+    ]
+}
+
+/// A requester that is not shown every agent is answered under a name
+/// whose holder it is not shown exactly as under a name no agent holds:
+/// the plan answers the same plan and the create is held the same way,
+/// whether an agent it is not shown, a removed agent's name or a worker
+/// member holds the name. Once a person approved it, the create under the
+/// taken name is refused when it is carried out, and its operation says so
+/// and names no holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requester_of_limited_sight_is_answered_under_a_name_it_is_not_shown_as_under_a_free_name()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = limited_sight_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
+    // A plan, without what names the request: its digests, and the name.
+    let plan_of = |mut plan: Value, name: &str| {
+        for digest in ["request_digest", "subject_digest"] {
+            plan.as_object_mut().expect("a plan").remove(digest);
+        }
+        serde_json::from_str::<Value>(&plan.to_string().replace(name, "NAME"))
+            .expect("a plan is JSON")
+    };
+    // What a held create answers, by its members.
+    let members_of = |outcome: &IdentityOutcome| {
+        let answer = outcome.to_json();
+        let mut members: Vec<String> = answer
+            .as_object()
+            .expect("an outcome")
+            .keys()
+            .cloned()
+            .collect();
+        members.sort_unstable();
+        (answer["outcome"].clone(), members)
+    };
+
+    let mut held_under_the_private_agent = None;
+    for (index, (who, family, requester)) in of_limited_sight(&rig).into_iter().enumerate() {
+        let free = format!("zz-nobody-{index}");
+        let free_plan = planned_create(&family, &mob, &requester, "p-free", one(&free))
+            .await
+            .unwrap_or_else(|said| panic!("{who}: the plan under a free name: {said}"));
+        assert_eq!(free_plan["outcome"], json!("require_approval"), "{who}");
+        let free_plan = plan_of(free_plan, &free);
+        let free_held = asked_create(&family, &mob, &requester, "c-free", one(&free)).await;
+        assert_eq!(
+            free_held.token(),
+            "pending_decision",
+            "{who}: {free_held:?}"
+        );
+        let free_held = members_of(&free_held);
+
+        for name in ["confidant", "zz-former", "zz-temp"] {
+            let plan = planned_create(&family, &mob, &requester, &format!("p-{name}"), one(name))
+                .await
+                .unwrap_or_else(|said| panic!("{who}: the plan under {name}: {said}"));
+            assert_eq!(
+                plan_of(plan, name),
+                free_plan,
+                "{who}: the plan under {name} is the plan under a free name"
+            );
+            let held =
+                asked_create(&family, &mob, &requester, &format!("c-{name}"), one(name)).await;
+            assert_eq!(
+                members_of(&held),
+                free_held,
+                "{who}: the create under {name} is held as under a free name: {held:?}"
+            );
+            if name == "confidant" && index == 0 {
+                held_under_the_private_agent = Some((requester.clone(), decision_of(&held)));
+            }
+        }
+    }
+
+    // Approved, the create under the taken name is refused when it is
+    // carried out: the operation names the refusal and no holder.
+    let (requester, decision_id) = held_under_the_private_agent.expect("the agent's held create");
+    approve(&rig.runtime, &decision_id).await;
+    let operation =
+        OperationId::for_request(&requester.recorded(), "c-confidant").expect("a request id");
+    let family = rig.family();
+    let host = ChangeRequester::host("seed");
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    let ended = loop {
+        match family
+            .read(&mob, &host, IdentityRead::Operation(operation.clone()))
+            .await
+        {
+            Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome)))
+                if outcome.token() != "pending_decision" =>
+            {
+                break outcome;
+            }
+            Ok(_) => {}
+            Err(refusal) => panic!("the operation is read: {refusal}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approved create was neither carried out nor refused"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        ended.to_json(),
+        json!({
+            "outcome": "refused",
+            "kind": "decision_closed",
+            "state": "execution_refused",
+            "retryable": false,
+            "detail": "The approved change was refused when it was carried out (name_taken).",
+        }),
+        "{ended:?}"
+    );
     rig.shutdown().await;
 }
 

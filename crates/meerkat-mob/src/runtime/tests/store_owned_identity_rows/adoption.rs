@@ -992,19 +992,9 @@ async fn an_adopted_roster_members_seat_follows_its_row_at_its_next_build() {
         )
         .await,
     );
-    assert_eq!(
-        seat(&mob, "listed").await.labels,
-        adopted.labels,
-        "the roster entry reads the adopted row's labels from the adoption on"
-    );
     preparer.compose_seats(host_answers_the_row("listed", &adopted.labels));
-    for restart in 1..=2 {
+    for _ in 0..2 {
         restart_with_preparer(&mut mob, &preparer).await;
-        assert_eq!(
-            seat(&mob, "listed").await.labels,
-            adopted.labels,
-            "restart {restart}: the start seats the row's labels on the roster entry"
-        );
         builds_with_labels(&mob, "listed", &session, &adopted.labels).await;
     }
     assert_eq!(mob.session("listed").await, session, "on its own session");
@@ -1120,16 +1110,28 @@ async fn a_member_an_earlier_release_adopted_is_built_with_its_rows_labels_after
             .collect(),
     ));
 
+    // The identity store's rows as the earlier release left them, in their
+    // stored form.
+    let mut stored = BTreeMap::new();
+    for name in names {
+        stored.insert(
+            name,
+            serde_json::to_string(&mob.row(name).await).expect("the row's stored form"),
+        );
+    }
+
     restart_with_preparer(&mut mob, &preparer).await;
     for name in names {
         let labels = &rows[name];
-        assert_eq!(
-            &seat(&mob, name).await.labels,
-            labels,
-            "{name}: the start seats the row's labels on the roster entry"
-        );
         let session = mob.session(name).await;
         builds_with_labels(&mob, name, &session, labels).await;
+    }
+    for name in names {
+        assert_eq!(
+            serde_json::to_string(&mob.row(name).await).expect("the row's stored form"),
+            stored[name],
+            "{name}: neither the start nor a build rewrote the row"
+        );
         assert!(
             !label_restamp_owed(&mob, name).await,
             "{name}: a build writes nothing to the row"

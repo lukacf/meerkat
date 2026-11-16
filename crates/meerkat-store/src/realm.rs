@@ -1875,6 +1875,168 @@ mod tests {
         assert_eq!(parsed.backend, first_backend);
     }
 
+    /// What an error on a lock file's own name means to a caller that wants
+    /// the lock, and what taking the manifest lock does with it. The platform
+    /// is a parameter of the code under test, so both platforms' answers are
+    /// checked on every host.
+    mod lock_file_errors {
+        use super::*;
+        use std::io::ErrorKind;
+
+        const WINDOWS: bool = true;
+        const NOT_WINDOWS: bool = false;
+
+        #[test]
+        fn a_refused_permission_is_a_holder_on_windows() {
+            assert_eq!(
+                classify_lock_file_error(ErrorKind::PermissionDenied, WINDOWS),
+                LockFileError::Held,
+                "a lock file that is being removed refuses a create or an open of its name"
+            );
+        }
+
+        #[test]
+        fn a_refused_permission_is_an_error_off_windows() {
+            assert_eq!(
+                classify_lock_file_error(ErrorKind::PermissionDenied, NOT_WINDOWS),
+                LockFileError::Fatal
+            );
+        }
+
+        #[test]
+        fn an_existing_lock_file_is_a_holder_on_every_platform() {
+            for windows in [WINDOWS, NOT_WINDOWS] {
+                assert_eq!(
+                    classify_lock_file_error(ErrorKind::AlreadyExists, windows),
+                    LockFileError::Held,
+                    "windows: {windows}"
+                );
+            }
+        }
+
+        #[test]
+        fn any_other_error_is_an_error_on_every_platform() {
+            for kind in [
+                ErrorKind::NotFound,
+                ErrorKind::InvalidInput,
+                ErrorKind::StorageFull,
+                ErrorKind::ReadOnlyFilesystem,
+                ErrorKind::ResourceBusy,
+                ErrorKind::TimedOut,
+                ErrorKind::Interrupted,
+                ErrorKind::Other,
+            ] {
+                for windows in [WINDOWS, NOT_WINDOWS] {
+                    assert_eq!(
+                        classify_lock_file_error(kind, windows),
+                        LockFileError::Fatal,
+                        "{kind:?}, windows: {windows}"
+                    );
+                }
+            }
+        }
+
+        fn refused() -> std::io::Error {
+            std::io::Error::from(ErrorKind::PermissionDenied)
+        }
+
+        async fn create_lock_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .await
+        }
+
+        // Paused clock in the three rows below: the waits between two takes
+        // elapse virtually.
+
+        #[tokio::test(start_paused = true)]
+        async fn taking_the_lock_on_windows_waits_out_refused_creates_and_then_takes_it() {
+            let temp = tempfile::tempdir().unwrap();
+            let lock_path = temp.path().join(".realm_manifest.lock");
+            let lock_path = lock_path.as_path();
+            let started = Instant::now();
+            let mut creates = 0u32;
+            let taken = ManifestLockGuard::acquire_with(lock_path, "team", WINDOWS, || {
+                creates += 1;
+                let refuse = creates <= 3;
+                async move {
+                    if refuse {
+                        Err(refused())
+                    } else {
+                        create_lock_file(lock_path).await
+                    }
+                }
+            })
+            .await;
+            assert!(
+                taken.is_ok(),
+                "creates refused while the lock is given back are waited out: {:?}",
+                taken.as_ref().err()
+            );
+            assert_eq!(creates, 4, "three refused creates, then the one that took");
+            assert!(lock_path.exists(), "the lock is held: its file exists");
+            let waited = started.elapsed();
+            assert!(
+                waited >= MANIFEST_LOCK_RETRY_DELAY * 3 && waited < MANIFEST_LOCK_TIMEOUT,
+                "one retry delay per refused create, inside the deadline: {waited:?}"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn taking_the_lock_on_windows_times_out_when_creates_stay_refused() {
+            let temp = tempfile::tempdir().unwrap();
+            let lock_path = temp.path().join(".realm_manifest.lock");
+            let started = Instant::now();
+            let mut creates = 0u32;
+            let taken = ManifestLockGuard::acquire_with(&lock_path, "team", WINDOWS, || {
+                creates += 1;
+                async { Err(refused()) }
+            })
+            .await;
+            assert!(
+                matches!(
+                    taken.as_ref().err(),
+                    Some(StoreError::RealmManifestLockTimeout { realm_id }) if realm_id == "team"
+                ),
+                "a permission that stays refused ends in the lock timeout: {:?}",
+                taken.as_ref().err()
+            );
+            assert!(creates > 1, "the create was tried again: {creates}");
+            let waited = started.elapsed();
+            assert!(
+                waited >= MANIFEST_LOCK_TIMEOUT
+                    && waited < MANIFEST_LOCK_TIMEOUT + MANIFEST_LOCK_RETRY_DELAY * 2,
+                "the wait ends at the existing deadline: {waited:?}"
+            );
+            assert!(!lock_path.exists(), "no lock file is left behind");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn taking_the_lock_off_windows_fails_at_once_on_a_refused_create() {
+            let temp = tempfile::tempdir().unwrap();
+            let lock_path = temp.path().join(".realm_manifest.lock");
+            let started = Instant::now();
+            let mut creates = 0u32;
+            let taken = ManifestLockGuard::acquire_with(&lock_path, "team", NOT_WINDOWS, || {
+                creates += 1;
+                async { Err(refused()) }
+            })
+            .await;
+            assert!(
+                matches!(
+                    taken.as_ref().err(),
+                    Some(StoreError::Io(err)) if err.kind() == ErrorKind::PermissionDenied
+                ),
+                "a refused permission is returned as it is: {:?}",
+                taken.as_ref().err()
+            );
+            assert_eq!(creates, 1, "the create is not tried again");
+            assert_eq!(started.elapsed(), Duration::ZERO, "nothing is waited for");
+        }
+    }
+
     /// The first open of a realm nobody has opened before creates it: the
     /// call succeeds, the manifest on disk is the one it returned, and no
     /// temporary file is left. It runs on every platform; where a directory

@@ -266,9 +266,9 @@ describe("GatingInboxPanel question sets", () => {
     const hintOf = (view: ReturnType<typeof render>, id: string) =>
       view.getByTestId(`decision-card:${id}`).querySelector(".cc-decision__hint")?.textContent;
     const NOT_LISTED = "This card has no answer form: the list of questions agents asked does not hold this set. "
-      + "It is answered in coordinator's conversation, or here once the list holds it.";
+      + "It is answered in coordinator's conversation or here, once the list holds it.";
     const NOT_READ = "This card has no answer form: the questions agents asked could not be read here. "
-      + "This set is answered in coordinator's conversation, or here once they can be read.";
+      + "This set is answered in coordinator's conversation or here, once they can be read.";
 
     const view = render(panel(sets()));
     // The list is read and does not hold the set.
@@ -298,7 +298,7 @@ describe("GatingInboxPanel question sets", () => {
     );
     expect(view.getByTestId(`decision-card:${OTHER_ID}`).querySelector(".cc-decision__hint")?.textContent)
       .toBe("This card has no answer form: the list of questions agents asked does not hold this set. "
-        + "It is answered in the asking agent's conversation, or here once the list holds it.");
+        + "It is answered in the asking agent's conversation or here, once the list holds it.");
   });
 
   it("draws a question set's rendering without the closing note the gateway names beside it", async () => {
@@ -331,7 +331,7 @@ describe("GatingInboxPanel question sets", () => {
     expect(card.textContent).not.toContain("it runs an earlier Console");
     expect(card.querySelector(".cc-decision__hint")?.textContent)
       .toBe("This card has no answer form: the list of questions agents asked does not hold this set. "
-        + "It is answered in coordinator's conversation, or here once the list holds it.");
+        + "It is answered in coordinator's conversation or here, once the list holds it.");
     // An answer that names no added text is drawn whole, whatever it ends with.
     expect(renderingOf({ rendering: HELD + NOTE })).toBe(HELD + NOTE);
     // Only the text the answer ends with is cut.

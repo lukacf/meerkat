@@ -153,7 +153,8 @@ temporary directory (or `LIVE_LOG_DIR`), never into the repository.
 The target builds nothing. Build first what you want it to cover:
 `make -C examples hosts sdk live-build` for the SDK, CLI and Rust examples,
 and `make -C examples web realtime` for the browser and realtime examples
-(example 032 also needs its guest files: run its `examples.sh` once). The
+(example 032 also needs the WebCM files and the runtime package that its
+`examples.sh` prepares before it serves). The
 browser examples run in headless Chromium with every agent on
 `gemini-4-hydrogen`, reached through the proxy of `sdks/web`.
 

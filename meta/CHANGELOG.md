@@ -303,6 +303,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   0.9.15 source; the remedy for a refused agent by a host's run on the
   published 0.9.15 gateway; the update right after an adoption by reading.)
 
+- Side chats and the memory tool after a restart (added 2026-11-16). With
+  agent memory on and the `memory` tool in the agent's profile, a side chat is
+  not offered the `memory` tool after a gateway restart until its source agent
+  has taken a turn in the new process. A call to the tool meanwhile answers
+  that the tool was not found, and the gateway logs nothing about it. A side
+  chat that existed before the restart is offered the tool once the agent has
+  taken its turn. A side chat that is forked after the restart and before the
+  agent's turn stays without the tool in that process, also after the agent's
+  turn; a further restart and the agent's turn give it the tool. After a
+  restart, let the source agent take one turn before its side chats are used.
+  (By a run on the published 0.9.15 `meta-rpc-gateway` archive for Linux
+  x86_64 with a scripted model; the other platforms and `meta_gateway` were
+  not run.)
+
 - Agent memory of private side chats (0.9.11 through 0.9.16). The known issue
   published with 0.9.15 is unchanged in this release. On a Console that
   several people sign in to, with agent memory on (it is off unless

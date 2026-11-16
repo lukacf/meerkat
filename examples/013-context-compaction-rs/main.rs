@@ -23,6 +23,12 @@ use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use tokio::sync::mpsc;
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a limit of
+/// 1,024 a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     meerkat_runtime::host_stack::run_host("013-context-compaction", async_main)?
 }
@@ -71,7 +77,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "claude-sonnet-5-5".to_string(),
-        max_tokens: 1024,
+        max_tokens: MAX_TOKENS_PER_TURN,
         structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
         self_hosted_server_id: None,
@@ -102,7 +108,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
              Always reference earlier topics when relevant. Give thorough, \
              detailed explanations with code examples.",
         )
-        .max_tokens_per_turn(1024)
+        .max_tokens_per_turn(MAX_TOKENS_PER_TURN)
         .resume_session(session)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
         .await?;

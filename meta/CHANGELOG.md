@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   another revision than the stored one. A host that reads the stored
   revision out of the old sentence meets the new one, with both revisions
   still in it as numbers. The error's type, its code (`-32014`) and its
-  fields are unchanged.
+  fields are unchanged. What the revision is and where a host learns it:
+  [One-shot mob definition update](docs/reference/configuration.mdx#one-shot-mob-definition-update).
 
 ## [0.9.15] - 2026-11-15
 

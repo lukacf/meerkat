@@ -361,6 +361,13 @@ impl Drop for RealmLeaseGuard {
         }
         if let Some(join) = self.join.take() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                // The heartbeat task removes the record as its last step,
+                // but only if the runtime polls it again: a runtime dropped
+                // right after this guard (a server at an ordinary end)
+                // never does, and the record would read as a live lease
+                // until it went stale. So the record is removed here too,
+                // synchronously; the task's own removal then finds nothing.
+                let _ = std::fs::remove_file(&self.lease_path);
                 std::mem::drop(handle.spawn(async move {
                     let _ = join.await;
                 }));

@@ -805,6 +805,19 @@ impl CreatedIdentityRecord {
         self.resealed()
     }
 
+    /// Whether an adoption from a roster spec wrote this row: its spec is
+    /// what the identity's host declared for it, and the member the
+    /// adoption found was seated before the identity had a row.
+    pub(crate) fn adopted_from_roster(&self) -> bool {
+        matches!(
+            self.provenance.entered,
+            IdentityEntered::Adopted {
+                from: crate::identity::IdentityAdoptedFrom::Roster,
+                ..
+            }
+        )
+    }
+
     /// The row with its removal record set, sealed again.
     pub fn with_removal(
         mut self,

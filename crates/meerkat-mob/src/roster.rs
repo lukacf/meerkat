@@ -276,6 +276,13 @@ pub struct Roster {
     /// against ([`Self::seat_row_labels`]).
     #[serde(skip)]
     seat_row_labels: BTreeMap<AgentIdentity, (Generation, BTreeMap<String, String>)>,
+    /// The identities whose member's last seat row is still the one its
+    /// adoption into store custody found: the adoption's binding row (a
+    /// `MemberSessionBindingRecovered` row with the Created origin) records
+    /// the identity, and its member's next seat row, or its retirement,
+    /// lets it go ([`Self::seat_is_as_adopted`]).
+    #[serde(skip)]
+    seats_as_adopted: BTreeSet<AgentIdentity>,
     /// The sessions whose member comms endpoint (and so its public key) a
     /// journal row of this mob recorded: a `MemberSpawned` or a
     /// `MemberSessionBindingRecovered` row naming the session with its
@@ -421,6 +428,7 @@ impl Roster {
                 {
                     self.seat_row_labels.remove(agent_identity);
                 }
+                self.seats_as_adopted.remove(agent_identity);
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
                 // A stale abandonment marker can replay after a successor
@@ -473,10 +481,14 @@ impl Roster {
                 // An adoption into store custody (the row's Created origin)
                 // makes the member a host root, live and on replay: its
                 // former spawner no longer reaches it.
-                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created)
-                    && let Some(entry) = self.entries.get_mut(&recovered.agent_identity)
-                {
-                    entry.spawned_by = None;
+                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created) {
+                    if let Some(entry) = self.entries.get_mut(&recovered.agent_identity) {
+                        entry.spawned_by = None;
+                    }
+                    // The member's last seat row is the one this adoption
+                    // found, until its next seat row.
+                    self.seats_as_adopted
+                        .insert(recovered.agent_identity.clone());
                 }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
@@ -554,6 +566,7 @@ impl Roster {
                 self.incarnation_builds.clear();
                 self.seat_builds.clear();
                 self.seat_row_labels.clear();
+                self.seats_as_adopted.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
             _ => {}
@@ -605,6 +618,7 @@ impl Roster {
             incarnation_builds: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
             seat_row_labels: BTreeMap::new(),
+            seats_as_adopted: BTreeSet::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
                 .into_iter()
@@ -806,8 +820,12 @@ impl Roster {
     /// answers: the member released, or left as it is because it holds
     /// work), and at a start for a row
     /// that records its seat is owed a label restamp
-    /// (`CreatedIdentityRecord::label_restamp_owed`). No other seat is
-    /// touched: a label only a seat carries stays on its entry. Only the
+    /// (`CreatedIdentityRecord::label_restamp_owed`). An adoption from a
+    /// roster spec is such an act too: its commit sets the entry from the
+    /// row it wrote, and a start does while the member's last seat row is
+    /// still the one the adoption found ([`Self::seat_is_as_adopted`]). No
+    /// other seat is touched: a label only a seat carries stays on its
+    /// entry. Only the
     /// roster entry changes: no seat row is written, the member keeps its
     /// generation, fence and session, and its live session keeps the labels
     /// it was built with until its next build.
@@ -849,6 +867,18 @@ impl Roster {
                 .get(agent_identity)
                 .map_or(&entry.labels, |(_, labels)| labels),
         )
+    }
+
+    /// Whether `agent_identity`'s last seat row is still the one its
+    /// adoption into store custody found: no seat row of its member was
+    /// written since. Such a member was seated before its identity had a
+    /// row, so its seat row can carry other labels than the row the
+    /// adoption wrote. An adoption from a roster spec makes that row the
+    /// identity's record, as an update does: the adoption's commit, a start
+    /// and a build read such a member's seat labels from the row
+    /// ([`Self::set_store_owned_seat_labels`]), and write nothing.
+    pub(crate) fn seat_is_as_adopted(&self, agent_identity: &AgentIdentity) -> bool {
+        self.seats_as_adopted.contains(agent_identity)
     }
 
     /// Whether a journal row of this mob recorded the member comms endpoint
@@ -913,6 +943,8 @@ impl Roster {
             identity.clone(),
             (member_spawned.generation, member_spawned.labels.clone()),
         );
+        // A new seat row: the seat is no longer the one an adoption found.
+        self.seats_as_adopted.remove(identity);
         match member_spawned.kickoff_prompt() {
             Some(prompt) => {
                 self.owed_kickoff_prompts.insert(

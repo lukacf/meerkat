@@ -7,7 +7,7 @@ RKAT_RPC ?= $(RKAT_TARGET)/debug/rkat-rpc
 
 .DEFAULT_GOAL := verify
 .NOTPARALLEL:
-.PHONY: verify rust standalone codemob mdm sdk shell web realtime hosts web-runtime wasm-comms browsers
+.PHONY: verify rust standalone codemob mdm sdk shell web realtime hosts web-runtime wasm-comms browsers live live-dry live-build
 
 # These are deterministic checks, not external-provider or physical-device tests.
 verify: rust standalone sdk shell web realtime
@@ -77,3 +77,27 @@ realtime: browsers hosts
 	cd "$(ROOT)" && npm --prefix examples/037-live-webrtc-web run build
 	cd "$(ROOT)" && npm --prefix examples/037-live-webrtc-web test
 	cd "$(ROOT)" && RKAT_RPC="$(RKAT_RPC)" node examples/037-live-webrtc-web/tests/local-host-smoke.cjs
+
+# The cheapest path of each example that reaches a provider: one line per
+# example, PASS, FAIL or SKIP. Not part of `verify`: it needs provider keys
+# (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY; an example whose key is
+# absent is skipped) and makes real calls, about 300 short ones for the whole
+# set. The run refuses to start when its estimate is above LIVE_MAX_CALLS
+# (600 by default). `make live-dry` lists what would run and what would be
+# skipped, and calls nothing. LIVE_ONLY="001 036" runs a selection.
+# It builds nothing: run `make hosts sdk live-build` first, and `make web
+# realtime` for the browser and realtime examples. See tests/live/run.sh.
+RKAT_REST ?= $(RKAT_TARGET)/debug/rkat-rest
+LIVE_ENV = RKAT="$(RKAT)" RKAT_RPC="$(RKAT_RPC)" RKAT_REST="$(RKAT_REST)" \
+	RKAT_TARGET="$(RKAT_TARGET)" PYTHON="$(PYTHON)"
+
+live:
+	cd "$(ROOT)" && $(LIVE_ENV) examples/tests/live/run.sh
+
+live-dry:
+	cd "$(ROOT)" && $(LIVE_ENV) examples/tests/live/run.sh --dry-run
+
+# The Rust examples as binaries, for `make live`.
+live-build:
+	cd "$(ROOT)" && "$(CARGO)" build --locked -p meerkat -p meerkat-mob --examples \
+		--features meerkat/jsonl-store,meerkat/session-compaction,meerkat/memory-store-session,meerkat/skills

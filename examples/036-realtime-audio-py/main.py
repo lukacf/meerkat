@@ -105,6 +105,7 @@ class TextProbeSignals:
     turn_completed: asyncio.Event = field(default_factory=asyncio.Event)
     turn_failed: asyncio.Event = field(default_factory=asyncio.Event)
     channel_closed: asyncio.Event = field(default_factory=asyncio.Event)
+    adapter_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class TranscriptPrinter:
@@ -550,6 +551,8 @@ async def live_receiver(
                 printer.status(f"command rejected: {obs.get('message', '')}")
             elif kind == "ready":
                 printer.status("adapter ready")
+                if text_probe_signals is not None:
+                    text_probe_signals.adapter_ready.set()
     finally:
         await playback.close()
 
@@ -597,6 +600,14 @@ async def run_text_probe(
     program was stopped from outside (Ctrl-C, SIGTERM) before that. A failed
     response or a channel that closed first raises.
     """
+    ends = {
+        "turn failure": signals.turn_failed,
+        "channel close": signals.channel_closed,
+        "stop": stop_event,
+    }
+    # Input sent before the adapter reports `ready` can be lost with the
+    # channel, so wait for that observation first.
+    await wait_for_first_event({"adapter ready": signals.adapter_ready, **ends}, timeout_s=timeout_s)
     await connection.send_input(
         {
             "kind": "text",
@@ -608,11 +619,6 @@ async def run_text_probe(
     )
     await channel.commit_input()
     printer.status("text probe sent; waiting for a tool request or turn completion event")
-    ends = {
-        "turn failure": signals.turn_failed,
-        "channel close": signals.channel_closed,
-        "stop": stop_event,
-    }
     await wait_for_first_event(
         {"tool request": signals.tool_requested, "turn completion": signals.turn_completed, **ends},
         timeout_s=timeout_s,

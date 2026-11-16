@@ -1,6 +1,6 @@
 # Meerkat Connect
 
-Give your agents the tools they need. Meerkat Connect combines more than 100
+Give your agents the tools they need. Meerkat Connect combines 100
 adopted OSS integrations with agent-led discovery and installation beyond the
 catalog. Describe a task, review the proposed access and let Connect guide setup.
 

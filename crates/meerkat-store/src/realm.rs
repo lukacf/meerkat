@@ -276,9 +276,17 @@ enum LockFileError {
 
 /// Classify an error from creating or probing a lock file. `windows` is the
 /// platform the answer is for (`cfg!(windows)` in the product).
-fn classify_lock_file_error(kind: std::io::ErrorKind, _windows: bool) -> LockFileError {
+///
+/// A holder gives a lock back by removing its file. On Windows the file
+/// keeps its name until the removal completes, and a create or an open of
+/// the name is refused with "Access is denied" in that moment: the lock is
+/// still held. A lock file that really cannot be created gives the same
+/// answer there, so the caller's deadline is what ends that wait. On every
+/// other platform a refused permission is a real one.
+fn classify_lock_file_error(kind: std::io::ErrorKind, windows: bool) -> LockFileError {
     match kind {
         std::io::ErrorKind::AlreadyExists => LockFileError::Held,
+        std::io::ErrorKind::PermissionDenied if windows => LockFileError::Held,
         _ => LockFileError::Fatal,
     }
 }

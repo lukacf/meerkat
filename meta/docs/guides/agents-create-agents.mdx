@@ -180,7 +180,11 @@ Every change answers one typed outcome, the same on every surface:
 | `pending_preparation` | The create committed, and at least one agent (its `state` is `pending_preparation`) waits for the host to prepare it: it has no member, takes no message and runs nothing until the host settles it, and its first message runs once then. | Nothing: no tool settles it. `identity_list` and `identity_get` read it as `readiness: "preparation_pending"`, and the identical call with the same `request_id` returns where it stands. |
 | `refused` | Nothing was written. `kind` is one of a closed vocabulary, `field` names the argument, `detail` says what to send instead, `retryable` says whether the same call may succeed later. | Fix what `detail` names, or retry later when `retryable` is true. |
 
-A person cannot approve a request they made themselves.
+A person cannot approve a request they made themselves. Who may approve is
+set outside the policy, in the approver map of the launch's access file:
+without a binding for the rule's approver id a held change can only be
+withdrawn or lapse at its deadline (see
+[Approval rules](/reference/identity-policy#approval-rules)).
 
 A tool's answer is this outcome without its `operation_id`. An operation id
 is the host's handle on a change (`meta/identity/operation` reads by it): an

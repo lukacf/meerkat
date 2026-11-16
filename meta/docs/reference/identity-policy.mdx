@@ -202,6 +202,20 @@ on the stdio gateway. An agent that asked is told
 the outcome by a message to itself; host code and a person read
 `meta/identity/operation`.
 
+Who may decide a held change is not part of this policy. A rule names an
+approver id, and the people who hold that id are the ones the launch's
+access file binds to it under `[approvers."<id>"]` (see
+[Approver identities](/concepts/access-control#approver-identities)). The
+gateway reads that map from the access file whether or not the file's
+`enabled` is `true`: a host that keeps access control off still writes the
+file, with `enabled = false` and the bindings. With no access file, or with
+a map that binds nobody to the rule's approver id, the change is held and
+nobody can decide it: `meta/decisions/list` notices it as `held` and not as
+`presented`, the stdio operator's `meta/decisions/decide` is refused
+`not_eligible`, and the change stays `pending_decision` until it is withdrawn
+or lapses at its deadline. A change held that way can still be decided once
+the gateway is started again with an access file that binds the approver.
+
 A person's approval is evidence, never authority over the policy. When an
 approved change is carried out, the policy the launch has then is asked
 again: if its rules deny the change now, nothing is executed, the decision

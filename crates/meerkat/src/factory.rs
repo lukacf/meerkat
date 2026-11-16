@@ -2417,25 +2417,37 @@ impl BuildMonitorRerunAdmission {
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait::async_trait]
 impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunAdmission {
-    async fn admits(&self) -> bool {
+    async fn answer(&self) -> meerkat_tools::builtin::shell::MonitorRerunAnswer {
+        use meerkat_tools::builtin::shell::MonitorRerunAnswer;
         if self.policy.as_ref().is_some_and(|policy| {
             !policy.permits_call(
                 Self::MONITOR_START,
                 meerkat_core::ToolMutationClass::Mutating,
             )
         }) {
-            return false;
+            return MonitorRerunAnswer::Refused;
         }
+        // Nothing bound yet: the build has not said what the session may
+        // do, so nothing is decided.
         let Some(bound) = self.bound.get() else {
-            return false;
+            return MonitorRerunAnswer::NotKnown;
         };
         // The session's durable visibility layers. Where they hide the
         // monitor, or `shell`, which bounds it, the session cannot call
         // it, so its recorded monitor is not run again. The turn's own
-        // overlay is not a durable layer and is not asked.
+        // overlay is not a durable layer and is not asked. The filters are
+        // composed as they are stored; the tool scope drops an entry whose
+        // witness no longer applies, which no built-in shell name has.
         if let Some(owner) = &bound.visibility {
-            let Ok(state) = owner.visibility_state() else {
-                return false;
+            let state = match owner.visibility_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "the session's tool filters could not be read for a monitor's re-run"
+                    );
+                    return MonitorRerunAnswer::NotKnown;
+                }
             };
             let layers = meerkat_core::ToolScope::compose(&[
                 state.capability_base_filter,
@@ -2444,11 +2456,11 @@ impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunA
                 state.active_filter,
             ]);
             if !layers.allows(Self::MONITOR_START) {
-                return false;
+                return MonitorRerunAnswer::Refused;
             }
         }
         let Some(gate) = &bound.gate else {
-            return true;
+            return MonitorRerunAnswer::Admitted;
         };
         // The monitor is never wider than `shell`: a grant gate that is
         // closed for either name closes the re-run. (The execution policy
@@ -2457,34 +2469,49 @@ impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunA
         for name in std::iter::once(Self::MONITOR_START).chain(
             meerkat_core::tool_scope::tool_never_wider_than(Self::MONITOR_START),
         ) {
-            if !Self::gate_is_open_for(gate, name).await {
-                return false;
+            match Self::gate_is_open_for(gate, name).await {
+                MonitorRerunAnswer::Admitted => {}
+                closed_or_not_known => return closed_or_not_known,
             }
         }
-        true
+        MonitorRerunAnswer::Admitted
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl BuildMonitorRerunAdmission {
     /// Whether `gate` leaves the shell tool `name` open at this moment: not
-    /// gated, or gated and opened by a live grant.
-    async fn gate_is_open_for(gate: &meerkat_core::tool_grant::ToolGrantGate, name: &str) -> bool {
+    /// gated, or gated and opened by a live grant. Grants that cannot be
+    /// read are not an answer.
+    async fn gate_is_open_for(
+        gate: &meerkat_core::tool_grant::ToolGrantGate,
+        name: &str,
+    ) -> meerkat_tools::builtin::shell::MonitorRerunAnswer {
+        use meerkat_tools::builtin::shell::MonitorRerunAnswer;
         let provenance = meerkat_core::ToolProvenance {
             kind: meerkat_core::ToolSourceKind::Shell,
             source_id: name.into(),
             artifact: None,
         };
         if !gate.is_gated(name, Some(&provenance)) {
-            return true;
+            return MonitorRerunAnswer::Admitted;
         }
         let view = meerkat_core::tool_grant::GatedToolView::new(
             BTreeSet::from([meerkat_core::ToolName::new(name)]),
             BTreeMap::new(),
         );
-        gate.open_names(&view, None)
-            .await
-            .is_ok_and(|open| open.contains(name))
+        match gate.open_names(&view, None).await {
+            Ok(open) if open.contains(name) => MonitorRerunAnswer::Admitted,
+            Ok(_) => MonitorRerunAnswer::Refused,
+            Err(refusal) => {
+                tracing::warn!(
+                    tool = name,
+                    code = refusal.code(),
+                    "the session's tool grants could not be read for a monitor's re-run"
+                );
+                MonitorRerunAnswer::NotKnown
+            }
+        }
     }
 }
 

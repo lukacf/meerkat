@@ -153,6 +153,29 @@ mod tests {
         assert_eq!(defined, ShellToolSet::tool_names());
     }
 
+    /// The tool scope's rule that `monitor_start` is never wider than
+    /// `shell` names two tools this family owns. Both names are this
+    /// family's own, so a rename here cannot leave the rule behind.
+    #[test]
+    fn the_scopes_rule_for_the_monitor_names_this_familys_tools() {
+        let names = ShellToolSet::tool_names();
+        assert_eq!(
+            meerkat_core::tool_scope::tool_never_wider_than("monitor_start"),
+            Some("shell")
+        );
+        for name in ["monitor_start", "shell"] {
+            assert!(names.contains(&name), "{name} is a tool of this family");
+        }
+        for name in names {
+            if let Some(bound) = meerkat_core::tool_scope::tool_never_wider_than(name) {
+                assert!(
+                    names.contains(&bound),
+                    "{name} is bounded by {bound}, which is no tool of this family"
+                );
+            }
+        }
+    }
+
     // ==================== ShellToolSet::new Tests ====================
 
     #[test]

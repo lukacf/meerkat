@@ -95,6 +95,8 @@ class SharedState:
     notes: list[str] = field(default_factory=list)
     delegation_queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Set when the voice_session_note callback has run (the text probe waits for it).
+    note_saved: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -279,6 +281,7 @@ async def register_tools(client: MeerkatClient, state: SharedState, printer: Tra
             state.notes.append(f"{timestamp} {text}")
             count = len(state.notes)
         printer.tool(f"saved note #{count}: {text}")
+        state.note_saved.set()
         return f"Saved note #{count}."
 
     @client.tool(
@@ -584,8 +587,16 @@ async def run_text_probe(
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
     signals: TextProbeSignals,
+    state: SharedState,
     timeout_s: float = 45.0,
-) -> None:
+) -> bool:
+    """Send the probe and wait for its outcome.
+
+    Returns True when the model requested the note tool and the callback ran,
+    or when the turn completed without a tool request. Returns False when the
+    program was stopped from outside (Ctrl-C, SIGTERM) before that. A failed
+    response or a channel that closed first raises.
+    """
     await connection.send_input(
         {
             "kind": "text",
@@ -597,28 +608,34 @@ async def run_text_probe(
     )
     await channel.commit_input()
     printer.status("text probe sent; waiting for a tool request or turn completion event")
-    completed = await wait_for_first_event(
-        {
-            "tool request": signals.tool_requested,
-            "turn completion": signals.turn_completed,
-            "turn failure": signals.turn_failed,
-            "channel close": signals.channel_closed,
-        },
+    ends = {
+        "turn failure": signals.turn_failed,
+        "channel close": signals.channel_closed,
+        "stop": stop_event,
+    }
+    await wait_for_first_event(
+        {"tool request": signals.tool_requested, "turn completion": signals.turn_completed, **ends},
         timeout_s=timeout_s,
     )
-    if completed == "channel close":
-        if signals.tool_requested.is_set():
-            completed = "tool request"
-        elif signals.turn_completed.is_set():
-            completed = "turn completion"
-        elif signals.turn_failed.is_set():
-            completed = "turn failure"
-    if completed == "turn failure":
+    if signals.tool_requested.is_set() and not any(event.is_set() for event in ends.values()):
+        # The request alone proves little: wait until the callback has run, so
+        # that the probe covers the tool round trip.
+        printer.status("text probe observed tool request; waiting for the callback")
+        await wait_for_first_event({"note saved": state.note_saved, **ends}, timeout_s=timeout_s)
+    # Several events can be set by now; the most telling one decides.
+    if signals.turn_failed.is_set():
         raise RuntimeError("text probe response failed; see the response failed status line")
-    if completed == "channel close":
-        raise RuntimeError("text probe channel closed before a tool request or turn completion event")
-    printer.status(f"text probe observed {completed}")
+    if signals.tool_requested.is_set() and state.note_saved.is_set():
+        printer.status("text probe observed the tool request and its callback")
+    elif signals.turn_completed.is_set() and not signals.tool_requested.is_set():
+        printer.status("text probe observed turn completion")
+    elif signals.channel_closed.is_set():
+        raise RuntimeError("text probe channel closed before a tool callback or turn completion")
+    else:
+        printer.status("text probe stopped before a tool callback or turn completion")
+        return False
     stop_event.set()
+    return True
 
 
 async def wait_for_enter(stop_event: asyncio.Event) -> None:
@@ -863,7 +880,8 @@ async def async_main(argv: list[str] | None = None) -> int:
     connection = None
     channel: MemberLiveChannel | None = None
     tasks: list[asyncio.Task[Any]] = []
-    probe_task: asyncio.Task[None] | None = None
+    probe_task: asyncio.Task[bool] | None = None
+    exit_status = 0
     text_probe_signals = TextProbeSignals() if args.text_probe else None
 
     try:
@@ -904,7 +922,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             if text_probe_signals is None:
                 raise RuntimeError("text probe signals were not initialized")
             probe_task = asyncio.create_task(
-                run_text_probe(connection, channel, printer, stop_event, text_probe_signals),
+                run_text_probe(connection, channel, printer, stop_event, text_probe_signals, state),
                 name="text probe",
             )
             tasks.append(probe_task)
@@ -922,16 +940,21 @@ async def async_main(argv: list[str] | None = None) -> int:
         if probe_task is not None:
             # The probe decides the exit status. A channel that closed before
             # the probe saw its event stops the receiver first; wait for the
-            # probe so that its failure is raised instead of a clean exit.
-            await probe_task
+            # probe so that its failure is raised instead of a clean exit. A
+            # stop from outside ends the probe at once: status 130.
+            if not await probe_task:
+                exit_status = 130
     finally:
         stop_event.set()
-        if connection is not None:
-            with contextlib.suppress(Exception):
-                await connection.close()
+        # Close the channel through the mob first, the websocket after it: the
+        # host then ends the transport itself and the websocket close does not
+        # wait for an answer.
         if channel is not None:
             with contextlib.suppress(Exception):
                 await channel.close()
+        if connection is not None:
+            with contextlib.suppress(Exception):
+                await connection.close()
         await playback.close()
         for task in tasks:
             task.cancel()
@@ -942,7 +965,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                 print(f"  {index}. {note}")
         await client.close()
 
-    return 0
+    return exit_status
 
 
 def main() -> None:

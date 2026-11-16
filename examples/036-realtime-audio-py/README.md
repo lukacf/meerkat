@@ -71,10 +71,12 @@ python3 examples/036-realtime-audio-py/main.py --realm live-demo
 ```
 
 `--text-probe` keeps the live WebSocket path but sends one text chunk
-instead of opening local audio devices. It waits for a tool request or turn
-completion event, and fails at once if the provider fails the response
-(`turn_failed`), so it is useful for checking runtime plumbing on machines
-without a microphone.
+instead of opening local audio devices. It asks the model to call the note
+tool and waits until that callback has run (or, when the model answers without
+the tool, until the turn completes). It fails at once if the provider fails the
+response (`turn_failed`) or the channel closes first, and exits with status 130
+when it is stopped from outside, so it is useful for checking runtime plumbing
+on machines without a microphone.
 
 ## Troubleshooting
 

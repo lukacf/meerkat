@@ -13,6 +13,7 @@
 //! The version 4 logs of these rows are written here, by SQL, from that
 //! description: a log this release wrote, the four statements of the move,
 //! the ledger row, and the frames of another mob.
+#![allow(clippy::expect_used)]
 
 use super::*;
 

@@ -240,10 +240,14 @@ pub enum GptLiveBrokerObservation {
     },
     /// The user turn about to finish continues the utterance of
     /// `delegation`: that delegation was created while this user's turn was
-    /// open (a pause mid-sentence), and this is the next user turn to finish
-    /// before any other client delegation. The protocol has no utterance
+    /// open (a pause mid-sentence), this is the next user turn to finish
+    /// before any other client delegation, and the user's speech from the
+    /// delegated words to the end of this turn holds no pause longer than a
+    /// sentence does (1.6 s between one word's end and the next word's
+    /// start on the session timeline). The protocol has no utterance
     /// identity, so this is the closest typed stand-in for "the rest of the
-    /// same sentence". Emitted immediately before the turn's `TurnFinished`.
+    /// same sentence"; words spoken after such a pause are an ordinary
+    /// turn. Emitted immediately before the turn's `TurnFinished`.
     UserTurnContinuesDelegation {
         turn: GptLiveTurnRef,
         delegation: GptLiveDelegationRef,

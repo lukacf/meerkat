@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Console: a page that runs another console bundle than its gateway serves
+  says so. `GET /console/experience` names the bundle the gateway serves in
+  `console_bundle` (the version its page gives its app script); a page
+  opened before the gateway was upgraded, and an application that mounts
+  another console than the gateway's, show one notice: "This Console was
+  updated. Reload the page to use the new version." The console's library
+  (`console/dist/index.cjs`) carries the id of the bundle it was built
+  beside, so an application that mounts it can tell too. There is no notice
+  on a gateway of an earlier release, which names no bundle, and a console
+  of an earlier release ignores the new member.
+
 ### Fixed
 
 - Console: the decision card of a set of questions that the list of

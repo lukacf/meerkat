@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   called, and a WebRTC live channel could not be answered over stdio. The
   Python SDK's `live_webrtc_answer` and `live_webrtc_answer_pending` and
   the TypeScript SDK's `liveWebrtcAnswer` and `liveWebrtcAnswerPending`
-  send this request. Every Meta release had this, from 0.9.0 on. The
+  send this request. Meta 0.9.0 through 0.9.15 had this (by a run on
+  0.9.15's code; the earlier versions read from the source). The
   method now answers as the `meta/live/*` methods do: with the live
   handler's answer, or with `-32050` `live_unavailable` on a gateway that
   has no live handler. The Console's own door was not affected: it hands
@@ -43,10 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and then rejected. The SDK calls that send these always name the member:
   `live_open_typed` with an execution identity, `live_connect` and
   `live_webrtc_answer_pending` in Python, `liveOpenTyped`, `liveConnect`
-  and `liveWebrtcAnswerPending` in TypeScript. Every Meta release had this,
-  from 0.9.0 on. A request that names no member, a live open without
+  and `liveWebrtcAnswerPending` in TypeScript. Meta 0.9.0 through 0.9.15
+  had this (by runs on 0.9.15's code; the earlier versions read from the
+  source). A request that names no member, a live open without
   `execution_identity`, every other live method and the Console's own door
-  were not affected.
+  were not affected. Two things stay as they were: a member the gateway's
+  identity runtime does not hold is still refused these calls (the open
+  with `execution_identity`, the answer under its receipts and
+  `live_connect` / `liveConnect`), and every live open over stdio still
+  takes the gateway's voice path first, which ends a Console voice call in
+  progress on that gateway.
 
 ## [0.9.15] - 2026-11-15
 

@@ -1046,15 +1046,68 @@ impl CarriedLiveRpcResponseDelivery {
 
     /// Run `future` with the carried slot as its request's slot. With none
     /// carried, `future` runs as it is.
+    ///
+    /// The request holds the slot until its writer has settled it. If only
+    /// this carry holds the slot when `future` returns, the request was
+    /// dropped while `future` ran (a gateway that shuts down aborts its
+    /// request tasks) and no writer will settle what `future` handed over:
+    /// that custody is rejected here, on the task that made it, before this
+    /// returns.
     pub(crate) async fn scope<F>(self, future: F) -> F::Output
     where
         F: std::future::Future,
     {
-        match self.0 {
-            Some(slot) => LIVE_RPC_RESPONSE_DELIVERY.scope(slot, future).await,
-            None => future.await,
+        let Some(slot) = self.0 else {
+            return future.await;
+        };
+        let output = LIVE_RPC_RESPONSE_DELIVERY
+            .scope(Arc::clone(&slot), future)
+            .await;
+        if Arc::strong_count(&slot) == 1 {
+            let abandoned = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(custody) = abandoned
+                && let Err(error) = custody.rejected().await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "a live response custody left by a dropped request could not be rejected"
+                );
+            }
+        }
+        output
+    }
+}
+
+/// A live handler's error answer publishes nothing. Reject the custody the
+/// handler left in the current request's slot before it answered the error:
+/// the outer writer settles a written answer as delivered, whatever the
+/// answer says. The Console's door does the same at its own capture.
+#[cfg(feature = "openai-live")]
+pub(crate) async fn reject_live_rpc_response_delivery_of_error(
+    response: JsonRpcResponse,
+) -> JsonRpcResponse {
+    if response.error.is_some() {
+        let left = LIVE_RPC_RESPONSE_DELIVERY
+            .try_with(|slot| {
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+            })
+            .ok()
+            .flatten();
+        if let Some(custody) = left
+            && let Err(error) = custody.rejected().await
+        {
+            tracing::warn!(
+                error = %error,
+                "the custody of a live response that answered an error could not be rejected"
+            );
         }
     }
+    response
 }
 
 #[cfg(feature = "openai-live")]

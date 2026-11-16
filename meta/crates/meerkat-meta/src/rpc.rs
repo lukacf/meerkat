@@ -2471,6 +2471,21 @@ fn is_stdio_module_method(method: &str) -> bool {
     method.contains('/') && !method.starts_with("meta/") && !is_stdio_live_method(method)
 }
 
+/// The live arm's answer as the stdio dispatch gives it. On an `openai-live`
+/// build an error answer first rejects the response custody its handler left
+/// for the gateway's writer: an error publishes nothing, and the writer
+/// settles a written answer as delivered whatever it says.
+async fn stdio_live_answer(response: JsonRpcResponse) -> JsonRpcResponse {
+    #[cfg(feature = "openai-live")]
+    {
+        crate::live_wiring::reject_live_rpc_response_delivery_of_error(response).await
+    }
+    #[cfg(not(feature = "openai-live"))]
+    {
+        response
+    }
+}
+
 async fn handle_unified_rpc_json_inner(
     runtime: &UnifiedRuntime,
     runtime_owner: Option<&Arc<UnifiedRuntime>>,
@@ -6822,7 +6837,7 @@ async fn handle_unified_rpc_json_inner(
         method if is_stdio_live_method(method) => {
             // A gateway with no live handler answers every live method with
             // the typed `live_unavailable` refusal.
-            match live {
+            let response = match live {
                 None => crate::live_wiring::live_unavailable_response(response_id),
                 Some(live) => {
                     let params = request.params.clone();
@@ -6929,7 +6944,8 @@ async fn handle_unified_rpc_json_inner(
                         }
                     }
                 }
-            }
+            };
+            stdio_live_answer(response).await
         }
         method if crate::mob_announcements::rpc::is_announcement_method(method) => {
             let service = runtime.mob_announcements();

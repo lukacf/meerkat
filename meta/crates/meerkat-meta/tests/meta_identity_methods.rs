@@ -4424,6 +4424,83 @@ async fn a_requester_of_limited_sight_is_answered_under_a_name_it_is_not_shown_a
     rig.shutdown().await;
 }
 
+/// A caller's view of the mob that shows every agent and says so.
+struct SeesEveryAgent;
+
+impl PeerVisibility for SeesEveryAgent {
+    fn sees(&self, _name: &str) -> bool {
+        true
+    }
+
+    fn sees_every_agent(&self) -> bool {
+        true
+    }
+}
+
+/// A caller that has a view of the mob is answered under a name that no
+/// agent holds, but a removed agent's name or a worker member does, exactly
+/// as under a name nothing holds: the plan is the same plan and the create
+/// is held the same way, for a worker member private to a person, for
+/// another worker member and for a removed agent's name. A view decides
+/// agents: it says nothing of those holders, even one that shows every
+/// agent, so only the host's own call is refused such a name before the
+/// hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_with_a_view_is_answered_under_a_name_no_agent_holds_as_under_a_free_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = limited_sight_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    Box::pin(mob.spawn_spec(
+        SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("zz-side")).with_labels(
+            BTreeMap::from([(PRIVATE_TO.to_owned(), "person-1".to_owned())]),
+        ),
+    ))
+    .await
+    .expect("a worker member private to a person is spawned");
+    let family = rig
+        .runtime
+        .identity_family_seen_by(Arc::new(SeesEveryAgent))
+        .expect("the family as a caller whose view shows every agent");
+    let requester = ChangeRequester::human(person_key("person-3"));
+    let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
+    let plan_of = |mut plan: Value, name: &str| {
+        for digest in ["request_digest", "subject_digest"] {
+            plan.as_object_mut().expect("a plan").remove(digest);
+        }
+        serde_json::from_str::<Value>(&plan.to_string().replace(name, "NAME"))
+            .expect("a plan is JSON")
+    };
+    let members_of = |outcome: &IdentityOutcome| {
+        let answer = outcome.to_json();
+        let mut members: Vec<String> = answer
+            .as_object()
+            .expect("an outcome")
+            .keys()
+            .cloned()
+            .collect();
+        members.sort_unstable();
+        (answer["outcome"].clone(), members)
+    };
+
+    let mut answers = Vec::new();
+    for name in ["zz-nobody", "zz-side", "zz-temp", "zz-former"] {
+        let plan = planned_create(&family, &mob, &requester, &format!("p-{name}"), one(name))
+            .await
+            .unwrap_or_else(|said| panic!("the plan under {name}: {said}"));
+        let held = asked_create(&family, &mob, &requester, &format!("c-{name}"), one(name)).await;
+        assert_eq!(held.token(), "pending_decision", "{name}: {held:?}");
+        answers.push((plan_of(plan, name), members_of(&held)));
+    }
+    for (answer, holder) in answers[1..].iter().zip([
+        "a worker member private to a person",
+        "a worker member",
+        "a removed agent's name",
+    ]) {
+        assert_eq!(answer, &answers[0], "under {holder} as under a free name");
+    }
+    rig.shutdown().await;
+}
+
 /// A requester that is not shown every agent is refused `name_taken`
 /// before the hold under the name of an agent it is shown, and the plan of
 /// that create is refused the same way: an agent, and a person whose view

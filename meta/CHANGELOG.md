@@ -3120,12 +3120,15 @@ Security, Upgrade and Changed.
   whether or not the access file has `enabled = true`. When the gateway was
   started with no access file, or with one whose map does not bind that id,
   the change is held, a decide is refused (`-32602`, `decision_refused`,
-  `not_eligible`), and nobody can decide it: left so, it ends at its
-  deadline. Nothing is lost: start the gateway again with an access file
+  `not_eligible`), and nobody can decide it. Until its deadline nothing is
+  lost: start the gateway again before the deadline with an access file
   whose approver map binds the id, and the held change is presented and can
-  be decided. Run on the released 0.9.15 gateway for a host's create under a
-  rule that requires approval, decided by the stdio operator; not run: a
-  decide attested by another declared ingress, a held change of another
+  be decided. Left undecided, it ends at its deadline: the operation is
+  refused (`decision_closed`), nothing is changed, and the change has to be
+  asked again. Run on the released 0.9.15 gateway for a host's create under
+  a rule that requires approval, decided by the stdio operator, and for the
+  deadline with that rule's decision timeout set to five seconds; not run:
+  a decide attested by another declared ingress, a held change of another
   kind, and an edit of the map without a restart. See
   [Approval rules](docs/reference/identity-policy.mdx#approval-rules).
 

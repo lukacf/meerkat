@@ -453,6 +453,14 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
     /// that serves it, so a gated server's tool that appeared after the last
     /// boundary is gated too. The seam reads the clock after its own awaits,
     /// so the caller hands the call on with no await in between.
+    ///
+    /// A tool that is never wider than another
+    /// ([`crate::tool_scope::tool_never_wider_than`]) stands on that tool's
+    /// grant: where the gate gates the bound, the call is first adjudicated
+    /// as a use of the bound, under the bound's name, so a grant of `shell`
+    /// that ended since the model request refuses a `monitor_start` call as
+    /// it refuses `shell`. The call's own gate, when it has one, is
+    /// adjudicated last, so its reading is the one the call is handed on at.
     async fn admit_grant_gated_call(
         &self,
         call: ToolCallView<'_>,
@@ -461,27 +469,32 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         let Some(gate) = self.tool_grant_gate.as_ref() else {
             return Ok(());
         };
-        let provenance = self
-            .inner
-            .tools()
-            .iter()
-            .find(|tool| tool.name == call.name)
-            .and_then(|tool| tool.provenance.clone());
-        if !gate.is_gated(call.name, provenance.as_ref()) {
-            return Ok(());
+        let tools = self.inner.tools();
+        let names = crate::tool_scope::tool_never_wider_than(call.name)
+            .into_iter()
+            .chain(std::iter::once(call.name));
+        for name in names {
+            let provenance = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.provenance.clone());
+            if !gate.is_gated(name, provenance.as_ref()) {
+                continue;
+            }
+            let server = provenance
+                .as_ref()
+                .filter(|provenance| provenance.kind == crate::types::ToolSourceKind::Mcp)
+                .map(|provenance| provenance.source_id.as_str());
+            gate.admit_call(crate::tool_grant::ToolGrantCall {
+                name,
+                server,
+                call_id: call.id,
+                run_id: context.and_then(ToolDispatchContext::run_id),
+            })
+            .await
+            .map_err(|refusal| refusal.into_tool_error(name))?;
         }
-        let server = provenance
-            .as_ref()
-            .filter(|provenance| provenance.kind == crate::types::ToolSourceKind::Mcp)
-            .map(|provenance| provenance.source_id.as_str());
-        gate.admit_call(crate::tool_grant::ToolGrantCall {
-            name: call.name,
-            server,
-            call_id: call.id,
-            run_id: context.and_then(ToolDispatchContext::run_id),
-        })
-        .await
-        .map_err(|refusal| refusal.into_tool_error(call.name))
+        Ok(())
     }
 
     async fn evaluate_consequence_policy(

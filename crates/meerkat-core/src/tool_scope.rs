@@ -2597,7 +2597,10 @@ impl ToolScope {
     /// tool would be visible, or loadable from the deferred catalog. Such a
     /// call goes on to the dispatch gate, which adjudicates the grants and
     /// refuses it there, so a closed gated tool behind the deferred catalog
-    /// is refused as one the model sees would be.
+    /// is refused as one the model sees would be. A name that is never wider
+    /// than another ([`tool_never_wider_than`]) is closed by that tool's
+    /// gate too: `monitor_start` under a closed gate on `shell` goes on to
+    /// the dispatch gate likewise.
     pub fn hidden_only_by_closed_grant_gate(
         &self,
         name: &str,
@@ -2607,17 +2610,27 @@ impl ToolScope {
             .read()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let mut visibility_state = self.visibility_owner.visibility_state()?;
-        let provenance = state
-            .base_tools
-            .iter()
-            .find(|tool| tool.name == name)
-            .and_then(|tool| tool.provenance.clone());
-        if !visibility_state.tool_is_closed_by_grant_gate(name, provenance.as_ref()) {
+        // The gates that close the name: its own, and the gate of the tool
+        // it is never wider than, whose grant it stands on.
+        let closed: Vec<&str> = std::iter::once(name)
+            .chain(tool_never_wider_than(name))
+            .filter(|candidate| {
+                let provenance = state
+                    .base_tools
+                    .iter()
+                    .find(|tool| tool.name == *candidate)
+                    .and_then(|tool| tool.provenance.clone());
+                visibility_state.tool_is_closed_by_grant_gate(candidate, provenance.as_ref())
+            })
+            .collect();
+        if closed.is_empty() {
             return Ok(false);
         }
-        visibility_state
-            .tool_grant_open_names
-            .insert(ToolName::from(name));
+        for candidate in closed {
+            visibility_state
+                .tool_grant_open_names
+                .insert(ToolName::from(candidate));
+        }
         let composed = Self::compose_state_filters(
             &state,
             &visibility_state,

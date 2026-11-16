@@ -1234,9 +1234,8 @@ mod shell_family_monitor {
         build_runtime_backed_service, default_persistent_executor, materialize_session,
     };
     use meerkat::{
-        AgentFactory, AttemptWriteAuthority, Config, CreateSessionRequest, DetachedJobService,
-        DetachedJobStore, FactoryAgentBuilder, JobTerminalResult, PersistentSessionService,
-        Session, SessionId,
+        AgentFactory, Config, CreateSessionRequest, DetachedJobService, DetachedJobStore,
+        FactoryAgentBuilder, JobTerminalResult, PersistentSessionService, Session, SessionId,
     };
     use meerkat_client::types::LlmStream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
@@ -1696,15 +1695,22 @@ mod shell_family_monitor {
             .unwrap_or(0)
     }
 
-    /// A script that records each start in `marker` and then stays alive.
+    /// A script that records each start in `marker` and completes at once.
     fn recording_script(marker: &Path) -> String {
-        format!("printf 'run\\n' >> '{}'; sleep 20", marker.display())
+        format!(
+            "printf 'run\\n' >> '{}'; printf '%s\\n' '{{\"type\":\"complete\"}}'",
+            marker.display()
+        )
     }
 
-    /// One host lifetime in which a shell session starts a replayable
-    /// monitor, and whose stop loses the monitor's worker: the job is left
-    /// with its lease recorded as expired, as an abrupt stop leaves it once
-    /// the lease ran out. Answers the session and the monitor's job.
+    /// One host lifetime in which a shell session's model starts a
+    /// replayable monitor, and that leaves a monitor of the session whose
+    /// worker was lost: a second job with the recorded monitor's own
+    /// specification, whose first attempt holds a lease that expired long
+    /// ago, as an abrupt host stop leaves a running monitor once its lease
+    /// ran out. (A monitor's lease is its timeout plus a minute, so the row
+    /// plants the lost attempt instead of waiting for a real one.) Answers
+    /// the session and the lost monitor's job.
     async fn a_lifetime_that_loses_a_resumable_monitor(
         root: &Path,
         marker: &Path,
@@ -1713,7 +1719,7 @@ mod shell_family_monitor {
             MONITOR,
             serde_json::json!({
                 "command": recording_script(marker),
-                "timeout_secs": 60,
+                "timeout_secs": 30,
                 "restart_class": "replayable",
             }),
         );
@@ -1732,33 +1738,58 @@ mod shell_family_monitor {
             Some(false),
             "the session's `{MONITOR}` call is answered without an error"
         );
-        let jobs = lifetime.monitor_jobs(&session_id).await;
-        assert_eq!(jobs.len(), 1, "the call recorded one durable monitor job");
-        let job_id = jobs[0].job_id.clone();
+        let recorded = lifetime.monitor_jobs(&session_id).await;
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the call recorded one durable monitor job"
+        );
+        let recorded = recorded.into_iter().next().expect("the recorded monitor");
 
+        // The recorded monitor runs once and completes.
+        let jobs = DetachedJobService::new(lifetime.job_store.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while runs(marker) == 0 {
+        loop {
+            let terminal = jobs
+                .get(&recorded.job_id)
+                .await
+                .expect("read job")
+                .expect("job")
+                .terminal_result;
+            if terminal.is_some() {
+                break;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the monitor's script never started"
+                "the session's monitor never completed"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        assert_eq!(runs(marker), 1, "the monitor's script ran once");
 
-        let jobs = DetachedJobService::new(lifetime.job_store.clone());
-        let running = jobs.get(&job_id).await.expect("read job").expect("job");
-        jobs.observe_lease_expired(
-            &job_id,
-            AttemptWriteAuthority {
-                attempt_id: running.current_attempt_id.expect("a claimed attempt"),
-                fence: running.current_fence,
-            },
-            u64::MAX / 2,
+        // The lost monitor: the same recorded specification under its own
+        // identity, claimed by a worker that is gone.
+        let mut spec = recorded.spec.clone();
+        spec.execution_intent_id =
+            meerkat::ExecutionIntentId::from_string("monitor-call:lost-with-the-host")
+                .expect("intent");
+        spec.submission_key =
+            meerkat::JobSubmissionKey::new(format!("monitor:{session_id}:lost-with-the-host"))
+                .expect("submission key");
+        let lost = jobs.submit(spec).await.expect("submit the lost monitor");
+        jobs.claim_attempt(
+            &lost.job_id,
+            meerkat::AttemptClaim::new(
+                meerkat::WorkerId::new("monitor-worker:gone").expect("worker"),
+                1,
+                10,
+                meerkat::RunnerHandleRef::new("inproc-monitor:gone").expect("handle"),
+            ),
         )
         .await
-        .expect("record the worker as lost");
+        .expect("the lost worker's claim");
         lifetime.stand_down().await;
-        (session_id, job_id)
+        (session_id, lost.job_id)
     }
 
     /// What became of a lost monitor in the next host lifetime.

@@ -2528,6 +2528,10 @@ for (const pkg of localPackages.values()) {
         data.push("//crates/meerkat-mcp-server:rkat_mcp_bin");
         env.push(`        "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",`);
       }
+      if (key === "meerkat-mob-mcp" && target.name === "public_spawn_metadata_stdio") {
+        data.push("//crates/meerkat-mob-mcp:rkat_mob_mcp_bin");
+        env.push(`        "CARGO_BIN_EXE_rkat-mob-mcp": "$(rootpath //crates/meerkat-mob-mcp:rkat_mob_mcp_bin)",`);
+      }
       if (key === "meerkat-rest") {
         data.push("//crates/meerkat-rest:rkat_rest_bin");
         env.push(`        "CARGO_BIN_EXE_rkat-rest": "$(rootpath //crates/meerkat-rest:rkat_rest_bin)",`);

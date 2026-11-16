@@ -12628,6 +12628,183 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// The unified server's `tools/call` answers a reserved label or context
+    /// key on the two public mob spawn tools as invalid params with the
+    /// shared metadata rule's message, and the mob seats nobody; ordinary
+    /// labels and context are taken and stored.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_spawn_tools_refuse_reserved_metadata_keys() {
+        async fn create_mob(state: &MeerkatMcpState, mob_id: &str) {
+            Box::pin(handle_tools_call(
+                state,
+                "meerkat_mob_create",
+                &json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "worker": { "model": "claude-sonnet-4-6", "tools": {"comms": true} }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .expect("typed mob create should succeed");
+        }
+        fn with_key(key: &str) -> Value {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("org".to_string(), json!("acme"));
+            metadata.insert(key.to_string(), json!("caller-value"));
+            Value::Object(metadata)
+        }
+        // `meerkat_mob_spawn_many` gets an entry with no labels and no
+        // context first, then the entry that carries them.
+        fn arguments(tool: &str, mob_id: &str, labels: Value, context: Value) -> Value {
+            if tool == "meerkat_mob_spawn" {
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "w-labelled",
+                    "runtime_mode": "turn_driven",
+                    "labels": labels,
+                    "context": context,
+                })
+            } else {
+                json!({
+                    "mob_id": mob_id,
+                    "specs": [
+                        {
+                            "profile": "worker",
+                            "agent_identity": "w-plain",
+                            "runtime_mode": "turn_driven",
+                        },
+                        {
+                            "profile": "worker",
+                            "agent_identity": "w-labelled",
+                            "runtime_mode": "turn_driven",
+                            "labels": labels,
+                            "context": context,
+                        },
+                    ],
+                })
+            }
+        }
+
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let mut cases = Vec::new();
+        for tool in ["meerkat_mob_spawn", "meerkat_mob_spawn_many"] {
+            for key in [
+                "mob_id",
+                "role",
+                "meerkat_id",
+                "agent_identity",
+                "meerkat.runtime_id",
+                "Role",
+            ] {
+                cases.push((
+                    tool,
+                    with_key(key),
+                    Value::Null,
+                    format!(
+                        "metadata label key '{key}' is reserved for Meerkat-owned runtime facts"
+                    ),
+                ));
+            }
+            cases.push((
+                tool,
+                Value::Null,
+                with_key("meerkat.runtime_id"),
+                "app_context key 'meerkat.runtime_id' is reserved for Meerkat-owned runtime facts"
+                    .to_string(),
+            ));
+        }
+        let mut wrong = Vec::new();
+        for (case, (tool, labels, context, message)) in cases.into_iter().enumerate() {
+            let mob = format!("spawn-metadata-{case}");
+            create_mob(&state, &mob).await;
+            let outcome = Box::pin(handle_tools_call(
+                &state,
+                tool,
+                &arguments(tool, &mob, labels, context),
+            ))
+            .await;
+            let seated: Vec<String> = state
+                .mob_state
+                .mob_list_members(&meerkat_mob::MobId::from(mob.as_str()))
+                .await
+                .expect("list the mob's members")
+                .into_iter()
+                .map(|member| {
+                    format!(
+                        "'{}' with roster labels {:?}",
+                        member.agent_identity, member.labels
+                    )
+                })
+                .collect();
+            match outcome {
+                Err(err) if err.code == -32602 && err.message == message && seated.is_empty() => {}
+                Err(err) => wrong.push(format!(
+                    "{tool} answered {} '{}' (wanted -32602 '{message}'); seated: [{}]",
+                    err.code,
+                    err.message,
+                    seated.join(", ")
+                )),
+                Ok(_) => wrong.push(format!(
+                    "{tool} accepted the call (wanted -32602 '{message}'); seated: [{}]",
+                    seated.join(", ")
+                )),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "calls with a reserved key were not refused as the rule answers:\n{}",
+            wrong.join("\n")
+        );
+
+        for tool in ["meerkat_mob_spawn", "meerkat_mob_spawn_many"] {
+            let mob = format!(
+                "spawn-metadata-plain-{}",
+                if tool == "meerkat_mob_spawn" {
+                    "one"
+                } else {
+                    "many"
+                }
+            );
+            create_mob(&state, &mob).await;
+            Box::pin(handle_tools_call(
+                &state,
+                tool,
+                &arguments(
+                    tool,
+                    &mob,
+                    json!({"org": "acme", "tier": "gold"}),
+                    json!({"client_ref": {"view": "compact"}, "role": "reviewer"}),
+                ),
+            ))
+            .await
+            .unwrap_or_else(|err| panic!("{tool} takes ordinary labels: {}", err.message));
+            let members = state
+                .mob_state
+                .mob_list_members(&meerkat_mob::MobId::from(mob.as_str()))
+                .await
+                .expect("list the mob's members");
+            let labelled = members
+                .iter()
+                .find(|member| member.agent_identity.as_str() == "w-labelled")
+                .unwrap_or_else(|| panic!("{tool} seats the labelled member"));
+            assert_eq!(
+                labelled.labels,
+                BTreeMap::from([
+                    ("org".to_string(), "acme".to_string()),
+                    ("tier".to_string(), "gold".to_string()),
+                ]),
+                "{tool}: roster labels"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_mcp_handlers_sessions_read_list_interrupt_archive() {
         let (state, session_id) = state_with_persisted_session().await;

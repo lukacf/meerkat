@@ -2854,4 +2854,322 @@ mod tests {
             "nothing was committed"
         );
     }
+
+    // Caller labels and context on the two public spawn tools. Core reserves
+    // the mob discovery label keys and the `meerkat.` namespace for facts the
+    // runtime owns (`meerkat_core::surface_metadata`); the tools answer a
+    // reserved key as the JSON-RPC `mob/spawn` and `mob/spawn_many` methods
+    // do: invalid params with the rule's own message, and nothing spawned.
+
+    /// A fresh in-memory state with one mob of a `worker` profile. Mob ids
+    /// are unique per call: a test may open several, and the in-process
+    /// routes of a mob id outlive its state.
+    async fn spawn_metadata_mob() -> (Arc<MobMcpState>, String) {
+        static NEXT_MOB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let mob_id = format!(
+            "public-spawn-metadata-{}",
+            NEXT_MOB.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let state = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": mob_id,
+                    "profiles": {
+                        "worker": { "model": "gpt-5.4", "tools": {"comms": true} }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("create the mob");
+        (state, mob_id)
+    }
+
+    /// One line per seated member with the labels of its roster row, then
+    /// one line per `member_spawned` event with its labels.
+    async fn seated_label_sets(state: &Arc<MobMcpState>, mob_id: &str) -> Vec<String> {
+        let mob_id = meerkat_mob::MobId::from(mob_id);
+        let mut lines = Vec::new();
+        for member in state
+            .mob_list_members(&mob_id)
+            .await
+            .expect("list the mob's members")
+        {
+            lines.push(format!(
+                "member '{}' of profile '{}': roster labels {:?}",
+                member.agent_identity, member.role, member.labels
+            ));
+        }
+        for event in state
+            .mob_events(&mob_id, 0, 1000)
+            .await
+            .expect("read the mob's events")
+        {
+            if let meerkat_mob::MobEventKind::MemberSpawned(spawned) = event.kind {
+                lines.push(format!(
+                    "member_spawned event of '{}': labels {:?}",
+                    spawned.agent_identity, spawned.labels
+                ));
+            }
+        }
+        lines
+    }
+
+    fn spawn_metadata_with_key(key: &str) -> Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("org".to_string(), json!("acme"));
+        metadata.insert(key.to_string(), json!("caller-value"));
+        Value::Object(metadata)
+    }
+
+    /// Arguments of `meerkat_mob_spawn` (`"one"`) or of
+    /// `meerkat_mob_spawn_many` (`"many"`: an entry with no labels and no
+    /// context first, then the entry that carries them).
+    fn spawn_metadata_arguments(shape: &str, mob_id: &str, labels: Value, context: Value) -> Value {
+        match shape {
+            "one" => json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": "w-labelled",
+                "runtime_mode": "turn_driven",
+                "labels": labels,
+                "context": context,
+            }),
+            _ => json!({
+                "mob_id": mob_id,
+                "specs": [
+                    {
+                        "profile": "worker",
+                        "agent_identity": "w-plain",
+                        "runtime_mode": "turn_driven",
+                    },
+                    {
+                        "profile": "worker",
+                        "agent_identity": "w-labelled",
+                        "runtime_mode": "turn_driven",
+                        "labels": labels,
+                        "context": context,
+                    },
+                ],
+            }),
+        }
+    }
+
+    fn spawn_tool_of(shape: &str) -> &'static str {
+        match shape {
+            "one" => "meerkat_mob_spawn",
+            _ => "meerkat_mob_spawn_many",
+        }
+    }
+
+    /// The call is refused as invalid params with exactly `message`, and the
+    /// mob seats nobody (for a batch: none of its entries).
+    async fn assert_spawn_metadata_refused(
+        shape: &str,
+        labels: Value,
+        context: Value,
+        message: String,
+    ) {
+        let tool = spawn_tool_of(shape);
+        let (state, mob_id) = spawn_metadata_mob().await;
+        let outcome = handle_public_tools_call(
+            &state,
+            tool,
+            &spawn_metadata_arguments(shape, &mob_id, labels, context),
+        )
+        .await;
+        let seated = seated_label_sets(&state, &mob_id).await;
+        match outcome {
+            Err(err) => {
+                assert_eq!(err.code, -32602, "{tool} answers invalid params: {err:?}");
+                assert_eq!(err.message, message, "{tool}: {err:?}");
+            }
+            Ok(payload) => panic!(
+                "{tool} accepted the call and answered {payload}; the mob holds:\n{}",
+                seated.join("\n")
+            ),
+        }
+        assert!(
+            seated.is_empty(),
+            "a refused {tool} seats no member; the mob holds:\n{}",
+            seated.join("\n")
+        );
+    }
+
+    async fn assert_spawn_label_key_refused(shape: &str, key: &str) {
+        assert_spawn_metadata_refused(
+            shape,
+            spawn_metadata_with_key(key),
+            Value::Null,
+            format!("metadata label key '{key}' is reserved for Meerkat-owned runtime facts"),
+        )
+        .await;
+    }
+
+    async fn assert_spawn_context_key_refused(shape: &str, key: &str) {
+        assert_spawn_metadata_refused(
+            shape,
+            Value::Null,
+            spawn_metadata_with_key(key),
+            format!("app_context key '{key}' is reserved for Meerkat-owned runtime facts"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_refuses_the_label_key_mob_id() {
+        assert_spawn_label_key_refused("one", "mob_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_refuses_the_label_key_role() {
+        assert_spawn_label_key_refused("one", "role").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_refuses_the_label_key_meerkat_id() {
+        assert_spawn_label_key_refused("one", "meerkat_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_refuses_the_label_key_agent_identity() {
+        assert_spawn_label_key_refused("one", "agent_identity").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_refuses_a_label_key_of_the_meerkat_namespace() {
+        assert_spawn_label_key_refused("one", "meerkat.runtime_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_refuses_a_context_key_of_the_meerkat_namespace() {
+        assert_spawn_context_key_refused("one", "meerkat.runtime_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_the_label_key_mob_id() {
+        assert_spawn_label_key_refused("many", "mob_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_the_label_key_role() {
+        assert_spawn_label_key_refused("many", "role").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_the_label_key_meerkat_id() {
+        assert_spawn_label_key_refused("many", "meerkat_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_the_label_key_agent_identity() {
+        assert_spawn_label_key_refused("many", "agent_identity").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_a_label_key_of_the_meerkat_namespace() {
+        assert_spawn_label_key_refused("many", "meerkat.runtime_id").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_a_context_key_of_the_meerkat_namespace() {
+        assert_spawn_context_key_refused("many", "meerkat.runtime_id").await;
+    }
+
+    /// Core's rule reads label keys without regard to letter case: a key that
+    /// differs from a reserved name only in case is refused too, on each tool.
+    #[tokio::test]
+    async fn public_spawn_refuses_a_label_key_that_differs_only_in_letter_case() {
+        assert_spawn_label_key_refused("one", "Role").await;
+        assert_spawn_label_key_refused("one", "MOB_ID").await;
+    }
+
+    #[tokio::test]
+    async fn public_spawn_many_refuses_a_label_key_that_differs_only_in_letter_case() {
+        assert_spawn_label_key_refused("many", "Role").await;
+        assert_spawn_label_key_refused("many", "MOB_ID").await;
+    }
+
+    /// The tools answer with the message of the rule the JSON-RPC spawn
+    /// methods call, in the forms that rule covers beyond the plain keys: a
+    /// key in another letter case and the bare namespace token, as a label
+    /// key and (the namespace forms) as a top-level context key.
+    #[tokio::test]
+    async fn public_spawn_tools_answer_the_shared_metadata_rule() {
+        for shape in ["one", "many"] {
+            for key in [
+                "Role",
+                "Mob_Id",
+                "MEERKAT_ID",
+                "Agent_Identity",
+                "MEERKAT.runtime_id",
+                "meerkat",
+            ] {
+                let labels = BTreeMap::from([(key.to_string(), "caller-value".to_string())]);
+                let rule = meerkat::surface::validate_public_surface_metadata(Some(&labels), None)
+                    .expect_err("the shared rule refuses the label key");
+                assert_spawn_metadata_refused(shape, json!(labels), Value::Null, rule).await;
+            }
+            for key in ["MEERKAT.runtime_id", "meerkat"] {
+                let context = Value::Object(serde_json::Map::from_iter([(
+                    key.to_string(),
+                    json!("caller-value"),
+                )]));
+                let rule = meerkat::surface::validate_public_surface_metadata(None, Some(&context))
+                    .expect_err("the shared rule refuses the context key");
+                assert_spawn_metadata_refused(shape, Value::Null, context, rule).await;
+            }
+        }
+    }
+
+    /// Ordinary labels and context are taken as before: the member is seated
+    /// and its roster row and `member_spawned` event carry the caller's
+    /// labels. The mob discovery names are reserved as label keys only, so a
+    /// context may use them as top-level keys, as on the JSON-RPC methods.
+    #[tokio::test]
+    async fn public_spawn_tools_keep_ordinary_labels_and_context() {
+        let labels = json!({"org": "acme", "tier": "gold"});
+        let context = json!({"client_ref": {"view": "compact"}, "role": "reviewer"});
+        for shape in ["one", "many"] {
+            let tool = spawn_tool_of(shape);
+            let (state, mob_id) = spawn_metadata_mob().await;
+            handle_public_tools_call(
+                &state,
+                tool,
+                &spawn_metadata_arguments(shape, &mob_id, labels.clone(), context.clone()),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{tool} takes ordinary labels and context: {err:?}"));
+
+            let members = state
+                .mob_list_members(&meerkat_mob::MobId::from(mob_id.as_str()))
+                .await
+                .expect("list the mob's members");
+            let labelled = members
+                .iter()
+                .find(|member| member.agent_identity.as_str() == "w-labelled")
+                .unwrap_or_else(|| panic!("{tool} seats the labelled member"));
+            let expected = BTreeMap::from([
+                ("org".to_string(), "acme".to_string()),
+                ("tier".to_string(), "gold".to_string()),
+            ]);
+            assert_eq!(labelled.labels, expected, "{tool}: roster labels");
+            let seated = seated_label_sets(&state, &mob_id).await;
+            assert!(
+                seated.iter().any(|line| {
+                    line == &format!("member_spawned event of 'w-labelled': labels {expected:?}")
+                }),
+                "{tool}: the spawn event carries the labels; the mob holds:\n{}",
+                seated.join("\n")
+            );
+            assert_eq!(
+                members.len(),
+                if shape == "one" { 1 } else { 2 },
+                "{tool}: every entry is seated"
+            );
+        }
+    }
 }

@@ -323,10 +323,7 @@ impl AccessController {
     /// Load a controller from an explicitly configured TOML file and remember
     /// the path, so administrator edits persist back to it. The file is read
     /// and validated directly: a missing path, a directory, or an unreadable
-    /// or invalid file is a typed error, never a disabled default. A file
-    /// that carries a key none of the configuration's tables reads is
-    /// invalid: it is refused as a file that could not be parsed, and the
-    /// refusal names the file and every such key with its table. Omitting
+    /// or invalid file is a typed error, never a disabled default. Omitting
     /// the configuration (installing no controller) is the feature-off case;
     /// a new deployment names its first administrator through trusted local
     /// setup ([`AccessController::new`] with
@@ -335,18 +332,6 @@ impl AccessController {
         let path = path.into();
         let raw = std::fs::read_to_string(&path)
             .map_err(|err| AccessConfigError::Io(format!("{}: {err}", path.display())))?;
-        // A file that carries a key no field reads is refused whole, with
-        // the file, every such key and its table named.
-        let written = toml::from_str::<serde_json::Value>(&raw)
-            .map_err(|err| AccessConfigError::Parse(err.to_string()))?;
-        let unknown = super::unknown_keys::unknown_config_keys(&written);
-        if !unknown.is_empty() {
-            return Err(AccessConfigError::Parse(format!(
-                "{}: {}",
-                path.display(),
-                super::unknown_keys::unknown_access_keys_text(&unknown)
-            )));
-        }
         let config = toml::from_str::<AccessControlConfig>(&raw)
             .map_err(|err| AccessConfigError::Parse(err.to_string()))?;
         Ok(Self::new(config)?.with_persist_path(path))

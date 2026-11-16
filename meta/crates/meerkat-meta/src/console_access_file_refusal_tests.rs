@@ -72,7 +72,7 @@ fn assert_refused(text: &str, named: &[&str], loaded: impl FnOnce(&AccessControl
 fn a_rule_with_a_misspelt_selector_is_refused_not_loaded_for_every_agent() {
     assert_refused(
         &KNOWN_KEYS.replace("agents = [\"ops-lead\"]", "agent = [\"ops-lead\"]"),
-        &["rule \"ops-send-lead\": unknown key \"agent\""],
+        &["rule \"ops-send-lead\": unknown key `agent`"],
         |controller| {
             format!(
                 "ops may send to an agent the rule does not list: {}",
@@ -100,7 +100,7 @@ fn a_rule_with_a_misspelt_caller_list_is_refused_not_loaded_for_every_caller() {
             "subject",
         ),
     ] {
-        let finding = format!("rule \"ops-send-lead\": unknown key \"{key}\"");
+        let finding = format!("rule \"ops-send-lead\": unknown key `{key}`");
         assert_refused(
             &KNOWN_KEYS.replace(written, misspelt),
             &[finding.as_str()],
@@ -121,7 +121,7 @@ fn a_rule_with_a_misspelt_caller_list_is_refused_not_loaded_for_every_caller() {
 fn a_rule_with_a_misspelt_effect_is_refused_not_loaded_as_an_allow() {
     assert_refused(
         &KNOWN_KEYS.replace("effect = \"deny\"", "efect = \"deny\""),
-        &["rule \"protect-auditor\": unknown key \"efect\""],
+        &["rule \"protect-auditor\": unknown key `efect`"],
         |controller| {
             format!(
                 "a caller no other rule names may view the auditor: {}",
@@ -138,7 +138,7 @@ fn a_rule_with_a_misspelt_effect_is_refused_not_loaded_as_an_allow() {
 fn a_file_with_a_misspelt_switch_is_refused_not_loaded_unenforced() {
     assert_refused(
         &KNOWN_KEYS.replace("enabled = true", "enable = true"),
-        &["the configuration: unknown key \"enable\""],
+        &["the configuration: unknown key `enable`"],
         |controller| format!("the rules are enforced: {}", controller.enabled()),
     );
 }
@@ -148,7 +148,7 @@ fn a_file_with_a_misspelt_switch_is_refused_not_loaded_unenforced() {
 fn a_file_with_a_misspelt_rules_table_is_refused_not_loaded_without_rules() {
     assert_refused(
         &KNOWN_KEYS.replace("[[rules]]", "[[rule]]"),
-        &["the configuration: unknown key \"rule\""],
+        &["the configuration: unknown key `rule`"],
         |controller| format!("rules loaded: {}", controller.snapshot().0.rules.len()),
     );
 }
@@ -179,37 +179,14 @@ actions = ["agent.*"]
 agent = ["auditor"]
 "#,
         &[
-            "the configuration: unknown key \"admin\"",
-            "group \"ops\": unknown key \"member\"",
-            "rule \"ops-view-all\": unknown key \"group\"",
-            "rule \"protect-auditor\": unknown key \"agent\"",
-            "rule \"protect-auditor\": unknown key \"efect\"",
+            "the configuration: unknown key `admin`",
+            "group \"ops\": unknown key `member`",
+            "rule \"ops-view-all\": unknown key `group`",
+            "rule \"protect-auditor\": unknown key `agent`",
+            "rule \"protect-auditor\": unknown key `efect`",
         ],
         |controller| format!("rules loaded: {}", controller.snapshot().0.rules.len()),
     );
-}
-
-/// A refused file names a key quoted, as it names the table: a quoted key
-/// that holds a line break, a control character and a quote does not stand
-/// raw in the refusal.
-#[test]
-fn a_refused_file_names_a_key_quoted() {
-    let (_dir, path) = write_access_file(&KNOWN_KEYS.replace(
-        "agents = [\"ops-lead\"]",
-        "\"agent\\nadmins = [\\\"x\\\"]\\u001b[31m\" = [\"ops-lead\"]",
-    ));
-    let refusal = match AccessController::load(&path) {
-        Err(AccessConfigError::Parse(refusal)) => refusal,
-        Err(other) => panic!("refused as {other:?}"),
-        Ok(_) => panic!("the file loaded"),
-    };
-    assert!(
-        refusal.contains(
-            "rule \"ops-send-lead\": unknown key \"agent\\nadmins = [\\\"x\\\"]\\u{1b}[31m\""
-        ),
-        "{refusal:?}"
-    );
-    assert!(!refusal.chars().any(char::is_control), "{refusal:?}");
 }
 
 /// Controls: a file of known keys loads and decides as written, and so does

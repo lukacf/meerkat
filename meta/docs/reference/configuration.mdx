@@ -749,8 +749,8 @@ realm keeps no manifest; naming it reads the user document.
 
 That configuration is the members' whole configuration, not only its
 `[realm]`, `[self_hosted]` and `[models]` tables: `[comms]`, hooks, skills
-repositories, `[model_fallback]`, `[limits]`, `[agent]`, `[confinement]` and
-`[governance]` apply to every member as well. Only the gateway's own
+repositories, `[model_fallback]`, `[limits]` and `[agent]` apply to every
+member as well. Only the gateway's own
 overlays (`member_comms_address`, `compaction`) are layered on top, as for
 `meerkat_config_path`; a realm document that pins comms to a fixed address,
 for example, sends every member there unless `member_comms_address`

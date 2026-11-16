@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an entry of an approver's `people` or `ingress_subjects` is refused since
   0.9.11.
 
+- An agent's `mob_spawn_member`, `delegate` and `fork_off` refuse a call that
+  supplies the label `agent_identity`, in its own `labels` or in a `specs` or
+  `members` entry, as invalid arguments.
+
 ### Security
 
 - Console: a request that names an agent hidden from the caller because it is
@@ -456,12 +460,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   manifest, the panel listed it as tombstoned and its record read returned the
   body; the same for a record replaced by an update; the text was in the
   realm's files after shutdown. The removal step by a run on the released
-  0.9.15 gateway (three realms, an imported markdown file; the `import-failed`
-  file and the plain file's import by reading). The steward's and the
-  Distiller's clauses and the releases before 0.9.15 by reading: 0.9.9 to
-  0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their tags in Meta's
-  earlier repository for the same lines; the bundled store is the default from
-  0.7.20.)
+  0.9.15 gateway (three realms, an imported markdown file and a plain one left
+  behind, which the next start imported; the `import-failed` file by reading).
+  The steward's and the Distiller's clauses and the releases before 0.9.15 by
+  reading: 0.9.9 to 0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their
+  tags in Meta's earlier repository for the same lines; the bundled store is
+  the default from 0.7.20.)
 
 ## [0.9.15] - 2026-11-15
 
@@ -3708,12 +3712,12 @@ Security, Upgrade and Changed.
   manifest, the panel listed it as tombstoned and its record read returned the
   body; the same for a record replaced by an update; the text was in the
   realm's files after shutdown. The removal step by a run on the released
-  0.9.15 gateway (three realms, an imported markdown file; the `import-failed`
-  file and the plain file's import by reading). The steward's and the
-  Distiller's clauses and the releases before 0.9.15 by reading: 0.9.9 to
-  0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their tags in Meta's
-  earlier repository for the same lines; the bundled store is the default from
-  0.7.20.)
+  0.9.15 gateway (three realms, an imported markdown file and a plain one left
+  behind, which the next start imported; the `import-failed` file by reading).
+  The steward's and the Distiller's clauses and the releases before 0.9.15 by
+  reading: 0.9.9 to 0.9.14 at their tags; 0.7.20 to 0.9.7 by a search of their
+  tags in Meta's earlier repository for the same lines; the bundled store is
+  the default from 0.7.20.)
 
 ## [0.9.14] - 2026-11-11
 

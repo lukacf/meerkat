@@ -4134,7 +4134,9 @@ pub struct AgentFactory {
     /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
     /// When unset, a build takes `project_root` as that root (its
     /// `.rkat/config.toml` hooks, `.rkat/skills` and AGENTS.md); with neither
-    /// root set, it reads no project convention.
+    /// root set, it reads no project convention. A context root that does not
+    /// exist fails the build's prompt assembly; a `project_root` taken in its
+    /// place that does not exist holds no AGENTS.md, and the build goes on.
     pub context_root: Option<PathBuf>,
     /// Optional user-global convention root (typically HOME).
     pub user_config_root: Option<PathBuf>,
@@ -6618,6 +6620,25 @@ impl AgentFactory {
                     std::env::current_dir().unwrap_or_else(|_| self.store_path.clone())
                 })
         })
+    }
+
+    /// The directory a build reads project instructions (AGENTS.md) from.
+    ///
+    /// A context root the host named is passed on as it is: when it does not
+    /// exist, prompt assembly refuses the build. Without one the project
+    /// root is the default place to look, and a default that does not exist
+    /// holds no project instructions. A probe that itself fails keeps the
+    /// root, so prompt assembly reports that fault.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn project_instructions_root(&self) -> Option<&std::path::Path> {
+        if let Some(named) = self.context_root.as_deref() {
+            return Some(named);
+        }
+        let default_root = self.project_root.as_deref()?;
+        match tokio::fs::try_exists(default_root).await {
+            Ok(false) => None,
+            Ok(true) | Err(_) => Some(default_root),
+        }
     }
 
     fn realm_scope_root(&self, _build_config: &AgentBuildConfig) -> PathBuf {
@@ -10929,7 +10950,7 @@ impl AgentFactory {
                 crate::assemble_system_prompt(
                     config,
                     &prompt_override,
-                    _conventions_context_root,
+                    self.project_instructions_root().await,
                     &extra_sections,
                     &tool_usage_instructions,
                 )
@@ -28303,6 +28324,141 @@ mod prompt_tests {
             pending_sources: Arc::from([]),
         }));
         build_config
+    }
+
+    fn build_config_refusal(result: Result<super::DynAgent, super::BuildAgentError>) -> String {
+        match result {
+            Err(super::BuildAgentError::Config(text)) => text,
+            Err(other) => panic!("expected a configuration refusal, got {other:?}"),
+            Ok(_) => panic!("expected a configuration refusal, and the agent was built"),
+        }
+    }
+
+    /// A build that was given no context root looks for project instructions
+    /// in its project root. That root is a default: when the directory does
+    /// not exist there are no project instructions, and the agent is built
+    /// with the prompt it gets for a directory that holds no AGENTS.md.
+    #[tokio::test]
+    async fn default_convention_root_that_does_not_exist_yields_no_project_instructions() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        let absent = temp.path().join("absent");
+
+        let with_existing = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(&existing)
+            .builtins(false)
+            .build_agent(external_only_build_config(), &Config::default())
+            .await
+            .unwrap();
+        let with_absent = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(&absent)
+            .builtins(false)
+            .build_agent(external_only_build_config(), &Config::default())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("a default root that does not exist is absence, not a fault: {error:?}")
+            });
+
+        assert_eq!(
+            system_prompt_of(with_absent.session().messages()),
+            system_prompt_of(with_existing.session().messages()),
+        );
+    }
+
+    /// A context root the host named is a statement: when the directory does
+    /// not exist the build is refused, and the refusal names it.
+    #[tokio::test]
+    async fn named_context_root_that_does_not_exist_refuses_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("absent");
+
+        let refusal = build_config_refusal(
+            AgentFactory::new(temp.path().join("sessions"))
+                .project_root(&absent)
+                .context_root(&absent)
+                .builtins(false)
+                .build_agent(external_only_build_config(), &Config::default())
+                .await,
+        );
+        assert!(
+            refusal.contains("project AGENTS.md")
+                && refusal.contains("is not readable")
+                && refusal.contains(&absent.display().to_string()),
+            "{refusal}"
+        );
+    }
+
+    /// An AGENTS.md that exists in the default root and cannot be read is a
+    /// fault, not absence: the build is refused.
+    #[tokio::test]
+    async fn unreadable_agents_md_in_the_default_convention_root_refuses_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        // Not UTF-8: the file is there and its content cannot be read as text.
+        std::fs::write(&agents_md, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let refusal = build_config_refusal(
+            AgentFactory::new(temp.path().join("sessions"))
+                .project_root(temp.path())
+                .builtins(false)
+                .build_agent(external_only_build_config(), &Config::default())
+                .await,
+        );
+        assert!(
+            refusal.contains("project AGENTS.md")
+                && refusal.contains("is not readable")
+                && refusal.contains(&agents_md.display().to_string()),
+            "{refusal}"
+        );
+    }
+
+    /// A default root whose existence cannot be established (here: the
+    /// directory above it cannot be searched) is not taken for absent. The
+    /// root is passed on, and the build is refused with the fault.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn default_convention_root_that_cannot_be_probed_refuses_the_build() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let closed = temp.path().join("closed");
+        let default_root = closed.join("project");
+        std::fs::create_dir_all(&default_root).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A runner that reads through the closed directory (the superuser)
+        // cannot make the probe fail: the row has nothing to state there.
+        let probe_fails = std::fs::metadata(&default_root).is_err();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(&default_root)
+            .builtins(false);
+        let passed_on = factory
+            .project_instructions_root()
+            .await
+            .map(std::path::Path::to_path_buf);
+        let result = if probe_fails {
+            Some(
+                factory
+                    .build_agent(external_only_build_config(), &Config::default())
+                    .await,
+            )
+        } else {
+            None
+        };
+        // Reopen the directory before any assertion, so it can be removed.
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(result) = result else {
+            return;
+        };
+
+        assert_eq!(passed_on.as_deref(), Some(default_root.as_path()));
+        let refusal = build_config_refusal(result);
+        assert!(
+            refusal.contains("project AGENTS.md")
+                && refusal.contains("is not readable")
+                && refusal.contains(&default_root.display().to_string()),
+            "{refusal}"
+        );
     }
 
     /// Item A3: the mob family reaches a `tools.mob` member through two

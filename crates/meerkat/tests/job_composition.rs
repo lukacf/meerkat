@@ -1732,27 +1732,23 @@ mod shell_family_monitor {
         )
     }
 
-    /// One host lifetime in which a shell session's model starts a
-    /// replayable monitor, and that leaves a monitor of the session whose
-    /// worker was lost: a second job with the recorded monitor's own
-    /// specification, whose first attempt holds a lease that expired long
-    /// ago, as an abrupt host stop leaves a running monitor once its lease
-    /// ran out. (A monitor's lease is its timeout plus a minute, so the row
-    /// plants the lost attempt instead of waiting for a real one.) Answers
-    /// the session and the lost monitor's job.
-    async fn a_lifetime_that_loses_a_resumable_monitor(
-        root: &Path,
-        marker: &Path,
-    ) -> (SessionId, meerkat::JobId) {
-        let (script, seen) = OneCallScript::new(
-            MONITOR,
-            serde_json::json!({
-                "command": recording_script(marker),
-                "timeout_secs": 30,
-                "restart_class": "replayable",
-            }),
-        );
-        let lifetime = Lifetime::open(root, true, script).await;
+    /// A script that records each start in `marker`, completes at once the
+    /// first time and stays alive every later time, so a cancel finds the
+    /// monitor running when it was started again.
+    fn recording_script_that_stays_alive_when_run_again(marker: &Path) -> String {
+        format!(
+            "printf 'run\\n' >> '{0}'; if [ \"$(wc -l < '{0}')\" -gt 1 ]; then sleep 60; fi; \
+             printf '%s\\n' '{{\"type\":\"complete\"}}'",
+            marker.display()
+        )
+    }
+
+    /// A session of `lifetime` whose model starts a replayable monitor
+    /// running `command`. Answers the session and the recorded job.
+    async fn a_session_starts_a_replayable_monitor(
+        lifetime: &Lifetime,
+        seen: &Arc<Mutex<Seen>>,
+    ) -> (SessionId, meerkat_jobs::StoredJob) {
         let session = Session::new();
         let session_id = session.id().clone();
         lifetime.run_session(session, Profile::open()).await;
@@ -1774,6 +1770,64 @@ mod shell_family_monitor {
             "the call recorded one durable monitor job"
         );
         let recorded = recorded.into_iter().next().expect("the recorded monitor");
+        (session_id, recorded)
+    }
+
+    /// The scripted call that starts a replayable monitor running `command`.
+    fn a_replayable_monitor_call(command: String) -> (Arc<OneCallScript>, Arc<Mutex<Seen>>) {
+        OneCallScript::new(
+            MONITOR,
+            serde_json::json!({
+                "command": command,
+                "timeout_secs": 120,
+                "restart_class": "replayable",
+            }),
+        )
+    }
+
+    /// Poll until `job_id` has a terminal result or `wait` passed.
+    async fn ended(
+        job_store: &Arc<dyn DetachedJobStore>,
+        job_id: &meerkat::JobId,
+        wait: std::time::Duration,
+    ) -> meerkat_jobs::JobSnapshot {
+        let jobs = DetachedJobService::new(job_store.clone());
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let snapshot = jobs.get(job_id).await.expect("read job").expect("job");
+            if snapshot.terminal_result.is_some() || std::time::Instant::now() >= deadline {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// One host lifetime in which a shell session's model starts a
+    /// replayable monitor, and that leaves a monitor of the session whose
+    /// worker was lost: a second job with the recorded monitor's own
+    /// specification, whose first attempt holds a lease that expired long
+    /// ago, as an abrupt host stop leaves a running monitor once its lease
+    /// ran out. (A monitor's lease is its timeout plus a minute, so the row
+    /// plants the lost attempt instead of waiting for a real one.) Answers
+    /// the session and the lost monitor's job.
+    async fn a_lifetime_that_loses_a_resumable_monitor(
+        root: &Path,
+        marker: &Path,
+    ) -> (SessionId, meerkat::JobId) {
+        a_lifetime_that_loses_a_resumable_monitor_running(root, marker, recording_script(marker))
+            .await
+    }
+
+    /// As [`a_lifetime_that_loses_a_resumable_monitor`], with the monitor's
+    /// script given.
+    async fn a_lifetime_that_loses_a_resumable_monitor_running(
+        root: &Path,
+        marker: &Path,
+        command: String,
+    ) -> (SessionId, meerkat::JobId) {
+        let (script, seen) = a_replayable_monitor_call(command);
+        let lifetime = Lifetime::open(root, true, script).await;
+        let (session_id, recorded) = a_session_starts_a_replayable_monitor(&lifetime, &seen).await;
 
         // The recorded monitor runs once and completes.
         let jobs = DetachedJobService::new(lifetime.job_store.clone());
@@ -1970,6 +2024,126 @@ mod shell_family_monitor {
             )
             .await
             .expect("the operator's monitor start")
+    }
+
+    /// After a restart, an operator's cancel of a lost resumable monitor
+    /// starts the monitor once more before it cancels it. The host's route
+    /// first recovers the session's jobs under the host's authority, which
+    /// claims a second attempt of the lost monitor and starts its script
+    /// again; the cancel then stops that attempt. The row pins the second
+    /// attempt and the cancelled end, not how far the script got before the
+    /// cancel reached it. Its level is the pin row's: the route's own
+    /// manager construction on the realm's real stores, not the RPC handler.
+    #[tokio::test]
+    async fn an_operators_cancel_of_a_lost_monitor_after_a_restart_starts_it_once_more_before_cancelling()
+     {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("monitor-runs");
+        let (session_id, job_id) = a_lifetime_that_loses_a_resumable_monitor_running(
+            temp.path(),
+            &marker,
+            recording_script_that_stays_alive_when_run_again(&marker),
+        )
+        .await;
+
+        // The next lifetime: nothing of the session's own runs; the operator
+        // cancels the lost monitor's job.
+        let (script, _seen) = OneCallScript::new("shell_jobs", serde_json::json!({}));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let lost = ended(&lifetime.job_store, &job_id, std::time::Duration::ZERO).await;
+        assert_eq!(
+            (lost.attempt_count, lost.terminal_result.clone()),
+            (1, None),
+            "the lost monitor has its one lost attempt and no end"
+        );
+
+        let operator = lifetime.operator_route_manager(temp.path(), &session_id);
+        operator
+            .cancel_job(&ShellJobId::from_string(job_id.as_str()))
+            .await
+            .expect("the operator's cancel of the lost monitor");
+
+        let after = ended(&lifetime.job_store, &job_id, SETTLE).await;
+        assert_eq!(
+            after.attempt_count, 2,
+            "the cancel's recovery started the lost monitor once more"
+        );
+        assert_eq!(
+            after.terminal_result,
+            Some(JobTerminalResult::Cancelled),
+            "and the cancel then ended it"
+        );
+    }
+
+    /// The safe order: a cancel accepted while the monitor still runs stops
+    /// it, and nothing is run again after the restart. The operator's route
+    /// cancels the session's running monitor in the first lifetime; the
+    /// next lifetime's session lists its shell jobs, which recovers them,
+    /// and the cancelled monitor keeps its one attempt and its cancelled
+    /// end.
+    #[tokio::test]
+    async fn a_monitor_cancelled_while_it_runs_is_not_run_again_after_a_restart() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("monitor-runs");
+        let (script, seen) = a_replayable_monitor_call(format!(
+            "printf 'run\\n' >> '{}'; sleep 60",
+            marker.display()
+        ));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let (session_id, recorded) = a_session_starts_a_replayable_monitor(&lifetime, &seen).await;
+        let job_id = recorded.job_id;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while runs(&marker) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the monitor's script never started"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // The operator cancels the running monitor through the host's route;
+        // the session's worker sees the request at its next lease renewal.
+        let operator = lifetime.operator_route_manager(temp.path(), &session_id);
+        operator
+            .cancel_job(&ShellJobId::from_string(job_id.as_str()))
+            .await
+            .expect("the operator's cancel of the running monitor");
+        let cancelled = ended(
+            &lifetime.job_store,
+            &job_id,
+            std::time::Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(
+            cancelled.terminal_result,
+            Some(JobTerminalResult::Cancelled),
+            "the cancel stops the running monitor"
+        );
+        lifetime.stand_down().await;
+
+        // The next lifetime: the session lists its shell jobs.
+        let (script, _seen) = OneCallScript::new("shell_jobs", serde_json::json!({}));
+        let lifetime = Lifetime::open(temp.path(), true, script).await;
+        let stored = lifetime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the stored session")
+            .expect("the session survives the restart");
+        lifetime.run_session(stored, Profile::open()).await;
+        tokio::time::sleep(QUIET).await;
+
+        let after = ended(&lifetime.job_store, &job_id, std::time::Duration::ZERO).await;
+        assert_eq!(
+            runs(&marker),
+            1,
+            "the cancelled monitor is not run again after the restart"
+        );
+        assert_eq!(
+            (after.attempt_count, after.terminal_result),
+            (1, Some(JobTerminalResult::Cancelled)),
+            "it keeps its one attempt and its cancelled end"
+        );
     }
 
     /// A monitor the session's recovery ended stays ended. When the host's

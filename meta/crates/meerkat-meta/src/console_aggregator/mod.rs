@@ -42,6 +42,8 @@ mod store;
 #[cfg_attr(not(test), allow(dead_code))]
 mod thread;
 mod types;
+#[cfg(test)]
+mod version_4_log_tests;
 
 use member_cut::{
     FrameVisibilityRead, MemberCut, capture_member_lineage_in, capture_member_provenance_in,

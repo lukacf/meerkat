@@ -3150,11 +3150,14 @@ Security, Upgrade and Changed.
   and says "ask again" although the refusal is not retryable
   (`retryable: false`). Nothing is created and no agent is changed. The
   pages said such a create is refused `name_taken` without this condition.
-  Before approving a create, check its name against the list of agents. Run
-  on the released 0.9.15 gateway for the three kinds of name taken before
-  the create, with the approver bound to the stdio operator; a name taken
-  between the hold and the approval ends the same way, by a run on a build
-  of this release's source. A fix is planned for the next release.
+  Before approving a create, check its name against `meta/identity/list`
+  with `include_archived`: an archived agent holds its name too. The list
+  does not show a removed agent's name, so a create under one is found only
+  when the approved change is carried out. Run on the released 0.9.15
+  gateway for the three kinds of name taken before the create, with the
+  approver bound to the stdio operator; a name taken between the hold and
+  the approval ends the same way, by a run on a build of this release's
+  source. A fix is planned for the next release.
 
 ## [0.9.14] - 2026-11-11
 

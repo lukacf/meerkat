@@ -2044,7 +2044,7 @@ impl meerkat_meta::identity_first::contracts::AgentCustomizer for DeclaredLabels
 /// What makes a host compose the builds of its agents.
 #[derive(Clone, Copy)]
 enum ComposingHost<'a> {
-    /// It registers a agent customizer, which answers each agent's
+    /// It registers an agent customizer, which answers each agent's
     /// declared labels.
     Customizer,
     /// It configures agent memory, kept under the directory, and registers

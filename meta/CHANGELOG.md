@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Console: the decision card of a set of questions that the list of
+  questions does not hold (it was read without the set, or could not be
+  read) says why it has no answer form and where the set is answered: the
+  asking agent's conversation, or the Approvals view once the list holds
+  the set. It said "Decide where it was presented.", which names no place
+  for a set that was presented nowhere. A decision of another kind keeps
+  its hint.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

@@ -2452,6 +2452,40 @@ fn candidate_launch_refused(method: &str, response_id: Value) -> JsonRpcResponse
     }
 }
 
+/// Whether the stdio dispatch gives `method` to the live arm: every
+/// `meta/live/*` method, and on an `openai-live` build the WebRTC answer
+/// method `live/webrtc/answer`, the one live method outside `meta/`.
+fn is_stdio_live_method(method: &str) -> bool {
+    method.starts_with("meta/live/")
+        || cfg!(feature = "openai-live") && method == "live/webrtc/answer"
+}
+
+/// Whether the stdio dispatch gives `method` to the loaded-module arm, as a
+/// call of the module its first segment names: a method with a slash that is
+/// outside `meta/` and is not a live method ([`is_stdio_live_method`]).
+/// `live/webrtc/answer` has a module call's shape, and the exclusion keeps
+/// the module arm from taking it as a call of a module named `live`. The
+/// two arms' guards are disjoint, so their order in the match decides
+/// nothing.
+fn is_stdio_module_method(method: &str) -> bool {
+    method.contains('/') && !method.starts_with("meta/") && !is_stdio_live_method(method)
+}
+
+/// The live arm's answer as the stdio dispatch gives it. On an `openai-live`
+/// build an error answer first rejects the response custody its handler left
+/// for the gateway's writer: an error publishes nothing, and the writer
+/// settles a written answer as delivered whatever it says.
+async fn stdio_live_answer(response: JsonRpcResponse) -> JsonRpcResponse {
+    #[cfg(feature = "openai-live")]
+    {
+        crate::live_wiring::reject_live_rpc_response_delivery_of_error(response).await
+    }
+    #[cfg(not(feature = "openai-live"))]
+    {
+        response
+    }
+}
+
 async fn handle_unified_rpc_json_inner(
     runtime: &UnifiedRuntime,
     runtime_owner: Option<&Arc<UnifiedRuntime>>,
@@ -6744,7 +6778,7 @@ async fn handle_unified_rpc_json_inner(
         }
         // A candidate launch calls no loaded module: a module call is opaque
         // and can act, as a tool call can.
-        method if method.contains('/') && !method.starts_with("meta/") => {
+        method if is_stdio_module_method(method) => {
             if !runtime.speaks_for_composition() {
                 return if is_notification {
                     String::new()
@@ -6800,11 +6834,10 @@ async fn handle_unified_rpc_json_inner(
                 },
             }
         }
-        method
-            if method.starts_with("meta/live/")
-                || cfg!(feature = "openai-live") && method == "live/webrtc/answer" =>
-        {
-            match live {
+        method if is_stdio_live_method(method) => {
+            // A gateway with no live handler answers every live method with
+            // the typed `live_unavailable` refusal.
+            let response = match live {
                 None => crate::live_wiring::live_unavailable_response(response_id),
                 Some(live) => {
                     let params = request.params.clone();
@@ -6847,6 +6880,13 @@ async fn handle_unified_rpc_json_inner(
                             let live = live.clone();
                             let method = method.to_string();
                             let operation_response_id = response_id.clone();
+                            // The tracked operation runs on a task of its
+                            // own: carry the request's delivery slot to it,
+                            // so the custody of the handler's response
+                            // reaches the gateway's writer.
+                            #[cfg(feature = "openai-live")]
+                            let delivery =
+                                crate::live_wiring::CarriedLiveRpcResponseDelivery::current();
                             match crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
                             vec![target],
                             move || async move {
@@ -6857,15 +6897,17 @@ async fn handle_unified_rpc_json_inner(
                                     &params,
                                 )
                                 .await?;
-                                Ok(live.dispatch(
+                                let dispatch = live.dispatch(
                                     crate::live_wiring::LiveSurfaceAuthority::host_trusted_stdio(),
                                     session,
                                     Some(canonical_target_identity),
                                     method,
                                     params,
                                     operation_response_id,
-                                )
-                                .await)
+                                );
+                                #[cfg(feature = "openai-live")]
+                                let dispatch = delivery.scope(dispatch);
+                                Ok(dispatch.await)
                             },
                         )
                         .await
@@ -6902,7 +6944,8 @@ async fn handle_unified_rpc_json_inner(
                         }
                     }
                 }
-            }
+            };
+            stdio_live_answer(response).await
         }
         method if crate::mob_announcements::rpc::is_announcement_method(method) => {
             let service = runtime.mob_announcements();
@@ -8484,6 +8527,15 @@ fn serialize_response(response: &JsonRpcResponse) -> String {
     reason = "shared fixtures moved with the turn-ticket RPC tests; not every test uses every helper"
 )]
 mod turn_ticket_rpc_tests;
+
+/// Test-only: the identity-first member fixtures of this module's tests, for
+/// the live rows that drive a stdio live method through the gateway's
+/// delivery-aware dispatch.
+#[cfg(all(test, feature = "openai-live"))]
+pub(crate) use tests::{
+    IdentityFirstLiveMember, identity_first_context_holding_for_test,
+    identity_first_live_member_for_test,
+};
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -10141,6 +10193,387 @@ shell = true
                 .build(),
         )
         .await?)
+    }
+
+    /// A gateway runtime with one identity-first member, for a row that
+    /// drives a stdio live method which names the member: `identity` is
+    /// registered with the identity runtime `identity_ctx` carries and bound
+    /// to its roster row's session, so the live arm of the stdio dispatch
+    /// takes the member's identity authority for the request.
+    #[cfg(feature = "openai-live")]
+    pub(crate) struct IdentityFirstLiveMember {
+        pub(crate) runtime: Arc<UnifiedRuntime>,
+        pub(crate) identity_ctx: IdentityFirstContext,
+        pub(crate) identity: &'static str,
+        _state: tempfile::TempDir,
+    }
+
+    /// [`IdentityFirstLiveMember`] in a mob of its own, under `namespace`.
+    #[cfg(feature = "openai-live")]
+    pub(crate) async fn identity_first_live_member_for_test(
+        namespace: &str,
+    ) -> Result<IdentityFirstLiveMember, Box<dyn std::error::Error + Send + Sync>> {
+        let state = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&state, namespace).await?;
+        let identity = "review:live-member";
+        spawn_identity_projection_fixture(
+            &runtime,
+            SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                identity.to_string(),
+                None,
+                None,
+                None,
+            )
+            .with_labels(BTreeMap::from([(
+                "agent_identity".to_string(),
+                identity.to_string(),
+            )])),
+        )
+        .await?;
+        let session = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&crate::member_comms_id::mob_member_id(identity))
+            .await
+            .ok_or("the member's roster row has a bridge session")?;
+        let identity_ctx = identity_first_context_holding_for_test(
+            &runtime, namespace, identity, "worker", session,
+        )
+        .await?;
+        Ok(IdentityFirstLiveMember {
+            runtime: Arc::new(runtime),
+            identity_ctx,
+            identity,
+            _state: state,
+        })
+    }
+
+    /// The identity-first context of an identity runtime that holds
+    /// `identity`, a member of `runtime`'s mob under `profile`, live on
+    /// `session`: the live arm of the stdio dispatch runs a request that
+    /// names the member under its identity authority. The context is
+    /// refused if the identity runtime answers no such authority.
+    #[cfg(feature = "openai-live")]
+    pub(crate) async fn identity_first_context_holding_for_test(
+        runtime: &UnifiedRuntime,
+        namespace: &str,
+        identity: &str,
+        profile: &str,
+        session: meerkat_core::types::SessionId,
+    ) -> Result<IdentityFirstContext, Box<dyn std::error::Error + Send + Sync>> {
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: namespace.to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        register_live(
+            &identity_runtime,
+            &core_bridge.core,
+            rpc_durable_spec(identity, profile),
+            1,
+            session,
+        )
+        .await?;
+        if identity_runtime
+            .member_alias_lifecycle_target(identity)
+            .await?
+            .is_none()
+        {
+            return Err("the identity runtime must hold the member".into());
+        }
+        Ok(IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                identity_runtime,
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: Some(runtime.mob_handle().definition().clone()),
+            transcript_edit_service: None,
+            compaction_floors: None,
+        })
+    }
+
+    /// An `openai-live` gateway with no live handler answers a stdio
+    /// `live/webrtc/answer`, sent as the SDKs send it, with the typed
+    /// `live_unavailable` refusal every `meta/live/*` method answers there.
+    /// The method is a live method, not a call of a module named `live`.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_without_a_live_handler_answers_live_unavailable()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-unavailable").await?;
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "identity": "worker-1",
+                        "channel_id": "no-such-channel",
+                        "pending_receipt": "no-such-pending-receipt",
+                        "readiness_receipt": "no-such-readiness-receipt",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": crate::live_wiring::LIVE_UNAVAILABLE_CODE,
+                "message": "live sessions are not available on this gateway",
+                "data": { "kind": crate::live_wiring::LIVE_UNAVAILABLE_KIND },
+            }),
+            "a stdio live/webrtc/answer with no live handler must answer live_unavailable: \
+             {response}"
+        );
+        Ok(())
+    }
+
+    /// An `openai-live` gateway with a live handler hands a stdio
+    /// `live/webrtc/answer` to that handler. The handler here has no answer
+    /// transport, so the request ends in the refusal only the live answer
+    /// handler gives.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_reaches_the_live_handler()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-handler").await?;
+        let persistence = meerkat::PersistenceBundle::new(
+            Arc::new(meerkat::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        )
+        .expect("live handler fixture persistence");
+        let live_state = tempfile::tempdir()?;
+        let factory = AgentFactory::new(live_state.path()).builtins(false);
+        let mut builder = meerkat::FactoryAgentBuilder::new(factory.clone(), Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, machine) =
+            meerkat::surface::build_runtime_backed_service(builder, 4, persistence)
+                .expect("compose the live handler fixture's service");
+        let service = Arc::new(service);
+        let context = Arc::new(crate::live_wiring::attach_live(
+            Arc::clone(&service),
+            Arc::clone(&machine),
+            &factory,
+            Config::default(),
+            "ws://127.0.0.1/stdio-live-answer".to_string(),
+            None,
+        ));
+        let live = crate::live_wiring::live_rpc_handler(context, Arc::clone(&service), machine);
+        let response: Value = serde_json::from_str(
+            &super::handle_unified_rpc_json_with_live(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "channel_id": "no-such-channel",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                None,
+                Some(&live),
+            )
+            .await,
+        )?;
+        service.shutdown().await;
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(
+            response["error"],
+            json!({
+                "code": super::CAPABILITY_UNAVAILABLE_CODE,
+                "message": "experimental live WebRTC answer transport is not available",
+            }),
+            "a stdio live/webrtc/answer must reach the live answer handler: {response}"
+        );
+        Ok(())
+    }
+
+    /// The loaded-module arm of the stdio dispatch still takes every other
+    /// method with a slash outside `meta/`, a name under `live/` that is not
+    /// a live method included: with no such module loaded each answers
+    /// `-32601` naming the module. On a build without `openai-live` that
+    /// includes `live/webrtc/answer`, which is no live method there.
+    #[tokio::test]
+    async fn stdio_module_calls_still_reach_the_loaded_module_arm()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-module-arm").await?;
+        let mut calls = vec![("calendar/list", "calendar"), ("live/status", "live")];
+        if cfg!(not(feature = "openai-live")) {
+            calls.push(("live/webrtc/answer", "live"));
+        }
+        let mut answers = Vec::new();
+        let mut expected = Vec::new();
+        for (method, module) in calls {
+            let response: Value = serde_json::from_str(
+                &handle_unified_rpc_json(
+                    &runtime,
+                    &json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": {}}).to_string(),
+                    Duration::from_secs(1),
+                    None,
+                    None,
+                )
+                .await,
+            )?;
+            answers.push((method, response["error"].clone()));
+            expected.push((
+                method,
+                json!({"code": -32601, "message": format!("Module '{module}' not loaded")}),
+            ));
+        }
+        let _ = runtime.mob_handle().stop().await;
+        assert_eq!(answers, expected);
+        Ok(())
+    }
+
+    /// What a stdio `live/webrtc/answer` answers on a gateway with no live
+    /// handler and no module named `live`, by build. The released gateways
+    /// are built with `openai-live`: there it is a live method and answers
+    /// the typed `live_unavailable` refusal. A build without the feature has
+    /// no such live method and answers as a call of a module named `live`.
+    #[tokio::test]
+    async fn stdio_live_webrtc_answer_answers_by_the_build()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = reservation_test_runtime(&temp_dir, "rpc-live-answer-by-build").await?;
+        let response: Value = serde_json::from_str(
+            &handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "live/webrtc/answer",
+                    "params": {
+                        "channel_id": "no-such-channel",
+                        "token": "no-such-token",
+                        "offer_sdp": "v=0\r\n",
+                    },
+                })
+                .to_string(),
+                Duration::from_secs(1),
+                None,
+                None,
+            )
+            .await,
+        )?;
+        let _ = runtime.mob_handle().stop().await;
+        let expected = if cfg!(feature = "openai-live") {
+            json!({
+                "code": -32050,
+                "message": "live sessions are not available on this gateway",
+                "data": {"kind": "live_unavailable"},
+            })
+        } else {
+            json!({"code": -32601, "message": "Module 'live' not loaded"})
+        };
+        assert_eq!(response["error"], expected, "{response}");
+        Ok(())
+    }
+
+    /// The stdio dispatch gives a method with a slash to one arm only: a
+    /// live method to the live arm, any other method outside `meta/` to the
+    /// loaded-module arm. `live/webrtc/answer` is a live method on an
+    /// `openai-live` build and a module call on a build without it.
+    #[test]
+    fn the_stdio_dispatch_gives_a_live_method_to_the_live_arm_only() {
+        let answer_is_live = cfg!(feature = "openai-live");
+        assert_eq!(
+            super::is_stdio_live_method("live/webrtc/answer"),
+            answer_is_live
+        );
+        assert_eq!(
+            super::is_stdio_module_method("live/webrtc/answer"),
+            !answer_is_live
+        );
+        for method in [
+            "meta/live/open",
+            "meta/live/status",
+            "meta/live/playback_owner/register",
+        ] {
+            assert!(super::is_stdio_live_method(method), "{method}");
+            assert!(!super::is_stdio_module_method(method), "{method}");
+        }
+        for method in [
+            "calendar/list",
+            "live/status",
+            "live/webrtc",
+            "live/webrtc/answer/extra",
+        ] {
+            assert!(super::is_stdio_module_method(method), "{method}");
+            assert!(!super::is_stdio_live_method(method), "{method}");
+        }
+        for method in ["meta/status", "meta/send", "status"] {
+            assert!(!super::is_stdio_module_method(method), "{method}");
+            assert!(!super::is_stdio_live_method(method), "{method}");
+        }
+    }
+
+    /// Source guard: the stdio dispatch decides its loaded-module arm and
+    /// its live arm by the two predicates alone. An inline test of a
+    /// method's slash, or of a live method's name, in the dispatch could
+    /// claim a live method as a module call again.
+    #[test]
+    fn the_stdio_dispatch_guards_its_module_and_live_arms_by_the_predicates() {
+        let source = include_str!("rpc.rs");
+        let start = source
+            .find("\nasync fn handle_unified_rpc_json_inner(")
+            .expect("the stdio dispatch");
+        let rest = &source[start..];
+        // The function ends at its closing brace in the first column.
+        let end = rest.find("\n}\n").expect("the stdio dispatch ends");
+        let dispatch = &rest[..end];
+        assert_eq!(
+            dispatch
+                .matches("method if is_stdio_module_method(method) =>")
+                .count(),
+            1,
+            "the loaded-module arm is guarded by is_stdio_module_method"
+        );
+        assert_eq!(
+            dispatch
+                .matches("method if is_stdio_live_method(method) =>")
+                .count(),
+            1,
+            "the live arm is guarded by is_stdio_live_method"
+        );
+        for inline in [
+            "method.contains('/')",
+            "method.starts_with(\"meta/live/\")",
+            "\"live/webrtc/answer\"",
+        ] {
+            assert!(
+                !dispatch.contains(inline),
+                "the stdio dispatch tests `{inline}` inline; decide it in is_stdio_live_method \
+                 or is_stdio_module_method"
+            );
+        }
     }
 
     /// The console treats frames under `_system` and `__console__` as the

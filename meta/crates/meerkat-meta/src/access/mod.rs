@@ -45,6 +45,8 @@
 mod controller;
 mod engine;
 mod model;
+#[allow(dead_code)]
+pub(crate) mod unknown_keys;
 
 pub use controller::{
     AccessController, AccessPublicationAlreadyJoined, AccessView, AgentResourceAttributes,

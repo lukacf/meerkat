@@ -4134,7 +4134,9 @@ pub struct AgentFactory {
     /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
     /// When unset, a build takes `project_root` as that root (its
     /// `.rkat/config.toml` hooks, `.rkat/skills` and AGENTS.md); with neither
-    /// root set, it reads no project convention.
+    /// root set, it reads no project convention. A context root that does not
+    /// exist fails the build's prompt assembly; a `project_root` taken in its
+    /// place that does not exist holds no AGENTS.md, and the build goes on.
     pub context_root: Option<PathBuf>,
     /// Optional user-global convention root (typically HOME).
     pub user_config_root: Option<PathBuf>,
@@ -6618,6 +6620,25 @@ impl AgentFactory {
                     std::env::current_dir().unwrap_or_else(|_| self.store_path.clone())
                 })
         })
+    }
+
+    /// The directory a build reads project instructions (AGENTS.md) from.
+    ///
+    /// A context root the host named is passed on as it is: when it does not
+    /// exist, prompt assembly refuses the build. Without one the project
+    /// root is the default place to look, and a default that does not exist
+    /// holds no project instructions. A probe that itself fails keeps the
+    /// root, so prompt assembly reports that fault.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn project_instructions_root(&self) -> Option<&std::path::Path> {
+        if let Some(named) = self.context_root.as_deref() {
+            return Some(named);
+        }
+        let default_root = self.project_root.as_deref()?;
+        match tokio::fs::try_exists(default_root).await {
+            Ok(false) => None,
+            Ok(true) | Err(_) => Some(default_root),
+        }
     }
 
     fn realm_scope_root(&self, _build_config: &AgentBuildConfig) -> PathBuf {
@@ -10929,7 +10950,7 @@ impl AgentFactory {
                 crate::assemble_system_prompt(
                     config,
                     &prompt_override,
-                    _conventions_context_root,
+                    self.project_instructions_root().await,
                     &extra_sections,
                     &tool_usage_instructions,
                 )

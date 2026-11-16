@@ -891,20 +891,23 @@ from 0.9.15 to a release older than 0.9.14 was run.
   code as 0.9.14, so these items hold there too: a created agent's row that
   records an owed label restamp; agents that created mobs and were seated
   again on 0.9.15; operator instruction records past the earlier totals, and
-  those written with `include_forks`; temporary council records; a schedule
-  paused for its target; and, of a stored reasoning effort level, the
-  refusal. What that last item describes beyond the refusal holds at 0.9.12
-  and 0.9.13 and was not read at 0.9.11. What the items say of a respawn or
-  a `meta/compact_member` through a Meta gateway was not read for these
-  releases. The other items about Core were established for 0.9.14 only.
+  those written with `include_forks`; what the item on agents' instruction
+  records says of the record; temporary council records; a recalled input; a
+  schedule paused for its target; and, of a stored reasoning effort level,
+  the refusal. What that last item describes beyond the refusal holds at
+  0.9.12 and 0.9.13 and was not read at 0.9.11. What the items say of a
+  respawn or a `meta/compact_member` through a Meta gateway was not read for
+  these releases. A member rotation in flight is established for none of
+  them, as its item says of 0.9.14.
 - **Meta, 0.9.12 and 0.9.13.** They are Meta 0.9.14 without the fix named
   under "Meta 0.9.14" below, so what the items say of a 0.9.14 gateway and
   its Console holds for them.
-- **Meta, 0.9.11.** Two things differ. A 0.9.11 gateway does not serve
-  agents created at run time, and what it does with the records of agents
-  created on 0.9.15 is not stated here. A `meta_gateway` launched with
-  `persistent_sessions: true` keeps its metadata and its console log in
-  memory (see "Rolling back to 0.9.11" below).
+- **Meta, 0.9.11.** Not read against every item. Two differences are known.
+  A 0.9.11 gateway does not serve agents created at run time, and what it
+  does with the records of agents created on 0.9.15 is not stated here. A
+  `meta_gateway` launched with `persistent_sessions: true` keeps its
+  metadata and its console log in memory (see "Rolling back to 0.9.11"
+  below).
 - **Before 0.9.11:** not read.
 
 An item that names other releases (0.9.9 through 0.9.14, for example) says

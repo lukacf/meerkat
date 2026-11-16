@@ -3944,6 +3944,105 @@ fn taken_name_policy() -> Arc<IdentityCreationPolicy> {
     )
 }
 
+/// A create under a taken name is refused `name_taken` when it is asked
+/// for, whatever the rules say of the create: nothing is held, and nobody
+/// is asked to decide a create that cannot be carried out. The plan of the
+/// same create is refused the same way. A name is taken by an agent the
+/// host's roster declares, by an agent created earlier and by a removed
+/// agent's name. Every name is asked before the row judges any.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_under_a_taken_name_is_refused_before_a_person_is_asked() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(taken_name_policy(), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let mob = rig.runtime.mob_handle();
+    let seed = ChangeRequester::host("seed");
+    let host = ChangeRequester::host("ops");
+    let create = |name: &str| create_of(json!([{"name": name, "profile": "worker"}]));
+
+    // An agent created earlier, and a removed agent's name.
+    for (request_id, name) in [("s-1", "earlier"), ("s-2", "former")] {
+        let made = rig.change(&seed, request_id, create(name)).await;
+        assert_eq!(made.token(), "done", "{made:?}");
+    }
+    let archived = rig
+        .change(
+            &seed,
+            "s-3",
+            IdentityChangeSpec::Archive(agent_ref("former", &rig.digest("former").await)),
+        )
+        .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    let removed = rig
+        .change(
+            &seed,
+            "s-4",
+            IdentityChangeSpec::Remove(agent_ref("former", &rig.digest("former").await)),
+        )
+        .await;
+    assert_eq!(removed.token(), "done", "{removed:?}");
+
+    // A free name is held for its person: the rules hold every create
+    // asked for on this surface.
+    let free = rig.change(&host, "free-1", create("fresh")).await;
+    assert_eq!(free.token(), "pending_decision", "{free:?}");
+
+    let mut wrong = Vec::new();
+    for (request_id, name, holder) in [
+        ("taken-1", HOST_A, "identity"),
+        ("taken-2", "earlier", "identity"),
+        ("taken-3", "former", "removed"),
+    ] {
+        let operation_id =
+            OperationId::for_request(&host.recorded(), request_id).expect("a request id");
+        let planned = rig
+            .family()
+            .read(
+                &mob,
+                &host,
+                IdentityRead::Plan(Box::new(IdentityChangeCall::new(
+                    operation_id,
+                    create(name),
+                ))),
+            )
+            .await;
+        match planned {
+            Err(refusal) if refusal.kind_token() == "name_taken" => {}
+            Err(refusal) => wrong.push(format!("the plan under {name} is refused {refusal}")),
+            Ok(IdentityReadAnswer::Plan(plan)) => wrong.push(format!(
+                "the plan under {name} answers the outcome {}",
+                serde_json::to_value(&*plan).expect("a plan as a surface writes it")["outcome"]
+            )),
+            Ok(other) => wrong.push(format!("the plan under {name} answers {other:?}")),
+        }
+        let outcome = rig.change(&host, request_id, create(name)).await;
+        match outcome.refusal() {
+            Some(refusal) => {
+                let data = refusal.to_data();
+                let said = json!({"kind": data["kind"], "by": data["by"], "field": refusal.field});
+                let expected =
+                    json!({"kind": "name_taken", "by": holder, "field": "agents[0].name"});
+                if said != expected {
+                    wrong.push(format!("the create under {name} is refused {said}"));
+                }
+            }
+            None => wrong.push(format!(
+                "the create under {name} answers {}",
+                outcome.to_json()
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
 /// A create a person approved whose name was taken after it was held is
 /// refused when it is carried out, for good: what its operation reads
 /// says the name is taken and does not tell its requester to ask again,

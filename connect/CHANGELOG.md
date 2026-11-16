@@ -33,6 +33,8 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-16
+
 ### Fixed
 
 - A profile used for agents hosted by Connect's native host may list

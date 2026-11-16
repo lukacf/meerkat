@@ -9,12 +9,18 @@ import type { MetaConsoleTransport } from "./headless";
 // newer gateway with older code, and nothing said so. The gateway now names
 // the console bundle it serves in the experience document, the page knows
 // which bundle it runs, and a page that runs another bundle than the gateway
-// names shows one notice that says to reload.
+// names shows one notice that says to reload. The gateway's own page says
+// it in words that hold after an upgrade and after a rollback; an
+// application that mounts the console's library is told as well what to do
+// when a reload does not help.
 
 const namespace = "runtime/realm/stale-bundle";
 const identity = "identity:stale-bundle-agent";
 const RUNNING = "9a34aa516728";
 const NEWER = "0f1e2d3c4b5a";
+const PAGE_WORDS = "This page is of another Console build than its gateway's. Reload the page to use the gateway's version.";
+const LIBRARY_WORDS = "This Console is of another build than its gateway's. Reload the page; "
+  + "if this notice stays, the application needs the Console of its gateway's release.";
 
 interface Gateway {
   transport: MetaConsoleTransport;
@@ -109,7 +115,7 @@ describe("a console whose gateway names the bundle it serves", () => {
     const served = gateway(NEWER);
     render(<ConsoleApp baseUrl="" storageNamespace={namespace} transport={served.transport} />);
     const shown = await screen.findByTestId("console-bundle-notice");
-    expect(shown.textContent).toContain("This Console was updated. Reload the page to use the new version.");
+    expect(shown.querySelector("span")?.textContent).toBe(PAGE_WORDS);
     expect(shown.querySelector("button")?.textContent).toBe("Reload");
     expect(screen.getAllByTestId("console-bundle-notice")).toHaveLength(1);
     // The console goes on working under the notice.
@@ -129,7 +135,9 @@ describe("a console whose gateway names the bundle it serves", () => {
     const before = served.reads();
     await act(async () => { served.frame(); });
     await waitFor(() => expect(served.reads()).toBeGreaterThan(before), { timeout: 5_000 });
-    expect(await screen.findByTestId("console-bundle-notice", undefined, { timeout: 5_000 })).toBeTruthy();
+    const shown = await screen.findByTestId("console-bundle-notice", undefined, { timeout: 5_000 });
+    // The words hold whichever way the gateway's build moved.
+    expect(shown.querySelector("span")?.textContent).toBe(PAGE_WORDS);
   }, 20_000);
 
   it("shows no notice on an older gateway, which names no bundle", async () => {
@@ -152,13 +160,28 @@ describe("a console whose gateway names the bundle it serves", () => {
 
 describe("an application that mounts the console itself", () => {
   // The console's own build names, inside the library an application
-  // mounts, the bundle that library was built beside.
-  it("gets the same notice when its console is of another build than the gateway's", async () => {
+  // mounts, the bundle that library was built beside. There a reload helps
+  // only when the application itself was updated, so the notice also says
+  // what is needed when it stays.
+  it("gets a notice in words of its own when its console is of another build than the gateway's", async () => {
     vi.stubGlobal("__META_CONSOLE_BUNDLE__", RUNNING);
     const served = gateway(NEWER);
     render(<ConsoleApp baseUrl="" storageNamespace={namespace} transport={served.transport} />);
     const shown = await screen.findByTestId("console-bundle-notice");
-    expect(shown.textContent).toContain("This Console was updated. Reload the page to use the new version.");
+    expect(shown.querySelector("span")?.textContent).toBe(LIBRARY_WORDS);
+    expect(shown.querySelector("button")?.textContent).toBe("Reload");
+    expect(screen.getAllByTestId("console-bundle-notice")).toHaveLength(1);
+  });
+
+  it("is told in the library's words also on a page whose script names a bundle", async () => {
+    // The library's build decides: an application's own page may load a
+    // script of that name too.
+    pageRuns(NEWER);
+    vi.stubGlobal("__META_CONSOLE_BUNDLE__", RUNNING);
+    const served = gateway(NEWER);
+    render(<ConsoleApp baseUrl="" storageNamespace={namespace} transport={served.transport} />);
+    const shown = await screen.findByTestId("console-bundle-notice");
+    expect(shown.querySelector("span")?.textContent).toBe(LIBRARY_WORDS);
   });
 
   it("gets none when its console is of the gateway's build", async () => {

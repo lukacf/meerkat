@@ -89,7 +89,7 @@ source of truth for tool names and availability.
 | `meerkat_mob_force_cancel` | Force-cancel a member's active work (mob feature) |
 | `meerkat_mob_wait_kickoff` | Wait for autonomous kickoff completion (mob feature) |
 | `meerkat_mob_wait_ready` | Wait for mob startup readiness (mob feature) |
-| `meerkat_mob_profile_*` tools | Realm-scoped mob profile create/get/list/update/delete; create and update take the public profile input, an update replaces the stored profile whole, and a profile field outside the public input is an argument error (mob feature) |
+| `meerkat_mob_profile_*` tools | Realm-scoped mob profile create/get/list/update/delete; create and update take the public profile input and `auth_binding`, an update replaces the stored profile whole, and any other profile field is an argument error (mob feature) |
 | `meerkat_mob_member_history` | Read a mob member transcript page by identity, local or placed (mob feature) |
 | `meerkat_mob_hosts` | List bound member hosts with capabilities (mob feature) |
 | `meerkat_mob_route_installs` | Read outstanding cross-host route-install obligations (mob feature) |

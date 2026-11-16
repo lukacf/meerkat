@@ -325,11 +325,12 @@ carry `auth_binding`, `tools.mcp_servers` and `tools.rust_bundles`, and its
 build on the binding, start the servers and mount the bundles of
 `tools.rust_bundles` and `tools.bundles` that the host registered for child
 mobs. A profile read back (`mob/profile/get`, `mob/profile/list`, and the
-answers of create and update) shows none of these four fields. The MCP
-profile tools and the agent profile tools take `MobProfileInput` only and
-refuse all four on a realm profile; an update through them replaces the
-stored profile whole, so it removes these fields from a profile a host
-stored.
+answers of create and update) shows none of these four fields. The agent
+profile tools take `MobProfileInput` only and refuse all four on a realm
+profile; the MCP profile tools take `MobProfileInput` and `auth_binding`, and
+refuse the other three. An update through either replaces the stored profile
+whole, so it removes from a profile a host stored every one of these fields
+that the update does not send.
 
 <Note>
 Every `Schedule` result is one flattened public object. Configuration fields

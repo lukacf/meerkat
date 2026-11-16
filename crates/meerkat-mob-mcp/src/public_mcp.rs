@@ -326,8 +326,23 @@ struct MeerkatMobProfileCreateInput {
     /// Unique profile name.
     name: String,
     /// Profile definition: the public profile input (model, skills, tools,
-    /// etc.). A field outside it is an argument error.
-    profile: MobProfileInput,
+    /// etc.) and `auth_binding`. Any other field is an argument error.
+    #[schemars(with = "MeerkatMobProfileToolProfile")]
+    profile: Value,
+}
+
+/// The `profile` argument of the realm profile tools as they advertise it:
+/// the public profile input, and the one key these tools take beside it.
+#[derive(JsonSchema)]
+#[schemars(deny_unknown_fields)]
+#[allow(dead_code)]
+struct MeerkatMobProfileToolProfile {
+    #[schemars(flatten)]
+    public: MobProfileInput,
+    /// The realm auth binding the profile's members resolve their
+    /// credentials through. A profile read back does not show it.
+    #[schemars(default)]
+    auth_binding: Option<WireAuthBindingRef>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -342,9 +357,11 @@ struct MeerkatMobProfileNameInput {
 struct MeerkatMobProfileUpdateInput {
     /// Profile name to update.
     name: String,
-    /// Updated profile definition: the public profile input. It replaces the
-    /// stored profile whole. A field outside it is an argument error.
-    profile: MobProfileInput,
+    /// Updated profile definition: the public profile input and
+    /// `auth_binding`. It replaces the stored profile whole. Any other field
+    /// is an argument error.
+    #[schemars(with = "MeerkatMobProfileToolProfile")]
+    profile: Value,
     /// Expected current revision for CAS.
     expected_revision: u64,
 }
@@ -1413,14 +1430,28 @@ fn parse_args<T: DeserializeOwned>(arguments: &Value) -> Result<T, McpToolError>
         .map_err(|error| McpToolError::invalid_params(format!("invalid arguments: {error}")))
 }
 
-/// Decode the public profile input of the realm profile tools, as the agent
-/// profile tools do. The input is closed, so a field outside it has already
-/// failed the argument parse, naming the field.
-fn decode_public_profile_input(
-    input: MobProfileInput,
-) -> Result<meerkat_mob::Profile, McpToolError> {
-    crate::decode_public_profile(input)
-        .map_err(|error| McpToolError::invalid_params(format!("invalid profile: {error}")))
+/// Decode the `profile` argument of the realm profile tools: the public
+/// profile input, decoded as the agent profile tools decode it, and
+/// `auth_binding`, the one key these tools take beside it, read as the stored
+/// profile's own field. The public input is closed, so any other field fails
+/// the parse, naming the field.
+fn decode_public_profile_input(mut profile: Value) -> Result<meerkat_mob::Profile, McpToolError> {
+    let invalid = |error: serde_json::Error| {
+        McpToolError::invalid_params(format!("invalid arguments: {error}"))
+    };
+    let auth_binding = match profile
+        .as_object_mut()
+        .and_then(|fields| fields.remove("auth_binding"))
+    {
+        Some(binding) => serde_json::from_value::<Option<meerkat_core::AuthBindingRef>>(binding)
+            .map_err(invalid)?,
+        None => None,
+    };
+    let input: MobProfileInput = serde_json::from_value(profile).map_err(invalid)?;
+    let mut profile = crate::decode_public_profile(input)
+        .map_err(|error| McpToolError::invalid_params(format!("invalid profile: {error}")))?;
+    profile.auth_binding = auth_binding;
+    Ok(profile)
 }
 
 fn parse_mob_id(raw: &str) -> Result<meerkat_mob::MobId, McpToolError> {

@@ -4100,6 +4100,107 @@ async fn asked_create(
         .await
 }
 
+/// A taken name refused before the hold reads as the one refused when a
+/// create is carried out. For a name held by an agent created earlier, by
+/// an agent the host's roster declares, by an archived agent, by a removed
+/// agent's name and by a worker member, a create the rules hold for a
+/// person and its plan answer the kind, the holder and the field that a
+/// create the rules allow at once is refused with at its commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_taken_name_refused_before_the_hold_reads_as_the_one_refused_at_the_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(taken_name_policy(), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let mob = rig.runtime.mob_handle();
+    let family = rig.family();
+    let seed = ChangeRequester::host("seed");
+    let host = ChangeRequester::host("ops");
+    let one = |name: &str| json!([{"name": name, "profile": "worker"}]);
+
+    for (request_id, name) in [("s-1", "earlier"), ("s-2", "shelved"), ("s-3", "former")] {
+        let made = rig.change(&seed, request_id, create_of(one(name))).await;
+        assert_eq!(made.token(), "done", "{made:?}");
+    }
+    for (request_id, name) in [("s-4", "shelved"), ("s-5", "former")] {
+        let archived = rig
+            .change(
+                &seed,
+                request_id,
+                IdentityChangeSpec::Archive(agent_ref(name, &rig.digest(name).await)),
+            )
+            .await;
+        assert_eq!(archived.token(), "done", "{archived:?}");
+    }
+    let removed = rig
+        .change(
+            &seed,
+            "s-6",
+            IdentityChangeSpec::Remove(agent_ref("former", &rig.digest("former").await)),
+        )
+        .await;
+    assert_eq!(removed.token(), "done", "{removed:?}");
+    Box::pin(mob.spawn_spec(SpawnMemberSpec::new(
+        "worker",
+        meerkat_mob::AgentIdentity::from("temp"),
+    )))
+    .await
+    .expect("a worker member is spawned");
+
+    let mut wrong = Vec::new();
+    for (tag, name, holder) in [
+        ("earlier", "earlier", "identity"),
+        ("roster", HOST_A, "identity"),
+        ("archived", "shelved", "identity"),
+        ("removed", "former", "removed"),
+        ("worker", "temp", "worker"),
+    ] {
+        // The taken name is the second agent of the request, which names
+        // its agents in name order: the field names it.
+        let agents = json!([
+            {"name": format!("aa-{tag}"), "profile": "worker"},
+            {"name": name, "profile": "worker"},
+        ]);
+        let committed = rig
+            .change(&seed, &format!("c-{tag}"), create_of(agents.clone()))
+            .await;
+        let at_the_commit = taken_as(
+            committed
+                .refusal()
+                .unwrap_or_else(|| panic!("the allowed create under {name}: {committed:?}")),
+        );
+        assert_eq!(
+            at_the_commit,
+            json!({"kind": "name_taken", "by": holder, "field": "agents[1].name"}),
+            "the allowed create under {name}"
+        );
+        let held = asked_create(&family, &mob, &host, &format!("h-{tag}"), agents.clone()).await;
+        match held.refusal() {
+            Some(refusal) if taken_as(refusal) == at_the_commit => {}
+            _ => wrong.push(format!(
+                "the held create under {name} answers {}",
+                held.to_json()
+            )),
+        }
+        match planned_create(&family, &mob, &host, &format!("p-{tag}"), agents).await {
+            Err(said) if said == at_the_commit => {}
+            Err(said) => wrong.push(format!("the plan under {name} is refused {said}")),
+            Ok(plan) => wrong.push(format!(
+                "the plan under {name} answers the outcome {}",
+                plan["outcome"]
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}
+
 /// The rules of the rows about a requester that is not shown every agent:
 /// the host on the surface `seed` makes every change of an agent of the
 /// profile `worker` at once, and a person decides every create of such an
@@ -4320,6 +4421,39 @@ async fn a_requester_of_limited_sight_is_answered_under_a_name_it_is_not_shown_a
         }),
         "{ended:?}"
     );
+    rig.shutdown().await;
+}
+
+/// A requester that is not shown every agent is refused `name_taken`
+/// before the hold under the name of an agent it is shown, and the plan of
+/// that create is refused the same way: an agent, and a person whose view
+/// of the mob shows the agent. The holder reads `identity`, as it does to
+/// such a requester for every taken name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requester_of_limited_sight_is_refused_before_the_hold_under_an_agent_it_is_shown() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = limited_sight_rig(temp.path()).await;
+    let mob = rig.runtime.mob_handle();
+    let agents = json!([{"name": HOST_A, "profile": "worker"}]);
+    let taken = json!({"kind": "name_taken", "by": "identity", "field": "agents[0].name"});
+
+    let mut wrong = Vec::new();
+    for (who, family, requester) in of_limited_sight(&rig) {
+        match planned_create(&family, &mob, &requester, "p-shown", agents.clone()).await {
+            Err(said) if said == taken => {}
+            Err(said) => wrong.push(format!("{who}: the plan is refused {said}")),
+            Ok(plan) => wrong.push(format!(
+                "{who}: the plan answers the outcome {}",
+                plan["outcome"]
+            )),
+        }
+        let held = asked_create(&family, &mob, &requester, "c-shown", agents.clone()).await;
+        match held.refusal() {
+            Some(refusal) if taken_as(refusal) == taken => {}
+            _ => wrong.push(format!("{who}: the create answers {}", held.to_json())),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
     rig.shutdown().await;
 }
 

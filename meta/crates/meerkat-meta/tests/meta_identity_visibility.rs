@@ -1972,3 +1972,30 @@ async fn the_console_plans_a_create_under_a_name_its_caller_is_not_shown_as_unde
         rig.shutdown().await;
     }
 }
+
+/// The Console's plan of a create under the name of an agent its caller is
+/// shown is refused `name_taken` at the agent that asked for the name, as
+/// the create is: an agent the caller may view, an agent private to the
+/// caller, and for an access administrator an agent private to a person.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_refuses_the_plan_of_a_create_under_the_name_of_an_agent_its_caller_is_shown() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(
+        temp.path(),
+        roster_with_a_private_agent(),
+        Some(SCOPED_DENIES),
+    )
+    .await;
+    let app = rig.console();
+    let mut wrong = Vec::new();
+    for (subject, name) in [(BOB, "clerk"), (ANN, "confidant"), (ROOT, "confidant")] {
+        let planned = console_plan_of_a_create(&app, subject, name).await;
+        let data = &planned["error"]["data"];
+        let said = json!({"kind": data["kind"], "by": data["by"], "field": data["field"]});
+        if said != json!({"kind": "name_taken", "by": "identity", "field": "agents[0].name"}) {
+            wrong.push(format!("{subject} under {name}: {planned}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    rig.shutdown().await;
+}

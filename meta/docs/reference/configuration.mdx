@@ -315,6 +315,20 @@ are not limited.
 
 ### One-shot mob definition update
 
+The revision is the number of the mob definition a state directory holds. A
+store that holds its first definition is at revision 1, and each committed
+update adds one: the first update declares `expected_revision=1` and leaves
+the store at 2, the next declares 2. An exact retry of a committed update
+adds nothing, and a refused declaration changes nothing. In 0.9.15 no call
+of the Python or TypeScript SDK reads the revision, so a host keeps count of
+its own updates. When an update is committed, the gateway logs a warning on
+its standard error, `operator-declared mob spec update committed`, with
+`previous_revision` and `committed_revision`. A host that has lost count can
+recover it only from the text of a refusal: a declaration that names another
+number than the stored one is refused, and its message names the stored one
+(in 0.9.15 `... moved from revision <declared> to <stored> ...`; the error's
+typed fields do not carry the number).
+
 Python hosts use the supported builder ceremony on the single activation
 authorized to change the durable definition:
 
@@ -356,7 +370,10 @@ does not append raw events, rewrite a projection independently, or treat the
 creation manifest as mutable authority. Remove `declare_spec_update(...)`
 (TypeScript `declareSpecUpdate(...)`) from later ordinary restarts. A stale
 revision or different successor definition raises `StorageResolutionError` in
-both SDKs; an exact retry returns the already
+both SDKs (in 0.9.15, with a gateway the SDK starts itself, as the
+`startup_error`, in TypeScript `startupError`, of a
+`GatewayStartupCleanupError`; see Known limitations in the Meta changelog);
+an exact retry returns the already
 committed successor revision and converges its checked projection.
 
 This is a cold-activation ceremony, not a hot reload. Fully shut down the prior

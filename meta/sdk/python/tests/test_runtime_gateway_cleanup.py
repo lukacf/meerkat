@@ -812,6 +812,38 @@ async def test_builder_build_keeps_unprintable_failures_and_their_cleanup_settle
     assert len(made) == 1, "no transport was made again"
 
 
+class _NoCleanup:
+    """A cleanup the message rows never call."""
+
+    async def shutdown(self) -> None:
+        raise AssertionError("the message rows stop nothing")
+
+    @property
+    def last_termination(self) -> TransportTermination | None:
+        return None
+
+
+def test_the_startup_cleanup_error_names_the_type_of_the_startup_failure():
+    # The message names the startup failure's type and nothing of the failure
+    # itself, so a failure that cannot be printed is named as well.
+    refused = GatewayStartupCleanupError(
+        RuntimeError("host bootstrap refused"),
+        OSError("private channel close failed"),
+        _NoCleanup(),
+    )
+    assert str(refused) == (
+        "gateway startup failed (RuntimeError) and the stop of its gateway "
+        "transport failed (see startup_error and cleanup_error)"
+    )
+    unprintable = GatewayStartupCleanupError(
+        Unprintable(), OSError("private channel close failed"), _NoCleanup()
+    )
+    assert str(unprintable) == (
+        "gateway startup failed (Unprintable) and the stop of its gateway "
+        "transport failed (see startup_error and cleanup_error)"
+    )
+
+
 class RefusesAttributes(BaseException):
     """A non-Exception startup failure whose attribute assignment raises."""
 

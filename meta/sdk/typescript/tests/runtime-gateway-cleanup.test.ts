@@ -445,6 +445,44 @@ describe("runtime gateway cleanup ownership", () => {
     });
   }
 
+  it("the startup cleanup error names the type of the startup failure", () => {
+    // The message names the startup failure's type and nothing of the failure
+    // itself: an Error by its `name`, any other value by its `typeof`, and an
+    // Error whose `name` cannot be read as the kind of value it is.
+    const cleanup = {
+      shutdown: async (): Promise<void> => {
+        throw new Error("the message rows stop nothing");
+      },
+      lastTermination: () => null,
+    };
+    const errorWithThrowingName = new Error("placeholder");
+    Object.defineProperty(errorWithThrowingName, "name", {
+      get() {
+        throw new Error("unreadable name");
+      },
+    });
+    for (const [startupError, named] of [
+      [new TypeError("host bootstrap refused"), "TypeError"],
+      [new NotConnectedError("no runtime is connected"), "NotConnectedError"],
+      [errorWithThrowingMessage(), "Error"],
+      [errorWithThrowingName, "object"],
+      [Object.create(null), "object"],
+      ["a thrown string", "string"],
+      [undefined, "undefined"],
+    ] as const) {
+      const failure = new GatewayStartupCleanupError(
+        startupError,
+        new Error("private channel close failed"),
+        cleanup,
+      );
+      assert.equal(
+        failure.message,
+        `gateway startup failed (${named}) and the stop of its gateway transport was rejected ` +
+          "(see startupError and cleanupError)",
+      );
+    }
+  });
+
   it("a refused native shutdown after the gateway exited stays visible, and the next shutdown settles", async () => {
     const dir = mkdtempSync(join(tmpdir(), "meta-cleanup-"));
     const gateway = writeGateway(dir, "refusing", {

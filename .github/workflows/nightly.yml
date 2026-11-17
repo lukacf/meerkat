@@ -182,6 +182,54 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # The runner's size and 12 GiB of swap before the build: the script of
+      # ci.yml's meerkat-meta unit rows (see main-unit there), with this
+      # job's file names. `make test-unit` compiles meerkat-mob's lib test,
+      # one rustc process that peaked at 15,970 to 16,298 MiB in four cold
+      # builds of ci.yml's mob unit rows on a host without a memory limit
+      # (the 0.9.15 and 0.9.16 trees): above this
+      # runner's memory, and CARGO_BUILD_JOBS cannot lower one process. Run
+      # 43976249019 lost this job at exit 143, 25 minutes into `make
+      # test-unit` (job 133831902555). Swap turns an OOM kill into a slower
+      # tail; it lowers no peak. Nothing here fails the job.
+      - name: Show the runner's size and add swap (workspace unit tests)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/workspace-unit-vmstat.log" 2>&1 </dev/null &
+          swapfile=/workspace-unit-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/workspace-unit-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Workspace unit swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       # meerkat-rpc's WebRTC router tests, which `live-webrtc` gates and this
       # lane compiles out, run on every Rust-changing main push instead:
       # ci.yml's "Main unit tests (rpc[openai-live])" row turns on every
@@ -189,6 +237,18 @@ jobs:
       # implies live-webrtc and mob).
       - name: Workspace unit tests
         run: make test-unit
+
+      # After a lost runner no later step runs, not even this one; it prints
+      # for a job that ended by itself.
+      - name: Show memory after the workspace unit tests
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          free -m
+          swapon --show || true
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          cat "${RUNNER_TEMP}/workspace-unit-vmstat.log" || true
 
   workspace-int:
     name: Workspace integration-fast tests
@@ -261,8 +321,67 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # The runner's size and 12 GiB of swap before the build, after the
+      # disk is freed above: the step of the workspace-unit job, with this
+      # job's file names. Run 43976249019 lost this job's runner 91 minutes
+      # into `make test-int` with the disk freed (job 133878731987, "The
+      # hosted runner lost communication with the server"). The cause is
+      # not established: this step prints memory and disk before the build,
+      # and vmstat logs every 30 seconds for the step after the tests.
+      # Nothing here fails the job.
+      - name: Show the runner's size and add swap (workspace integration-fast tests)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/workspace-int-vmstat.log" 2>&1 </dev/null &
+          swapfile=/workspace-int-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/workspace-int-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Workspace integration-fast swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
       - name: Workspace integration-fast tests
         run: make test-int
+
+      # After a lost runner no later step runs, not even this one; it prints
+      # for a job that ended by itself.
+      - name: Show memory after the workspace integration-fast tests
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          free -m
+          swapon --show || true
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          cat "${RUNNER_TEMP}/workspace-int-vmstat.log" || true
+          df -h /
 
   e2e-fast:
     name: Deterministic e2e lane
@@ -754,8 +873,19 @@ jobs:
       # the shipped binaries actually have. It lives on the nightly, not the
       # release path: a release build of meerkat-rpc's tests is minutes of
       # runner time that would land on every tag otherwise.
+      # The router::tests::server_gate_rpc rows spawn the MCP test server
+      # and fail, never skip, without it: a release test binary looks for
+      # it under target/release, where nothing builds it (five rows failed
+      # so on main on 2026-11-16, job 133159267629). The script builds it
+      # in the dev profile and prints its path; it runs before make, so
+      # that rustc never runs under the target's RUST_MIN_STACK.
       - name: RPC router tests on a 1 MiB release stack
-        run: make stack-budget-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
+          export MEERKAT_MCP_TEST_SERVER
+          make stack-budget-release
 
   e2e-system:
     name: System e2e lane

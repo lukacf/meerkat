@@ -3346,6 +3346,137 @@ headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
         }
     }
 
+    /// A project server that names an unset variable keeps its name: the
+    /// user's server of the same name does not take its place, in the file
+    /// load or in the effective set.
+    #[tokio::test]
+    async fn an_unresolved_project_server_still_shadows_the_users() {
+        let temp = TempDir::new().unwrap();
+        let user = write_user_mcp(
+            &temp,
+            "[[servers]]\nname = \"shared\"\ncommand = \"user-tool\"\n",
+        )
+        .await;
+        let project = temp.path().join("project").join(".rkat").join("mcp.toml");
+        tokio::fs::create_dir_all(project.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &project,
+            "[[servers]]\nname = \"shared\"\ncommand = \"${PROJECT_HOME}/bin/tool\"\n",
+        )
+        .await
+        .unwrap();
+        let env = |_: &str| None;
+
+        let files = resolve_file_servers_with_env(Some(&project), Some(&user), &env)
+            .await
+            .unwrap();
+        assert!(files.servers.is_empty(), "{files:?}");
+        assert_eq!(files.unresolved.len(), 1);
+        assert_eq!(files.unresolved[0].scope, McpScope::Project);
+        assert_eq!(files.unresolved[0].field, "command");
+
+        let effective =
+            effective_servers_trusting_with_env(&[], Some(&project), Some(&user), &|_| false, &env)
+                .await
+                .unwrap();
+        assert!(effective.admitted.is_empty(), "{effective:?}");
+        assert_eq!(effective.unresolved.len(), 1);
+        assert_eq!(effective.unresolved[0].scope, McpScope::Project);
+    }
+
+    /// A server that names a set variable and an unset one stays whole as
+    /// written: the set variable's value is in no part of the unresolved
+    /// entry or of its texts. The first unset variable in field order is the
+    /// one named.
+    #[tokio::test]
+    async fn an_unresolved_server_carries_no_expanded_value() {
+        let temp = TempDir::new().unwrap();
+        let user = write_user_mcp(
+            &temp,
+            "[[servers]]\nname = \"mixed\"\nurl = \"https://mixed.example/mcp\"\n\
+             headers = { Authorization = \"Bearer ${SET_SECRET}\", X-Second = \"${ABSENT_TWO}\", X-First = \"${ABSENT_ONE}\" }\n",
+        )
+        .await;
+        let env = |key: &str| (key == "SET_SECRET").then(|| "s3cr3t-value".to_owned());
+
+        let files = resolve_file_servers_with_env(None, Some(&user), &env)
+            .await
+            .unwrap();
+        assert!(files.servers.is_empty());
+        let unresolved = &files.unresolved[0];
+        assert_eq!(unresolved.field, "headers.X-First");
+        assert_eq!(unresolved.variable, "ABSENT_ONE");
+        let McpTransportConfig::Http(http) = &unresolved.server.transport else {
+            unreachable!("mixed is a remote server");
+        };
+        assert_eq!(
+            http.headers.get("Authorization").map(String::as_str),
+            Some("Bearer ${SET_SECRET}"),
+            "nothing of an unresolved server is expanded"
+        );
+        for text in [
+            unresolved.to_string(),
+            unresolved.missing_env_var().to_string(),
+            format!("{unresolved:?}"),
+        ] {
+            assert!(!text.contains("s3cr3t-value"), "{text}");
+        }
+    }
+
+    /// The reference form is `${NAME}` only. A variable set to the empty
+    /// string is set; there is no default or escape form, and `$NAME` and
+    /// `$$` are literal text.
+    #[test]
+    fn a_reference_is_a_braced_name_and_an_empty_value_is_set() {
+        let env = |key: &str| (key == "EMPTY").then(String::new);
+        assert_eq!(
+            expand_env_in_string_with("a${EMPTY}b $HOME $$ {x}", "url", &env).unwrap(),
+            "ab $HOME $$ {x}"
+        );
+        match expand_env_in_string_with("${ABSENT:-fallback}", "url", &env) {
+            Err(McpConfigError::MissingEnvVar { field, var }) => {
+                assert_eq!(field, "url");
+                assert_eq!(var, "ABSENT:-fallback");
+            }
+            other => unreachable!("no default form: {other:?}"),
+        }
+    }
+
+    /// A malformed reference is not an unset variable: it fails the whole
+    /// file, as before, in the per-server loads too, and the error names
+    /// the server. No server of that file is staged, so its text reaches no
+    /// server's failure detail.
+    #[tokio::test]
+    async fn a_malformed_reference_fails_the_whole_file_naming_its_server() {
+        for malformed in ["https://bad.example/${UNCLOSED", "https://bad.example/${}"] {
+            let temp = TempDir::new().unwrap();
+            let user = write_user_mcp(
+                &temp,
+                &format!(
+                    "[[servers]]\nname = \"good\"\ncommand = \"tool\"\n\n\
+                     [[servers]]\nname = \"bad\"\nurl = \"{malformed}\"\n"
+                ),
+            )
+            .await;
+            let env = |_: &str| None;
+            match resolve_file_servers_with_env(None, Some(&user), &env).await {
+                Err(McpConfigError::InvalidEnvVarSyntax { field, value }) => {
+                    assert_eq!(field, "server 'bad' url");
+                    assert_eq!(value, malformed);
+                }
+                other => unreachable!("expected the whole-file refusal, got {other:?}"),
+            }
+            assert!(matches!(
+                effective_servers_trusting_with_env(&[], None, Some(&user), &|_| false, &env).await,
+                Err(EffectiveMcpServersError::Config(
+                    McpConfigError::InvalidEnvVarSyntax { .. }
+                ))
+            ));
+        }
+    }
+
     /// Adding and removing a server writes every other entry back as it was
     /// written: a `${VAR}` reference is neither expanded nor dropped, whether
     /// or not its variable is set.

@@ -441,3 +441,138 @@ fn mcp_text_listings_mask_env_header_and_url_credentials() {
         );
     }
 }
+
+/// The scoped forms resolve each server alone too; a project server that
+/// names an unset variable keeps its name over the user's server of that
+/// name; and a set variable's value is in no text about an unresolved
+/// server, which is shown as written.
+#[test]
+fn scoped_mcp_commands_and_a_shadowing_server_resolve_alone() {
+    const ABSENT: &str = "RKAT_ROW_MCP_SCOPED_ABSENT_TOKEN";
+    const PRESENT: &str = "RKAT_ROW_MCP_SCOPED_PRESENT_SECRET";
+    const VALUE: &str = "row-scoped-value-0123456789";
+    let roots = Roots::new(&format!(
+        "[[servers]]\nname = \"alpha\"\nurl = \"https://alpha.example/mcp\"\n\
+         headers = {{ Authorization = \"Bearer ${{{PRESENT}}}\", X-Row = \"${{{ABSENT}}}\" }}\n\n\
+         [[servers]]\nname = \"beta\"\ncommand = \"beta-tool\"\n\n\
+         [[servers]]\nname = \"shared\"\ncommand = \"user-tool\"\n"
+    ));
+    std::fs::create_dir_all(roots.context.join(".rkat")).unwrap();
+    std::fs::write(
+        roots.context.join(".rkat/mcp.toml"),
+        format!("[[servers]]\nname = \"shared\"\ncommand = \"${{{ABSENT}}}/bin/project-tool\"\n"),
+    )
+    .unwrap();
+    let rkat = |args: &[&str]| roots.rkat(&[(PRESENT, VALUE)], &[ABSENT], args);
+    let text_of = |output: &Output| format!("{}{}", stdout_of(output), stderr_of(output));
+    let row = |listed: &str, name: &str| -> Vec<String> {
+        listed
+            .lines()
+            .filter(|line| line.starts_with(name))
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let list = rkat(&["mcp", "list", "--scope", "user"]);
+    assert_success(&list);
+    let listed = text_of(&list);
+    let alpha = row(&listed, "alpha");
+    assert_eq!(alpha.len(), 1, "{listed}");
+    assert!(
+        alpha[0].contains("unresolved")
+            && alpha[0].contains(ABSENT)
+            && alpha[0].contains("headers.X-Row"),
+        "{listed}"
+    );
+    assert!(row(&listed, "beta")[0].contains("beta-tool"), "{listed}");
+    assert!(!listed.contains(VALUE), "{listed}");
+
+    let list_json = rkat(&["mcp", "list", "--scope", "user", "--json"]);
+    assert_success(&list_json);
+    assert!(!text_of(&list_json).contains(VALUE));
+    let entries: serde_json::Value = serde_json::from_slice(&list_json.stdout).unwrap();
+    let entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "alpha")
+        .unwrap();
+    assert_eq!(
+        entry["unresolved"],
+        serde_json::json!({ "field": "headers.X-Row", "variable": ABSENT })
+    );
+    assert_eq!(
+        entry["headers"]["Authorization"],
+        format!("Bearer ${{{PRESENT}}}"),
+        "nothing of an unresolved server is expanded: {entries}"
+    );
+
+    let get = rkat(&["mcp", "get", "alpha", "--scope", "user"]);
+    assert_success(&get);
+    let shown = text_of(&get);
+    assert!(
+        shown.contains("Unresolved:") && shown.contains("headers.X-Row") && shown.contains(ABSENT),
+        "{shown}"
+    );
+    assert!(!shown.contains(VALUE), "{shown}");
+
+    let get_json = rkat(&["mcp", "get", "alpha", "--scope", "user", "--json"]);
+    assert_success(&get_json);
+    assert!(!text_of(&get_json).contains(VALUE));
+    let entry: serde_json::Value = serde_json::from_slice(&get_json.stdout).unwrap();
+    assert_eq!(entry["unresolved"]["variable"], ABSENT);
+
+    let login = rkat(&[
+        "mcp",
+        "login",
+        "alpha",
+        "--scope",
+        "user",
+        "--allow-headless",
+    ]);
+    assert!(!login.status.success());
+    let refused = text_of(&login);
+    assert!(
+        refused.contains("'alpha'")
+            && refused.contains("headers.X-Row")
+            && refused.contains(ABSENT),
+        "{refused}"
+    );
+    assert!(!refused.contains(VALUE), "{refused}");
+    let login_other = rkat(&[
+        "mcp",
+        "login",
+        "beta",
+        "--scope",
+        "user",
+        "--allow-headless",
+    ]);
+    assert!(!login_other.status.success());
+    assert!(
+        text_of(&login_other).contains("streamable HTTP servers only"),
+        "a scoped login addressed to the other server reaches it: {}",
+        text_of(&login_other)
+    );
+
+    // Every scope: the project's unresolved `shared` keeps the name; the
+    // user's `shared` does not take its place.
+    let all = rkat(&["mcp", "list"]);
+    assert_success(&all);
+    let listed = text_of(&all);
+    let shared = row(&listed, "shared");
+    assert_eq!(shared.len(), 1, "{listed}");
+    assert!(
+        shared[0].contains("project") && shared[0].contains("unresolved"),
+        "{listed}"
+    );
+    assert!(!listed.contains("user-tool"), "{listed}");
+
+    // The unresolved server is removed like any other, and the rest of the
+    // file stays.
+    assert_success(&rkat(&["mcp", "remove", "alpha"]));
+    let file = std::fs::read_to_string(roots.user_mcp_toml()).unwrap();
+    assert!(
+        !file.contains("alpha") && file.contains("beta-tool") && file.contains("user-tool"),
+        "{file}"
+    );
+}

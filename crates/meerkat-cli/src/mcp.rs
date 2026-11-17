@@ -623,7 +623,7 @@ pub async fn get_server(
         println!("Scope:   {}", server.source);
         if let Some(unresolved) = unresolved {
             println!(
-                "Unresolved: environment variable '{}' referenced in {} is not set (shown as written)",
+                "Unresolved: environment variable '{}' referenced in {} is not set; nothing of this server is expanded",
                 unresolved.variable, unresolved.field
             );
         }

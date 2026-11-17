@@ -39945,6 +39945,91 @@ mod tests {
         assert_eq!(unresolved, ["alpha"]);
     }
 
+    /// A restore beside an installation that cannot be resolved now: the
+    /// attachment of the server whose `mcp.toml` entry names an unset
+    /// variable is reported unavailable, never retired, and the other
+    /// server's attachment is restored.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn a_restore_reports_only_the_unresolved_installations_attachment_unavailable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_RPC_RESTORE_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        runtime
+            .start_turn(
+                &session_id,
+                "hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the first turn materializes the session");
+        for name in ["alpha", "beta"] {
+            runtime
+                .mcp_stage_add(
+                    &session_id,
+                    McpServerConfig::stdio(name, "echo", Vec::new(), HashMap::new()),
+                )
+                .await
+                .expect("stage add");
+        }
+        let requested = runtime
+            .durable_mcp_attachment_intents(&session_id)
+            .await
+            .expect("read the durable intents");
+        assert_eq!(requested.len(), 2, "both adds are durable: {requested:?}");
+
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".rkat")).unwrap();
+        std::fs::write(
+            project.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"echo\"\n\
+                 env = {{ TOKEN = \"${{{ABSENT}}}\" }}\n\n\
+                 [[servers]]\nname = \"beta\"\ncommand = \"echo\"\n"
+            ),
+        )
+        .unwrap();
+        runtime.set_skill_identity_roots(Some(project), None);
+        {
+            let mut sessions = runtime.mcp_sessions.write().await;
+            let state = sessions
+                .get_mut(&session_id)
+                .expect("the session's MCP state");
+            while state.lifecycle_rx.try_recv().is_ok() {}
+            state.pending_restore = requested;
+        }
+
+        runtime.restore_queued_mcp_attachments(&session_id).await;
+
+        let mut reported = Vec::new();
+        {
+            let mut sessions = runtime.mcp_sessions.write().await;
+            let state = sessions
+                .get_mut(&session_id)
+                .expect("the session's MCP state");
+            while let Ok(action) = state.lifecycle_rx.try_recv() {
+                reported.push((action.target.clone(), action.restore));
+            }
+        }
+        assert_eq!(
+            reported,
+            [(
+                "alpha".to_owned(),
+                Some(meerkat_core::McpAttachmentRestoreWireOutcome::Unavailable)
+            )],
+            "only the unresolved installation's attachment is unavailable; the other is restored"
+        );
+    }
+
     /// A session with one parked governed restore entry (`restored`), whose
     /// current installation the restore does not find: settling the batch
     /// reports it once on the session's lifecycle stream.

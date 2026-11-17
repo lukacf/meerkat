@@ -175,8 +175,9 @@ rkat mcp get <NAME> [--scope project|user|local|realm] [--json]
   when there are several; an inherited server must be removed in the realm
   that configures it.
 - `list` and `get` without `--scope` show every scope. `get` text output
-  masks env and header values whose name contains key, secret, token or
-  password; `--json` (on `list` and `get`) prints stored values unmasked.
+  masks every env and header value and shows a URL without its userinfo and
+  query (so does the `list` table); `--json` (on `list` and `get`) prints
+  stored values unmasked.
   Neither shows `access`, `tool_names`, `secret_env` or `cwd`.
 - `rkat mcp` edits configuration only; sessions read it when they start or
   when a server reloads. There is no `rkat mcp reload`, `rkat mcp logout` or

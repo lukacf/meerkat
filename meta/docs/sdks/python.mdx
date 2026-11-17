@@ -1368,8 +1368,12 @@ gateway refuses an earlier request at once with `InitInProgressError`
 
 A host runnable is application code that a durable schedule fires. The builder
 declares its name with `.host_runnables([...])`, and
-`on_schedule_fire(name, handler)` on the runtime registers the handler that
-takes each fire (see [Scheduling](/concepts/scheduling#targets)).
+`on_schedule_fire(name, handler)` registers the handler that takes each fire
+(see [Scheduling](/concepts/scheduling#targets)). Give the handler of a
+schedule that can be due when the gateway starts to the builder
+(`.on_schedule_fire(name, handler)` under [Builder methods](#builder-methods),
+from 0.9.17): it is in place before `build()` connects. A handler registered
+on the runtime that `build()` returned can come too late for such a fire.
 
 <Warning>
 From 0.7.32 to 0.9.16 a schedule callback can arrive before the application
@@ -1384,8 +1388,7 @@ due while the application starts.
 
 This was shown by a run of the 0.9.16 source against the released 0.9.15
 gateway with the SDK's start held open; one unforced start on the published
-0.9.15 did not meet it. A fix, a way to register the handler on the builder,
-is planned.
+0.9.15 did not meet it. 0.9.17 adds the handler on the builder.
 </Warning>
 
 ## Adopting a gateway child the host started

@@ -530,6 +530,11 @@ invalid, interrupted, recovered, applied, and rolled-back attempts, so it is
 more sensitive than graph inspection and is advertised only to callers with a
 `topology.audit` grant. Returned records additionally require `agent.view`,
 `topology.view`, and `topology.audit` on every endpoint in that record.
+From 0.9.17 the record of an apply the access rules refused holds no
+operation when an endpoint is a name the Console knows no agent under or
+an agent hidden from the caller: such a record names no endpoint, is
+returned on the Console to access administrators only, and is counted in
+`latest_seq` and `next_after_seq` for every reader.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -1416,7 +1421,9 @@ is carried out.
 On the Console, a create under the name of an
 agent private to another person answers `-32001` (unknown identity), not
 `name_taken`, to a caller who is neither that person nor an access
-administrator. A name that begins `approval-branch-` and holds only ASCII
+administrator. From 0.9.17 the access rules are asked first: a caller
+they refuse the create reads `-32030` (access denied) for such a name as
+for any other. A name that begins `approval-branch-` and holds only ASCII
 letters, digits, `-` and `_` (a name Meerkat holds as written) is refused
 `invalid_name` at `agents[i].name`: Meerkat keeps those names for its
 approval branches. `profile` is one of the mob's profiles. `instructions`
@@ -4444,7 +4451,7 @@ under `workgraph_realm_migration`.
 | `-32000` | other WorkGraph error | `workgraph_error` |
 | `-32602` | invalid params (including `realm_id`, a non-default namespace where refused, or `limit` above 1000) | none |
 | `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign` names a member of another mob; its bindings live only in that mob's realm (`mob.<mob_id>`), so the write is refused before it happens | `attention_target_realm_mismatch` (`data.owner_key`, `data.mob_id`, `data.required_realm_id`, `data.realm_id`) |
-| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`) | `private_member_workgraph_target` (`data.member`) |
+| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`; from 0.9.17, for the target of those three methods, a caller the access rules refuse the request reads their refusal, `-32030`, as for any other name) | `private_member_workgraph_target` (`data.member`) |
 | `-32030` | ABAC denial on the console surface | `access_denied` |
 
 SDK method names are the RPC names with the `meta/workgraph/` prefix

@@ -1661,7 +1661,18 @@ without `persistent_state`, `runtime_options.runtime_store` and the builder's
 `ConflictingConfiguration` from the builder). Undeclared gaps are startup
 errors that SDKs surface as the typed `StorageResolutionError` (`-32014`). The sanctioned boot-without
 degradations (schedule or workgraph store open failure) disable the feature
-and appear as `degraded` slots.
+and appear as `degraded` slots. One more `degraded` slot has the domain
+`workgraph_attention`. It appears when a start that speaks for the mob's
+composition finds WorkGraph attention bindings whose target is a member
+private to a person and holds them paused; its `detail` names each held
+binding by its id. This entry is not a store that failed to open and
+disables nothing, although its `backend` field reads `disabled` and its
+resolution `non_persistent`, as the entry of a store that failed to open
+does: WorkGraph stays on. The entry is the start's snapshot: it stays in
+the summary until the next start, also after every binding it names was
+reassigned to another member or its goal was closed. A host that reads any
+`degraded` slot as a store that failed to open should tell this one by its
+domain.
 
 **Storage census surfaces.** The resolved picture rides the `storage` object
 on `meta/status`, `meta/capabilities`, and `meta/storage/doctor`:

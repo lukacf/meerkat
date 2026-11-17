@@ -245,6 +245,10 @@ async fn every_read(
             "recent of bob's conversation",
             window(None, Some("bob"), ConsoleTimelineMode::Recent, 2),
         ),
+        (
+            "recent of alice in alice's conversation",
+            window(Some("alice"), Some("alice"), ConsoleTimelineMode::Recent, 2),
+        ),
     ] {
         let page = store.query_windowed_frames(query).await?;
         reads.insert(name.to_string(), serde_json::to_value(page)?);
@@ -415,6 +419,159 @@ async fn a_log_moved_while_it_is_open_is_served_as_a_version_4_log() -> TestResu
     );
     assert_eq!(another_mobs_rows(&path)?, another_mobs);
     assert_eq!(ledger_version(&path)?, Some(4));
+    Ok(())
+}
+
+/// A log that is stamped above schema version 4 while this release holds
+/// it open (a later release moved it on) is not served any more: every
+/// operation of the store that reads or writes the log is refused with the
+/// refusal an open of such a log gets, runs no statement, and leaves the
+/// file as it is.
+#[tokio::test]
+async fn a_log_stamped_above_version_4_while_it_is_open_refuses_every_operation() -> TestResult {
+    fn refusal<T>(result: ConsoleLogResult<T>) -> Option<String> {
+        result.err().map(|error| error.to_string())
+    }
+    fn watermarks(path: &std::path::Path) -> Result<Vec<String>, Failure> {
+        let conn = rusqlite::Connection::open(path)?;
+        let mut statement = conn.prepare(
+            "SELECT runtime_key || '|' || source_kind || '|' || source_cursor \
+             FROM console_source_watermarks ORDER BY 1",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("console.sqlite3");
+    let stored = version_4_log(&path).await?;
+    let store = SqliteConsoleLogStore::open(&path)?;
+    every_read(&store, &stored).await?;
+
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute(
+        "UPDATE meerkat_schema SET version = 5 WHERE domain = 'meta-console'",
+        [],
+    )?;
+    drop(conn);
+    let declared = catalog(&path)?;
+    let frames = rows(&path, "1 = 1")?;
+    let marks = watermarks(&path)?;
+
+    let launch_send = stored
+        .iter()
+        .find(|frame| frame.dedupe_key == "alice-send")
+        .expect("the launch mob's send");
+    let outcomes: Vec<(&str, Option<String>)> = vec![
+        (
+            "a page",
+            refusal(
+                store
+                    .query_windowed_frames(window(None, None, ConsoleTimelineMode::Since, 200))
+                    .await,
+            ),
+        ),
+        (
+            "a member's page",
+            refusal(
+                store
+                    .query_windowed_frames(window(
+                        Some("alice"),
+                        None,
+                        ConsoleTimelineMode::Recent,
+                        2,
+                    ))
+                    .await,
+            ),
+        ),
+        (
+            "the frames",
+            refusal(store.query_frames(ConsoleTimelineQuery::default()).await),
+        ),
+        ("the newest cursor", refusal(store.latest_cursor().await)),
+        (
+            "a frame by key",
+            refusal(store.frame_by_dedupe_key("alice-1").await),
+        ),
+        (
+            "the send of an interaction",
+            refusal(store.send_frame_by_interaction(INTERACTION).await),
+        ),
+        (
+            "the unsettled sends",
+            refusal(store.unsettled_send_frames(1000, 100).await),
+        ),
+        (
+            "a member's last activity",
+            refusal(store.latest_activity_times(&["alice".to_string()]).await),
+        ),
+        (
+            "an append",
+            refusal(store.append_if_absent(text("alice-3", "alice", 60)).await),
+        ),
+        (
+            "a status change",
+            refusal(
+                store
+                    .update_frame_status(&launch_send.id, ConsoleFrameStatus::DeliveryFailed)
+                    .await,
+            ),
+        ),
+        (
+            "a send transition",
+            refusal(
+                store
+                    .transition_send_frame(&launch_send.id, SendTransition::StartDispatch, None)
+                    .await,
+            ),
+        ),
+        (
+            "a taken hold",
+            refusal(store.take_send_frame_hold(&launch_send.id).await),
+        ),
+        (
+            "a compaction",
+            refusal(
+                store
+                    .compact_message_deltas(&ConsoleDeltaCompaction::new(
+                        RUNTIME,
+                        "alice",
+                        ConsoleDeltaKind::Text,
+                        MESSAGE,
+                        ConsoleCursor::from_seq(1),
+                        ConsoleCursor::from_seq(3),
+                    ))
+                    .await,
+            ),
+        ),
+        ("a clear", refusal(store.clear_frames().await)),
+        (
+            "a source watermark",
+            refusal(
+                store
+                    .record_source_watermark(
+                        RUNTIME,
+                        ConsoleFrameSourceKind::ConsoleEvent,
+                        "cursor-1",
+                    )
+                    .await,
+            ),
+        ),
+    ];
+    for (operation, refusal) in &outcomes {
+        let refusal = refusal.as_deref().unwrap_or("it ran");
+        assert!(
+            refusal.contains("`meta-console`")
+                && refusal.contains("file has version 5")
+                && refusal.contains("supports up to 4"),
+            "{operation} is refused with the log's version: {refusal}"
+        );
+    }
+
+    assert_eq!(ledger_version(&path)?, Some(5));
+    assert_eq!(catalog(&path)?, declared);
+    assert_eq!(rows(&path, "1 = 1")?, frames);
+    assert_eq!(watermarks(&path)?, marks);
     Ok(())
 }
 

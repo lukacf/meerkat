@@ -74,4 +74,4 @@ pub use model::{
     OPERATOR_INGRESS, PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions,
     normalize_access_config_for_schedule_actions, validate_access_config,
 };
-pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};
+pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner, private_to_another};

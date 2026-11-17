@@ -14,7 +14,7 @@ use super::engine::{
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
-    check_declared_ingresses, private_owner, validate_access_config,
+    check_declared_ingresses, private_owner, private_to_another, validate_access_config,
 };
 use crate::console_aggregator::ConsoleAggregatorId;
 use crate::private_owners::PrivateOwnerRecordId;
@@ -1252,10 +1252,9 @@ impl AccessView {
     fn private_owner_hides(&self, lineage: &[LineageLink]) -> bool {
         !self.is_admin
             && lineage.iter().any(|link| {
-                link.attributes
-                    .as_deref()
-                    .and_then(|attributes| private_owner(&attributes.labels))
-                    .is_some_and(|owner| self.private_owner_key.as_deref() != Some(owner))
+                link.attributes.as_deref().is_some_and(|attributes| {
+                    private_to_another(&attributes.labels, self.private_owner_key.as_deref())
+                })
             })
     }
 

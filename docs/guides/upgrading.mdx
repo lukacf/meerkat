@@ -89,10 +89,10 @@ sent to such a session while it was stopped:
 of 0.9.17.)
 
 **Do:** after the first start on 0.9.17, send again what was sent to such a
-session while it was stopped, other than a `meta/send` that carried an
-idempotency key. Repeat that one under the same key, not a new one: the
-repeat makes no second input and answers the ids, with which its status can
-be asked.
+session while it was stopped. A `meta/send` that carried an idempotency key
+need not be sent again; if you do repeat it, use the same key, not a new
+one: the repeat makes no second input and answers the ids, with which its
+status can be asked.
 
 ## Upgrading to 0.9.16
 

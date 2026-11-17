@@ -35,6 +35,50 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `rkat`, `meerkat-mcp`, `meerkat-core`: a stdio MCP server that fails during
+  setup now shows why. Since 0.9.3 the host captures such a server's stderr
+  as a bounded, redacted tail and records the phase, the class of the failure
+  and the server's own exit status, but `rkat` showed none of it: its
+  operator read only the transport's text, such as
+  `connection closed: initialize response`.
+  - The `detail` of the server's `Failed` lifecycle notice (the
+    `tool_config_changed` event, and the CLI's `--wait-for-mcp` warning)
+    keeps the transport's text and adds, in fixed words, the phase (`launch`,
+    `initialize` or `tool discovery`) and what the transport established,
+    with the server's own exit status or signal where its close proved it.
+    For example: `...; stdio setup failed during initialize: the server
+    process ended, exit status 3`. A signal reads
+    `killed by signal 9 (SIGKILL)`.
+  - `rkat` also tells its operator, on its own stderr only and once per
+    failed server, that sentence and the last lines the server wrote to
+    stderr: at most 40 lines and 4 KiB of the retained tail, marked when
+    earlier output is not shown and when the end of the server's stderr was
+    not reached. It does so after the `--wait-for-mcp` wait, also when that
+    wait refuses the run, and otherwise when the run ends. A confined
+    server's last stderr lines are shown this way too; `rkat` showed them
+    nowhere before. A trusted-host server's stderr is still also written to
+    `rkat`'s stderr as it arrives.
+  - What the shown tail can hold: values of 8 bytes or more that the host
+    passed in the server's environment (the first 64, declared secrets
+    first) are removed from it exactly, and secret-shaped text is removed.
+    Launch arguments are not removed exactly, only where they are
+    secret-shaped: a secret belongs in `secret_env`, not in an argument.
+  - The stderr tail still never reaches the model, lifecycle notices, events
+    or errors, and the model's setup-failure notice is unchanged and carries
+    no class. Only the phase, the class and the exit status are added to the
+    notice's detail.
+  - Other hosts (`rkat-rpc`, `rkat-rest`, a governed realm's sessions) show
+    the phase and the exit status in that event's detail and do not print
+    the tail. A host built on the Rust API reads it with
+    `McpRouterAdapter::stdio_stderr_tail`, or with the new
+    `McpRouterAdapter::claim_stdio_failure_reports`, which returns each
+    retained failure once with its tail (sensitive: host and operator
+    only). `McpStdioSetupFailure`, `McpStdioSetupPhase`,
+    `McpStdioSetupFailureClass` and `McpStdioExit` implement `Display`.
+  - Not covered: a server that dies during a call, after a good setup.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

@@ -1866,7 +1866,11 @@ async fn a_drain_without_an_executor_leaves_a_checkpoint_owing_terminal_carrier_
     .await
     .expect_err("a drain without an executor cannot take the session checkpoint");
     assert!(
-        matches!(refused, RuntimeDriverError::ValidationFailed { .. }),
+        matches!(
+            &refused,
+            RuntimeDriverError::ValidationFailed { reason }
+                if reason == "a recovered terminal completion batch needs a session checkpoint"
+        ),
         "unexpected refusal: {refused}"
     );
     assert_eq!(
@@ -1924,15 +1928,11 @@ async fn an_unregister_after_a_restart_succeeds_with_a_terminal_carrier(
         .await
         .expect("the registered session unregisters while its completion is still carried");
     assert!(!machine.contains_session(&fixture.session_id).await);
-    assert!(
-        fixture
-            .store
-            .load_input_state(&fixture.runtime_id(), &input_id)
-            .await
-            .unwrap()
-            .is_some(),
-        "the consumed row stays stored"
-    );
+    // The unregister neither finalizes nor drops the carried completion: the
+    // row is still consumed with its completion pending, and the store still
+    // names it, for the next start's drain.
+    fixture.pending(&input_id).await;
+    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 1);
 }
 
 #[tokio::test]
@@ -2058,6 +2058,11 @@ async fn a_store_holding_an_unrecovered_ephemeral_terminal_carrier_heals_at_the_
             .await
             .unwrap()
             .expect("a queued durable input stays stored");
+        assert_eq!(
+            row.seed.phase,
+            InputLifecycleState::Queued,
+            "a queued durable input is still queued"
+        );
         assert!(
             row.seed.terminal_outcome.is_none(),
             "a queued durable input is still unfinished work"

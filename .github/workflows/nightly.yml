@@ -58,7 +58,7 @@ name: Nightly
 #        feature-matrix (170-267) > workspace-int (134-240)
 #        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
 #          e2e-fast (3-34) > sdk-host (3-52)
-#        machine-verify (30-43) > workspace-unit (117-173) > clippy-full
+#        machine-verify (40-50) > workspace-unit (117-173) > clippy-full
 #          (30-63) > dense-topology (24-70) > wasm-contract (4-26)
 # Minutes are the range over the 2026-11-01 to 11-07 runs, a job that ran
 # out of time counted at its limit and a run that lost its runner left
@@ -336,6 +336,19 @@ jobs:
       # The generated adaptive composition is large enough that Java's
       # container-selected ~3.5 GiB heap OOMs during semantic processing.
       JAVA_TOOL_OPTIONS: -Xmx8g
+      # The per-run TLC cap of this job's sweep (the checker's default is
+      # 900 s). The longest run, SessionDocumentMachine's ci.cfg
+      # (156,393,703 states generated over 38,712 distinct ones), finished
+      # in 846 s on one kind of hosted runner (2026-11-16) and was killed at
+      # 900 s, 78 percent through, on a slower kind (2026-11-14 and
+      # 2026-11-16: about 1180 s projected), so the machine had no complete
+      # bounded check on those nights. 1800 s is 1.5 times the slower kind's
+      # need. A run that reaches the cap still fails as TLC INCOMPLETE,
+      # never as a pass. The cap holds for every run of the sweep: with one
+      # run at the cap the job takes about 61 of its 90 minutes (setup and
+      # the xtask build 10, the other runs 21), so the checker reports it;
+      # with a second run at the cap the job's limit can come first.
+      TLC_RUN_CAP_SECS: "1800"
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -382,8 +395,9 @@ jobs:
           setup-java: "false"
 
       # Only the lane's machine-verify part, which no per-change lane runs:
-      # the bounded adaptive witness, then `machine-verify --all`, an
-      # estimated 30-43 minutes with setup and the xtask build. The lane's
+      # the bounded adaptive witness, then `machine-verify --all`: 40 minutes
+      # with setup and the xtask build on 2026-11-16, and about 50 on the
+      # slower kind of runner (see TLC_RUN_CAP_SECS above). The lane's
       # twenty-four audit shards run in ci.yml's tlc-audits job on every
       # change scripts/machine-authority-changed matches. The whole lane in
       # one 4-vCPU job needs an estimated 218-260 minutes, and it hit this

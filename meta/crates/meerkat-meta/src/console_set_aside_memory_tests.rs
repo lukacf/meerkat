@@ -85,7 +85,8 @@ async fn primed(
     record_live_and_registered_attributes(
         controller,
         vec![shared_member("helper"), shared_member("ledger")],
-        &BTreeMap::new(),
+        &crate::console_spawn::SpawnRegistry::default(),
+        &BTreeSet::new(),
         &BTreeSet::new(),
         &owners.memory_members(),
         "",

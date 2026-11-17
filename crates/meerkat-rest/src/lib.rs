@@ -26,11 +26,13 @@
     clippy::unnested_or_patterns
 )]
 
+pub mod allowed_origins;
 pub mod auth_endpoints;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod resumed_run_tests;
 mod schedule_host;
+pub mod served_hosts;
 pub mod webhook;
 
 use axum::{
@@ -171,6 +173,12 @@ pub struct AppState {
     pub max_tokens: u32,
     pub rest_host: Cow<'static, str>,
     pub rest_port: u16,
+    /// The origins of the browser pages this server answers
+    /// (`[rest] allowed_origins`, read at startup).
+    pub rest_allowed_origins: allowed_origins::AllowedOrigins,
+    /// The host names this server answers for (`[rest] host` and
+    /// `[rest] served_hosts`, read at startup).
+    pub rest_served_hosts: served_hosts::ServedHosts,
     /// Whether to enable built-in tools (task management, shell)
     pub enable_builtins: bool,
     /// Whether to enable shell tools (requires enable_builtins=true)
@@ -824,6 +832,10 @@ impl AppState {
         let max_tokens = config.agent.resolved_max_tokens_per_turn();
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
+        let rest_allowed_origins =
+            allowed_origins::AllowedOrigins::new(&config.rest.allowed_origins);
+        let rest_served_hosts =
+            served_hosts::ServedHosts::new(&config.rest.host, &config.rest.served_hosts);
 
         // Shared TokenStore: attach to the factory AND to AppState so the
         // OAuth write-path handlers (auth/login/complete, auth/profile/
@@ -948,6 +960,8 @@ impl AppState {
             max_tokens,
             rest_host,
             rest_port,
+            rest_allowed_origins,
+            rest_served_hosts,
             enable_builtins,
             enable_shell,
             project_root: Some(task_project_root),
@@ -2933,7 +2947,13 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/mcp/remove", post(mcp_remove))
         .route("/sessions/{id}/mcp/reload", post(mcp_reload));
 
-    r.with_state(state)
+    // Every route, and the answers to a path or a method the router does not
+    // know, pass the caller checks: they are layers over the finished router.
+    let origins = state.rest_allowed_origins.clone();
+    let hosts = state.rest_served_hosts.clone();
+    allowed_origins::answering_allowed_origins_only(r.with_state(state), origins).layer(
+        axum::middleware::from_fn_with_state(hosts, served_hosts::refuse_host_not_served),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -9560,8 +9580,10 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
 
+    mod allowed_origins_tests;
     pub(crate) mod committed_reads_tests;
     mod default_context_root_tests;
+    mod served_hosts_tests;
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};

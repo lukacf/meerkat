@@ -2051,6 +2051,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        ":package_runfiles",
         "//tests/fixtures/mcp-test-server:mcp_test_server_bin",
         "//crates/meerkat-rpc:rkat_rpc_bin",
     ],

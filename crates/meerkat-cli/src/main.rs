@@ -6602,10 +6602,14 @@ async fn handle_config_get(
     let (store, base_dir) = resolve_config_store(scope).await?;
     let runtime =
         meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
-    let snapshot = runtime
+    let mut snapshot = runtime
         .get()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    // Every output form shows a marker in place of each stored secret
+    // value; `config set` and `config patch` take the marker back. The
+    // document file itself holds the values.
+    meerkat_core::config_secrets::mask_config_secrets(&mut snapshot.config);
     match format {
         ConfigFormat::Toml => {
             let rendered = toml::to_string_pretty(&snapshot.config)

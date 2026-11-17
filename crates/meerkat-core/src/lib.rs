@@ -93,6 +93,7 @@ pub mod config;
 mod config_document;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_runtime;
+pub mod config_secrets;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_store;
 pub mod confinement;
@@ -305,6 +306,7 @@ pub use config_runtime::{
     ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot,
     EnteredConfigWriteError,
 };
+pub use config_secrets::CONFIG_SECRET_MARKER;
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_store::{
     ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, EffectiveConfigReader, FileConfigStore,

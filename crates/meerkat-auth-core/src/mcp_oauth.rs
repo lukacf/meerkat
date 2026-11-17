@@ -6498,6 +6498,83 @@ mod tests {
         RealmId::parse(id).unwrap()
     }
 
+    /// The stored token of an HTTP MCP server that names an account is
+    /// selected by a key that holds the server's URL as written. After the
+    /// entry's URL changes, the token stored for the old address is not
+    /// found for the entry: its token key and its lease key are other
+    /// ones. The token stays under the old address's key. The same holds
+    /// for an entry that names an account selection, and in a realm.
+    #[tokio::test]
+    async fn a_stored_token_is_not_found_for_an_entry_whose_url_changed() {
+        const STORED_FOR: &str = "https://mcp.synthetic.invalid/one";
+        const CHANGED: &str = "https://mcp.synthetic.invalid/two";
+        let tokens = PersistedTokens {
+            auth_mode: PersistedAuthMode::McpOauth,
+            primary_secret: Some(["synthetic", "stored", "token"].join(" ")),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        for account in [
+            serde_json::json!({"oauth_account": "account-1"}),
+            serde_json::json!({"oauth_account_selection": "discover"}),
+        ] {
+            let entry = |url: &str| -> meerkat_core::McpServerConfig {
+                let mut entry = serde_json::json!({"name": "remote", "url": url});
+                entry
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(account.as_object().unwrap().clone());
+                serde_json::from_value(entry).unwrap()
+            };
+            for in_realm in [None, Some(realm("alpha"))] {
+                let identity = |url: &str| {
+                    let identity = McpServerIdentity::from_config(&entry(url)).unwrap();
+                    match &in_realm {
+                        Some(realm) => identity.in_realm(realm.clone()),
+                        None => identity,
+                    }
+                };
+                let stored_for = identity(STORED_FOR);
+                let changed = identity(CHANGED);
+                let store = EphemeralTokenStore::new();
+                store
+                    .save(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &stored_for.token_key().unwrap(),
+                        &tokens,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .load(&changed.token_key().unwrap())
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "no token is found for the entry at its changed URL ({account})"
+                );
+                assert_ne!(
+                    changed.lease_key().unwrap(),
+                    stored_for.lease_key().unwrap(),
+                    "{account}"
+                );
+                assert!(
+                    store
+                        .load(&stored_for.token_key().unwrap())
+                        .await
+                        .unwrap()
+                        .is_some(),
+                    "the token stays under the key of the address it was stored for ({account})"
+                );
+            }
+        }
+    }
+
     /// The same server in two realms, and realm-less, has three distinct
     /// credential slots and leases; the realm tag cannot collide with an
     /// account selection.

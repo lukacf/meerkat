@@ -4870,8 +4870,17 @@ async fn set_config(
         } => (config, expected_generation),
         SetConfigRequest::Direct(config) => (config, None),
     };
+    // The document the write would commit: a marker the request carries in
+    // place of a stored secret value is the stored value here. The request
+    // is committed as it was sent: the write resolves it again under its
+    // own custody.
+    let resolved = state
+        .config_runtime
+        .set_preview(&config)
+        .await
+        .map_err(config_runtime_err_to_api)?;
     validate_config_for_commit_with_roots(
-        &config,
+        &resolved,
         state.context_root.as_deref(),
         state.user_config_root.as_deref(),
     )?;
@@ -14379,6 +14388,449 @@ mod tests {
         .await
         .expect_err("patch should reject invalid config");
         assert!(matches!(patch_err, ApiError::BadRequest(_)));
+    }
+
+    /// A write that carries the text a configuration answer shows in place
+    /// of a stored secret value, where the document holds no value it can
+    /// stand for, is refused as a bad request that names the text, and
+    /// nothing is written: by a PUT and by a PATCH.
+    #[tokio::test]
+    async fn test_config_writes_refuse_the_secret_marker_where_no_value_is_stored() {
+        const MARKER: &str = "<redacted>";
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let Json(initial) = get_config(State(state.clone())).await.unwrap();
+        let added = serde_json::json!([{
+            "name": "added",
+            "url": "http://synthetic.invalid/mcp",
+            "headers": {"X-Synthetic": MARKER},
+        }]);
+        let mut config_value = serde_json::to_value(&initial.config).expect("serialize config");
+        config_value["tools"]["mcp_servers"] = added.clone();
+        let with_marker: Config =
+            serde_json::from_value(config_value).expect("deserialize config with the marker");
+
+        let set = set_config(
+            State(state.clone()),
+            Json(SetConfigRequest::Wrapped {
+                config: with_marker,
+                expected_generation: None,
+            }),
+        )
+        .await;
+        let patch = patch_config(
+            State(state.clone()),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"tools": {"mcp_servers": added}}),
+                expected_generation: None,
+            }),
+        )
+        .await;
+        for (what, outcome) in [("a PUT", set), ("a PATCH", patch)] {
+            let Err(refused) = outcome else {
+                panic!("{what} with the marker where nothing is stored was accepted");
+            };
+            let ApiError::BadRequest(text) = refused else {
+                panic!("{what} was refused otherwise than as a bad request");
+            };
+            assert!(text.contains(MARKER), "{what}: {text}");
+        }
+        let Json(after) = get_config(State(state)).await.unwrap();
+        assert_eq!(after.generation, initial.generation);
+        assert!(after.config.tools.mcp_servers.is_empty());
+    }
+
+    /// The refusal of a PATCH whose document would no longer load names
+    /// what is wrong and where, and holds no value of the stored document:
+    /// not the line of the document the error sits on (here an auth
+    /// profile's source, stored on one line with its value). A bad request;
+    /// the document keeps its bytes.
+    #[tokio::test]
+    async fn test_config_patch_refused_for_a_document_that_does_not_load_shows_no_stored_value() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let document = PathBuf::from(&state.resolved_paths.config_path);
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        let text = format!(
+            "[realm.global.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n"
+        );
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(&document, &text).unwrap();
+
+        let refused = patch_config(
+            State(state),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"realm": {"global": {"auth": {"inline": {
+                    "source": {"kind": "no_such_kind"},
+                }}}}}),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect_err("a patch whose document does not load is refused");
+        let ApiError::BadRequest(message) = refused else {
+            panic!("refused otherwise than as a bad request");
+        };
+        assert!(
+            !message.contains(&stored),
+            "the refusal holds a stored value"
+        );
+        assert!(message.contains("line"), "{message}");
+        assert_eq!(std::fs::read_to_string(&document).unwrap(), text);
+    }
+
+    /// A read of a stored document that no longer parses answers an error
+    /// that says what is wrong and where (line and column), and holds no
+    /// value of the document: not the line the error sits on (here the line
+    /// of an auth profile's inline secret, its table no longer closed).
+    #[tokio::test]
+    async fn test_config_read_of_a_document_that_does_not_parse_shows_no_stored_value() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let document = PathBuf::from(&state.resolved_paths.config_path);
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(
+            &document,
+            format!(
+                "[realm.global.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{stored}\"\n"
+            ),
+        )
+        .unwrap();
+
+        let refused = get_config(State(state))
+            .await
+            .expect_err("a document that does not parse is not answered");
+        let (ApiError::Configuration(message) | ApiError::Internal(message)) = refused else {
+            panic!("answered otherwise than as a configuration or internal error");
+        };
+        assert!(!message.contains(&stored), "the error holds a stored value");
+        assert!(
+            message.contains("line ") && message.contains("column "),
+            "{message}"
+        );
+    }
+
+    /// The text a configuration answer shows in place of a stored secret
+    /// value.
+    const SECRET_MARKER: &str = "<redacted>";
+
+    /// The stored value `n` of the rows below: plain synthetic words, put
+    /// together at run time.
+    fn stored_value(n: u8) -> String {
+        format!("synthetic stored value {n:02}")
+    }
+
+    /// A state whose realm document holds an HTTP MCP server with a stored
+    /// header value, and a provider route whose auth profile holds a stored
+    /// inline secret; with the document's path.
+    async fn state_with_stored_secrets(temp: &TempDir) -> (AppState, PathBuf) {
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let document = PathBuf::from(&state.resolved_paths.config_path);
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(
+            &document,
+            format!(
+                "[[tools.mcp_servers]]\nname = \"remote\"\nurl = \"http://synthetic.invalid/mcp\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n\
+                 [realm.global.backend.main]\nprovider = \"openai\"\n\
+                 backend_kind = \"openai_api\"\nbase_url = \"http://synthetic.invalid/v1\"\n\n\
+                 [realm.global.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n\
+                 [realm.global.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n",
+                stored_value(1),
+                stored_value(2)
+            ),
+        )
+        .unwrap();
+        (state, document)
+    }
+
+    const HEADER_PLACE: &str = "/tools/mcp_servers/0/headers/X-Synthetic";
+    const SECRET_PLACE: &str = "/realm/global/auth/main/source/secret";
+
+    /// What the stored document holds at the two secret places.
+    async fn stored_secrets(state: &AppState) -> (Value, Value) {
+        let stored =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        (
+            stored.pointer(HEADER_PLACE).cloned().unwrap_or(Value::Null),
+            stored.pointer(SECRET_PLACE).cloned().unwrap_or(Value::Null),
+        )
+    }
+
+    /// A PATCH of `patch`.
+    async fn patch_of(state: &AppState, patch: Value) -> Result<Json<ConfigEnvelope>, ApiError> {
+        patch_config(
+            State(state.clone()),
+            Json(PatchConfigRequest::Wrapped {
+                patch,
+                expected_generation: None,
+            }),
+        )
+        .await
+    }
+
+    /// A PUT of the document `config`.
+    async fn put_of(state: &AppState, config: Value) -> Result<Json<ConfigEnvelope>, ApiError> {
+        set_config(
+            State(state.clone()),
+            Json(SetConfigRequest::Wrapped {
+                config: serde_json::from_value(config).expect("a config document"),
+                expected_generation: None,
+            }),
+        )
+        .await
+    }
+
+    /// The answers that return the configuration document (GET, and the
+    /// answers to a PATCH and a PUT) show a marker in place of each stored
+    /// secret value; the stored document keeps its values.
+    #[tokio::test]
+    async fn test_config_answers_show_a_marker_in_place_of_stored_secret_values() {
+        let temp = TempDir::new().unwrap();
+        let (state, _document) = state_with_stored_secrets(&temp).await;
+        let kept = (json!(stored_value(1)), json!(stored_value(2)));
+        let mut restated =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        restated["max_tokens"] = json!(4096);
+        let answers = [
+            ("a GET", get_config(State(state.clone())).await),
+            (
+                "a PATCH",
+                patch_of(&state, json!({"max_tokens": 2048})).await,
+            ),
+            ("a PUT", put_of(&state, restated).await),
+        ];
+        let mut otherwise = Vec::new();
+        for (what, answer) in answers {
+            let Ok(Json(envelope)) = answer else {
+                otherwise.push(format!("{what} was refused"));
+                continue;
+            };
+            let shown = serde_json::to_value(&envelope).unwrap();
+            if shown.to_string().contains("synthetic stored value") {
+                otherwise.push(format!("the answer to {what} holds a stored value"));
+            }
+            for place in [HEADER_PLACE, SECRET_PLACE] {
+                if shown["config"].pointer(place) != Some(&json!(SECRET_MARKER)) {
+                    otherwise.push(format!("the answer to {what} shows no marker at {place}"));
+                }
+            }
+        }
+        assert!(otherwise.is_empty(), "{otherwise:#?}");
+        assert_eq!(stored_secrets(&state).await, kept);
+    }
+
+    /// A write that sends the marker back where an answer showed it keeps
+    /// the stored value of the same place: a PUT of the shown document and
+    /// a PATCH that restates a list with the marker. The marker under
+    /// another entry's name is refused, and the marker text is never
+    /// stored.
+    #[tokio::test]
+    async fn test_config_writes_resolve_the_secret_marker_to_the_stored_value() {
+        let temp = TempDir::new().unwrap();
+        let (state, document) = state_with_stored_secrets(&temp).await;
+        let kept = (json!(stored_value(1)), json!(stored_value(2)));
+        let mut shown =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        for place in [HEADER_PLACE, SECRET_PLACE] {
+            *shown.pointer_mut(place).unwrap() = json!(SECRET_MARKER);
+        }
+        let server = |name: &str| {
+            json!({"tools": {"mcp_servers": [{
+                "name": name,
+                "url": "http://synthetic.invalid/mcp",
+                "headers": {"X-Synthetic": SECRET_MARKER},
+            }]}})
+        };
+
+        shown["max_tokens"] = json!(4096);
+        let put = put_of(&state, shown).await;
+        assert!(put.is_ok(), "a PUT of the shown document commits");
+        assert_eq!(stored_secrets(&state).await, kept, "after the PUT");
+
+        let patch = patch_of(&state, server("remote")).await;
+        assert!(patch.is_ok(), "a PATCH that restates the list commits");
+        assert_eq!(stored_secrets(&state).await, kept, "after the PATCH");
+
+        let renamed = patch_of(&state, server("renamed")).await;
+        assert!(
+            matches!(&renamed, Err(ApiError::BadRequest(text)) if text.contains(SECRET_MARKER)),
+            "the marker under another name is refused as a bad request"
+        );
+        assert_eq!(stored_secrets(&state).await, kept, "after the refusal");
+        assert!(
+            !std::fs::read_to_string(&document)
+                .unwrap()
+                .contains(SECRET_MARKER),
+            "the document never holds the marker text"
+        );
+    }
+
+    /// A stored inline secret stays with the route it was stored for: a
+    /// write that changes where the secret is sent (the address of the
+    /// backend its binding uses, the binding's backend, the profile's
+    /// provider) is refused unless the same write states the secret as a
+    /// value; the marker does not state it. A credential the host holds
+    /// outside the document is not this rule's. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_that_move_a_stored_inline_secret_must_state_it() {
+        const OTHER: &str = "http://other.synthetic.invalid/v1";
+        let realm = |section: Value| json!({"realm": {"global": section}});
+        let stated = "a secret the writer states";
+        let mut otherwise = Vec::new();
+        for (what, patch, expect) in [
+            (
+                "the backend's address alone",
+                realm(json!({"backend": {"main": {"base_url": OTHER}}})),
+                None,
+            ),
+            (
+                "the backend's address with the marker for the secret",
+                realm(json!({
+                    "backend": {"main": {"base_url": OTHER}},
+                    "auth": {"main": {"source": {"secret": SECRET_MARKER}}},
+                })),
+                None,
+            ),
+            (
+                "the binding's backend alone",
+                realm(json!({
+                    "backend": {"second": {"provider": "openai", "backend_kind": "openai_api",
+                        "base_url": OTHER}},
+                    "binding": {"main": {"backend_profile": "second"}},
+                })),
+                None,
+            ),
+            (
+                "the backend's address with the secret stated",
+                realm(json!({
+                    "backend": {"main": {"base_url": OTHER}},
+                    "auth": {"main": {"source": {"secret": stated}}},
+                })),
+                Some(json!(stated)),
+            ),
+            (
+                "another key",
+                json!({"max_tokens": 2048}),
+                Some(json!(stored_value(2))),
+            ),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (state, _document) = state_with_stored_secrets(&temp).await;
+            let before = stored_secrets(&state).await;
+            match (patch_of(&state, patch).await, expect) {
+                (Ok(_), Some(secret)) => {
+                    if stored_secrets(&state).await.1 != secret {
+                        otherwise.push(format!("{what}: the stored secret is not as written"));
+                    }
+                }
+                (Err(ApiError::BadRequest(text)), None) => {
+                    if !(text.contains("the auth profile `main`")
+                        && text.contains("again in the same write"))
+                        || text.contains("synthetic stored value")
+                    {
+                        otherwise.push(format!("{what}: refused otherwise: {text}"));
+                    }
+                    if stored_secrets(&state).await != before {
+                        otherwise.push(format!("{what}: a refused write changed the document"));
+                    }
+                }
+                (Ok(_), None) => otherwise.push(format!("{what}: the write was accepted")),
+                (Err(_), _) => otherwise.push(format!("{what}: refused otherwise")),
+            }
+        }
+
+        // A route whose credential the host holds outside the document.
+        let temp = TempDir::new().unwrap();
+        let (state, document) = state_with_stored_secrets(&temp).await;
+        let text = std::fs::read_to_string(&document).unwrap().replace(
+            &format!(
+                "{{ kind = \"inline_secret\", secret = \"{}\" }}",
+                stored_value(2)
+            ),
+            "{ kind = \"env\", env = \"MEERKAT_REST_ROW_VALUE\" }",
+        );
+        std::fs::write(&document, text).unwrap();
+        if patch_of(
+            &state,
+            realm(json!({"backend": {"main": {"base_url": OTHER}}})),
+        )
+        .await
+        .is_err()
+        {
+            otherwise.push("a route with a credential held outside the document: refused".into());
+        }
+        assert!(otherwise.is_empty(), "{otherwise:#?}");
+    }
+
+    /// A patch that makes an auth profile an inline secret states the
+    /// secret itself: a `secret` key that an earlier form of the profile
+    /// left in the document is not taken up. So two patches that never
+    /// state the secret (another kind for the profile's source with another
+    /// address, then the inline kind again) do not put the stored value in
+    /// force at that address; the second commits when it states a secret.
+    #[tokio::test]
+    async fn test_config_patches_that_make_a_profile_an_inline_secret_must_state_it() {
+        const OTHER: &str = "http://other.synthetic.invalid/v1";
+        const KIND_PLACE: &str = "/realm/global/auth/main/source/kind";
+        let realm = |section: Value| json!({"realm": {"global": section}});
+        let stated = "a secret the writer states";
+        let temp = TempDir::new().unwrap();
+        let (state, _document) = state_with_stored_secrets(&temp).await;
+
+        let first = patch_of(
+            &state,
+            realm(json!({
+                "auth": {"main": {"source": {"kind": "env", "env": "MEERKAT_REST_ROW_VALUE"}}},
+                "backend": {"main": {"base_url": OTHER}},
+            })),
+        )
+        .await;
+        assert!(
+            first.is_ok(),
+            "a patch to a credential the host holds, with another address, commits"
+        );
+
+        let inline_again = realm(json!({"auth": {"main": {"source": {"kind": "inline_secret"}}}}));
+        let second = patch_of(&state, inline_again.clone()).await;
+        assert!(
+            matches!(
+                &second,
+                Err(ApiError::BadRequest(text))
+                    if text.contains("the auth profile `main`")
+                        && text.contains("does not state the secret")
+                        && !text.contains("synthetic stored value")
+            ),
+            "a patch that names the inline kind and no secret is refused as a bad request"
+        );
+        let stored =
+            serde_json::to_value(state.config_runtime.get().await.unwrap().config).unwrap();
+        assert_eq!(
+            stored.pointer(KIND_PLACE),
+            Some(&json!("env")),
+            "the profile is as the first patch left it"
+        );
+
+        let mut with_secret = inline_again;
+        with_secret["realm"]["global"]["auth"]["main"]["source"]["secret"] = json!(stated);
+        assert!(
+            patch_of(&state, with_secret).await.is_ok(),
+            "the same patch with a secret stated commits"
+        );
+        assert_eq!(stored_secrets(&state).await.1, json!(stated));
     }
 
     /// While an admission holds the realm document's fence, a REST config

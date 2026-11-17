@@ -1798,7 +1798,7 @@ async fn read_mcp_file_raw(path: Option<&Path>) -> Result<McpConfig, McpConfigEr
         .map_err(|e| McpConfigError::Io(e.to_string()))?;
     let parsed: McpConfig = toml::from_str(&contents).map_err(|e| McpConfigError::Parse {
         path: path.display().to_string(),
-        message: e.to_string(),
+        message: crate::redact::toml_error_text(&e),
     })?;
     for server in &parsed.servers {
         server.validate_access()?;
@@ -1838,7 +1838,7 @@ async fn read_mcp_document(path: &Path) -> Result<DocumentMut, McpConfigError> {
         .parse::<DocumentMut>()
         .map_err(|err| McpConfigError::Parse {
             path: path.display().to_string(),
-            message: err.to_string(),
+            message: crate::config_document::edit_error_text(&err, &contents),
         })
 }
 
@@ -4904,6 +4904,43 @@ command = "remove-cmd"
                         .unwrap();
                     assert_eq!(mode_bits(&path), 0o600, "no setgid bit, no group read");
                 },
+            );
+        }
+    }
+
+    /// An MCP config file that does not parse is refused with an error
+    /// that names the file, says where it is broken and what is wrong, and
+    /// holds no value of the file: not the line the error sits on (here a
+    /// server's environment, its table left open). By the reader and by
+    /// the editing reader.
+    #[tokio::test]
+    async fn a_file_that_does_not_parse_is_refused_without_its_text() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("mcp.toml");
+        let value = ["synthetic", "stored", "value"].join(" ");
+        tokio::fs::write(
+            &path,
+            format!(
+                "[[servers]]\nname = \"local\"\ncommand = \"/synthetic/server\"\n\
+                 env = {{ SYNTHETIC = \"{value}\"\n"
+            ),
+        )
+        .await
+        .unwrap();
+        let refusals = [
+            read_mcp_file_raw(Some(&path)).await.map(|_| ()),
+            read_mcp_document(&path).await.map(|_| ()),
+        ];
+        for refused in refusals {
+            let text = refused.expect_err("the file does not parse").to_string();
+            assert!(text.contains("mcp.toml"), "{text}");
+            assert!(
+                text.contains("line ") && text.contains(", column "),
+                "the error says where: {text}"
+            );
+            assert!(
+                !text.contains(&value),
+                "the error holds a value of the file"
             );
         }
     }

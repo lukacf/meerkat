@@ -550,9 +550,31 @@ fn compose_reporting_chain_warnings(
     head: &crate::connection::RealmId,
     mut warnings: Vec<RealmConfigWarning>,
 ) -> Result<(Config, Vec<RealmConfigWarning>), ConfigError> {
-    let (config, chain) = crate::config::compose_effective_config_with_chain(docs, raw_docs, head)?;
+    let (mut config, chain) =
+        crate::config::compose_effective_config_with_chain(docs, raw_docs, head)?;
     crate::config::check_composed_confinement(docs, &chain)?;
-    crate::config::check_composed_command_servers(docs, &chain, &config)?;
+    // A binding whose inline secret would go to a self-hosted server that
+    // another document states is left out: the realm composes without it,
+    // and the warning says why and what to do.
+    for (realm, binding, profile) in
+        crate::config::check_composed_command_servers(docs, &chain, &config)?
+    {
+        if let Some(section) = config.realm.get_mut(&realm) {
+            section.binding.remove(&binding);
+        }
+        let left_out = crate::connection::RealmId::parse(realm).map(|realm| RealmConfigWarning {
+            realm,
+            warning: ConfigWarning::InlineSecretBindingLeftOut {
+                binding: crate::config::warning_name(&binding),
+                profile: crate::config::warning_name(&profile),
+            },
+        });
+        if let Ok(left_out) = left_out
+            && !warnings.contains(&left_out)
+        {
+            warnings.push(left_out);
+        }
+    }
     warnings.retain(|warning| chain.realms().contains(&warning.realm));
     Ok((config, warnings))
 }
@@ -3270,6 +3292,337 @@ auth_profile = "anonymous"
         compose(document("server = \"box\""))
             .await
             .expect("a command binding that declares its server composes");
+    }
+
+    /// What `head` composes from `documents`, each a realm's own document
+    /// text, with the load warnings of the composition.
+    async fn compose_documents(
+        documents: &[(&str, &str)],
+        head: &str,
+    ) -> Result<(Config, Vec<RealmConfigWarning>), ConfigError> {
+        let source = RawMapSource {
+            docs: documents
+                .iter()
+                .map(|(realm, text)| {
+                    (
+                        (*realm).to_owned(),
+                        Config::from_persisted_toml(text).unwrap().0,
+                    )
+                })
+                .collect(),
+            raw: documents
+                .iter()
+                .map(|(realm, text)| ((*realm).to_owned(), toml::from_str(text).unwrap()))
+                .collect(),
+        };
+        EffectiveConfigReader::new(Arc::new(source))
+            .effective_config_with_warnings(&crate::connection::RealmId::parse(head).unwrap())
+            .await
+    }
+
+    /// Whether `binding` of the realm `team` resolves in `composed`.
+    fn team_binding_resolves(composed: &Config, binding: &str) -> bool {
+        use crate::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
+        crate::connection::resolve_explicit_auth_binding_target(
+            composed,
+            &AuthBindingRef {
+                realm: RealmId::parse("team").unwrap(),
+                binding: BindingId::parse(binding).unwrap(),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            },
+        )
+        .is_ok()
+    }
+
+    /// Whether `warnings` report the binding `main` left out for the inline
+    /// secret of its auth profile `inline`, by name.
+    fn reports_a_binding_left_out(warnings: &[RealmConfigWarning]) -> bool {
+        warnings.iter().any(|reported| {
+            let text = reported.warning.to_string();
+            text.contains("binding 'main' was left out")
+                && text.contains("auth profile 'inline' holds an inline secret")
+        })
+    }
+
+    /// The binding a request that names none gets for the self-hosted
+    /// provider in the realm `team`.
+    fn team_binding_of_an_unnamed_request(composed: &Config) -> Option<String> {
+        crate::connection::resolve_auth_binding_or_default_for_provider(
+            composed,
+            crate::provider::Provider::SelfHosted,
+            None,
+            Some(&crate::connection::RealmId::parse("team").unwrap()),
+            false,
+        )
+        .ok()
+        .map(|target| target.auth_binding.binding.as_str().to_owned())
+    }
+
+    /// A binding whose auth profile holds an inline secret sends it to the
+    /// `[self_hosted.servers]` entry its backend names, and a composition
+    /// takes that entry only from the document that holds the secret. When
+    /// another document on the chain states or changes the entry, the realm
+    /// still composes: that one binding is left out of it, with a load
+    /// warning that says why and what to do, so a session on it does not
+    /// resolve and the realm's other bindings do. The warning names the
+    /// binding and its auth profile. When the binding left out was the
+    /// section's default, a request that names no binding gets the realm's
+    /// other binding of the provider. A profile that names an environment
+    /// variable keeps its binding with such an entry, and the document that
+    /// holds the secret composes whole alone.
+    #[tokio::test]
+    async fn a_composition_leaves_out_an_inline_secret_binding_whose_server_another_document_states()
+     {
+        const OTHER: &str = "http://other.synthetic.invalid/v1";
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        let user = |profile: &str| {
+            format!(
+                "[realm.global]\n\n\
+                 [self_hosted.servers.box]\nbase_url = \"http://127.0.0.1:9/v1\"\n\n\
+                 [realm.team]\ndefault_binding = \"main\"\n\n\
+                 [realm.team.backend.boxed]\nprovider = \"self_hosted\"\nbackend_kind = \"self_hosted\"\n\
+                 server = \"box\"\n\n\
+                 [realm.team.auth.inline]\nprovider = \"self_hosted\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n\n\
+                 [realm.team.auth.named]\nprovider = \"self_hosted\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"env\", env = \"SYNTHETIC_NAME\" }}\n\n\
+                 [realm.team.binding.main]\nbackend_profile = \"boxed\"\nauth_profile = \"{profile}\"\n\n\
+                 [realm.team.binding.spare]\nbackend_profile = \"boxed\"\nauth_profile = \"named\"\n"
+            )
+        };
+        let moved = format!("[self_hosted.servers.box]\nbase_url = \"{OTHER}\"\n");
+        let (inline, named) = (user("inline"), user("named"));
+
+        for other in [
+            moved.as_str(),
+            "[self_hosted.servers.box]\napi_style = \"responses\"\n",
+        ] {
+            let (composed, warnings) =
+                compose_documents(&[("global", inline.as_str()), ("team", other)], "team")
+                    .await
+                    .unwrap_or_else(|refused| panic!("{other} composes: {refused}"));
+            assert!(
+                !composed.realm["team"].binding.contains_key("main"),
+                "{other}: the binding is left out"
+            );
+            assert!(!team_binding_resolves(&composed, "main"), "{other}");
+            assert!(team_binding_resolves(&composed, "spare"), "{other}");
+            assert!(reports_a_binding_left_out(&warnings), "{warnings:?}");
+            assert!(
+                !format!("{warnings:?}").contains(&stored),
+                "the warning holds a stored value"
+            );
+            // The binding left out was the section's default: a request that
+            // names no binding gets the realm's other binding of the provider.
+            assert_eq!(
+                team_binding_of_an_unnamed_request(&composed).as_deref(),
+                Some("spare"),
+                "{other}"
+            );
+        }
+
+        // A profile that names an environment variable takes the entry as
+        // the chain composes it.
+        let (kept, warnings) = compose_documents(
+            &[("global", named.as_str()), ("team", moved.as_str())],
+            "team",
+        )
+        .await
+        .expect("a binding with no stored secret composes with the changed entry");
+        assert_eq!(kept.self_hosted.servers["box"].base_url, OTHER);
+        assert!(team_binding_resolves(&kept, "main") && !reports_a_binding_left_out(&warnings));
+        assert_eq!(
+            team_binding_of_an_unnamed_request(&kept).as_deref(),
+            Some("main")
+        );
+        // The document that holds the secret composes whole alone, as its
+        // own head and under a realm document that states nothing.
+        for (documents, head) in [
+            (vec![("global", user("inline"))], "global"),
+            (
+                vec![("global", user("inline")), ("team", String::new())],
+                "team",
+            ),
+        ] {
+            let documents: Vec<(&str, &str)> = documents
+                .iter()
+                .map(|(realm, text)| (*realm, text.as_str()))
+                .collect();
+            let (alone, warnings) = compose_documents(&documents, head)
+                .await
+                .expect("the document that holds the secret composes alone");
+            assert_eq!(
+                alone.self_hosted.servers["box"].base_url,
+                "http://127.0.0.1:9/v1"
+            );
+            assert!(
+                team_binding_resolves(&alone, "main") && !reports_a_binding_left_out(&warnings)
+            );
+            assert_eq!(
+                team_binding_of_an_unnamed_request(&alone).as_deref(),
+                Some("main")
+            );
+        }
+    }
+
+    /// A binding whose auth profile holds an inline secret and whose
+    /// self-hosted backend declares no server sends the secret to the server
+    /// that serves the request's model, which the `[self_hosted]` section
+    /// decides. A composition takes that section only from the document that
+    /// holds the secret: when another document on the chain states or
+    /// changes a server, a model or the default model of it, the realm
+    /// still composes and that one binding is left out, with the load
+    /// warning; the realm's other bindings resolve. The document alone
+    /// composes whole, with no declared server, and so does a chain whose
+    /// other documents leave `[self_hosted]` alone.
+    #[tokio::test]
+    async fn a_composition_leaves_out_an_inline_secret_binding_with_no_declared_server_when_another_document_states_self_hosted()
+     {
+        const OTHER: &str = "http://other.synthetic.invalid/v1";
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        let holder = |realm: &str| {
+            format!(
+                "[self_hosted.servers.box]\nbase_url = \"http://127.0.0.1:9/v1\"\n\n\
+                 [self_hosted.models.served]\nserver = \"box\"\nremote_model = \"served\"\n\n\
+                 [realm.{realm}.backend.plain]\nprovider = \"self_hosted\"\nbackend_kind = \"self_hosted\"\n\n\
+                 [realm.{realm}.backend.vendor]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\n\
+                 [realm.{realm}.auth.inline]\nprovider = \"self_hosted\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n\n\
+                 [realm.{realm}.auth.named]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"env\", env = \"SYNTHETIC_NAME\" }}\n\n\
+                 [realm.{realm}.binding.main]\nbackend_profile = \"plain\"\nauth_profile = \"inline\"\n\
+                 default_model = \"served\"\n\n\
+                 [realm.{realm}.binding.spare]\nbackend_profile = \"vendor\"\nauth_profile = \"named\"\n"
+            )
+        };
+        let user = format!("[realm.global]\n\n{}", holder("team"));
+
+        for other in [
+            // The server that serves the binding's model, at another address.
+            format!("[self_hosted.servers.box]\nbase_url = \"{OTHER}\"\n"),
+            // The binding's model, served by another server.
+            format!(
+                "[self_hosted.servers.other]\nbase_url = \"{OTHER}\"\n\n\
+                 [self_hosted.models.served]\nserver = \"other\"\n"
+            ),
+            // The section's default model, stated by another document.
+            "[self_hosted]\ndefault_model = \"served\"\n".to_owned(),
+        ] {
+            let (composed, warnings) = compose_documents(
+                &[("global", user.as_str()), ("team", other.as_str())],
+                "team",
+            )
+            .await
+            .unwrap_or_else(|refused| panic!("{other} composes: {refused}"));
+            assert!(
+                !composed.realm["team"].binding.contains_key("main"),
+                "{other}: the binding is left out"
+            );
+            assert!(!team_binding_resolves(&composed, "main"), "{other}");
+            assert!(team_binding_resolves(&composed, "spare"), "{other}");
+            assert!(reports_a_binding_left_out(&warnings), "{warnings:?}");
+            assert!(
+                !format!("{warnings:?}").contains(&stored),
+                "the warning holds a stored value"
+            );
+        }
+
+        // One document that states the secret and its servers, with no
+        // declared server: it composes whole, as before.
+        let solo = holder("solo");
+        let (single, warnings) = compose_documents(&[("solo", solo.as_str())], "solo")
+            .await
+            .expect("a single document with no declared server composes");
+        assert_eq!(single.self_hosted.models["served"].server, "box");
+        assert!(single.realm["solo"].binding.contains_key("main"));
+        assert!(!reports_a_binding_left_out(&warnings));
+        // A chain whose other document leaves `[self_hosted]` alone.
+        let (untouched, warnings) = compose_documents(
+            &[("global", user.as_str()), ("team", "max_tokens = 2048\n")],
+            "team",
+        )
+        .await
+        .expect("a chain that leaves [self_hosted] alone composes");
+        assert_eq!(
+            untouched.self_hosted.servers["box"].base_url,
+            "http://127.0.0.1:9/v1"
+        );
+        assert_eq!(untouched.max_tokens, Some(2048));
+        assert!(
+            team_binding_resolves(&untouched, "main") && !reports_a_binding_left_out(&warnings)
+        );
+    }
+
+    /// A request that names a binding the composition left out is answered
+    /// by the chain as for any binding id: the nearest ancestor section that
+    /// states a binding of that id answers with its own profile and backend,
+    /// and only where no chain member states the id is it an unknown binding
+    /// (the rows above). A pin of that effect.
+    #[tokio::test]
+    async fn a_request_that_names_a_binding_left_out_gets_an_ancestors_binding_of_that_id() {
+        use crate::connection::{AuthBindingRef, BindingId, BindingOrigin, RealmId};
+
+        let stored = ["synthetic", "stored", "value"].join(" ");
+        let user = format!(
+            "[realm.global.backend.vendor]\nprovider = \"self_hosted\"\nbackend_kind = \"self_hosted\"\n\n\
+             [realm.global.auth.own]\nprovider = \"self_hosted\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"env\", env = \"SYNTHETIC_NAME\" }}\n\n\
+             [realm.global.binding.main]\nbackend_profile = \"vendor\"\nauth_profile = \"own\"\n\n\
+             [self_hosted.servers.box]\nbase_url = \"http://127.0.0.1:9/v1\"\n\n\
+             [realm.team.backend.boxed]\nprovider = \"self_hosted\"\nbackend_kind = \"self_hosted\"\n\
+             server = \"box\"\n\n\
+             [realm.team.auth.inline]\nprovider = \"self_hosted\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n\n\
+             [realm.team.binding.main]\nbackend_profile = \"boxed\"\nauth_profile = \"inline\"\n"
+        );
+        let named_main = |composed: &Config| {
+            crate::connection::resolve_explicit_auth_binding_target(
+                composed,
+                &AuthBindingRef {
+                    realm: RealmId::parse("team").unwrap(),
+                    binding: BindingId::parse("main").unwrap(),
+                    profile: None,
+                    origin: BindingOrigin::Configured,
+                },
+            )
+            .map(|target| {
+                (
+                    target.auth_binding.realm.as_str().to_owned(),
+                    target.auth_profile.id,
+                )
+            })
+            .ok()
+        };
+
+        let (whole, warnings) =
+            compose_documents(&[("global", user.as_str()), ("team", "")], "team")
+                .await
+                .expect("the documents compose");
+        assert!(!reports_a_binding_left_out(&warnings));
+        assert_eq!(
+            named_main(&whole),
+            Some(("team".to_owned(), "inline".to_owned()))
+        );
+
+        let (composed, warnings) = compose_documents(
+            &[
+                ("global", user.as_str()),
+                (
+                    "team",
+                    "[self_hosted.servers.box]\nbase_url = \"http://other.synthetic.invalid/v1\"\n",
+                ),
+            ],
+            "team",
+        )
+        .await
+        .expect("the realm composes");
+        assert!(reports_a_binding_left_out(&warnings), "{warnings:?}");
+        assert_eq!(
+            named_main(&composed),
+            Some(("global".to_owned(), "own".to_owned())),
+            "the ancestor's binding of that id answers, with its own profile"
+        );
     }
 
     const LEGACY_MODEL_FALLBACK_DOC: &str = "[model_fallback]\nenabled = true\n";

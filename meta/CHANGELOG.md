@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Adopted agents on a host with an agent customizer or agent memory build
+  again (the Known limitation of the 0.9.16 notes). On 0.9.15 and 0.9.16, on
+  a host that registers an agent customizer or configures agent memory, an
+  agent configured in the roster and adopted into the identity store
+  (`meta/identity/adopt`) was refused the next time it was built and read
+  `broken`. Such an agent is now built with the labels of its record, on the
+  same conversation. An agent that an earlier release adopted and refused is
+  built at its first build after the restart into this release, with no step
+  by its host; no update is needed after an adoption, and the update the
+  0.9.16 notes name still works. Nothing stored changes. An agent that is
+  live at the adoption keeps the labels of its running build until its next
+  build, while its roster entry follows its record at once. Unchanged: a
+  label that the host's customizer answers and the agent's record does not
+  carry is still refused, and the refusal names that key.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

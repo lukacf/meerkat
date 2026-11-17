@@ -35,6 +35,26 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mob`: a member adopted from a roster spec is built with its
+  record's labels. On 0.9.15 and 0.9.16 a member taken into store custody
+  from a roster spec (`MobHandle::adopt_identity` with a roster source) was
+  refused every later build where its host composes the seat, because its
+  seat's labels differed from its record's. A start and a build now read the
+  labels of such a member from its record while the member's last seat row
+  is still the one the adoption found, and the adoption's commit sets its
+  roster entry from the record. Nothing is written for it and no stored form
+  changes; a member refused before the restart into this release is built at
+  its first build after it. An import that binds such a record in place
+  (`MobHandle::import_created_identities`) sets the roster entry from the
+  record at its commit too. Unchanged: a member adopted from a worker; a
+  seat that a label update of a created agent left behind its record (moved
+  by a respawn with the record's labels or by an update, as on 0.9.15); and
+  a label the host answers that the record does not carry is still refused,
+  naming that key. The record census still counts a healthy adopted member
+  as a stale seat until its next seat row.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

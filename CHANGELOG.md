@@ -35,6 +35,34 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mob`: a Stop or Shutdown issued again after a refused Stop ends a
+  run that started in between, and lands. A Stop that fails (for one, a
+  member's turn does not end within the Stop's ten-minute guard) leaves the
+  mob running with the Stop owed, and input that was queued for a member can
+  then start a run. Every later Stop and Shutdown treated that member as
+  already interrupted: it sent the member no cancel, waited for the run, and
+  failed with `LifecycleOperationProgressStalled` naming the member (stage
+  `autonomous_member_stop_idle` or `runtime_run_settlement`), each time,
+  until the run ended by itself or was ended with `mob/stop_member_run` or
+  `mob/force_cancel`, the member was removed, or the host was restarted. Now
+  the Stop issued again holds each member and cancels the run the member has
+  then, at the run's next boundary; a Shutdown ends it at once. Two things a
+  caller can see besides: the report of a Stop issued again after a failed
+  one states, for each member, what that Stop itself found and did (for
+  example the run it cancelled), no longer the outcome kept from the failed
+  attempt; and that Stop sends every autonomous member one more stop call.
+  Unchanged: a Stop that fails pauses nothing, so input queued for a member
+  runs until the next Stop; a turn that reaches no boundary still keeps a
+  Stop waiting to its guard, and `mob/stop_member_run` ends such a run at
+  once. Affected: autonomous members, in 0.9.16 by run; by reading, every
+  release from 0.9.3, where a failed Stop first released the members it
+  held. Measured by tests of this change, of the mob runtime with a stand-in
+  for the session service and the model, for a member the host runs itself:
+  the Stop and the Shutdown issued again failed as above before the change
+  and land with it. Not measured, read only: a member on another host.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

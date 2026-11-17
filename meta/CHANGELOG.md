@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - The Console's roster no longer groups a member that an agent spawned by a `group` label the spawn set: a spawn can no longer set `group`. Such a member falls to the next selector of `[agent_list].group_by` (in the guide's example, its role, the profile it was spawned from). A member that the host's roster declares keeps its `group` label. The mob and the host shown on a member's row are the Console's own, whatever `source_mob_id` or `delegate_host_identity` label the member carries: a call that sets those labels no longer changes them on the row.
+- Behaviour-only: on the cross-mob control channel, a member that is kept
+  apart from other callers is answered as a name no member has by every
+  verb that names a member: `wire`, `unwire`, `inject`, `lookup_member`,
+  `inject_keyed` and `inject_status`, whatever the peer gateway's control
+  grant lists, a grant without `members` included. Nothing is wired to such
+  a member, nothing is admitted into its session, and its status reads as
+  no commit. While a gateway is still reading which of its members are kept
+  apart (after a start), the member verbs answer every name that way; they
+  answer as before once the read has succeeded. A member that is not kept
+  apart is answered as before. Rust: a host that builds its own
+  `MobHandleControlHandler` gets the roster entries' labels read; the
+  runtime's record of its members is read by the listener a runtime starts
+  (`start_control_listener`, `start_control_listener_with_authorizer`).
 
 ### Known limitations
 

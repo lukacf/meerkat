@@ -55,8 +55,10 @@ OPENAI_API_KEY=sk-... npm start    # the question and the answer
 OPENAI_API_KEY=sk-... npm start    # again: the agent remembers
 ```
 
-`npm install` takes the newest released `@rkat/meta-sdk`. To use another
-release, install that version: `npm install @rkat/meta-sdk@<version>`.
+`package.json` names the `@rkat/meta-sdk` version of this repository tree,
+and the gateway must be of that version. On a checkout between two releases
+that version may not be published yet: `npm install @rkat/meta-sdk@latest`
+then takes the newest released one, with the gateway of the same release.
 
 The program prints, on the first run with a key:
 

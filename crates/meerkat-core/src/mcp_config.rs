@@ -1905,7 +1905,7 @@ where
                 .iter()
                 .find(|(trusted_scope, trusted)| *trusted_scope != scope && *trusted == server)
             {
-                Some((trusted_scope, trusted)) => resolve(*trusted, *trusted_scope)?,
+                Some((trusted_scope, trusted)) => resolve(trusted, *trusted_scope)?,
                 None => refused.push(RefusedMcpServer {
                     server: server.clone(),
                     scope,

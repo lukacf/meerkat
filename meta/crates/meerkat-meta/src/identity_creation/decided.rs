@@ -616,9 +616,12 @@ fn closed_refusal(row: &StoredDecision) -> IdentityRefusal {
                 .map_or("refused", DecisionReference::as_str);
             match execution_refusal_kind(token) {
                 Some(kind) => IdentityRefusal::new(kind),
+                // A decision ends this way only for a refusal the same
+                // request cannot outlive (a refusal it can is released and
+                // tried again), so the detail names the refusal and does
+                // not say to ask again: the refusal is not retryable.
                 None => IdentityRefusal::new(closed()).with_detail(format!(
-                    "The approved change was refused when it was carried out ({token}): ask \
-                     again."
+                    "The approved change was refused when it was carried out ({token})."
                 )),
             }
         }

@@ -5,7 +5,7 @@
   },
   "profiles": {
     "commander": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": [
         "incident-commander"
       ],
@@ -18,7 +18,7 @@
       "external_addressable": true
     },
     "sre-lead": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": [
         "sre-lead"
       ],
@@ -30,7 +30,7 @@
       "external_addressable": false
     },
     "app-investigator": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": [
         "application-triage"
       ],
@@ -42,7 +42,7 @@
       "external_addressable": false
     },
     "customer-comms": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": [
         "customer-comms"
       ],
@@ -54,7 +54,7 @@
       "external_addressable": false
     },
     "scribe": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": [
         "incident-scribe"
       ],

@@ -112,7 +112,7 @@ timer, or durable external ingress is configured here.
     let result = service
         .create_session(CreateSessionRequest {
             injected_context: Vec::new(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             prompt: "An alert just fired: 'CPU usage on prod-web-03 exceeded 95% for \
                      5 minutes.' Acknowledge the alert and describe your initial triage \
                      steps. Keep your response to 2-3 sentences."
@@ -343,7 +343,7 @@ mod tests {
                 requests.push(request.clone());
                 requests.len()
             };
-            assert_eq!(request.model, "claude-sonnet-4-6");
+            assert_eq!(request.model, "claude-sonnet-5-5");
             let events = if self.fail_on == Some(call) {
                 vec![Err(LlmError::InvalidRequest {
                     message: "synthetic incident failure".into(),

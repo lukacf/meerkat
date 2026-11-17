@@ -695,9 +695,9 @@ silently retried. Full recovery includes those cases and is unfinished. Source
 restoration, ordinary empty-round helper reattachment and warm shared respawn
 do not qualify cold shared-G recovery or selected-preparation replay.
 
-Restoring a live Console login is a separate path, and arbitrary older MobKit
-stores are not supported merely because a schema number or source reconstruction
-method exists. See the
+Restoring a live Console login is a separate path, and arbitrary older Meta
+stores, including those written by MobKit 0.8.x, are not supported merely
+because a schema number or source reconstruction method exists. See the
 [store compatibility contract](/reference/stores#other-stores-and-schema-compatibility).
 
 ## Ordinary authorization review window
@@ -866,7 +866,7 @@ member access. A viewer or requester-leaf grant alone cannot select operator
 cleanup. Use the host's supported exact-selection producer; do not edit a compiled
 artifact after approval. Ordinary Forge generation does not enable this option.
 Its custom-selection consumption and full-controller reconstruction are separate
-Forge/MobkitInstaller responsibilities.
+Meta Forge responsibilities.
 
 In the integrated setup panel, open **Unresolved service approvals**, inspect the
 agent, operations, resource, native access and policy observation, then choose

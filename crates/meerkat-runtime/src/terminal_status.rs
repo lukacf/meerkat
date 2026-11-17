@@ -1197,4 +1197,172 @@ mod tests {
         assert_eq!(report.attempt_count, 1);
         assert_eq!(report.idempotency_key, Some(IdempotencyKey::new("key-7")));
     }
+
+    /// The stored input rows of a run that never began executing, written by
+    /// 0.9.15 (the tag `v0.9.15`): one input a committed round had applied,
+    /// one still staged; the run failed with its executor stopped and its
+    /// contributors were terminalized.
+    const NEVER_BEGAN_EXECUTING_V0_9_15: &str =
+        include_str!("../tests/fixtures/v0_9_15_inputs_of_a_run_that_never_began_executing.json");
+
+    /// The stored input rows of a session whose admitted turn was refused
+    /// for its reasoning effort level at its start, with an input queued
+    /// behind it and one turn after it, written by 0.9.15 (the tag
+    /// `v0.9.15`).
+    const REFUSED_TURN_V0_9_15: &str =
+        include_str!("../tests/fixtures/v0_9_15_inputs_of_a_turn_refused_for_its_level.json");
+
+    /// The rows of the same session as this tree writes them: the refused
+    /// turn ends alone, its input as never executed.
+    const REFUSED_TURN_ENDING_ALONE: &str =
+        include_str!("../tests/fixtures/inputs_of_a_turn_refused_for_its_level_ending_alone.json");
+
+    /// What this tree's readers answer for every stored input row of
+    /// `document` (the store's own serde form of the rows of one runtime):
+    /// the stored terminal record, the exact completion reader's answer
+    /// (which asks `receipt_less_terminal` about a row without a receipt),
+    /// the terminal receipt reader's answer, and the public terminal class
+    /// the machine projects. A refusal is part of the answer.
+    fn stored_rows_read_back(document: &str) -> Vec<[String; 4]> {
+        let rows: Vec<StoredInputState> =
+            serde_json::from_str(document).expect("every stored row is read back");
+        rows.iter()
+            .map(|row| {
+                let id = &row.state.input_id;
+                let completion =
+                    match crate::input_state::input_terminal_completion_outcome(&rows, id) {
+                        Ok(Some(outcome)) => format!("{:?}", outcome.class()),
+                        Ok(None) => "no receipt yet".to_string(),
+                        Err(error) => format!("refused: {error}"),
+                    };
+                let receipt = match input_terminal_receipt_read(&rows, id) {
+                    Ok(Some(InputTerminalReceiptRead::Finalized(receipt))) => {
+                        match receipt.scope() {
+                            InputTerminalReceiptScope::RuntimeTermination => {
+                                "finalized, of a runtime termination".to_string()
+                            }
+                            _ => "finalized, of a run".to_string(),
+                        }
+                    }
+                    Ok(Some(InputTerminalReceiptRead::Pending { .. })) => "pending".to_string(),
+                    Ok(Some(InputTerminalReceiptRead::TerminalWithoutReceipt { .. })) => {
+                        "terminal without a receipt".to_string()
+                    }
+                    Ok(None) => "absent".to_string(),
+                    Err(error) => format!("refused: {error}"),
+                };
+                let public = match interaction_report(row).terminal {
+                    None => "not terminal".to_string(),
+                    Some(terminal) => {
+                        match crate::meerkat_machine::resolve_input_public_terminal_outcome_projection(
+                            id, &terminal,
+                        ) {
+                            Ok(Some(outcome)) => format!("{outcome:?}"),
+                            Ok(None) => "none".to_string(),
+                            Err(error) => format!("refused: {error}"),
+                        }
+                    }
+                };
+                [
+                    serde_json::to_string(&row.seed.terminal_outcome).expect("a terminal record"),
+                    completion,
+                    receipt,
+                    public,
+                ]
+            })
+            .collect()
+    }
+
+    fn read_back(terminal: &str, completion: &str, receipt: &str, public: &str) -> [String; 4] {
+        [terminal, completion, receipt, public].map(str::to_string)
+    }
+
+    /// An upgrade and a rollback meet each other's stored inputs. A turn
+    /// refused for its reasoning effort level at its start ends its input,
+    /// and the input queued behind it, as `stopped` in 0.9.15 (the receipt
+    /// of a runtime termination), and its own input alone as
+    /// `never_executed` (the receipt of its run) from the release that lets
+    /// the refused turn end alone; `never_executed` is the reason 0.9.15
+    /// itself stores for the inputs of a run that never began executing.
+    /// This tree reads 0.9.15's rows of both kinds, and its own: every row
+    /// is read back, no reader refuses one, and every refused or stopped
+    /// input is projected as the public outcome `Abandoned`. The fixture
+    /// files hold the rows as each side stored them. The reverse reading
+    /// (0.9.15's own readers over this tree's rows) was run at the tag and
+    /// is not a test of this tree: it gave the answers this row holds for
+    /// `REFUSED_TURN_ENDING_ALONE`.
+    #[test]
+    fn stored_inputs_of_a_refused_turn_are_read_across_0_9_15_and_the_turn_that_ends_alone() {
+        let consumed = r#"{"outcome_type":"consumed"}"#;
+        let never_executed = r#"{"outcome_type":"abandoned","reason":"never_executed"}"#;
+        let stopped = r#"{"outcome_type":"abandoned","reason":"stopped"}"#;
+
+        assert_eq!(
+            stored_rows_read_back(NEVER_BEGAN_EXECUTING_V0_9_15),
+            vec![
+                read_back(consumed, "no receipt yet", "pending", "Completed"),
+                read_back(never_executed, "no receipt yet", "pending", "Abandoned"),
+            ],
+            "0.9.15's rows of a run that never began executing: the applied input, the staged one"
+        );
+        assert_eq!(
+            stored_rows_read_back(REFUSED_TURN_V0_9_15),
+            vec![
+                read_back(consumed, "Completed", "finalized, of a run", "Completed"),
+                read_back(
+                    stopped,
+                    "RuntimeTerminated",
+                    "finalized, of a runtime termination",
+                    "Abandoned"
+                ),
+                read_back(
+                    stopped,
+                    "RuntimeTerminated",
+                    "finalized, of a runtime termination",
+                    "Abandoned"
+                ),
+                read_back(consumed, "Completed", "finalized, of a run", "Completed"),
+            ],
+            "0.9.15's rows: the session's first turn, the refused turn, the input queued \
+             behind it, the next turn"
+        );
+        assert_eq!(
+            stored_rows_read_back(REFUSED_TURN_ENDING_ALONE),
+            vec![
+                read_back(consumed, "Completed", "finalized, of a run", "Completed"),
+                read_back(
+                    never_executed,
+                    "AbandonedWithError",
+                    "finalized, of a run",
+                    "Abandoned"
+                ),
+                read_back(consumed, "Completed", "finalized, of a run", "Completed"),
+                read_back(consumed, "Completed", "finalized, of a run", "Completed"),
+            ],
+            "this tree's rows: the session's first turn, the refused turn, the input queued \
+             behind it, the next turn"
+        );
+
+        // The rule is asked: the refused input without its receipt is not a
+        // receipt-less terminal, so both readers refuse the row.
+        let mut rows: serde_json::Value =
+            serde_json::from_str(REFUSED_TURN_ENDING_ALONE).expect("the fixture is JSON");
+        let refused = rows
+            .as_array_mut()
+            .expect("an array of rows")
+            .iter_mut()
+            .find(|row| row["terminal_outcome"]["reason"] == "never_executed")
+            .expect("the refused turn's row");
+        refused
+            .as_object_mut()
+            .expect("a row is an object")
+            .remove("terminal_completion")
+            .expect("the refused turn's row carries its receipt");
+        let lost = "refused: v5 terminal input lost its exact completion receipt";
+        assert_eq!(
+            stored_rows_read_back(&rows.to_string())[1],
+            read_back(never_executed, lost, lost, "Abandoned"),
+            "the refused turn's row without its receipt"
+        );
+    }
 }

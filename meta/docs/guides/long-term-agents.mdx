@@ -503,7 +503,10 @@ is already in the agent's record.
   created are removed with their stores when the host next starts, and
   unarchiving the agent does not bring them back.
 - **Remove.** Removal is permanent: the name is never available again
-  (`name_taken`). The agent's conversation and memory are kept, and no
+  (`name_taken`; in 0.9.15 a create under it that a rule holds for approval
+  is refused only when the approved change is carried out, see Known
+  limitations in the Meta changelog). The agent's conversation and memory
+  are kept, and no
   other agent can reach them. A removal owes what an archive owes (the
   harvest, the exit interview, the retirement hook); a removal of an
   archived agent owes nothing more. A removal of an agent that still owns

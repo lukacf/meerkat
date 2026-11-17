@@ -700,6 +700,230 @@ async fn a_set_survives_a_restart() {
     assert_eq!(notices[1].result.outcome, AskUserOutcome::Answered);
 }
 
+/// A Console on which BOB, an access admin, reads every decision and
+/// answers every set.
+fn bob_administers() -> Setup {
+    Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![BOB.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+}
+
+/// The subject key of the decision that holds a call whose asker, run id
+/// and call id make no valid key verbatim: `ask_user.call:`, the run id,
+/// and the SHA-256 of the three, each preceded by its byte length as an
+/// 8-byte big-endian unsigned integer.
+fn bounded_subject_key(asker: &str, run_id: &RunId, call_id: &str) -> String {
+    let run = run_id.to_string();
+    let mut material = Vec::new();
+    for field in [asker, run.as_str(), call_id] {
+        material.extend(u64::try_from(field.len()).expect("a length").to_be_bytes());
+        material.extend(field.as_bytes());
+    }
+    format!("ask_user.call:{run}:{}", Sha256Digest::of(&material))
+}
+
+/// A member's call whose provider issued a 2,000-byte tool-call id holds a
+/// set as any call does: `meta/gating/questions` lists it with its asker
+/// and its questions, `meta/decisions/list` and `meta/decisions/get` show
+/// its decision, under a subject key within a reference's limit that names
+/// the call's run, a replay of the call answers the same request, a person
+/// answers it on the Console and its asker is told once. A pending id
+/// nothing holds is answered as it was before the set was held.
+#[tokio::test]
+async fn a_set_asked_in_a_call_with_a_long_id_is_listed_answered_and_its_asker_told() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let console = QuestionConsole::start(
+        "questions-long-call",
+        bob_administers(),
+        decisions_in(state_dir.path(), "questions-long-call", true),
+    )
+    .await;
+    let unknown = format!("decision:{}", "0".repeat(64));
+    let unknown_before = console.answer(Some(&bob()), &unknown).await;
+    let run_id = RunId::new();
+    let set = question_set();
+    let call_id = "c".repeat(2_000);
+    let call = AskUserRequest {
+        questions: &set,
+        timeout: Duration::from_hours(1),
+        run_id: &run_id,
+        call_id: &call_id,
+    };
+    let host = console.host(ASKER);
+    let asked = host
+        .ask(call)
+        .await
+        .expect("the host takes a call with a long tool-call id");
+    let replayed = host.ask(call).await.expect("the host takes the replay");
+    let pending_id = asked.request_id.clone().expect("an asked set");
+    let questions = console_rpc_as(&console.app, Some(&bob()), QUESTIONS, json!({})).await;
+    let pages = decision_pages(
+        &console,
+        &bob(),
+        &json!({ "kind": ASK_USER_QUESTIONS_KIND }),
+    )
+    .await;
+    let got = console_rpc_as(
+        &console.app,
+        Some(&bob()),
+        "meta/decisions/get",
+        json!({ "decision_id": pending_id }),
+    )
+    .await;
+    let held = console.row(&pending_id);
+    let unknown_after = console.answer(Some(&bob()), &unknown).await;
+    let decided = console.answer(Some(&bob()), &pending_id).await;
+    let told = Arc::new(Told::default());
+    let driver = console.drive(&told);
+    until("the asker is told", || !told.all().is_empty()).await;
+    until("the decision is settled", || {
+        console.row(&pending_id).notice_receipt.is_some()
+    })
+    .await;
+    let passes = driver.passes();
+    console.decisions.notify_work();
+    until("another pass was made", || driver.passes() > passes).await;
+    let row = console.row(&pending_id);
+    let notices = told.all();
+    driver.shutdown().await;
+    console.stop().await;
+
+    assert_eq!(asked.outcome, AskUserOutcome::Asked, "{asked:?}");
+    assert_eq!(replayed, asked, "a replayed call answers the set it held");
+    let subject_key = bounded_subject_key(ASKER, &run_id, &call_id);
+    assert_eq!(held.descriptor.subject_key.as_str(), subject_key);
+    assert_eq!(subject_key.len(), 122);
+    assert!(!subject_key.contains('/'), "{subject_key}");
+
+    // The questions list: the set with its asker and its questions.
+    let listed = questions["result"]["question_sets"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list of question sets: {questions}"));
+    assert_eq!(listed.len(), 1, "{questions}");
+    assert_eq!(listed[0]["pending_id"], json!(pending_id), "{questions}");
+    assert_eq!(
+        listed[0]["origin"],
+        json!({ "identity": ASKER }),
+        "{questions}"
+    );
+    assert_eq!(listed[0]["title"], json!("Release plan"), "{questions}");
+    assert_eq!(
+        listed[0]["questions"],
+        serde_json::to_value(&set).unwrap()["questions"],
+        "{questions}"
+    );
+    assert_eq!(
+        listed[0]["subject_digest"],
+        json!(held.descriptor.subject_digest.to_string()),
+        "{questions}"
+    );
+
+    // The decision list and the read of the decision: a row like any other.
+    assert_eq!(pages.len(), 1, "{pages:?}");
+    let listed_decisions = pages[0]["result"]["decisions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a page of decisions: {pages:?}"));
+    assert_eq!(listed_decisions.len(), 1, "{pages:?}");
+    assert_eq!(
+        listed_decisions[0]["decision_id"],
+        json!(pending_id),
+        "{pages:?}"
+    );
+    assert_eq!(
+        listed_decisions[0]["subject_key"],
+        json!(subject_key),
+        "{pages:?}"
+    );
+    assert!(got["error"].is_null(), "{got}");
+    let got = got.to_string();
+    assert!(got.contains(&pending_id), "{got}");
+    assert!(got.contains(&subject_key), "{got}");
+    assert!(
+        !got.contains(&call_id),
+        "the read carries no 2,000-byte call id"
+    );
+
+    assert_eq!(
+        unknown_after, unknown_before,
+        "a pending id nothing holds is answered as before"
+    );
+    assert!(unknown_after["error"]["code"].is_i64(), "{unknown_after}");
+    assert_eq!(
+        decided["result"],
+        json!({
+            "pending_id": pending_id,
+            "kind": "question_set",
+            "outcome": "answered",
+            "decided_at_ms": row.state.decided_at_ms,
+        }),
+        "{decided}"
+    );
+    assert_eq!(row.state.phase, DecisionPhase::Executed, "{row:?}");
+    assert_eq!(notices.len(), 1, "told exactly once: {notices:?}");
+    assert_eq!(notices[0].decision_id.as_str(), pending_id);
+    assert_eq!(notices[0].asker, ASKER);
+    assert_eq!(notices[0].result.outcome, AskUserOutcome::Answered);
+}
+
+/// A set held for a call with a 2,000-byte tool-call id survives a restart
+/// of its runtime: the next runtime lists it, a person answers it by its id
+/// and its asker is told.
+#[tokio::test]
+async fn a_set_asked_in_a_call_with_a_long_id_survives_a_restart() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let run_id = RunId::new();
+    let set = question_set();
+    let call_id = "c".repeat(2_000);
+    let call = AskUserRequest {
+        questions: &set,
+        timeout: Duration::from_hours(1),
+        run_id: &run_id,
+        call_id: &call_id,
+    };
+    let first = QuestionConsole::start(
+        "questions-long-restart-1",
+        Setup::enforced(),
+        decisions_in(state_dir.path(), "questions-long-restart-1", true),
+    )
+    .await;
+    let asked = first
+        .host(ASKER)
+        .ask(call)
+        .await
+        .expect("the host takes a call with a long tool-call id");
+    let pending_id = asked.request_id.clone().expect("an asked set");
+    first.stop().await;
+
+    let second = QuestionConsole::start(
+        "questions-long-restart-2",
+        Setup::enforced(),
+        decisions_in(state_dir.path(), "questions-long-restart-2", true),
+    )
+    .await;
+    let listed = second.listed(Some(&bob())).await;
+    let told = Arc::new(Told::default());
+    let driver = second.drive(&told);
+    let decided = second.answer(Some(&bob()), &pending_id).await;
+    until("the asker is told", || !told.all().is_empty()).await;
+    let notices = told.all();
+    let row = second.row(&pending_id);
+    driver.shutdown().await;
+    second.stop().await;
+
+    assert_eq!(asked.outcome, AskUserOutcome::Asked, "{asked:?}");
+    assert_eq!(listed, vec![pending_id.clone()]);
+    assert_eq!(
+        row.descriptor.subject_key.as_str(),
+        bounded_subject_key(ASKER, &run_id, &call_id)
+    );
+    assert_eq!(decided["result"]["outcome"], json!("answered"), "{decided}");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].decision_id.as_str(), pending_id);
+    assert_eq!(notices[0].result.outcome, AskUserOutcome::Answered);
+}
+
 /// Several first sets arriving together start one driver: every call is
 /// answered `asked`, none waits for another, and each set's end reaches its
 /// asker exactly once.
@@ -2287,6 +2511,131 @@ async fn a_build_through_its_registrations_surface_gate_gets_no_tool() {
     assert!(
         same_dispatcher(build_of(&hosted).host_tools.as_ref(), Some(&own)),
         "the host tools of a build through a gate stay as they are"
+    );
+}
+
+/// Every member build that carries a declared tool restriction is told the
+/// stock names as names of its host tools, whether or not the tool is
+/// mounted on it: a plain member build (mounted), a build whose external
+/// tools already name `ask_user` (not mounted) and a build through its
+/// registration's tool-surface gate (not mounted). So a restriction that
+/// denies `ask_user` names a known tool on each. What is declared is the
+/// stock names, beside the vocabularies the restriction already had. A
+/// member build without a declared restriction gets none made for it, and
+/// a request that is not a member build is not touched.
+#[tokio::test]
+async fn every_member_build_is_told_the_stock_names_mounted_or_not() {
+    use meerkat_core::ToolVocabularySource;
+    fn restricted(
+        mut request: meerkat_core::service::CreateSessionRequest,
+    ) -> meerkat_core::service::CreateSessionRequest {
+        request
+            .build
+            .as_mut()
+            .expect("build options")
+            .declared_tool_restriction = Some(meerkat_core::ops::DeclaredToolRestriction {
+            declared_by: "profile 'worker'".to_string(),
+            enabled_families: vec!["comms".to_string()],
+            read_only: false,
+            deny: [ASK_USER_TOOL].into_iter().collect(),
+            vocabulary: [(
+                ToolVocabularySource::MobOperator,
+                ["spawn_member"].into_iter().collect(),
+            )]
+            .into_iter()
+            .collect(),
+            deferred_mcp_servers: std::collections::BTreeSet::new(),
+        });
+        request
+    }
+    /// The names the build's restriction lists under `source`, sorted; none
+    /// when it lists no such source or the build has no restriction.
+    fn declared(
+        request: &meerkat_core::service::CreateSessionRequest,
+        source: &ToolVocabularySource,
+    ) -> Option<Vec<String>> {
+        let names = build_of(request)
+            .declared_tool_restriction
+            .as_ref()?
+            .vocabulary
+            .get(source)?;
+        let mut names: Vec<String> = names.iter().map(ToString::to_string).collect();
+        names.sort();
+        Some(names)
+    }
+    let stock = Some(vec![ASK_USER_TOOL.to_string()]);
+    let slot = AskUserSlot::default();
+
+    let mut mounted = restricted(build_request(Some("agent-a"), None));
+    slot.mount(&mut mounted);
+    assert_eq!(
+        names_of(build_of(&mounted).host_tools.as_ref()),
+        vec![ASK_USER_TOOL.to_string()]
+    );
+    assert_eq!(declared(&mounted, &ToolVocabularySource::HostTools), stock);
+    assert_eq!(
+        declared(&mounted, &ToolVocabularySource::MobOperator),
+        Some(vec!["spawn_member".to_string()]),
+        "the vocabularies the restriction had stay"
+    );
+
+    let mut own = restricted(build_request(
+        Some("agent-a"),
+        Some(Named::of(&[ASK_USER_TOOL])),
+    ));
+    slot.mount(&mut own);
+    assert!(build_of(&own).host_tools.is_none());
+    assert_eq!(
+        declared(&own, &ToolVocabularySource::HostTools),
+        stock,
+        "a build with its own ask_user is told the stock names too"
+    );
+
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let session = meerkat_core::types::SessionId::new();
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("register the member's session");
+    let registration = machine
+        .current_session_registration_witness(&session)
+        .await
+        .expect("the registration is current");
+    let bindings = machine
+        .prepare_bindings(session)
+        .await
+        .expect("prepare the registration's bindings");
+    machine
+        .bind_session_tool_surface_gate(&registration, Arc::new(NeverAsked))
+        .await
+        .expect("install the host's gate");
+    let mut gated = restricted(build_request(Some("agent-a"), None));
+    gated
+        .build
+        .as_mut()
+        .expect("build options")
+        .runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+    slot.mount(&mut gated);
+    assert!(build_of(&gated).host_tools.is_none());
+    assert_eq!(
+        declared(&gated, &ToolVocabularySource::HostTools),
+        stock,
+        "a build through its registration's gate is told the stock names too"
+    );
+
+    let mut unrestricted = build_request(Some("agent-a"), None);
+    slot.mount(&mut unrestricted);
+    assert!(
+        build_of(&unrestricted).declared_tool_restriction.is_none(),
+        "a member build that declares no restriction gets none made for it"
+    );
+
+    let mut plain = restricted(build_request(None, None));
+    slot.mount(&mut plain);
+    assert_eq!(
+        declared(&plain, &ToolVocabularySource::HostTools),
+        None,
+        "a request that is not a member build is not touched"
     );
 }
 

@@ -9561,6 +9561,7 @@ mod tests {
     use chrono::{Duration, Utc};
 
     pub(crate) mod committed_reads_tests;
+    mod default_context_root_tests;
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};

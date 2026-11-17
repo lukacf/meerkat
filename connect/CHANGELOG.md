@@ -33,6 +33,47 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-16
+
+### Fixed
+
+- A profile used for agents hosted by Connect's native host may list
+  `ask_user` in `tools.deny`. In 0.9.15 the build of such an agent was
+  refused with the deny
+  (`profile '<name>' denies tool 'ask_user', which is in none of its tool vocabularies`):
+  the native host decides its members' tool surface itself, so they are
+  given no stock `ask_user`, and the deny named a tool no part of their
+  build knew. Meerkat Meta now knows the stock name on every member build
+  (see the Meta changelog), so a profile shared with a Meta gateway, where
+  the deny is the documented way to keep the tool from a member, no longer
+  meets that refusal. What was run: rows on a Meta host that decides its
+  members' tool surface as the native host does (it installs a member
+  registration hook), where a member on a denying profile builds and is
+  not offered the tool. It was not run through Connect's native host. For
+  the native host the rest is read from the source: its registration
+  judges the tools a member's build holds and the ones it offers, and
+  reads neither the build's tool policy nor a profile's deny list, and a
+  deny of a name that no tool of the member has changes neither of those
+  lists, so the host is asked to decide the same surface as without the
+  deny. Its agents are still not offered the tool, with the deny or
+  without it. Affected: 0.9.15 only (0.9.14 has no stock `ask_user`).
+
+- Release tooling: the request that adds a file to a Connect release now
+  states the length of the file. The upload host refuses a request without
+  one ("Bad Content-Length"). The candidate tool of 0.9.10 through 0.9.15
+  sends the earlier request, and so does the release upload tool, which
+  exists since 0.9.15 and uploads through it. An empty file is now refused
+  before any request is made. The installed product is unchanged.
+
+- Package README: the install line is corrected. The README inside the
+  published `@rkat/toolkit` 0.9.15 package says "Install the tagged 0.9.0
+  release" and gives an address in the former standalone repository that
+  does not exist (it answers 404); the Python SDK's `HOME_ASSISTANT.md`
+  gives the same for the wheel. The published `@rkat/toolkit` 0.9.15 package
+  keeps that line; the Python guide is a repository file and is in no
+  published 0.9.15 package. From 0.9.16 both name no fixed release and point
+  to the SDK page; install as that page says.
+
 ## [0.9.15] - 2026-11-15
 
 ### Fixed

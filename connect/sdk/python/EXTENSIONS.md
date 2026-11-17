@@ -94,7 +94,7 @@ The host must serialize install/update/import as appropriate and supply scoped
 service handles that enforce their own authority and lifetime. Required service
 availability is checked, but the loader cannot authorize or revoke a handle.
 Activation, admission, audiences, routing, cleanup, readiness and revocation
-remain with the application and Meerkat/MobKit owners. Service connectors and
+remain with the application and Meerkat/Meta owners. Service connectors and
 agent frontends can share these artifact checks without sharing their roles.
 
 ## Host migration boundary and provenance

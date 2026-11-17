@@ -26,7 +26,7 @@ fault-tolerant parse result is never used. The pinned npm artifact integrity is
 retained in the staging provenance; installation must preserve it in a lockfile.
 
 The build-only dependency TypeScript is pinned to 5.8.3, Apache-2.0. It is not a
-runtime dependency. There are no MobKit, Meerkat, host or credential-store
+runtime dependency. There are no Meta, Meerkat, host or credential-store
 runtime dependencies.
 
 The Microsoft dependency license follows for attribution.

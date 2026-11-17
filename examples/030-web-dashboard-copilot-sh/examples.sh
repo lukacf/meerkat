@@ -82,7 +82,7 @@ credentials = ["anthropic_api_key"]
 capabilities = ["comms"]
 
 [models]
-default = "claude-sonnet-4-6"
+default = "claude-sonnet-5-5"
 TOML
 
 cat > "$MOB_DIR/definition.json" <<'JSON'
@@ -91,7 +91,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
   "orchestrator": { "profile": "incident-commander" },
   "profiles": {
     "incident-commander": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": ["incident-commander-playbook"],
       "peer_description": "Primary user-facing dashboard copilot. Triages telemetry, coordinates specialists, and summarizes operator actions.",
       "external_addressable": true,
@@ -102,7 +102,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       }
     },
     "metrics-analyst": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": ["metrics-analyst-playbook"],
       "peer_description": "Reads service health signals, spots regressions, and compares live metrics to rollout expectations.",
       "external_addressable": false,
@@ -112,7 +112,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       }
     },
     "rollout-guard": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": ["rollout-guard-playbook"],
       "peer_description": "Evaluates deployment risk, rollback criteria, blast radius, and operator safeguards.",
       "external_addressable": false,
@@ -122,7 +122,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       }
     },
     "status-scribe": {
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-5-5",
       "skills": ["status-scribe-playbook"],
       "peer_description": "Turns the team discussion into concise operator-ready status updates and next-step checklists.",
       "external_addressable": false,

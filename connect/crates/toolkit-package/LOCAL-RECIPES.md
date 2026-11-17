@@ -20,7 +20,7 @@ From the Toolkit checkout:
 
 Use the resulting `toolkit-local-recipes` executable from that build's reported
 target directory. The examples below assume it is on your operator command path.
-No native Meerkat or MobKit runtime is needed for this local metadata workflow.
+No native Meerkat or Meta runtime is needed for this local metadata workflow.
 
 ## Initialize a store before the first investigation
 

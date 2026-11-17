@@ -12426,6 +12426,174 @@ mod tests {
             }
         }
 
+        /// The binding the member's session recorded, if any.
+        async fn recorded_binding(rig: &Rig, mob_id: &str, identity: &str) -> Option<String> {
+            let handle = rig
+                .router
+                .mob_state
+                .handle_for(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .expect("mob handle");
+            let session = handle
+                .resolve_bridge_session_id(&meerkat_mob::AgentIdentity::from(identity))
+                .await
+                .expect("member session");
+            rig.router
+                .mob_state
+                .session_service()
+                .load_persisted_session_metadata(&session)
+                .await
+                .expect("read the member session's metadata")
+                .and_then(|view| view.session_metadata)
+                .and_then(|metadata| metadata.auth_binding)
+                .map(|binding| binding.binding.as_str().to_string())
+        }
+
+        /// `mob/profile/create` and `mob/profile/update` take the stored
+        /// profile form from the host's own caller: a binding, a server and a
+        /// bundle name are stored as sent, and the profile read back shows
+        /// none of them.
+        #[tokio::test]
+        async fn the_profile_methods_store_the_stored_profile_form() {
+            let rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            let host_form = |binding: &str| {
+                let mut profile = worker_profile(serde_json::json!({
+                    "mcp_servers": [server.clone()],
+                    "rust_bundles": ["host-bundle"],
+                }));
+                profile["auth_binding"] =
+                    serde_json::json!({"realm": "global", "binding": binding});
+                profile
+            };
+
+            let created = ok(
+                &rig,
+                "mob/profile/create",
+                serde_json::json!({"name": "host-form", "profile": host_form("host-binding")}),
+                "the stored profile form is created",
+            )
+            .await;
+            let updated = ok(
+                &rig,
+                "mob/profile/update",
+                serde_json::json!({
+                    "name": "host-form",
+                    "profile": host_form("other-binding"),
+                    "expected_revision": created["revision"],
+                }),
+                "the stored profile form is updated",
+            )
+            .await;
+            for answer in [&created, &updated] {
+                assert!(answer["profile"].get("auth_binding").is_none(), "{answer}");
+                assert!(
+                    answer["profile"]["tools"].get("mcp_servers").is_none(),
+                    "{answer}"
+                );
+                assert!(
+                    answer["profile"]["tools"].get("rust_bundles").is_none(),
+                    "{answer}"
+                );
+            }
+            let stored = rig
+                .router
+                .mob_state
+                .realm_profile_get("host-form")
+                .await
+                .expect("read the realm profile store")
+                .expect("the profile is stored")
+                .profile;
+            assert_eq!(
+                stored
+                    .auth_binding
+                    .as_ref()
+                    .map(|binding| binding.binding.as_str()),
+                Some("other-binding")
+            );
+            assert_eq!(stored.tools.mcp_servers.len(), 1);
+            assert_eq!(stored.tools.rust_bundles, vec!["host-bundle".to_string()]);
+        }
+
+        /// A realm profile the host stored with a server and a binding, read
+        /// back through the MCP profile tool and updated there with exactly
+        /// what was read, holds the public profile input only. The member
+        /// spawned before the update started the server and recorded the
+        /// binding; the member spawned after it starts no server process and
+        /// records no binding.
+        #[tokio::test]
+        async fn a_profile_updated_through_the_mcp_tool_with_its_read_back_drops_its_server_and_binding()
+         {
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            let mut profile = worker_profile(serde_json::json!({"mcp_servers": [server]}));
+            profile["auth_binding"] =
+                serde_json::json!({"realm": "global", "binding": "host-binding"});
+            create_realm_mob(&rig, "round-trip", "host-form", profile).await;
+
+            spawn(&rig, "round-trip", "before", None).await;
+            let open = member_turn_until(
+                &mut rig,
+                "round-trip",
+                "before",
+                &S_TOOLS,
+                "s_echo",
+                Turn::settled,
+            )
+            .await;
+            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
+            assert_eq!(started_count(&started), 1);
+            assert_eq!(
+                recorded_binding(&rig, "round-trip", "before")
+                    .await
+                    .as_deref(),
+                Some("host-binding")
+            );
+
+            let read = meerkat_mob_mcp::handle_public_tools_call(
+                &rig.router.mob_state,
+                "meerkat_mob_profile_get",
+                &serde_json::json!({"name": "host-form"}),
+            )
+            .await
+            .expect("the MCP profile tool reads the profile back");
+            let updated = meerkat_mob_mcp::handle_public_tools_call(
+                &rig.router.mob_state,
+                "meerkat_mob_profile_update",
+                &serde_json::json!({
+                    "name": "host-form",
+                    "profile": read["profile"],
+                    "expected_revision": read["revision"],
+                }),
+            )
+            .await
+            .expect("the MCP profile tool takes what it read back");
+            assert_eq!(updated["revision"], 2, "{updated}");
+            let stored = rig
+                .router
+                .mob_state
+                .realm_profile_get("host-form")
+                .await
+                .expect("read the realm profile store")
+                .expect("the profile is stored")
+                .profile;
+            assert!(stored.tools.mcp_servers.is_empty());
+            assert!(stored.auth_binding.is_none());
+
+            spawn(&rig, "round-trip", "after", None).await;
+            let closed =
+                member_turn(&mut rig, "round-trip", "after", &S_TOOLS, Some("s_echo")).await;
+            assert!(closed.found_no_tool(), "{closed:?}");
+            assert_eq!(
+                started_count(&started),
+                1,
+                "the later member's build starts no server process"
+            );
+            assert_eq!(recorded_binding(&rig, "round-trip", "after").await, None);
+        }
+
         /// A live member's identity grant answers `applies: "now"`, and its
         /// list answers the member's gate, running and next build; a retired
         /// identity's list answers its history without a gate.

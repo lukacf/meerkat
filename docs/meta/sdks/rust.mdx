@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from Meerkat Meta main at [225d539132a2](https://github.com/lukacf/meerkat/commit/225d539132a2ace672400cfa432d00adb43db1a7) on 2026-11-14; Meta version 0.9.14 at that commit.*
+*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-meta` is the primary interface for Meta. All other inter
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-meta = "0.9.14"
+meerkat-meta = "0.9.15"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -369,8 +369,13 @@ calls them at these points:
   records the customized spawn spec in the seat or rotation. It builds
   nothing, except a declared role migration's restamp of the member onto
   its session, which builds the member from it: a seat that revives the
-  archived session of a member Core retired after it was built (a respawn,
-  for example) is a Dormant seat and builds nothing.
+  archived session of a member Core retired after it was built (an identity
+  listed again after its member was retired, for example) is a Dormant seat
+  and builds nothing. From 0.9.15 a respawn seats the identity's successor
+  in one step, and `customize_build` runs once for that seat, a Dormant seat
+  on the session the member keeps, with no archive in between; before
+  0.9.15, and still for a member the same-session step does not serve (see Known limitations in Meta's changelog, the entry on the loss of an identity's mobs after a respawn), a respawn retires the member and
+  revives its archived session with such a seat.
   `meta/identity/resolved_tools`, which reports the tools a build actually
   resolved, answers `no_build_recorded` until the member's first build. Each
   of these calls gets the runtime's real context: every registered identity
@@ -382,10 +387,12 @@ calls them at these points:
   ran `customize_build`, with the session the identity is bound to, as at an
   identity's creation. A wake's build never calls it.
 
-A respawn of a built member seats it again on the session Core kept
-archived when it retired it, Dormant and building nothing, and the wake that
+From 0.9.15 a respawn of a built member seats its successor on the session
+it keeps, Dormant and building nothing, and the wake that
 follows builds it once, as for a lazily seated identity: `after_create` is
-told once, with the session the respawn keeps. A materialization, a warm or
+told once, with the session the respawn keeps. Before 0.9.15, and still for
+a member the same-session step does not serve (see Known limitations in Meta's changelog, the entry on the loss of an identity's mobs after a respawn), the member is retired first and seated again on the session
+Core kept archived. A materialization, a warm or
 a delivery of an identity Core seats again on its archived session builds
 the member once, at its wake, and the roster pass builds nothing. A lazily
 seated identity (one seated with nothing built yet) gets two

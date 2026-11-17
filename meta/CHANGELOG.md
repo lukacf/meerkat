@@ -246,6 +246,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   member's deny does not bind, decides. See Fixed and Known limitations in
   the Meerkat changelog.
 - A persistent `meta_gateway` (`persistent_sessions: true`) with no mob definition file (`config/mob.toml` or `<workspace>/definition.json`) starts again after an upgrade on the state directory that holds its mob, with no operator step. Such a launch runs the built-in default mob, whose id was derived from the launch, the release version included; the state directory keeps the id it was created with, so the first start of every later release was refused: `the supplied mob definition diverges from the canonical definition in this storage, in: id` (answered as `-32603` `failed to bootstrap local runtime`). Meta 0.9.9, the oldest release looked at, through 0.9.16 had this. The gateway now takes the mob id the state directory records (`definition.id` in `<state directory>/event_log.sqlite3.composition.json`) for the built-in default mob. The 0.9.16 upgrade step, copying that `definition` to `<workspace>/definition.json`, is no longer needed; a workspace that has the file keeps starting, and a definition file still names its own mob. A state directory that records no mob gets an id derived from the launch without the release version, so a mob created by this release keeps its id under the next one. The definition is still judged: a launch with no definition file on a state directory whose mob was created from a definition file is refused with `-32019` `divergent`, naming the fields that differ. Going back: a 0.9.16 or earlier gateway on a default mob that this release created derives its own id and refuses as before, unless the workspace has the `definition.json` of the 0.9.16 step. Rust: `mob_composition_manifest::recorded_definition_id` reads the recorded id.
+- Adopted agents on a host with an agent customizer or agent memory build
+  again (the Known limitation of the 0.9.16 notes). On 0.9.15 and 0.9.16, on
+  a host that registers an agent customizer or configures agent memory, an
+  agent configured in the roster and adopted into the identity store
+  (`meta/identity/adopt`) was refused the next time it was built and read
+  `broken`. Such an agent is now built with the labels of its record, on the
+  same conversation. An agent that an earlier release adopted and refused is
+  built at its first build after the restart into this release, with no step
+  by its host; no update is needed after an adoption, and the update the
+  0.9.16 notes name still works. Nothing stored changes. An agent that is
+  live at the adoption keeps the labels of its running build until its next
+  build, while its roster entry follows its record at once. Unchanged: a
+  label that the host's customizer answers and the agent's record does not
+  carry is still refused, and the refusal names that key.
 
 ### Known limitations
 

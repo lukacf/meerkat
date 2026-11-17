@@ -516,6 +516,24 @@ them.
   the Stop and the Shutdown issued again failed as above before the change
   and land with it. Not measured, read only: a member on another host.
 
+- `meerkat-mob`: a member adopted from a roster spec is built with its
+  record's labels. On 0.9.15 and 0.9.16 a member taken into store custody
+  from a roster spec (`MobHandle::adopt_identity` with a roster source) was
+  refused every later build where its host composes the seat, because its
+  seat's labels differed from its record's. A start and a build now read the
+  labels of such a member from its record while the member's last seat row
+  is still the one the adoption found, and the adoption's commit sets its
+  roster entry from the record. Nothing is written for it and no stored form
+  changes; a member refused before the restart into this release is built at
+  its first build after it. An import that binds such a record in place
+  (`MobHandle::import_created_identities`) sets the roster entry from the
+  record at its commit too. Unchanged: a member adopted from a worker; a
+  seat that a label update of a created agent left behind its record (moved
+  by a respawn with the record's labels or by an update, as on 0.9.15); and
+  a label the host answers that the record does not carry is still refused,
+  naming that key. The record census still counts a healthy adopted member
+  as a stale seat until its next seat row.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

@@ -95,6 +95,21 @@ them.
   error message carries. Affected: every release of the TypeScript SDK
   since 0.3.0.
 
+- `meerkat`: a session that is the target of a WorkGraph attention binding
+  and was built without the WorkGraph tools takes its turns. The binding's
+  turn overlay allows the WorkGraph tools of the binding's mode, and a turn
+  whose allow-list names a tool the session lacks is refused whole, so such
+  a session (a mob member whose profile has no WorkGraph tools, for one)
+  took no turn while a binding named it, and its status read healthy. The
+  session now takes the overlay as its own tools allow: with some of the
+  mode's tools the allow-list is narrowed to those it has; with none of
+  them it takes an ordinary turn with its own tools. Another overlay of
+  the same turn that narrowed the list keeps its restriction, with one
+  exception: an allow-list that holds every tool of the binding's mode
+  cannot be told from no other overlay, so a session with none of those
+  tools takes that turn with its own tools too. Present in every release
+  since 0.8.41.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

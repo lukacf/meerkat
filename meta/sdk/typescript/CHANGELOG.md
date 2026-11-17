@@ -15,6 +15,11 @@
   refusal's own typed error (`CompositionProvenanceError`,
   `StorageResolutionError` or the typed RPC error) instead of
   `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+  For this the exported `PersistentTransport` gains the public method
+  `initSettledFailed()`, which the runtime calls when the init settles
+  `failed`, so that the stop that follows makes no shutdown request. A
+  subclass inherits it; a subclass must not define a method of that name
+  for another purpose.
 - `GatewayStartupCleanupError`'s message names the startup failure it wraps
   by the error's `name` ("gateway startup failed (CompositionProvenanceError)
   and the stop of its gateway transport ..."), or by its `typeof` when it is

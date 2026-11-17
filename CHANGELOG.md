@@ -107,13 +107,12 @@ them.
   `monitors/start` route records `v1`, as every earlier release did for
   both. No wire type changes.
 
-- **A session whose committed run never settles is reported instead of
-  standing silent.** After a run's terminal commit the runtime still records
-  the completion of the run's inputs and, for a directed run, publishes its
-  terminals; until it has, the session starts nothing further, so input it is
-  handed is accepted and never run. That state used to show nowhere: no log
-  line, and a healthy status. When the work has stayed unsettled for one
-  minute:
+- **A session whose committed run never settles is reported by name.** After
+  a run's terminal commit the runtime still records the completion of the
+  run's inputs and, for a directed run, publishes its terminals; until it
+  has, a session whose run completed starts nothing further, so input it is
+  handed is accepted and never run. When the work has stayed unsettled for
+  one minute:
   - the host logs an error that names the session, the run and its inputs,
     and repeats it every minute for as long as it lasts, also after the
     session's runtime loop has ended;

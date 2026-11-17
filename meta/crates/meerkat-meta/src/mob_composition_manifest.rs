@@ -1297,7 +1297,7 @@ mod tests {
         write_manifest_beside(&storage, &predecessor_manifest(&recorded, "0.8.26"));
         assert_eq!(
             recorded_definition_id(&storage).expect("a predecessor manifest reads"),
-            Some(recorded.id.clone())
+            Some(recorded.id)
         );
 
         std::fs::write(manifest_path(&storage), b"not a manifest").expect("write manifest");

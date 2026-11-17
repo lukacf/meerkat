@@ -4,7 +4,7 @@ description: "Let an agent create, change, archive and remove long-term agents u
 icon: "user-plus"
 ---
 
-*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [fa0a5003395b](https://github.com/lukacf/meerkat/commit/fa0a5003395b406399b94d7bca46a8f8712a0c53) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -187,7 +187,10 @@ set outside the policy, in the approver map of the launch's access file:
 unless that map binds the rule's approver id to the stdio operator or to a
 person a declared ingress attests, a held change can only be withdrawn or
 lapse at its deadline (see
-[Approval rules](/meta/reference/identity-policy#approval-rules)).
+[Approval rules](/meta/reference/identity-policy#approval-rules)). In 0.9.15 and
+0.9.16 the decision is taken through the host, not in the Console, which
+shows it: see
+[Decisions held for a person](/meta/guides/console#decisions-held-for-a-person).
 
 A tool's answer is this outcome without its `operation_id`. An operation id
 is the host's handle on a change (`meta/identity/operation` reads by it): an

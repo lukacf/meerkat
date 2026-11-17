@@ -154,6 +154,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keeps `monitor_start` closed with its other tools until a grant, which
   opens all five. A read-only member lists it, as it lists `shell`, and is
   refused every call.
+- A stdio gateway's refusal of an opt-in configuration file's content names
+  the file: the error text ends with ` (file '<path>')` for an access file
+  that does not parse or validate (`runtime_options.access_config_path`,
+  the approver-ingress check included), for a gating file that does not
+  parse or whose content is refused (`gating_config_path`) and for a
+  routing file that does not parse (`routing_config_path`). The text before
+  the suffix and the error codes are unchanged, and a file that cannot be
+  read was named already. Python and TypeScript SDKs: when the gateway
+  refuses a start and the builder had applied files by convention from the
+  working directory (a file such as `config/access.toml` that no builder
+  call named), `build()` says once which files it applied, as a warning on
+  the `meerkat_meta` logger in Python and through `console.warn` in
+  TypeScript, and raises the same error as before. A file the program
+  named itself is not listed. No new option, and the `meta/init` request
+  is unchanged.
 
 ### Fixed
 

@@ -41,6 +41,13 @@ The RPC surface is fully runtime-backed:
     `rkat-rpc --tcp` is a JSON-RPC host transport. It is not the signed
     Meerkat peer/comms channel used by remote agents or external mob members;
     use `rkat run --comms-listen-tcp ...` for that.
+
+    The listener speaks JSON lines only. A connection whose first line is an
+    HTTP request line (a method, a target and an HTTP version) is closed on
+    that line: nothing the request carries is read or run, and the server
+    logs a warning with the peer's address. Only the first line is read this
+    way; a later line that is not JSON is answered with a parse error, as
+    before.
   </Step>
   <Step title="Send the handshake">
     ```json

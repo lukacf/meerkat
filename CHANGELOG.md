@@ -35,6 +35,10 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`: a `[confinement]` or `[governance]` table in a project's `.rkat/config.toml` that is not in effect is now reported. These hosts read the two sections from the config documents they compose and, for confinement, from the `--confinement` flags; a project file's table is not read (since 0.9.1, the first release with `[confinement]`), and until now nothing said so. `rkat` prints one `warning:` line per section on stderr at the start of a command that builds an agent, naming the file, the table and where the section is read from: for confinement the user document `~/.rkat/config.toml` and the flags first (on Linux with the `--state-root` that a start confining every launch kind needs when its realm state lies inside a write grant), then the realm's own document. `rkat doctor` prints the same as a `warn config` line and its verdict is unchanged. `rkat-rpc`, `rkat-rest` and `rkat-mcp` log it as a warning at start when they have a `--context-root`. It is reported when the table is present, not empty and not what is in effect, or does not parse as its section; a project file that restates what is in effect is not mentioned. The table is still not read from the project file. The configuration pages say where the section goes and that these hosts read only the hook entries of a project's `.rkat/config.toml`.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

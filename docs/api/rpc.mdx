@@ -3905,6 +3905,10 @@ Send one typed input chunk. Image input is available only when
 for the next text, audio, or explicitly committed response. Every image must
 carry a caller-stable, session-scoped `idempotency_key`.
 
+Send no input before the channel reports `ready`: input sent earlier is
+refused and is not held for later. See
+[Wait for ready before the first input](/guides/realtime#wait-for-ready-before-the-first-input).
+
 The JSON-RPC JSONL transport accepts frames up to 64 MiB, excluding the
 trailing newline. Direct live WebSocket frames are a different input path:
 they support JSON text chunks and negotiated raw PCM audio only, with a 2 MiB

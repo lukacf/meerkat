@@ -275,7 +275,9 @@ impl CopilotTokenExchangeError {
             CopilotHttpTransportError::Request(request) if request.is_timeout() => {
                 exchange_timeout()
             }
-            CopilotHttpTransportError::Request(request) if request.is_connect() => {
+            CopilotHttpTransportError::Request(request)
+                if request.is_connect() || connection_broke(request) =>
+            {
                 meerkat_llm_core::LlmError::ConnectionReset
             }
             CopilotHttpTransportError::Request(_) => meerkat_llm_core::LlmError::Unknown {
@@ -298,6 +300,29 @@ impl CopilotTokenExchangeError {
             not_before: None,
         })
     }
+}
+
+/// Whether a request failed because its established connection broke: an
+/// I/O error of kind connection reset, connection aborted, broken pipe or
+/// unexpected end of file anywhere in the error's source chain. A peer that
+/// closes the connection without a reset leaves no I/O error and is not one.
+fn connection_broke(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// The class of a token exchange that timed out: on its request bound, or
@@ -7771,6 +7796,106 @@ mod tests {
         ] {
             assert!(retryable_class(&failure).is_none(), "{failure:?}");
         }
+    }
+
+    /// A connection the peer resets after it was established is a connection
+    /// failure of the exchange, as a refused connection is. The request's
+    /// own timeout stays a timeout, and a connection the peer closes without
+    /// a reset stays unclassified.
+    #[tokio::test]
+    async fn token_exchange_reset_after_connect_is_a_connection_failure() {
+        use tokio::io::AsyncReadExt;
+
+        fn retryable_class(
+            error: &CopilotHttpTransportError,
+        ) -> Option<meerkat_llm_core::LlmError> {
+            match CopilotTokenExchangeError::from_transport(error) {
+                CopilotTokenExchangeError::Unavailable(unavailable) => Some(unavailable.retryable),
+                CopilotTokenExchangeError::Failed(_) => None,
+            }
+        }
+
+        async fn exchange_error(address: std::net::SocketAddr) -> CopilotHttpTransportError {
+            match ReqwestCopilotHttpTransport::new()
+                .get(&format!("http://{address}/token"), HeaderMap::new())
+                .await
+            {
+                Err(error) => error,
+                Ok(response) => panic!("the endpoint answered: status {}", response.status),
+            }
+        }
+
+        // An endpoint that accepts the connection and resets it once the
+        // request has begun to arrive: a socket closed with unread data is
+        // reset.
+        let resetting = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = resetting.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = resetting.accept().await.unwrap();
+            let mut first = [0_u8; 1];
+            assert_eq!(stream.peek(&mut first).await.unwrap(), 1);
+            drop(stream);
+        });
+        let reset = exchange_error(address).await;
+        peer.await.unwrap();
+        let class = retryable_class(&reset);
+        assert!(
+            matches!(class, Some(meerkat_llm_core::LlmError::ConnectionReset)),
+            "a connection reset after the connect is classified {class:?}, from {reset:?}"
+        );
+
+        // Control: a refused connection. The port is bound, never listens
+        // and stays bound until the answer is in.
+        let unlistened = tokio::net::TcpSocket::new_v4().unwrap();
+        unlistened.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let refused = exchange_error(unlistened.local_addr().unwrap()).await;
+        drop(unlistened);
+        let class = retryable_class(&refused);
+        assert!(
+            matches!(class, Some(meerkat_llm_core::LlmError::ConnectionReset)),
+            "a refused connection is classified {class:?}, from {refused:?}"
+        );
+
+        // Control: a request that passes its bound stays a timeout.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let timed_out = reqwest::Client::builder()
+            .timeout(StdDuration::from_millis(50))
+            .build()
+            .unwrap()
+            .get(format!("http://{}/token", silent.local_addr().unwrap()))
+            .send()
+            .await
+            .expect_err("a silent endpoint times out");
+        let class = retryable_class(&CopilotHttpTransportError::Request(timed_out));
+        assert!(
+            matches!(
+                class,
+                Some(meerkat_llm_core::LlmError::NetworkTimeout { .. })
+            ),
+            "a timeout is classified {class:?}"
+        );
+
+        // Control: an endpoint that reads the request and closes without a
+        // reset. That failure carries no I/O error and stays unclassified.
+        let closing = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closing.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = closing.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "the request ends with a blank line");
+                request.extend_from_slice(&chunk[..read]);
+            }
+        });
+        let closed = exchange_error(address).await;
+        peer.await.unwrap();
+        let class = retryable_class(&closed);
+        assert!(
+            matches!(class, Some(meerkat_llm_core::LlmError::Unknown { .. })),
+            "a connection closed without a reset is classified {class:?}, from {closed:?}"
+        );
     }
 
     #[test]

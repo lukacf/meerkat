@@ -853,6 +853,9 @@ protection does not cover another kind that writes the same place. On macOS
 the `workspace` preset protects `<root>/.rkat` (the CLI's default realm state
 and the project's convention files). The Linux backend has no deny lists, so
 there the host's realm state must live outside the workspace.
+A write grant outside the root takes the macOS protection away: a kind that
+can write the root and a place outside it is judged able to move the root
+away, so the host treats `<root>/.rkat` as changeable by that kind.
 
 A host that runs any launch kind as the trusted host claims none of this: its
 startup report says that a process the agent drives can still change the

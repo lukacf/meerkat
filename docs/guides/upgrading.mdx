@@ -55,6 +55,45 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.17
+
+This section is for systems running 0.9.16. The full list of changes is in
+the CHANGELOG under `## [0.9.17]`; read its Breaking and Upgrade notes
+sections before you upgrade.
+
+### What was sent to a session that an earlier release had stopped
+
+This is for a host on which, before the upgrade, a session stopped running
+after a response to a peer request that carried no result. From 0.9.17
+such a response no longer stops the session (see Fixed in the CHANGELOG
+under `## [0.9.17]`, the entry that begins "Peer requests: a response to a
+peer request without a result no longer stops the requester"). What was
+sent to such a session while it was stopped:
+
+- At the first start on 0.9.17, an input that was queued behind the stop is
+  ended as abandoned and is not run, however soon after the stop that start
+  comes. Any start on 0.9.15 and 0.9.16 did the same. New work runs.
+- One exception was seen: a message that a Meta gateway took with an
+  idempotency key (`meta/send` with `idempotency_key`) is run at that
+  start, once. Sending it again under the same key makes no second input
+  and answers the session id and the input id.
+- No log line and no event reports an abandoned input to a host. A program
+  that embeds Meerkat and waits on the input in the same process is given
+  its end (read from the source).
+- Where the caller holds the input's id, its status can be asked:
+  JSON-RPC `session/input_status`, or `meta/send_status` on a Meta gateway,
+  reads `abandoned`, without a reason. A `meta/send` without a key answers
+  no input id.
+
+(Shown by runs on the published 0.9.15 and 0.9.16 and on a candidate build
+of 0.9.17.)
+
+**Do:** after the first start on 0.9.17, send again what was sent to such a
+session while it was stopped, other than a `meta/send` that carried an
+idempotency key. Repeat that one under the same key, not a new one: the
+repeat makes no second input and answers the ids, with which its status can
+be asked.
+
 ## Upgrading to 0.9.16
 
 This section is for systems running 0.9.15. The full list of changes is in

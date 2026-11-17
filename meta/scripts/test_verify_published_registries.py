@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import hashlib
+from http.client import IncompleteRead
 import io
 from pathlib import Path
 import sys
@@ -333,7 +334,7 @@ class RegistryWaitTests(unittest.TestCase):
 
     def test_npm_serving_eight_minutes_after_the_first_read_is_within_the_default_wait(self):
         fake = FakeTime()
-        lines = self.wait(fake, npm_serving_from(fake, 480.0))
+        lines = self.wait(fake, npm_serving_from(fake, 480.0), clock=fake.clock)
         self.assertEqual(fake.now, 480.0)
         self.assertEqual(len(fake.sleeps), 48)
         self.assertIn("@rkat/meta-sdk 0.8.0 on npm", lines[-1])
@@ -417,7 +418,7 @@ class RegistryWaitTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             registries.verify_with_retries(
                 "0.8.0", reader=npm_serving_from(fake, 20.0), downloader=exact_artifact,
-                sleeper=fake.sleep,
+                sleeper=fake.sleep, clock=fake.clock,
             )
         self.assertEqual(len(output.getvalue().splitlines()), 3)
         self.assertGreaterEqual(output.flushes, 3)
@@ -465,7 +466,9 @@ class WrongDigestTests(unittest.TestCase):
             str(raised.exception),
             "release 0.8.0 refused: npm serves npm tarball with sha1 "
             f"{hashlib.sha1(other).hexdigest()}, not the expected "
-            f"{artifact_digest(NPM_TARBALL, 'sha1')} (the same answer at two reads in a row)",
+            f"{artifact_digest(NPM_TARBALL, 'sha1')} (the same answer at two reads in a row); "
+            "last answer: npm: npm tarball checksum mismatch: expected "
+            f"{artifact_digest(NPM_TARBALL, 'sha1')}, got {hashlib.sha1(other).hexdigest()}",
         )
         self.assertEqual(raised.exception.registries, ("npm",))
         # At the second read, not at the deadline.
@@ -483,7 +486,9 @@ class WrongDigestTests(unittest.TestCase):
         self.assertEqual(
             str(raised.exception),
             f"release 0.8.0 refused: crates.io serves meerkat-meta 0.8.0 with sha256 {served}, "
-            f"not the expected {'0' * 64} (the same answer at two reads in a row)",
+            f"not the expected {'0' * 64} (the same answer at two reads in a row); "
+            f"last answer: crates.io: crates.io serves meerkat-meta 0.8.0 with checksum {served}, "
+            f"not the verified {'0' * 64}",
         )
         self.assertEqual(raised.exception.registries, ("crates.io",))
         self.assertEqual(fake.sleeps, [10.0])
@@ -575,6 +580,224 @@ class WrongDigestTests(unittest.TestCase):
         lines = self.wait(fake, reader=reader)
         self.assertEqual(fake.sleeps, [10.0] * 3)
         self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_a_refusal_keeps_what_the_other_registries_answered_at_that_read(self):
+        fake = FakeTime()
+        with self.assertRaisesRegex(
+            registries.RegistryVerificationError,
+            r"^release 0\.8\.0 refused: npm serves npm tarball with sha1 [0-9a-f]{40}, not the "
+            r"expected [0-9a-f]{40} \(the same answer at two reads in a row\); last answer: "
+            r"PyPI: HTTP Error 404: Not Found; npm: npm tarball checksum mismatch: ",
+        ) as raised:
+            def reader(url: str) -> dict:
+                if "pypi.org" in url:
+                    raise HTTPError(url, 404, "Not Found", None, None)
+                return exact_payload(url)
+
+            self.wait(fake, reader=reader, downloader=npm_bytes(*[b"other bytes"] * 9))
+        # The refusal names the registry that serves the wrong answer only.
+        self.assertEqual(raised.exception.registries, ("npm",))
+        self.assertEqual(fake.sleeps, [10.0])
+
+    def test_an_incomplete_read_is_not_served_yet(self):
+        """A connection that ends in the middle of an answer is read again."""
+        for stage in ("metadata", "artifact"):
+            with self.subTest(stage=stage):
+                fake = FakeTime()
+                failures = {"metadata": 2, "artifact": 2}
+
+                def reader(url: str) -> dict:
+                    if stage == "metadata" and "npmjs.org" in url and failures["metadata"]:
+                        failures["metadata"] -= 1
+                        raise IncompleteRead(b"{", 100)
+                    return exact_payload(url)
+
+                def downloader(url: str) -> bytes:
+                    if stage == "artifact" and url == NPM_TARBALL and failures["artifact"]:
+                        failures["artifact"] -= 1
+                        raise IncompleteRead(b"npm", 100)
+                    return ARTIFACTS[url]
+
+                lines = self.wait(fake, reader=reader, downloader=downloader)
+                self.assertEqual(fake.sleeps, [10.0] * 2)
+                self.assertIn("npm: IncompleteRead(", lines[0])
+                self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+
+def served_wrong(mutate, *, reads: int = 500):
+    """A reader whose first `reads` answers per URL are changed by `mutate`
+    (which returns False for an answer it leaves alone)."""
+    changed: dict[str, int] = {}
+
+    def reader(url: str) -> dict:
+        payload = exact_payload(url)
+        if changed.get(url, 0) < reads and mutate(url, payload) is not False:
+            changed[url] = changed.get(url, 0) + 1
+        return payload
+
+    return reader
+
+
+def yank_crate(url: str, payload: dict):
+    if "crates.io" not in url or "meta-extension-state" in url:
+        return False
+    payload["version"]["yanked"] = True
+
+
+def yank_sdist(url: str, payload: dict):
+    if "pypi.org" not in url:
+        return False
+    payload["urls"][1]["yanked"] = True
+
+
+def other_npm_version(url: str, payload: dict):
+    if "npmjs.org" not in url:
+        return False
+    payload["version"] = "0.8.1"
+
+
+def other_crate(url: str, payload: dict):
+    if "crates.io" not in url or "meta-extension-state" in url:
+        return False
+    payload["version"]["crate"] = "another-crate"
+
+
+def other_pypi_version(url: str, payload: dict):
+    if "pypi.org" not in url:
+        return False
+    payload["info"]["version"] = "0.8.1"
+
+
+class ServedAndWrongTests(unittest.TestCase):
+    """A yanked release and unexpected package or version metadata are
+    answers of a registry that serves the version: the same one at two reads
+    in a row is refused at the second, like a wrong digest."""
+
+    REFUSALS = (
+        (yank_crate, "crates.io",
+         "crates.io serves meerkat-meta 0.8.0 with yank state true, not the expected false",
+         "crates.io: crates.io release is yanked or lacks yank state"),
+        (yank_sdist, "PyPI",
+         "PyPI serves meerkat_meta-0.8.0.tar.gz with yank state true, not the expected false",
+         "PyPI: PyPI wheel or source distribution is yanked or lacks yank state"),
+        (other_npm_version, "npm",
+         'npm serves package "@rkat/meta-sdk" version "0.8.1", not the expected package '
+         '"@rkat/meta-sdk" version "0.8.0"',
+         "npm: npm returned unexpected package/version metadata"),
+        (other_crate, "crates.io",
+         'crates.io serves crate "another-crate" version "0.8.0", not the expected crate '
+         '"meerkat-meta" version "0.8.0"',
+         "crates.io: crates.io returned unexpected package/version metadata"),
+        (other_pypi_version, "PyPI",
+         'PyPI serves version "0.8.1", not the expected version "0.8.0"',
+         "PyPI: PyPI returned an unexpected package version"),
+    )
+
+    def wait(self, fake: FakeTime, reader) -> list[str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                registries.verify_with_retries(
+                    "0.8.0", reader=reader, downloader=exact_artifact,
+                    sleeper=fake.sleep, clock=fake.clock,
+                )
+            finally:
+                self.lines = output.getvalue().splitlines()
+        return self.lines
+
+    def test_the_same_wrong_answer_at_two_reads_in_a_row_is_refused_at_the_second(self):
+        for mutate, registry, refusal, answer in self.REFUSALS:
+            with self.subTest(case=mutate.__name__):
+                fake = FakeTime()
+                with self.assertRaises(registries.RegistryVerificationError) as raised:
+                    self.wait(fake, served_wrong(mutate))
+                self.assertEqual(
+                    str(raised.exception),
+                    f"release 0.8.0 refused: {refusal} (the same answer at two reads in a row); "
+                    f"last answer: {answer}",
+                )
+                self.assertEqual(raised.exception.registries, (registry,))
+                self.assertEqual(fake.sleeps, [10.0])
+                self.assertEqual(len(self.lines), 1)
+
+    def test_a_wrong_answer_once_and_then_the_right_one_pass(self):
+        for mutate, _, _, _ in self.REFUSALS:
+            with self.subTest(case=mutate.__name__):
+                fake = FakeTime()
+                lines = self.wait(fake, served_wrong(mutate, reads=1))
+                self.assertEqual(fake.sleeps, [10.0])
+                self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_the_same_wrong_answer_with_a_read_that_did_not_serve_in_between_keeps_waiting(self):
+        for mutate, registry, _, _ in self.REFUSALS:
+            with self.subTest(case=mutate.__name__):
+                fake = FakeTime()
+                wrong = served_wrong(mutate, reads=2)
+                reads: dict[str, int] = {}
+
+                def reader(url: str) -> dict:
+                    reads[url] = reads.get(url, 0) + 1
+                    if reads[url] == 2:
+                        raise HTTPError(url, 404, "Not Found", None, None)
+                    return wrong(url)
+
+                # Wrong, not served, the same wrong answer, exact.
+                lines = self.wait(fake, reader)
+                self.assertEqual(fake.sleeps, [10.0] * 3)
+                self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_a_wrong_answer_that_changes_between_reads_keeps_waiting(self):
+        fake = FakeTime()
+        versions = iter(f"0.8.{patch}" for patch in range(1, 500))
+
+        def changing(url: str, payload: dict):
+            if "npmjs.org" not in url:
+                return False
+            payload["version"] = next(versions)
+
+        lines = self.wait(fake, served_wrong(changing, reads=3))
+        self.assertEqual(fake.sleeps, [10.0] * 3)
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_an_answer_without_the_expected_fields_repeated_keeps_waiting(self):
+        """An answer that does not have the shape of a served version is not
+        a served version."""
+        def no_distribution(url: str, payload: dict):
+            if "npmjs.org" not in url:
+                return False
+            del payload["dist"]
+
+        def no_version_metadata(url: str, payload: dict):
+            if "crates.io" not in url:
+                return False
+            payload["version"] = None
+
+        for mutate in (no_distribution, no_version_metadata):
+            with self.subTest(case=mutate.__name__):
+                fake = FakeTime()
+                lines = self.wait(fake, served_wrong(mutate, reads=3))
+                self.assertEqual(fake.sleeps, [10.0] * 3)
+                self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+
+class WaitArgumentTests(unittest.TestCase):
+    def test_a_wait_that_could_not_end_is_refused(self):
+        for kwargs, text in (
+            ({"deadline_seconds": float("nan")}, "deadline_seconds must be a finite number"),
+            ({"deadline_seconds": float("inf")}, "deadline_seconds must be a finite number"),
+            ({"delay_seconds": float("nan")}, "delay_seconds must be a finite number"),
+            ({"delay_seconds": float("inf")}, "delay_seconds must be a finite number"),
+            ({"delay_seconds": 0}, "delay_seconds of 0 needs an attempts cap"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                def never(url: str) -> dict:
+                    raise AssertionError(f"read {url}")
+
+                with self.assertRaisesRegex(ValueError, text):
+                    registries.verify_with_retries(
+                        "0.8.0", reader=never, downloader=exact_artifact,
+                        sleeper=lambda _: None, **kwargs,
+                    )
 
 
 class RegistrySelectionTests(unittest.TestCase):
@@ -669,6 +892,16 @@ class RegistryCommandLineTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertEqual(seen, {})
         self.assertIn("--only-registry and --only-crates", errors)
+
+    def test_a_registry_selection_with_a_crate_checksum_is_refused(self):
+        """The checksum would bind nothing: --only-registry reads no crate."""
+        status, seen, errors = self.run_cli(
+            "--version", "0.8.0", "--only-registry", "npm",
+            "--crate-sha256", "meerkat-meta=" + "0" * 64,
+        )
+        self.assertEqual(status, 2)
+        self.assertEqual(seen, {})
+        self.assertIn("--only-registry reads no crate", errors)
 
     def test_an_unknown_registry_is_refused(self):
         status, seen, _ = self.run_cli("--version", "0.8.0", "--only-registry", "crates.io")

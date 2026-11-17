@@ -23,6 +23,12 @@ All notable changes to the Python SDK are documented here.
   refusal's own typed error (`CompositionProvenanceError`,
   `StorageResolutionError` or the typed RPC error) instead of
   `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+  For this `meerkat_meta._transport.PersistentTransport`, the class
+  `gateway_transport()` takes, gains the method `init_settled_failed()`,
+  which the runtime calls when the init settles `failed`, so that the stop
+  that follows makes no shutdown request. A subclass inherits it (the
+  exported `AdoptedGatewayTransport` is one); a subclass must not define a
+  method of that name for another purpose.
 - `GatewayStartupCleanupError`'s message names the type of the startup
   failure it wraps ("gateway startup failed (CompositionProvenanceError) and
   the stop of its gateway transport ..."); it still formats nothing of the

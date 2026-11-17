@@ -13126,16 +13126,8 @@ async fn create_mcp_tools(
             project_servers.len()
         );
         for s in &project_servers {
-            let target = match &s.server.transport {
-                meerkat_core::mcp_config::McpTransportConfig::Stdio(stdio) => {
-                    if stdio.args.is_empty() {
-                        stdio.command.clone()
-                    } else {
-                        format!("{} {}", stdio.command, stdio.args.join(" "))
-                    }
-                }
-                meerkat_core::mcp_config::McpTransportConfig::Http(http) => http.url.clone(),
-            };
+            // The listing's own target: a URL without its userinfo and query.
+            let (_, target) = mcp::format_server_target(&s.server);
             eprintln!("  - {} ({})", s.server.name, target);
         }
     }

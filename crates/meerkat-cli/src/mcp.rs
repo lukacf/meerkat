@@ -33,7 +33,25 @@ fn mask_secret(s: &str) -> String {
     }
 }
 
-fn format_server_target(server: &McpServerConfig) -> (McpTransportKind, String) {
+/// `url` for a text listing, without the credentials a URL can embed: its
+/// userinfo and its query are each shown as `***`.
+fn display_url(url: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((base, _)) => (base, "?***"),
+        None => (url, ""),
+    };
+    let userinfo = base.split_once("://").and_then(|(scheme, rest)| {
+        let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
+        authority
+            .rfind('@')
+            .map(|at| format!("{scheme}://***@{}", &rest[at + 1..]))
+    });
+    format!("{}{query}", userinfo.as_deref().unwrap_or(base))
+}
+
+/// A server's transport and its target for a text listing: a stdio server's
+/// command line, or an HTTP server's URL without its userinfo and query.
+pub(crate) fn format_server_target(server: &McpServerConfig) -> (McpTransportKind, String) {
     match &server.transport {
         McpTransportConfig::Stdio(stdio) => {
             let cmd = if stdio.args.is_empty() {
@@ -45,7 +63,7 @@ fn format_server_target(server: &McpServerConfig) -> (McpTransportKind, String) 
         }
         McpTransportConfig::Http(http) => {
             let kind = server.transport_kind();
-            (kind, http.url.clone())
+            (kind, display_url(&http.url))
         }
     }
 }
@@ -618,17 +636,10 @@ pub async fn get_server(
                 }
                 if !stdio.env.is_empty() {
                     println!("Env:");
+                    // Every value is masked: a name does not say whether
+                    // its value is a credential.
                     for (k, v) in &stdio.env {
-                        let display_value = if k.to_lowercase().contains("key")
-                            || k.to_lowercase().contains("secret")
-                            || k.to_lowercase().contains("token")
-                            || k.to_lowercase().contains("password")
-                        {
-                            mask_secret(v)
-                        } else {
-                            v.clone()
-                        };
-                        println!("  {k}={display_value}");
+                        println!("  {k}={}", mask_secret(v));
                     }
                 }
             }
@@ -638,7 +649,7 @@ pub async fn get_server(
                     _ => "streamable-http",
                 };
                 println!("Transport: {transport}");
-                println!("URL:       {}", http.url);
+                println!("URL:       {}", display_url(&http.url));
                 if let Some(account) = &http.oauth_account {
                     println!("Account:   {account}");
                 }
@@ -654,16 +665,7 @@ pub async fn get_server(
                 if !http.headers.is_empty() {
                     println!("Headers:");
                     for (k, v) in &http.headers {
-                        let display_value = if k.to_lowercase().contains("key")
-                            || k.to_lowercase().contains("secret")
-                            || k.to_lowercase().contains("token")
-                            || k.to_lowercase().contains("password")
-                        {
-                            mask_secret(v)
-                        } else {
-                            v.clone()
-                        };
-                        println!("  {k}: {display_value}");
+                        println!("  {k}: {}", mask_secret(v));
                     }
                 }
             }
@@ -1283,6 +1285,33 @@ future_server_key = "preserve-too"
         let (kind, target) = format_server_target(&server);
         assert_eq!(kind, McpTransportKind::StreamableHttp);
         assert_eq!(target, "https://api.example.com");
+    }
+
+    /// A text listing shows a URL without the credentials it can embed: its
+    /// userinfo and its query. Everything else of it stays readable.
+    #[test]
+    fn a_listed_url_hides_its_userinfo_and_query() {
+        for (url, shown) in [
+            ("https://api.example.com/mcp", "https://api.example.com/mcp"),
+            (
+                "https://user:secret@api.example.com/mcp?key=secret",
+                "https://***@api.example.com/mcp?***",
+            ),
+            (
+                "https://api.example.com?key=secret",
+                "https://api.example.com?***",
+            ),
+            (
+                "https://token@api.example.com",
+                "https://***@api.example.com",
+            ),
+            ("https://api.example.com/a@b", "https://api.example.com/a@b"),
+            ("not a url", "not a url"),
+        ] {
+            assert_eq!(display_url(url), shown);
+            let server = McpServerConfig::streamable_http("test", url, HashMap::new());
+            assert_eq!(format_server_target(&server).1, shown);
+        }
     }
 
     #[test]

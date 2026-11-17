@@ -179,7 +179,8 @@ pub(crate) fn validate_raw_identity_labels(
 /// private owner ([`crate::access::PRIVATE_TO_LABEL`]), which only that fork
 /// and a spawn or fork by a member private to a person record. No caller
 /// supplies one on any label path: member creation refuses them
-/// ([`validate_member_creation_labels`]) and so do the agent spawn tools.
+/// ([`validate_host_member_creation_labels`], and with it
+/// [`validate_caller_member_creation_labels`]) and so do the agent spawn tools.
 pub(crate) const RESERVED_AUTHORITY_LABELS: [&str; 4] = [
     crate::side_chat::SIDE_CHAT_OF_LABEL,
     crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
@@ -206,10 +207,20 @@ pub(crate) fn reserved_authority_label_refusal(key: &str) -> String {
     )
 }
 
-/// Validate the labels a member-creation request may supply: those
+/// Validate the labels the HOST's own member creation may supply: those
 /// [`validate_raw_identity_labels`] accepts, and none of the
 /// [`RESERVED_AUTHORITY_LABELS`]. The refusal names the label.
-pub(crate) fn validate_member_creation_labels(
+///
+/// For the host's own doors only: the Rust `spawn` and `spawn_many`, the
+/// host fork API and the SDK gateway's `meta/ensure_member` (the host's own
+/// process). Beyond the keys only Meta writes, a host labels its members as
+/// it likes: a `role` label is display data it may choose, as a declared
+/// identity's is. A door that a caller who is not the host reaches takes
+/// [`validate_caller_member_creation_labels`] instead. The row
+/// `the_member_creation_label_checks_are_called_only_by_their_listed_doors`
+/// lists every caller of both: a new one fails it until it is listed there
+/// as a host door or takes the caller check.
+pub(crate) fn validate_host_member_creation_labels(
     labels: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
     validate_raw_identity_labels(labels).map_err(str::to_string)?;
@@ -217,6 +228,50 @@ pub(crate) fn validate_member_creation_labels(
         Some(key) => Err(reserved_authority_label_refusal(key)),
         None => Ok(()),
     }
+}
+
+/// Validate the labels a caller who is NOT the host may supply on member
+/// creation (a person on the console, through `meta/ensure_member`): those
+/// [`validate_host_member_creation_labels`] accepts, none whose key differs
+/// only by letter case from a label only Meta writes
+/// ([`reserved_authority_label_case_variant`]: a near miss of a reserved
+/// label is refused, not stored), and none Core reserves for runtime facts
+/// ([`meerkat_core::validate_public_labels`]: the mob discovery names
+/// `mob_id`, `role`, `meerkat_id` and `agent_identity`, and the `meerkat`
+/// namespace, each without regard to letter case).
+///
+/// The keys Core reserves name facts the runtime owns, so such a caller
+/// does not supply them. The refusal of a key Core reserves is Core's own
+/// message, naming the key. An agent's spawn tools apply the same two
+/// refusals to their labels
+/// ([`crate::console_spawn::caller_reserved_label_refusal_in_spawn_args`]).
+pub(crate) fn validate_caller_member_creation_labels(
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    validate_host_member_creation_labels(labels)?;
+    if let Some((key, reserved)) = labels
+        .keys()
+        .find_map(|key| reserved_authority_label_case_variant(key).map(|reserved| (key, reserved)))
+    {
+        return Err(reserved_authority_label_case_variant_refusal(key, reserved));
+    }
+    meerkat_core::validate_public_labels(Some(labels)).map_err(|refusal| refusal.to_string())
+}
+
+/// The [`RESERVED_AUTHORITY_LABELS`] entry that `key` differs from only by
+/// letter case, if any. The entry itself is no variant of itself.
+pub(crate) fn reserved_authority_label_case_variant(key: &str) -> Option<&'static str> {
+    RESERVED_AUTHORITY_LABELS
+        .into_iter()
+        .find(|reserved| *reserved != key && reserved.eq_ignore_ascii_case(key))
+}
+
+/// The refusal of a caller-supplied label whose key differs only by letter
+/// case from a [`RESERVED_AUTHORITY_LABELS`] entry, naming both.
+pub(crate) fn reserved_authority_label_case_variant_refusal(key: &str, reserved: &str) -> String {
+    format!(
+        "labels.{key} is refused: its key differs only by letter case from the reserved label '{reserved}', which only Meta writes; a caller may not supply it"
+    )
 }
 
 /// True when `s` is a valid meerkat 0.7 comms-name component
@@ -1500,6 +1555,81 @@ mod tests {
         labels.remove("agent_identity");
         labels.insert("team".to_string(), "red".to_string());
         assert_eq!(validate_raw_identity_labels(&labels), Ok(()));
+    }
+
+    /// The host's check takes the label keys Core reserves (a host labels
+    /// its own members), the caller's check refuses each with Core's own
+    /// message, and both refuse the keys only Meta writes and take an
+    /// ordinary label.
+    #[test]
+    fn the_caller_check_adds_core_s_reserved_label_keys_to_the_host_check() {
+        let labelled =
+            |key: &str| std::collections::BTreeMap::from([(key.to_string(), "value".to_string())]);
+        for key in [
+            "role",
+            "mob_id",
+            "meerkat_id",
+            "meerkat",
+            "meerkat.runtime_id",
+            "Role",
+            "MOB_ID",
+            "Meerkat_Id",
+            "Agent_Identity",
+            "MEERKAT.runtime_id",
+        ] {
+            assert_eq!(
+                validate_host_member_creation_labels(&labelled(key)),
+                Ok(()),
+                "the host's check takes {key}"
+            );
+            assert_eq!(
+                validate_caller_member_creation_labels(&labelled(key)),
+                Err(format!(
+                    "metadata label key '{key}' is reserved for Meerkat-owned runtime facts"
+                )),
+                "the caller's check refuses {key} as Core does"
+            );
+        }
+        for key in std::iter::once("agent_identity").chain(RESERVED_AUTHORITY_LABELS) {
+            let host = validate_host_member_creation_labels(&labelled(key));
+            assert!(host.is_err(), "the host's check refuses {key}");
+            assert_eq!(
+                validate_caller_member_creation_labels(&labelled(key)),
+                host,
+                "the caller's check refuses {key} in the host check's words"
+            );
+        }
+        for key in ["team", "profile_name", "side_chat", "console.private"] {
+            assert_eq!(
+                validate_caller_member_creation_labels(&labelled(key)),
+                Ok(()),
+                "{key} is an ordinary label to both checks"
+            );
+        }
+        // A key that differs only by letter case from a label only Meta
+        // writes: the host's check is exact, the caller's check refuses it,
+        // naming the label it differs from.
+        for (key, reserved) in [
+            ("Side_Chat_Of", "side_chat_of"),
+            ("SIDE_CHAT_OF_SESSION", "side_chat_of_session"),
+            ("Side_Chat_Creator", "side_chat_creator"),
+            ("Console.Private_To", "console.private_to"),
+        ] {
+            assert_eq!(reserved_authority_label_case_variant(key), Some(reserved));
+            assert_eq!(reserved_authority_label_case_variant(reserved), None);
+            assert_eq!(
+                validate_host_member_creation_labels(&labelled(key)),
+                Ok(()),
+                "the host's check takes {key}"
+            );
+            assert_eq!(
+                validate_caller_member_creation_labels(&labelled(key)),
+                Err(format!(
+                    "labels.{key} is refused: its key differs only by letter case from the reserved label '{reserved}', which only Meta writes; a caller may not supply it"
+                )),
+                "the caller's check refuses {key}"
+            );
+        }
     }
 
     #[test]

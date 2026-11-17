@@ -1072,6 +1072,39 @@ pub(crate) fn reserved_label_in_spawn_args(args: &Value) -> Option<&'static str>
         .find_map(|labels| crate::member_comms_id::reserved_authority_label(labels.keys()))
 }
 
+/// The refusal of the first label key, among the labels a spawn-tool call
+/// supplies (its own `labels`, or those of an entry of its `specs` or
+/// `members` array), that a caller who is not the host may not supply
+/// beyond the exact keys only Meta writes: a key that differs from one of
+/// those only by letter case, or a key Core reserves for runtime facts
+/// ([`meerkat_core::validate_public_labels`]: `mob_id`, `role`, `meerkat_id`
+/// and the `meerkat` namespace, without regard to letter case). An agent's
+/// spawn refuses such a key as console member creation does
+/// ([`crate::member_comms_id::validate_caller_member_creation_labels`]).
+///
+/// The exact key `agent_identity` is not judged here: the console identity
+/// a spawn's labels may name has its own rule.
+pub(crate) fn caller_reserved_label_refusal_in_spawn_args(args: &Value) -> Option<String> {
+    spawn_label_maps(args)
+        .flat_map(|labels| labels.keys())
+        .find_map(|key| {
+            if let Some(reserved) =
+                crate::member_comms_id::reserved_authority_label_case_variant(key)
+            {
+                return Some(
+                    crate::member_comms_id::reserved_authority_label_case_variant_refusal(
+                        key, reserved,
+                    ),
+                );
+            }
+            (key.as_str() != "agent_identity" && meerkat_core::is_reserved_meerkat_label_key(key))
+                .then(|| {
+                    meerkat_core::SurfaceMetadataError::ReservedLabelKey { key: key.clone() }
+                        .to_string()
+                })
+        })
+}
+
 /// The first of the [`CONSOLE_ROW_LABELS`] among the labels a spawn-tool
 /// call supplies: its own `labels`, or those of an entry of its `specs` or
 /// `members` array. An agent's spawn refuses it, naming it.

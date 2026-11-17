@@ -77,6 +77,11 @@ mod identity_tools_tests;
 mod reserved_identity_tests;
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[path = "mob_handle_runtime_created_mob_owner_tests.rs"]
+mod created_mob_owner_tests;
+
+#[cfg(test)]
 pub(crate) fn acquisition_observation_probe(
     reject: bool,
     reads: Arc<std::sync::atomic::AtomicUsize>,
@@ -3727,9 +3732,29 @@ fn idle_retire_patched_tool_def(
         Arc::new(delegate_tool_def_with_idle_retire_secs(tool))
     } else if tool.name == "mob_spawn_member" {
         Arc::new(mob_spawn_tool_def_with_idle_retire_secs(tool))
+    } else if tool.name == "mob_create" {
+        Arc::new(mob_create_tool_def_with_schedules_note(tool))
     } else {
         Arc::clone(tool)
     }
+}
+
+/// What `mob_create` says of schedules on these mob tools: a create here ends
+/// the schedules that name the new mob's id
+/// ([`crate::mob_schedules_release`]). The one that writes such a schedule is
+/// an agent, and an agent reads its tools, not a release's notes.
+const MOB_CREATE_SCHEDULES_NOTE: &str = "A schedule that names a mob id is ended when a mob is created under that id: create the mob \
+     first, then write its schedules.";
+
+fn mob_create_tool_def_with_schedules_note(
+    tool: &meerkat_core::types::ToolDef,
+) -> meerkat_core::types::ToolDef {
+    let mut patched = tool.clone();
+    if !patched.description.contains(MOB_CREATE_SCHEDULES_NOTE) {
+        patched.description.push_str("\n\nSCHEDULES:\n");
+        patched.description.push_str(MOB_CREATE_SCHEDULES_NOTE);
+    }
+    patched
 }
 
 fn delegate_tool_def_with_idle_retire_secs(
@@ -7853,6 +7878,10 @@ pub struct MobBootstrapSpec {
     /// mobs exist, as a gateway composition adopts its own
     /// ([`crate::gateway_composition::adopt_schedule_mob_targets`]).
     pub(crate) schedule_target_registry: Option<crate::schedule_wiring::ScheduleMobTargetRegistry>,
+    /// The late-bound release of the schedules the launch keeps under a
+    /// mob's id (`crate::mob_schedules_release`); see
+    /// [`Self::with_mob_schedules_declared`].
+    pub(crate) mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
     /// Late-bound personal accounts the base session-service wrapper
     /// classifies each member build's personal MCP servers with
     /// (`crate::personal_accounts`); see [`Self::with_personal_mcp_accounts`].
@@ -8048,6 +8077,7 @@ impl MobBootstrapSpec {
             private_owners,
             ask_user_slot,
             schedule_target_registry: None,
+            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -8074,6 +8104,18 @@ impl MobBootstrapSpec {
         &self,
     ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
         self.side_chat_memory_slot.clone()
+    }
+
+    /// Say that this launch has schedules, before its runtime is built. A
+    /// mob the launch's mob set creates beside the launch mob must find
+    /// none of the schedules an earlier mob of its id left, so from here on
+    /// such a create is refused until the composition that owns the
+    /// schedule service has handed the release of a mob's schedules to the
+    /// runtime. A launch that says nothing has no schedules to release.
+    #[must_use]
+    pub fn with_mob_schedules_declared(self) -> Self {
+        self.mob_schedules.declare();
+        self
     }
 
     /// Classify every member build of this spec's personal MCP servers with
@@ -9859,9 +9901,16 @@ impl MobBootstrapSpec {
         // firing host — authored schedules become durable rows the embedder's
         // own driver (or a gateway pointed at the same store) fires.
         let mut schedule_target_registry = None;
+        let mut mob_schedules_release = None;
         let schedule_slot = schedule_store.map(|store| {
             let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            // This launch owns its schedule service, so it hands the
+            // release of a mob's schedules to its own runtime.
+            mob_schedules_release = Some(crate::schedule_wiring::MobAgentSchedules::new(
+                attached.service.clone(),
+                attached.mob_target_registry.clone(),
+            ));
             schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
@@ -10072,6 +10121,9 @@ impl MobBootstrapSpec {
             slots.push(slot);
         }
         spec.schedule_target_registry = schedule_target_registry;
+        if let Some(release) = mob_schedules_release {
+            spec.mob_schedules.bind(Arc::new(release));
+        }
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -10331,9 +10383,16 @@ impl MobBootstrapSpec {
         // in a caller-supplied remote store. Library mode wires no firing
         // host (see `UnifiedRuntimeBuilder::schedule_store`).
         let mut schedule_target_registry = None;
+        let mut mob_schedules_release = None;
         let schedule_slot = schedule_store.map(|store| {
             let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            // This launch owns its schedule service, so it hands the
+            // release of a mob's schedules to its own runtime.
+            mob_schedules_release = Some(crate::schedule_wiring::MobAgentSchedules::new(
+                attached.service.clone(),
+                attached.mob_target_registry.clone(),
+            ));
             schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
@@ -10529,6 +10588,9 @@ impl MobBootstrapSpec {
             slots.push(slot);
         }
         spec.schedule_target_registry = schedule_target_registry;
+        if let Some(release) = mob_schedules_release {
+            spec.mob_schedules.bind(Arc::new(release));
+        }
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -11127,6 +11189,8 @@ pub struct MobRuntime {
     console_schedules: crate::console_schedules::ConsoleSchedules,
     /// See [`MobBootstrapSpec::with_personal_mcp_accounts`].
     personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot,
+    /// See [`MobBootstrapSpec::with_mob_schedules_declared`].
+    mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -11605,6 +11669,11 @@ impl MobRuntime {
                 )
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
             spec.private_owners.bind_child_mobs(state);
+            // Before a mob is created under an id, the admission asks for
+            // the release of the schedules the launch keeps under that id
+            // ([`crate::mob_schedules_release`]).
+            spec.private_owners
+                .bind_create_release(Arc::new(spec.mob_schedules.clone()));
         }
         auto_mark_declared_resume_overrides(&mut spec.definition);
         let ephemeral_dir = spec._ephemeral_dir.clone();
@@ -12204,6 +12273,7 @@ impl MobRuntime {
             ask_user_slot: spec.ask_user_slot,
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: spec.personal_accounts_slot,
+            mob_schedules: spec.mob_schedules,
         };
         // Agent schedule tools attached over an injected schedule store
         // judge their targets with this runtime's mobs and with who its
@@ -12274,6 +12344,7 @@ impl MobRuntime {
             ask_user_slot: crate::ask_user::AskUserSlot::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
+            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
         }
     }
 
@@ -12341,6 +12412,14 @@ impl MobRuntime {
     /// [`crate::console_schedules::ConsoleSchedules`]).
     pub(crate) fn console_schedules(&self) -> &crate::console_schedules::ConsoleSchedules {
         &self.console_schedules
+    }
+
+    /// The launch's late-bound release of the schedules it keeps under a
+    /// mob's id (see [`crate::mob_schedules_release`]): the composition
+    /// that owns the schedule service binds it, and the create admission
+    /// asks it before a mob is created under an id.
+    pub(crate) fn mob_schedules(&self) -> &crate::mob_schedules_release::MobSchedulesSlot {
+        &self.mob_schedules
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's

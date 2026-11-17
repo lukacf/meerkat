@@ -1820,6 +1820,17 @@ pub async fn adopt_schedule_mob_targets(
             crate::schedule_wiring::EndedPrivateMemberSchedules::new(schedule_service.clone()),
         ))
         .await;
+    // Only the launch that speaks for its composition hands its runtime the
+    // release of a mob's schedules: a create under a mob's id then ends the
+    // schedules that name that id before the mob exists. A candidate
+    // launch, above, declares its schedules and never binds the release, so
+    // it refuses such a create and ends no schedule.
+    runtime.mob_runtime().mob_schedules().bind(Arc::new(
+        crate::schedule_wiring::MobAgentSchedules::new(
+            schedule_service.clone(),
+            mob_target_registry.clone(),
+        ),
+    ));
     match crate::schedule_wiring::repair_resumable_session_targets_to_mob_members(
         schedule_service,
         mob_target_registry,

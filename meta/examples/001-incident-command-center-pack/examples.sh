@@ -70,7 +70,7 @@ start_server() {
   # set -m puts the background job in its own process group so cleanup can
   # kill the entire cargo/server tree via kill -- -PID.
   set -m
-  (cd "$ROOT" && INCIDENT_COMMAND_CENTER_LISTEN_ADDR="127.0.0.1:0" cargo run -p meerkat-meta --example incident_command_center > "$SERVER_LOG" 2>&1) &
+  (cd "$ROOT" && INCIDENT_COMMAND_CENTER_LISTEN_ADDR="127.0.0.1:0" "$ROOT/../scripts/repo-cargo" run -p meerkat-meta --example incident_command_center > "$SERVER_LOG" 2>&1) &
   SERVER_PID=$!
   set +m
   # A server that never became ready ends the leg here. Without the check the

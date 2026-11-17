@@ -873,8 +873,19 @@ jobs:
       # the shipped binaries actually have. It lives on the nightly, not the
       # release path: a release build of meerkat-rpc's tests is minutes of
       # runner time that would land on every tag otherwise.
+      # The router::tests::server_gate_rpc rows spawn the MCP test server
+      # and fail, never skip, without it: a release test binary looks for
+      # it under target/release, where nothing builds it (five rows failed
+      # so on main on 2026-11-16, job 133159267629). The script builds it
+      # in the dev profile and prints its path; it runs before make, so
+      # that rustc never runs under the target's RUST_MIN_STACK.
       - name: RPC router tests on a 1 MiB release stack
-        run: make stack-budget-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
+          export MEERKAT_MCP_TEST_SERVER
+          make stack-budget-release
 
   e2e-system:
     name: System e2e lane

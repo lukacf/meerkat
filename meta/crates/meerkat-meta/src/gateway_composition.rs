@@ -111,9 +111,11 @@
 //!   plane only exists when an SDK host is on the other end of stdin.
 //!
 //! - **Registry / resume.** `meta_gateway` maintains a cross-process
-//!   runtime registry keyed by a config fingerprint and can answer
-//!   `launch_state: "resumed"` without booting a runtime at all.
-//!   `rpc_gateway` has no such concept.
+//!   runtime registry keyed by a config fingerprint and can answer a
+//!   launch started with `--resume-from-registry` as
+//!   `launch_state: "resumed"` without booting a runtime at all; a launch
+//!   without that argument always binds and starts. `rpc_gateway` has no
+//!   such concept.
 //!
 //! Profile-specific enrichment remains explicit between bootstrap and
 //! activation. This is the checked seam list, not a closed census:

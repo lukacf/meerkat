@@ -69,11 +69,19 @@ def builder(state_dir: Path, gateway: str, *, init_deadline: float = 120.0):
 
 
 async def stop(runtime) -> None:
-    """Shut the runtime down. A gateway that is already gone has nothing to stop."""
+    """Shut the runtime down.
+
+    After the gateway process has died, the first `shutdown()` raises: its
+    shutdown request went unanswered. `last_gateway_termination` says what
+    the stop saw. When the process has exited there is nothing left to stop;
+    in every other case the error stands, because the runtime still holds a
+    gateway that a later `shutdown()` has to stop.
+    """
     try:
         await runtime.shutdown()
     except RuntimeError:
-        if runtime.is_running:
+        termination = runtime.last_gateway_termination
+        if termination is None or termination.state != "exited":
             raise
 
 

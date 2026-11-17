@@ -34,6 +34,12 @@ expect() {
   exit 1
 }
 
+expect_either() {
+  # expect_either <label> <log> <pattern> <pattern>: the log has a line matching one of the two
+  grep -q "$3" "$2" && return 0
+  expect "$1" "$2" "$4"
+}
+
 run() {
   # run <label> <state dir name>: one run of the program on a fresh state directory
   local label="$1" state="$WORK/$2/meta"
@@ -49,7 +55,11 @@ check_lifecycle() {
   expect "$label" "$log" "^\[5\] the gateway is gone and the runtime says so: True$"
   expect "$label" "$log" "^\[5\] same agents after the crash: yes$"
   expect "$label" "$log" "^\[6\] a second runtime on the same state was refused, state in use: yes$"
-  expect "$label" "$log" "^\[6\] a start that ran out of time: outcome unknown, last phase seen: True$"
+  # A deadline caps the wait and does not promise a timeout: the program
+  # prints one of two lines, and a start that beat one millisecond is right too.
+  expect_either "$label" "$log" \
+    "^\[6\] a start that ran out of time: outcome unknown, last phase seen: True$" \
+    "^\[6\] the start beat a deadline of one millisecond$"
   expect "$label" "$log" "^\[end\] same agents at the end: yes$"
 }
 

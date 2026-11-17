@@ -106,8 +106,10 @@ is in use by another Meta runtime`: that is the refusal the step asks for.
   the gateway refuses is raised as `GatewayStartupCleanupError`; the sentence
   that says why is in its `startup_error`. The program reads it there.
 - **After the gateway is gone, `shutdown()` raises.** The program still
-  calls it, to release what the runtime holds on its side, and lets the error
-  pass only when the runtime reports that it is not running.
+  calls it, to release what the runtime holds on its side. It lets the error
+  pass only when `runtime.last_gateway_termination` says the process has
+  exited. In every other case the error stands: the runtime still holds a
+  gateway, and a later `shutdown()` has to stop it.
 - **An unknown outcome is not a refusal.** After `InitOutcomeUnknownError`
   the gateway may have changed state before it stopped. The program does not
   loop on it: it starts once more and looks at what it finds. A state

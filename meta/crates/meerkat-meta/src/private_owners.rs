@@ -190,6 +190,38 @@ pub(crate) trait PrivateMemberEndFollower: Send + Sync {
     async fn member_ended(&self, ended: &EndedPrivateMember);
 }
 
+/// What a create is refused with when a release it asks before its mob
+/// exists fails ([`MobCreateRelease`]): one sentence for every release. What
+/// the release itself said goes to the host's log.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the answer of a create whose release fails; no create asks a release yet"
+    )
+)]
+pub(crate) const CREATE_RELEASE_FAILED: &str = "what an earlier mob of this id left with the host could not be released, so the mob \
+     is not created; the create can be retried, and the host's log has the cause";
+
+/// One release the host owes before a mob is created under an id
+/// ([`PrivateOwners::bind_create_release`]): what the host keeps under that
+/// id is of an earlier mob of the same id, and the new mob is to find none
+/// of it.
+#[allow(
+    dead_code,
+    reason = "the seat of a create's releases; no create asks a release yet"
+)]
+#[async_trait::async_trait]
+pub(crate) trait MobCreateRelease: Send + Sync {
+    /// What this releases, in a few words, for the host's log.
+    fn what(&self) -> &'static str;
+
+    /// Release what the host keeps under `mob_id`. Asked again, it releases
+    /// what is left. An error means some may be left; its text is for the
+    /// host's log, never for a caller.
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String>;
+}
+
 /// The follower of the ends of members private to a person, and the ends
 /// seen while none was installed.
 #[derive(Default)]
@@ -304,6 +336,9 @@ struct Inner {
     /// Who follows the end of a member private to a person, and the ends
     /// held for it.
     ends: std::sync::Mutex<MemberEnds>,
+    /// The releases a create asks before its mob exists, in the order they
+    /// were bound ([`PrivateOwners::bind_create_release`]).
+    create_releases: RwLock<Vec<Arc<dyn MobCreateRelease>>>,
 }
 
 impl std::fmt::Debug for PrivateOwners {
@@ -830,6 +865,24 @@ impl PrivateOwners {
                 Some(&entry.labels),
             );
         }
+    }
+
+    /// Bind `release` as one of the releases a create asks before its mob
+    /// exists ([`Self::before_create_hook`]). They are asked in the order
+    /// they were bound.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "bound by the composition that owns what is released; none binds one yet"
+        )
+    )]
+    pub(crate) fn bind_create_release(&self, release: Arc<dyn MobCreateRelease>) {
+        self.inner
+            .create_releases
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(release);
     }
 
     /// Install `follower` as what follows the end of a member private to a

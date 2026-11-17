@@ -77,6 +77,11 @@ mod identity_tools_tests;
 mod reserved_identity_tests;
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[path = "mob_handle_runtime_created_mob_owner_tests.rs"]
+mod created_mob_owner_tests;
+
+#[cfg(test)]
 pub(crate) fn acquisition_observation_probe(
     reject: bool,
     reads: Arc<std::sync::atomic::AtomicUsize>,
@@ -7809,6 +7814,10 @@ pub struct MobBootstrapSpec {
     /// mobs exist, as a gateway composition adopts its own
     /// ([`crate::gateway_composition::adopt_schedule_mob_targets`]).
     pub(crate) schedule_target_registry: Option<crate::schedule_wiring::ScheduleMobTargetRegistry>,
+    /// The late-bound release of the schedules the launch keeps under a
+    /// mob's id (`crate::mob_schedules_release`); see
+    /// [`Self::with_mob_schedules_declared`].
+    pub(crate) mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
     /// Late-bound personal accounts the base session-service wrapper
     /// classifies each member build's personal MCP servers with
     /// (`crate::personal_accounts`); see [`Self::with_personal_mcp_accounts`].
@@ -7995,6 +8004,7 @@ impl MobBootstrapSpec {
             private_owners,
             ask_user_slot,
             schedule_target_registry: None,
+            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -8021,6 +8031,18 @@ impl MobBootstrapSpec {
         &self,
     ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
         self.side_chat_memory_slot.clone()
+    }
+
+    /// Say that this launch has schedules, before its runtime is built. A
+    /// mob the launch's mob set creates beside the launch mob must find
+    /// none of the schedules an earlier mob of its id left, so from here on
+    /// such a create is refused until the composition that owns the
+    /// schedule service has handed the release of a mob's schedules to the
+    /// runtime. A launch that says nothing has no schedules to release.
+    #[must_use]
+    pub fn with_mob_schedules_declared(self) -> Self {
+        self.mob_schedules.declare();
+        self
     }
 
     /// Classify every member build of this spec's personal MCP servers with
@@ -11039,6 +11061,8 @@ pub struct MobRuntime {
     console_schedules: crate::console_schedules::ConsoleSchedules,
     /// See [`MobBootstrapSpec::with_personal_mcp_accounts`].
     personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot,
+    /// See [`MobBootstrapSpec::with_mob_schedules_declared`].
+    mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -12045,6 +12069,7 @@ impl MobRuntime {
             ask_user_slot: spec.ask_user_slot,
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: spec.personal_accounts_slot,
+            mob_schedules: spec.mob_schedules,
         };
         // Agent schedule tools attached over an injected schedule store
         // judge their targets with this runtime's mobs and with who its
@@ -12115,6 +12140,7 @@ impl MobRuntime {
             ask_user_slot: crate::ask_user::AskUserSlot::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
+            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
         }
     }
 
@@ -12182,6 +12208,14 @@ impl MobRuntime {
     /// [`crate::console_schedules::ConsoleSchedules`]).
     pub(crate) fn console_schedules(&self) -> &crate::console_schedules::ConsoleSchedules {
         &self.console_schedules
+    }
+
+    /// The launch's late-bound release of the schedules it keeps under a
+    /// mob's id (see [`crate::mob_schedules_release`]): the composition
+    /// that owns the schedule service binds it, and the create admission
+    /// asks it before a mob is created under an id.
+    pub(crate) fn mob_schedules(&self) -> &crate::mob_schedules_release::MobSchedulesSlot {
+        &self.mob_schedules
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's

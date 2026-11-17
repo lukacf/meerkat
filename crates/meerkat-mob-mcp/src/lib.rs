@@ -20253,9 +20253,11 @@ mod tests {
     }
 
     /// A member tools build binds only through the create that manages its
-    /// mob. Two creates of one id both build (the second passes the
-    /// existence check while the first waits at the insertion seam); only
-    /// the one that enters the managed set runs its on-managed hook.
+    /// mob. Of two creates of one id, the first holds the id from its first
+    /// step: the second is refused at once, while the first waits at the
+    /// insertion seam, before the host's create admission is asked for it
+    /// and before anything of its mob is built. The first enters the
+    /// managed set and runs its on-managed hook.
     #[tokio::test]
     async fn only_the_create_that_manages_its_mob_runs_its_member_tools_hook() {
         let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -20285,6 +20287,16 @@ mod tests {
         .expect("runtime custody")
         .with_member_external_tools_factory(factory)
         .into_shared();
+        let admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .set_before_create(Arc::new({
+                let admissions = Arc::clone(&admissions);
+                move |_: MobCreateRequest| {
+                    admissions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async { Ok(()) })
+                }
+            }))
+            .expect("bind the create hook");
         let hold = Arc::new(InsertHold::default());
         *state
             .create_insert_hold
@@ -20315,19 +20327,25 @@ mod tests {
                 .mob_create_definition(explicit_definition("hooked-once"))
                 .await
         });
-        // The second create builds too: it either fails its build or waits
-        // at the same seam.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !second.is_finished() && !hold.reached.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the second create builds");
+        // The second create finds the id held: it is answered at once.
+        let refused = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .expect("the second create is answered while the first holds the id")
+            .expect("second create task")
+            .expect_err("a create under an id that a create in flight holds");
+        assert!(
+            refused.to_string().contains("mob already exists"),
+            "{refused}"
+        );
+        assert_eq!(
+            admissions.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the host's create admission is asked by the create that holds the id alone"
+        );
         assert_eq!(
             built.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "both creates built member tools"
+            1,
+            "nothing of the refused create is built"
         );
         assert!(
             managed
@@ -20336,25 +20354,20 @@ mod tests {
                 .is_empty(),
             "no hook runs before a mob is managed"
         );
-        // Release every create parked at the seam; a permit stored before a
-        // create registers is taken by it.
+        // Release the create parked at the seam; a permit stored before it
+        // registers is taken by it.
         tokio::time::timeout(Duration::from_secs(20), async {
-            while !(first.is_finished() && second.is_finished()) {
+            while !first.is_finished() {
                 hold.release.notify_one();
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("both creates finish once released");
-        let outcomes = [
-            first.await.expect("first create task"),
-            second.await.expect("second create task"),
-        ];
-        assert_eq!(
-            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
-            1,
-            "exactly one create manages the mob: {outcomes:?}"
-        );
+        .expect("the first create finishes once released");
+        first
+            .await
+            .expect("first create task")
+            .expect("the create that holds the id manages the mob");
         assert_eq!(
             *managed
                 .lock()
@@ -20362,6 +20375,49 @@ mod tests {
             vec![MobId::from("hooked-once")],
             "only the managing create ran its hook"
         );
+        assert_eq!(
+            state.stand_down(far_deadline()).await,
+            MobStateStandDown::Clean
+        );
+    }
+
+    /// A create that ends without a mob frees the id it held: a later create
+    /// under the id is admitted and manages its mob.
+    #[tokio::test]
+    async fn a_create_that_fails_frees_the_id_for_a_later_create() {
+        let state = MobMcpState::new(
+            Arc::new(MockSessionSvc::new()),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("runtime custody")
+        .into_shared();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        state
+            .set_before_create(Arc::new({
+                let refuse = Arc::clone(&refuse);
+                move |_: MobCreateRequest| {
+                    let refused = refuse.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async move {
+                        if refused {
+                            Err("the host refuses this create".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }
+            }))
+            .expect("bind the create hook");
+
+        let refused = state
+            .mob_create_definition(explicit_definition("held-once"))
+            .await
+            .expect_err("the first create is refused by the host");
+        assert!(MobMcpState::is_create_refusal(&refused), "{refused}");
+        let created = state
+            .mob_create_definition(explicit_definition("held-once"))
+            .await
+            .expect("a later create under the id is admitted");
+        assert_eq!(created, MobId::from("held-once"));
         assert_eq!(
             state.stand_down(far_deadline()).await,
             MobStateStandDown::Clean

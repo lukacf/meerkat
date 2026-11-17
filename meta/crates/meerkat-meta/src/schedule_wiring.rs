@@ -1020,6 +1020,33 @@ impl MobAgentSchedules {
             schedule.config.name.clone(),
         )
     }
+
+    /// End every schedule that names the mob `mob_id`, for a mob that is
+    /// about to be created under that id, and name the schedules ended.
+    ///
+    /// It ends nothing yet: the rows beside the follow's rows say what a
+    /// create under an id needs of it.
+    pub async fn release_mob(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<Vec<crate::identity_creation::ScheduleRef>, meerkat::ScheduleDomainError> {
+        let _ = (mob_id, &self.service);
+        Ok(Vec::new())
+    }
+}
+
+/// The launch's schedules as the release a create asks before its mob
+/// exists ([`MobAgentSchedules::release_mob`]): the answer is how many
+/// schedules ended, and an error's text is for the host's log.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl crate::mob_schedules_release::MobSchedulesRelease for MobAgentSchedules {
+    async fn release_mob(&self, mob_id: &meerkat_mob::MobId) -> Result<usize, String> {
+        MobAgentSchedules::release_mob(self, mob_id)
+            .await
+            .map(|released| released.len())
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[async_trait]
@@ -9111,6 +9138,8 @@ schedule = true
             .with_agent_mob_tools(mob_tools_slot)
             .expect("install the agent mob tools")
             .with_composition_authority(authority)
+            // As a gateway does for a launch that has a schedule service.
+            .with_mob_schedules_declared()
             .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
                 allow_ephemeral_sessions: true,
                 notify_orchestrator_on_resume: true,
@@ -9271,6 +9300,13 @@ schedule = true
             ScheduleFiringAuthority::Vacant,
             "a candidate takes no executor lease"
         );
+        assert!(
+            matches!(
+                candidate.runtime.mob_runtime().mob_schedules().standing(),
+                crate::mob_schedules_release::MobSchedulesStanding::Owed
+            ),
+            "a candidate launch declares its schedules and is never handed their release"
+        );
         candidate.shutdown().await;
 
         let authoritative = ScheduleLaunch::boot(
@@ -9281,6 +9317,17 @@ schedule = true
         .await;
         assert!(authoritative.host.is_some());
         assert!(authoritative.attached.firing_host_binding.is_bound());
+        assert!(
+            matches!(
+                authoritative
+                    .runtime
+                    .mob_runtime()
+                    .mob_schedules()
+                    .standing(),
+                crate::mob_schedules_release::MobSchedulesStanding::Bound(_)
+            ),
+            "the launch that speaks for its composition is handed the release of a mob's schedules"
+        );
         let deadline = tokio::time::Instant::now() + HOSTED_FIRE_TERMINAL_WAIT;
         let fired = loop {
             let completed = authoritative

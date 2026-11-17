@@ -49,6 +49,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sent to the gateway and the `meta/init` request is unchanged. (The lost
   fire was shown by a run with the SDK's start held open; it was not seen
   in an unforced start.)
+- Console: a page that runs another console bundle than its gateway serves
+  says so. `GET /console/experience` names the bundle the gateway serves in
+  `console_bundle` (the version its page gives its app script), and a page
+  of this release or later compares it with the bundle it runs. The
+  gateway's own page, when the gateway's build changed after the page was
+  opened, shows one notice: "This page is of another Console build than
+  its gateway's. Reload the page to use the gateway's version." The
+  console's library (`console/dist/index.cjs`) carries the id of the bundle
+  it was built beside, so an application that mounts the library of this
+  release or later is told too, in words of its own: "This Console is of
+  another build than its gateway's. Reload the page; if this notice stays,
+  the application needs the Console of its gateway's release." The notice
+  is in pages and libraries of this release and later only: a page that
+  was opened on 0.9.15 or 0.9.16 before the upgrade to this release has no
+  such code and shows nothing, so reload open Console pages after this
+  upgrade. There is no notice on a gateway of an earlier release, which
+  names no bundle, and a console of an earlier release ignores the new
+  member.
+- Console: the rendering of an open question set, as the Console's
+  `meta/decisions/rendering` answers it, ends with a closing note: "Answer
+  these questions in the Console, in the agent's chat or under Approvals.
+  If this page offers no way to answer them, it runs an earlier Console:
+  reload the page, or, in an application that builds the Console in,
+  update its Console." A Console page of an earlier release shows a
+  question set, where it shows one at all, as the text of a decision with
+  no way to answer; it now reads there what to do. The answer names what
+  was added (a blank line and the note) in the new member
+  `rendering_suffix`, and a page of this release takes it off and says in
+  its own words where the set is answered. The note is not part of the
+  held rendering: `subject_digest` (the digest a decide compares) and
+  `parts` are those of the rendering without it, the stdio answer does not
+  carry it, and a set that ended and a decision of another kind are
+  answered as before.
 
 ### Changed
 
@@ -66,6 +99,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `MobHandleControlHandler` gets the roster entries' labels read; the
   runtime's record of its members is read by the listener a runtime starts
   (`start_control_listener`, `start_control_listener_with_authorizer`).
+
+### Fixed
+
+- Console: the decision card of a set of questions that the list of
+  questions does not hold (it was read without the set, or could not be
+  read) says why it has no answer form and where the set is answered: the
+  asking agent's conversation or the Approvals view, once the list holds
+  the set. It said "Decide where it was presented.", which names no place
+  for a set that was presented nowhere. A decision of another kind keeps
+  its hint.
+- Console: a reply to an agent's questions that is sent after their
+  deadline now leaves the line of a question that timed out ("This
+  question timed out before the gateway took your reply, so nothing was
+  sent. If the answer still matters, tell the agent in its chat."). The
+  gateway refuses such a reply `not_open`, as it refuses a reply to a set
+  someone else closed, and the Console said for both "This question was
+  already answered or closed ... Nothing more is needed from you." It now
+  words the line by the set's own deadline; the refusal is unchanged.
 
 ### Known limitations
 

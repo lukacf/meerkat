@@ -1,0 +1,5 @@
+- No host setting bounds a monitor's notification rate below the hard caps
+  (at most 1000 notifications per window, a window of 1 second to 24
+  hours, 1048576 bytes per line):
+  a monitor with event delivery starts turns of its own session at a rate
+  the model chooses. `deny` is the control.

@@ -1,0 +1,10 @@
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A profile's `deny`, a spawn's tool access policy, a turn's block list or
+  a grant gate on the name `shell` (`grant_gated = { tools = ["shell"] }`)
+  that closes `shell` closes `monitor_start` with it, also after a gateway
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force. A member whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade. (Shown by tests on a gateway for the grant gate and for a
+  resumed member whose profile denies `shell`; the other closures by the
+  Meerkat tests named in its changelog.)

@@ -1,0 +1,9 @@
+- `meerkat-core`: one session's fallback or live model switch onto another
+  credential no longer takes the credential it leaves away from the host's
+  other sessions (by a live model switch since 0.6.0 at the
+  latest: the lines are in the source at 0.6.0 and not at 0.5.2, and were
+  not traced end to end below 0.7.0; by a fallback from a release between
+  0.8.30 and 0.8.51): sessions on that sign-in go on, new ones
+  can be started, and a session that runs on, or falls back to, the
+  credential another session left is no longer held. A sign-out, or the
+  removal of a credential, still withdraws it for every session.

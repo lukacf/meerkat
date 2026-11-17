@@ -1,0 +1,21 @@
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A deny list, a spawn's or a fork's tool access policy, a session's tool
+  filter, a turn's block list or a grant gate on the name `shell` that
+  closes `shell` closes `monitor_start` with it, at every build and after a
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force: a `monitor_start` call is checked against it when it
+  is dispatched. A session whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade, and, unless only a turn's block list closes it, its recorded
+  monitors are not run again. An allow list that names `monitor_start` and
+  not `shell` no longer admits the monitor. The rule goes by the tool's
+  name: a host's or an MCP server's tool exposed as `monitor_start` is
+  bound to `shell` in the same way, and where shell is on with durable
+  stores the built-in tool takes the name (the built-in is on only where
+  the build also has a realm id and a job delivery projector). (These
+  notes on `monitor_start`. Shown by tests: that a deny, an access policy,
+  a filter, a block list or a grant gate on `shell` closes it; what a live
+  session with shell is offered; which recorded monitors are run again; an
+  operator's monitor on a session that may not start one. Read from the
+  source: the guards that go by the tool's name, and going back to an
+  earlier release, read at 0.9.15.)

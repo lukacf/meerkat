@@ -1,0 +1,1 @@
+- A structured output that is JSON null: a gateway's sessions keep their runtime state in the store that the fix in Meerkat 0.9.17 reads again (see Fixed in the Meerkat changelog); the Known limitation of that name added under Meta 0.9.16 on 2026-11-17 ends with it. Read from the source; not run on a gateway.

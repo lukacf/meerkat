@@ -1,0 +1,19 @@
+- An environment variable that is not set fails only the `mcp.toml` server
+  that names it (affected: 0.3.0 to 0.9.16, where it failed every server).
+  Each server resolves alone, and that server is reported by name with the
+  field and the variable, never a value. `rkat mcp list` and `rkat mcp get`
+  show it with nothing expanded, marked unresolved (`--json`: the entry as
+  written, with an `unresolved` object holding `field` and `variable`);
+  `rkat mcp login` and the RPC and REST auth
+  methods work for the other servers; a run starts with that server reported
+  as a failed MCP server and a warning on stderr; a resumed `rkat-rpc`
+  session restores the other servers' attachments and reports only that
+  server's as unavailable. A login addressed to that server with `rkat mcp login`, and a run in a
+  governed realm, are refused with a message naming the server, the field
+  and the variable; a login over the RPC or REST auth methods is refused
+  with `MCP configuration could not be read`, and the names go to the
+  host's log only. One case still fails the whole set: an unresolved file
+  server whose name a realm server also uses. The loads of `meerkat-core` that return one list
+  (`McpConfig::load*`, `effective_servers_from_roots*`) keep their
+  whole-load error, whose field names the server; the per-server loads
+  (`McpConfig::resolve_*`, `UnresolvedMcpServer`) are additive.

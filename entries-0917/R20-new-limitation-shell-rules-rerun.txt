@@ -1,0 +1,5 @@
+- A `[shell]` command rule that was tightened after a monitor was started
+  does not stop that monitor's re-run after a restart: the recorded
+  command is started again with no new check of the rules, as in earlier
+  releases. A deny, a grant gate, a read-only profile or a tool filter
+  does stop the re-run. Read from the source.

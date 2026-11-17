@@ -1,0 +1,9 @@
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one, and nothing in Meerkat can teach it the name: add `monitor_start` to
+  such a guard, or deny the tool. A governed application tool policy admits
+  only the tools it names, so it refuses `monitor_start` until it names it.
+  A tool permission rule is such a guard: a rule that refuses `shell` by
+  name does not refuse a `monitor_start` call, and a rule that permits
+  `shell` by name does not permit it. A monitor's command does pass the
+  `[shell]` section's command rules when it is started.

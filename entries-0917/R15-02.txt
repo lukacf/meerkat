@@ -1,0 +1,21 @@
+- TypeScript SDK: when a gateway that the SDK started refuses the start
+  after it has accepted the init request, and exits, `builder.build()` now
+  rejects with the refusal (in this release the refusal itself: see
+  Breaking), with one corner read from the source and not run: where a
+  host callback reply is written after the gateway is gone and before the
+  SDK has read the settlement, it rejects with `InitOutcomeUnknownError`. Before, the Node program could be ended by an
+  unhandled `write EPIPE` error (`Unhandled 'error' event`, exit code 1)
+  although `build()` was inside a try/catch: the SDK asked the exiting
+  gateway to shut down, and the failed write was raised outside the call.
+  The same holds for any request or callback reply written to a gateway
+  whose input is gone, and for a failed read of its output: the waiting
+  requests and every later request on that gateway process reject with
+  `TransportReaderFailedError`; for the waiting requests its `reason` names
+  the failed write or read. A refusal that the gateway gives as its answer
+  to the init request, and a gateway that exits without a refusal
+  (`InitOutcomeUnknownError`), were not affected. Affected: Meta 0.9.9
+  through 0.9.16, by the source at the eight release tags; earlier
+  releases of the TypeScript SDK were not read.
+  This closes the Known limitation on the TypeScript SDK's unhandled
+  `write EPIPE` error that was added under 0.9.16 and 0.9.15 on
+  2026-11-17, after those releases.

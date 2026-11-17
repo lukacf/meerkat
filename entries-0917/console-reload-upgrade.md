@@ -1,0 +1,1 @@
+- Console: reload every open Console page after the upgrade. A page that was opened on an earlier release keeps running that release's Console bundle against the new gateway and has no code to say so: the notice for a page of another build than its gateway's (see Added) is in pages and libraries of this release and later only.

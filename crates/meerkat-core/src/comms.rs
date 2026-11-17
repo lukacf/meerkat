@@ -2735,6 +2735,134 @@ mod tests {
         );
     }
 
+    /// A generated add authority of `source`, filed under `row_owner`, for
+    /// `descriptor` into the trust store of `store_peer_id`.
+    fn add_authority_for_store(
+        source: GeneratedCommsTrustAuthoritySourceKind,
+        row_owner: GeneratedCommsTrustAuthoritySourceKind,
+        operation: GeneratedCommsTrustAuthorityOperation,
+        store_peer_id: PeerId,
+        descriptor: &TrustedPeerDescriptor,
+    ) -> CommsTrustMutationAuthority {
+        CommsTrustMutationAuthority::from_generated_parts(
+            source,
+            1,
+            None,
+            row_owner,
+            operation,
+            descriptor.peer_id.to_string(),
+            Some(store_peer_id.to_string()),
+            Some(descriptor.clone()),
+        )
+        .expect("generated add authority")
+    }
+
+    /// A descriptor on `pubkey` at another name and address than the store
+    /// that shares the key.
+    fn sibling_descriptor(name: &str, pubkey: [u8; 32]) -> TrustedPeerDescriptor {
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            PeerId::from_ed25519_pubkey(&pubkey).to_string(),
+            pubkey,
+            "tcp://127.0.0.1:7001",
+        )
+        .expect("valid descriptor")
+    }
+
+    /// A trust store never holds its own key: the reciprocal add of an
+    /// external peer wiring is refused, with its own sentence, when the
+    /// descriptor's peer id is the peer id of the store it is added to (two
+    /// runtimes built on one key). The same add of another peer is admitted.
+    #[test]
+    fn reciprocal_trust_add_under_the_stores_own_peer_id_is_refused() {
+        let own_key = [3u8; 32];
+        let own_peer_id = PeerId::from_ed25519_pubkey(&own_key);
+        let same_key = sibling_descriptor("same-key-sibling", own_key);
+
+        let refused = add_authority_for_store(
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            own_peer_id,
+            &same_key,
+        )
+        .validate_public_add(Some(own_peer_id), &same_key);
+        assert!(
+            refused.as_ref().is_err_and(|message| {
+                message.contains("never holds its own key")
+                    && message.contains(&own_peer_id.to_string())
+                    && message.contains("MobMachineExternalPeerReciprocalTrust")
+            }),
+            "a reciprocal add under the store's own peer id must be refused with its own \
+             sentence, got {refused:?}"
+        );
+
+        // Control: the reciprocal add of another peer is admitted.
+        let other = sibling_descriptor("other-peer", [4u8; 32]);
+        let admitted = add_authority_for_store(
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            own_peer_id,
+            &other,
+        )
+        .validate_public_add(Some(own_peer_id), &other);
+        assert_eq!(admitted, Ok(()), "a reciprocal add of another peer");
+    }
+
+    /// The preflight of an add is its validation without the consume: it
+    /// refuses the reciprocal add under the store's own peer id with the
+    /// same sentence, leaves the authority unconsumed, and admits the
+    /// reciprocal add of another peer.
+    #[test]
+    fn reciprocal_trust_add_preflight_under_the_stores_own_peer_id_is_refused() {
+        let own_key = [3u8; 32];
+        let own_peer_id = PeerId::from_ed25519_pubkey(&own_key);
+        let same_key = sibling_descriptor("same-key-sibling", own_key);
+
+        let authority = add_authority_for_store(
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            own_peer_id,
+            &same_key,
+        );
+        let preflight = authority.preflight_public_add(Some(own_peer_id), &same_key);
+        assert!(
+            preflight.as_ref().is_err_and(|message| {
+                message.contains("never holds its own key")
+                    && message.contains(&own_peer_id.to_string())
+            }),
+            "the preflight of a reciprocal add under the store's own peer id must be refused \
+             with the same sentence, got {preflight:?}"
+        );
+        // The refusal consumed nothing: the validation answers with the same
+        // sentence, not with "already consumed".
+        let validated = authority.validate_public_add(Some(own_peer_id), &same_key);
+        assert!(
+            validated
+                .as_ref()
+                .is_err_and(|message| message.contains("never holds its own key")),
+            "the validation after a refused preflight gives the same refusal, got {validated:?}"
+        );
+
+        // Control: the preflight of a reciprocal add of another peer passes.
+        let other = sibling_descriptor("other-peer", [4u8; 32]);
+        let admitted = add_authority_for_store(
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust,
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustWiring,
+            GeneratedCommsTrustAuthorityOperation::PublicAdd,
+            own_peer_id,
+            &other,
+        )
+        .preflight_public_add(Some(own_peer_id), &other);
+        assert_eq!(
+            admitted,
+            Ok(()),
+            "the preflight of a reciprocal add of another peer"
+        );
+    }
+
     #[test]
     fn peer_id_parse_round_trip() {
         let id = PeerId::new();

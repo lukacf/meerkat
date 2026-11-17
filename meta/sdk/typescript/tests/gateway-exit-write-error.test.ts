@@ -7,6 +7,8 @@
  *   failure, and the host program runs on.
  * - A gateway that closed its input while it still runs: the next request
  *   and every later one reject with `TransportReaderFailedError`.
+ * - A read of the gateway's output that fails: the waiting request and
+ *   every later one reject the same way.
  * - A healthy gateway: requests, callback replies and the stop are unchanged.
  */
 
@@ -66,6 +68,8 @@ rl.on("line", (line) => {
     closeInput();
     emit({ jsonrpc: "2.0", method: "fixture/input_closed", params: {} });
     setTimeout(() => process.exit(0), 30000);
+  } else if (mode === "silent") {
+    // Reads its input and never answers.
   } else if (callbackFor !== null && message.id === "callback-1") {
     // The host's reply to the callback completes the request that asked.
     emit({ jsonrpc: "2.0", id: callbackFor, result: { host_replied: message.result } });
@@ -77,7 +81,7 @@ rl.on("line", (line) => {
     emit({ jsonrpc: "2.0", id: message.id, result: { answered: ++answered } });
   }
 });
-rl.on("close", () => { if (mode === "healthy") process.exit(0); });
+rl.on("close", () => { if (mode === "healthy" || mode === "silent") process.exit(0); });
 `;
 
 // A host program: `build()` inside a try/catch, as many times as asked, with
@@ -263,6 +267,31 @@ describe("a gateway whose input is gone", () => {
         // rejects the same way instead of waiting out its timeout.
         await assert.rejects(transport.sendAsync(request("3")), TransportReaderFailedError);
         assert.equal(transport.isRunning(), true);
+      });
+    } finally {
+      await transport.stop().catch(() => undefined);
+    }
+    assert.equal(transport.isRunning(), false);
+  });
+
+  it("a failed read of the gateway's output: the waiting request rejects to its caller", async () => {
+    const transport = new PersistentTransport(gateway("silent"), { timeout: 20_000 });
+    try {
+      await withUncaughtProbe(async () => {
+        transport.start();
+        const waiting = transport.sendAsync(request("1")).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        // The host's end of the gateway's output fails, as a read error does.
+        const child = (transport as unknown as { _process: ChildProcess })._process;
+        child.stdout?.destroy(new Error("read failed"));
+
+        const failure = await waiting;
+        assert.ok(failure instanceof TransportReaderFailedError, String(failure));
+        assert.match(failure.reason, /read failed/);
+        assert.equal(transport.isRunning(), true);
+        await assert.rejects(transport.sendAsync(request("2")), TransportReaderFailedError);
       });
     } finally {
       await transport.stop().catch(() => undefined);

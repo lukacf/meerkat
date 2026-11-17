@@ -50004,6 +50004,195 @@ mod tests {
         );
     }
 
+    /// After `mob/cancel_all_work` ended a member's running run, a
+    /// `mob/member_send` to that member is admitted and its run completes:
+    /// the send's input ends consumed. RED before on a WholeBlob store,
+    /// which the fixture's in-memory stores are: the send was admitted, its
+    /// run made its model request and was then dropped at its first save
+    /// (the cancelled run's closing save, promoted by the runtime alone,
+    /// left the live session's checkpoint base behind the store), and the
+    /// sender was told nothing.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_send_after_cancel_all_work_runs_to_its_end() {
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+
+        let session = FailedStartSession::materialized().await;
+        let member_session = session.child_member_session.clone();
+        let worker = || meerkat_mob::AgentIdentity::from("worker-1");
+
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        session
+            .client
+            .answer_a_tool_call_next
+            .store(true, AtomicOrdering::SeqCst);
+        session
+            .mob_state
+            .mob_member_send(
+                &session.child_mob,
+                worker(),
+                "the member's running turn".into(),
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .await
+            .expect("the member admits the turn");
+        assert!(
+            session
+                .request_entered(requests + 2, Duration::from_mins(1))
+                .await,
+            "the member's running turn reaches its second model request"
+        );
+        let (member_runtime, member_fence) = session
+            .mob_state
+            .mob_member_binding_for_cancel(&session.child_mob, &worker())
+            .await
+            .expect("the member's binding, as `mob/cancel_all_work` resolves it");
+        session
+            .mob_state
+            .mob_cancel_all_work(&session.child_mob, member_runtime, member_fence)
+            .await
+            .expect("cancel all of the member's work");
+        let serving = session.serve_model_requests();
+        assert!(
+            still_registered_after(&session.runtime, &member_session, Duration::from_secs(2)).await,
+            "the member's session stays registered after its work was cancelled"
+        );
+
+        let before_the_send = session.client.calls.load(AtomicOrdering::SeqCst);
+        let receipt = session
+            .mob_state
+            .mob_member_send(
+                &session.child_mob,
+                worker(),
+                "the send after the cancel".into(),
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .await
+            .expect("the member admits the send after the cancel");
+        let input = receipt
+            .admission
+            .expect("the send's admission on the member's session")
+            .input_id;
+        let mut terminal = "no terminal within a minute".to_string();
+        for _ in 0..2400 {
+            let stored = session
+                .runtime
+                .runtime_adapter
+                .input_state(&member_session, &input)
+                .await
+                .expect("read the send's input");
+            if let Some(outcome) = stored
+                .as_ref()
+                .and_then(|stored| stored.seed.terminal_outcome.as_ref())
+            {
+                terminal = format!("{outcome:?}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        serving.abort();
+        println!(
+            "the member send after the cancel: terminal {terminal}; model requests made since \
+             the send: {}",
+            session.client.calls.load(AtomicOrdering::SeqCst) - before_the_send
+        );
+        assert_eq!(
+            terminal, "Consumed",
+            "the terminal of the member send admitted after the cancel"
+        );
+    }
+
+    /// A plain session, with no mob, on a realm created with the `jsonl`
+    /// backend (a WholeBlob store): its running turn is interrupted in the
+    /// form that waits for the run's boundary (the yielding interrupt), the
+    /// model call in flight returns, and the next turn on the session runs.
+    /// RED before: the interrupted run's closing save, promoted by the
+    /// runtime alone, left the live session's checkpoint base behind the
+    /// store, and the next turn was answered "-32603 turn abandoned".
+    #[cfg(feature = "mob")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_turn_after_a_boundary_interrupt_runs_on_a_jsonl_realm() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "first-turn-after-boundary-interrupt",
+            Some(meerkat_store::RealmBackend::Jsonl),
+            None,
+        )
+        .await
+        .expect("open the realm");
+        let profile = format!(
+            "{:?}",
+            persistence.runtime_store().session_persistence_profile()
+        );
+        let runtime = Arc::new(
+            SessionRuntime::new(
+                temp_factory(&temp),
+                Config::default(),
+                10,
+                persistence,
+                crate::router::NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime"),
+        );
+        let client = Arc::new(HeldModelLlmClient::default());
+        runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create the session");
+        let first = spawn_held_turn(&runtime, &session_id, "first");
+        assert!(
+            held_request_entered(&client, 1).await,
+            "the first turn reaches the model"
+        );
+        client.release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+
+        let running = spawn_held_turn(&runtime, &session_id, "the interrupted turn");
+        assert!(
+            held_request_entered(&client, 2).await,
+            "the running turn reaches the model"
+        );
+        let interrupt = runtime
+            .interrupt_yielding(&session_id)
+            .await
+            .expect("the boundary interrupt is accepted");
+        client.release.notify_one();
+        let interrupted = held_turn_answer(running, "the interrupted turn's request").await;
+        assert!(
+            still_registered_after(&runtime, &session_id, Duration::from_secs(2)).await,
+            "the session stays registered after the boundary interrupt"
+        );
+
+        let next = spawn_held_turn(&runtime, &session_id, "next");
+        let next_reached_the_model = held_request_entered(&client, 3).await;
+        client.release.notify_one();
+        let next = held_turn_answer(next, "the next turn's request").await;
+        let after_next = spawn_held_turn(&runtime, &session_id, "after next");
+        let _ = held_request_entered(&client, 4).await;
+        client.release.notify_one();
+        let after_next = held_turn_answer(after_next, "the request of the turn after it").await;
+        println!(
+            "jsonl realm ({profile}), plain session: the interrupt answered {interrupt:?}; the \
+             interrupted turn {interrupted:?}; next turn {next:?} (reached the model: \
+             {next_reached_the_model}); the turn after it {after_next:?}"
+        );
+        assert_eq!(
+            (next, after_next),
+            (Ok(()), Ok(())),
+            "(the first turn after the boundary interrupt, the turn after it) on a jsonl realm \
+             ({profile})"
+        );
+    }
+
     /// The relay runs the cleanup the machine names, end to end, in an
     /// arrangement where the machine names the cleanup of an archived
     /// session and no archive call runs that cleanup itself (an archive

@@ -1256,6 +1256,30 @@ fn refuse_init_with_data(
     anyhow::Error::new(InitReplied)
 }
 
+/// The init refusal of a runtime bootstrap that failed, in the form
+/// `rpc_gateway` answers it: on the request id, with the reason in the
+/// message. A composition provenance refusal is a deliberate refusal, not an
+/// internal error, so it carries its own code
+/// ([`meerkat_meta::COMPOSITION_PROVENANCE_CODE`]) with the refusal's kind
+/// and facts as data; every other bootstrap failure stays `-32603`.
+fn refuse_bootstrap(
+    request_id: &Value,
+    error: &meerkat_meta::UnifiedRuntimeBootstrapError,
+) -> anyhow::Error {
+    let message = format!("Runtime bootstrap failed: {error}");
+    match error.composition_provenance() {
+        Some(refusal) => refuse_init_with_data(
+            request_id,
+            meerkat_meta::COMPOSITION_PROVENANCE_CODE,
+            message,
+            // `None` only if the refusal does not serialize, which leaves
+            // the typed code and the message intact.
+            serde_json::to_value(refusal.refusal()).ok(),
+        ),
+        None => refuse_init(request_id, -32603, message),
+    }
+}
+
 fn init_error(request_id: Value, code: i64, message: String) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -3489,7 +3513,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     )
     .bootstrap()
     .await
-    .context("failed to bootstrap local runtime")?;
+    .map_err(|error| refuse_bootstrap(&request_id, &error))?;
     let runtime = composition.runtime_mut();
     // And its console log in the state directory's console store, installed
     // right after the bootstrap, as rpc_gateway installs it.

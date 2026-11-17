@@ -55,10 +55,10 @@ downloads remain unpromoted and a subsequent launch retries the pair.
 ```
 Browser Tab
 ├── Meerkat Mob (4 agents, comms-wired)
-│   ├── Alpha Meerkat (orchestrator) → claude-opus-4-8
-│   ├── Planner → gpt-5.5
+│   ├── Alpha Meerkat (orchestrator) → claude-opus-5-5
+│   ├── Planner → gpt-6-astra
 │   ├── Coder → gpt-5.3-codex
-│   └── Reviewer → gemini-3.5-flash
+│   └── Reviewer → gemini-4-hydrogen
 ├── meerkat-web-runtime (Rust WASM)
 │   ├── EphemeralSessionService + canonical MeerkatMachine (in-memory) + AgentFactory
 │   ├── JsToolDispatcher → WebCM tool callbacks

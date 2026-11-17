@@ -5,18 +5,16 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "500ce4bf2a6be67a9d021c3128f3fb9965e62d45",
-  "connect_source_commit": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
-  "connect_source_tree": "245cf826ee78d6f60c098dc9d8856b100448fa23",
+  "source_docs_tree": "1540a78e353167412c5231c2bb0c9f6616e2d9f7",
   "connect_source_state": "monorepo_sync",
-  "connect_source_version": "0.9.10",
+  "connect_source_version": "0.9.15",
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
     "The source pages already use neutral names (the connect/ sync); rendering adds the /connect prefix to root-relative links outside fenced code blocks."
   ],
   "pages": 52,
-  "fenced_blocks_preserved": 71,
+  "fenced_blocks_preserved": 72,
   "namespaced_links": 203,
   "files": [
     {
@@ -66,8 +64,8 @@
     },
     {
       "path": "contributing/validation.mdx",
-      "source_sha256": "317c0cf6f616d85aa46255802a118e2767f608967cca7b7f52b77877d6d9c642",
-      "rendered_sha256": "131c9364b9cabf54c9c3a9da3aa29c726ab8dfff821218909cd09d4d7466d1b4"
+      "source_sha256": "de463c23721541447eb7d3f63df98def193caa34de7391d4611b4bb8c4ff2c6e",
+      "rendered_sha256": "ed3a392b335c4c9eac7c06b44d6d73aa2271ee28107d41d623606a0adbfc7341"
     },
     {
       "path": "examples/device-extension.mdx",
@@ -96,8 +94,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "e4ed1d3f6e4c1af69fb1c61c94859edc4edc0ac03d0b7829a2e381aaefe222cf",
-      "rendered_sha256": "9ccd5d1c460cf095af15731a66c09d343083d053d6249700b6d57d654f842a2c"
+      "source_sha256": "8bd96841fe4fa6cf8bd5837c5586a455c46ede585d99753e2fa7b2d38ffa7fbe",
+      "rendered_sha256": "ae3e5ae3bd710e6a0b75c0e3f3f65933b7b3fa00534f72f508ef467248b48f86"
     },
     {
       "path": "guides/manage-connections.mdx",
@@ -251,8 +249,8 @@
     },
     {
       "path": "sdks/python.mdx",
-      "source_sha256": "0c8bc372e7ed7619eb174ebd33387f2e5df11d82792ad2aec2d230abe24ee132",
-      "rendered_sha256": "b274f764133ee36bb531a9bb81a014bdb18927646eacd6627e57048eca84d428"
+      "source_sha256": "1c820dbee4dfc46cdb04237d90b993b6046e54dc2ede1c26ff3cbd9499a26820",
+      "rendered_sha256": "d08b52e7f395ccaf40ae23e4cf610601d7ddb86b1ce3206c3454307b5844e54b"
     },
     {
       "path": "sdks/rust.mdx",

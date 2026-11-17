@@ -1,4 +1,4 @@
-export const SWARM_STRESS_MODEL = "gemini-3.1-flash-lite-preview";
+export const SWARM_STRESS_MODEL = "gemini-3.5-flash-lite";
 export const BASE_PER_MOB = 75;
 export const BURST_PARENTS_PER_MOB = 3;
 export const SUBAGENTS_PER_PARENT = 20;

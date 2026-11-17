@@ -3159,6 +3159,33 @@ Security, Upgrade and Changed.
   the approval ends the same way, by a run on a build of this release's
   source. A fix is planned for the next release.
 
+- Added 2026-11-16, after the release. Python and TypeScript SDKs
+  (`meerkat-meta`, `@rkat/meta-sdk`), with a gateway the SDK starts itself:
+  when the gateway refuses a start after it has accepted the init request (a
+  mob definition that differs from the stored one, or a declared update
+  whose expected revision is stale, is such a refusal), `builder.build()`
+  does not raise the refusal's own exception, although the SDK pages show a
+  handler for `CompositionProvenanceError` around it. It raises
+  `GatewayStartupCleanupError` (a `TransportError` in both SDKs), whose
+  message says that the stop of the gateway transport failed; the refusal is
+  its `startup_error` and `__cause__` in Python, and its `startupError` and
+  `cause` in TypeScript. So a handler for `CompositionProvenanceError` or
+  for `RpcError` does not match, and a host that retries transport errors
+  retries a start that can never pass. Read the startup error of a
+  `GatewayStartupCleanupError`, and do not retry when it is a typed refusal.
+  A host's own gateway transport whose stop succeeds raises the refusal
+  unchanged; that path was not run. Nothing is left behind: the refused
+  gateway has exited, and a next start with the matching definition works.
+  Run on the released 0.9.15 gateway with the `meerkat-meta` 0.9.15 and
+  `@rkat/meta-sdk` 0.9.15 packages for a mob definition that differs from
+  the stored one (the next start with the Python SDK); that no file under
+  the state directory stays held, and that the next start needs no cleanup
+  call, by a run on a build of this release's source with the Python SDK. A
+  stale declared revision is masked the same way, by a run on a build of
+  this release's source; no other refusal of a start was run. The Python
+  path is the same in 0.9.11 (read by lines), and by a search in 0.9.9,
+  0.9.10 and 0.9.12 to 0.9.14; earlier TypeScript releases were not read.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

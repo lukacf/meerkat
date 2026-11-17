@@ -47,7 +47,7 @@ The accepted Agno29 and Agno35 graphs are immutable. The Agno36 PostgreSQL miles
 psycopg 3.3.6 and psycopg-binary 3.3.6, both LGPL-3.0-only external runtime
 distributions. Its 111-pin source environment preserves all 109 Agno35 versions.
 The adapter calls the real driver without copying or modifying its source. These optional dependencies are not
-added to core Meerkat or MobKit. The [per-profile SDK closure audit](../../docs/verification/20261003-agno-library-batch/dependency-audit.json)
+added to core Meerkat or Meta. The [per-profile SDK closure audit](../../docs/verification/20261003-agno-library-batch/dependency-audit.json)
 records the shared dependencies and each SDK's declared closure for future
 optional install groups without duplicating transport ownership.
 The [accepted Agno29 installed proof](../../docs/verification/20261003-agno-library-batch/INSTALLED-VERIFICATION.md)
@@ -1589,7 +1589,7 @@ failure-prefix redaction, write uncertainty, result bounds, invalid config,
 clean stdout, current MCP client calls, repeated direct cancellation, canceled
 queues, legacy stdio ping while a worker is active, and a raw `2024-11-05`
 initialize/list/rejected-call exchange. That last exchange establishes wire
-compatibility only, not Meerkat or MobKit runtime acceptance. Installed-wheel
+compatibility only, not Meerkat or Meta runtime acceptance. Installed-wheel
 and real-provider evidence must identify the exact artifact, operation and
 host profile separately before any adoption claim.
 The OpenWeather/Bitbucket/GitLab batch exercises all 13 inherited read methods, actual

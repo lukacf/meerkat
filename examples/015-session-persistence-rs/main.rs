@@ -46,10 +46,10 @@ async fn async_main() -> Result<(), DemoError> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key.clone())?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-5-5").await;
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .system_prompt("You are an assistant whose session is written to a store.")
         .max_tokens_per_turn(512)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), adapted_store)

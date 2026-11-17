@@ -48,4 +48,4 @@ client requests searches on both turns and derives its replies from the actual
 tool results; the test requires all five indexed facts, accumulated history,
 and scoped directory cleanup. It does not use external transport or test
 credentials. Production still constructs the normal Anthropic client and uses
-`claude-sonnet-4-6`.
+`claude-sonnet-5-5`.

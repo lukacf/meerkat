@@ -59,4 +59,4 @@ seven-message transcript. Owner-level service checks verify archive cleanup
 after success and failures on any turn. Later-turn failures still archive the
 session, while the original typed error propagates. No external transport or
 credentials are used; production retains the normal Anthropic client and
-`claude-sonnet-4-6`.
+`claude-sonnet-5-5`.

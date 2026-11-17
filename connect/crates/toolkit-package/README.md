@@ -92,7 +92,7 @@ confinement still need independent assessment and controls. See
 scoped compatibility metadata. It is generated from the canonical OSS inventory;
 see [catalog inputs](catalog/README.md). The current isolated default-feature
 verification is retained under `docs/verification/20261003-adopted-catalog`.
-It does not resolve or build native Meerkat/MobKit dependencies.
+It does not resolve or build native Meerkat/Meta dependencies.
 
 The [versioned library](integrations/README.md) retains 14 package versions across
 11 identities and 17 strategies: 6 remote service recipes and 11 guidance-only

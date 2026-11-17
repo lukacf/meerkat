@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Schedules written by agents: see the two Security entries on schedules in Core's changelog for this release; they hold on a Meta gateway. On a gateway they also keep agents from the gateway's own schedules (the memory steward's pass and the announcement source runners), which a member with the schedule tools could create, change, pause or delete. Affected: every Meta release from 0.7.27 through 0.9.16 for a member's schedule into a member it cannot message; Meta 0.9.9 through 0.9.16 for the gateway's own schedules.
+
+### Upgrade
+
+- Schedules the gateway keeps for itself: at its first start on this version the gateway makes them anew: the memory steward's first pass comes one interval after that start, and the collector of every live announcement source that names a runner runs once at that start and then at its interval. From then on the gateway keeps its own schedules across starts, resumes one that was paused, sets its timing back, and removes any other row that claims to be one of them.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

@@ -751,6 +751,7 @@ impl CommsTrustMutationAuthority {
         self.validate_peer_match(peer.peer_id)?;
         self.validate_peer_descriptor_match(peer)?;
         self.validate_trust_store_peer_match(trust_store_peer_id)?;
+        self.refuse_reciprocal_add_of_the_stores_own_key(trust_store_peer_id, peer)?;
         self.consume_once()
     }
 
@@ -769,7 +770,32 @@ impl CommsTrustMutationAuthority {
         }
         self.validate_peer_match(peer.peer_id)?;
         self.validate_peer_descriptor_match(peer)?;
-        self.validate_trust_store_peer_match(trust_store_peer_id)
+        self.validate_trust_store_peer_match(trust_store_peer_id)?;
+        self.refuse_reciprocal_add_of_the_stores_own_key(trust_store_peer_id, peer)
+    }
+
+    /// A trust store never holds its own key. The reciprocal add of an
+    /// external peer wiring puts a member's descriptor into the store of the
+    /// runtime that member was wired to. Two runtimes built on one key (two
+    /// session runtimes of one realm under tcp or uds comms) have one peer
+    /// id, so that descriptor would be filed under the store's own peer id:
+    /// the add is refused.
+    fn refuse_reciprocal_add_of_the_stores_own_key(
+        &self,
+        trust_store_peer_id: Option<PeerId>,
+        peer: &TrustedPeerDescriptor,
+    ) -> Result<(), String> {
+        if self.source_kind
+            == GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust
+            && trust_store_peer_id == Some(peer.peer_id)
+        {
+            return Err(format!(
+                "trust authority from {:?} for peer {:?} carries the trust store's own peer id: a trust store never holds its own key",
+                self.source_kind,
+                self.peer_id(),
+            ));
+        }
+        Ok(())
     }
 
     fn consume_once(&self) -> Result<(), String> {

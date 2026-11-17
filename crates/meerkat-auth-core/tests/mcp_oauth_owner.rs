@@ -362,6 +362,14 @@ struct TestState {
     /// The protected resource metadata URL answers with this status and no
     /// document (a redirection status answers a redirect).
     protected_resource_answer: Mutex<Option<StatusCode>>,
+    /// The protected resource metadata location under the server's own
+    /// endpoint path answers with this status and no document, in place of
+    /// `404` (a `401` carries a challenge that names no resource metadata).
+    endpoint_path_resource_answer: Mutex<Option<StatusCode>>,
+    /// The protected resource metadata location at the origin root, without
+    /// the server's path, answers with this status and no document, in
+    /// place of `404`.
+    origin_root_resource_answer: Mutex<Option<StatusCode>>,
     /// The server publishes no authorization-server metadata: the RFC 8414
     /// and the OpenID Connect discovery documents are both absent.
     authorization_metadata_absent: AtomicBool,
@@ -592,6 +600,14 @@ async fn spawn_oauth_fixture() -> (String, Arc<TestState>) {
             get(protected_resource),
         )
         .route(
+            "/mcp/.well-known/oauth-protected-resource",
+            get(endpoint_path_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(origin_root_resource),
+        )
+        .route(
             "/.well-known/oauth-authorization-server",
             get(authorization_metadata),
         )
@@ -662,6 +678,35 @@ async fn mcp_endpoint(headers: HeaderMap) -> impl IntoResponse {
         "",
     )
         .into_response()
+}
+
+/// The answer of a protected resource metadata location that serves no
+/// document: `status`, or `404` when none is set.
+fn documentless_answer(status: Option<StatusCode>) -> axum::response::Response {
+    match status {
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some(status) if status.is_redirection() => {
+            Redirect::temporary("/redirected").into_response()
+        }
+        Some(StatusCode::UNAUTHORIZED) => (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "www-authenticate",
+                r#"Bearer realm="OAuth", error="invalid_token""#,
+            )],
+            "",
+        )
+            .into_response(),
+        Some(status) => status.into_response(),
+    }
+}
+
+async fn endpoint_path_resource(State(state): State<Arc<TestState>>) -> axum::response::Response {
+    documentless_answer(*state.endpoint_path_resource_answer.lock())
+}
+
+async fn origin_root_resource(State(state): State<Arc<TestState>>) -> axum::response::Response {
+    documentless_answer(*state.origin_root_resource_answer.lock())
 }
 
 async fn protected_resource(
@@ -11660,4 +11705,189 @@ async fn a_second_start_joins_the_pending_attempt_of_a_trailing_slash_issuer() {
         .login_complete(&target, split_callback(&joined, &joined.state))
         .await
         .expect("the joined projection completes the single attempt");
+}
+
+const ENDPOINT_PATH_RESOURCE_METADATA: &str = "/mcp/.well-known/oauth-protected-resource";
+const ORIGIN_ROOT_RESOURCE_METADATA: &str = "/.well-known/oauth-protected-resource";
+
+/// A server whose own endpoint guard answers the metadata location under
+/// its endpoint path: the two well-known URLs at the origin root answer
+/// `404`, the one under the endpoint path answers `401` with a challenge
+/// that names no resource metadata, and the origin serves
+/// authorization-server metadata. That `401` is the endpoint's guard, not a
+/// document: the server publishes none, and the login completes against
+/// the origin's endpoints.
+#[tokio::test]
+async fn an_endpoint_path_metadata_location_that_demands_authorization_is_absent() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "guarded-endpoint-path");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the endpoint guard's answer is not a published document");
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    for asked in [
+        "/.well-known/oauth-protected-resource/mcp",
+        ENDPOINT_PATH_RESOURCE_METADATA,
+        ORIGIN_ROOT_RESOURCE_METADATA,
+        "/.well-known/oauth-authorization-server",
+    ] {
+        assert!(asked_for(&state, asked), "{asked} was not asked for");
+    }
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the login completes against the origin's token endpoint");
+    assert_eq!(
+        state.token_requests.lock()[0]["resource"],
+        format!("{base}/mcp")
+    );
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+}
+
+/// Under the endpoint path `403` and `405` are the endpoint's own answers
+/// as well: the server publishes no document there.
+#[tokio::test]
+async fn an_endpoint_path_metadata_location_that_is_forbidden_or_not_allowed_is_absent() {
+    for status in [StatusCode::FORBIDDEN, StatusCode::METHOD_NOT_ALLOWED] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(status);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "guarded-endpoint-path");
+
+        let start = authority
+            .login_start(
+                &target,
+                SPLIT_REDIRECT,
+                Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{status} under the endpoint path: {error:?}"));
+
+        assert!(
+            start
+                .authorize_url
+                .starts_with(&format!("{base}/authorize?")),
+            "{status}"
+        );
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(asked_for(&state, "/.well-known/oauth-authorization-server"));
+    }
+}
+
+/// A server error or a redirect of the location under the endpoint path is
+/// not an absent document there either: the login is refused and the
+/// server's own origin metadata is not read.
+#[tokio::test]
+async fn an_endpoint_path_metadata_location_that_fails_or_redirects_is_not_absent() {
+    for status in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::TEMPORARY_REDIRECT,
+    ] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(status);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "failing-endpoint-path");
+
+        let refused = authority
+            .login_start(
+                &target,
+                SPLIT_REDIRECT,
+                Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+            )
+            .await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the resource metadata refusal for {status}, got {refused:?}");
+        };
+        assert_eq!(
+            reason, "no oauth-protected-resource metadata found",
+            "{status}"
+        );
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(!asked_for(
+            &state,
+            "/.well-known/oauth-authorization-server"
+        ));
+        assert!(!asked_for(&state, "/redirected"));
+        assert!(state.registration_requests.lock().is_empty());
+    }
+}
+
+/// At the origin root only `404` and `410` say a document is absent: a
+/// root well-known URL that demands authorization, forbids or does not
+/// allow the request refuses the login, whichever of the two root forms it
+/// is, and the server's own origin metadata is not read.
+#[tokio::test]
+async fn an_origin_root_metadata_location_that_demands_authorization_is_not_absent() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::METHOD_NOT_ALLOWED,
+    ] {
+        for path_inserted in [true, false] {
+            let (base, state) = spawn_oauth_fixture().await;
+            if path_inserted {
+                *state.protected_resource_answer.lock() = Some(status);
+            } else {
+                state
+                    .protected_resource_absent
+                    .store(true, Ordering::SeqCst);
+                *state.origin_root_resource_answer.lock() = Some(status);
+            }
+            let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+            let target = split_target(&base, "guarded-origin-root");
+
+            let refused = authority
+                .login_start(
+                    &target,
+                    SPLIT_REDIRECT,
+                    Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+                )
+                .await;
+
+            let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+                panic!(
+                    "expected the resource metadata refusal for {status} (path inserted: {path_inserted}), got {refused:?}"
+                );
+            };
+            assert_eq!(
+                reason, "no oauth-protected-resource metadata found",
+                "{status}"
+            );
+            assert!(!asked_for(
+                &state,
+                "/.well-known/oauth-authorization-server"
+            ));
+            assert!(state.registration_requests.lock().is_empty());
+        }
+    }
 }

@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest import mock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 
 SCRIPT = Path(__file__).with_name("verify-published-registries.py")
@@ -411,19 +411,6 @@ class RegistryWaitTests(unittest.TestCase):
                 crate_sha256={}, only_crates=True,
             )
 
-    def test_a_wrong_artifact_is_still_refused_at_the_end_of_the_wait(self):
-        fake = FakeTime()
-        with self.assertRaisesRegex(
-            registries.RegistryVerificationError, "still failing: npm; last answer: npm: npm tarball checksum mismatch"
-        ):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                registries.verify_with_retries(
-                    "0.8.0", reader=exact_payload,
-                    downloader=lambda url: b"other bytes" if "npm.example" in url else ARTIFACTS[url],
-                    sleeper=fake.sleep, clock=fake.clock, deadline_seconds=30.0,
-                )
-
     def test_each_attempt_line_is_flushed_as_it_is_written(self):
         fake = FakeTime()
         output = FlushCounting()
@@ -434,6 +421,160 @@ class RegistryWaitTests(unittest.TestCase):
             )
         self.assertEqual(len(output.getvalue().splitlines()), 3)
         self.assertGreaterEqual(output.flushes, 3)
+
+
+NPM_TARBALL = "https://npm.example/rkat-meta-sdk-0.8.0.tgz"
+
+
+def npm_bytes(*served: bytes):
+    """A downloader whose npm tarball reads return `served` in turn, then the
+    exact bytes; every other artifact is exact."""
+    remaining = list(served)
+
+    def downloader(url: str) -> bytes:
+        if url == NPM_TARBALL and remaining:
+            return remaining.pop(0)
+        return ARTIFACTS[url]
+
+    return downloader
+
+
+class WrongDigestTests(unittest.TestCase):
+    """Only a version that is not served yet waits for the clock. A registry
+    that serves the version with other bytes is refused at the second read
+    in a row that gives the same wrong digest."""
+
+    def wait(self, fake: FakeTime, **kwargs) -> list[str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                registries.verify_with_retries(
+                    "0.8.0", sleeper=fake.sleep, clock=fake.clock,
+                    **{"reader": exact_payload, "downloader": exact_artifact, **kwargs},
+                )
+            finally:
+                self.lines = output.getvalue().splitlines()
+        return self.lines
+
+    def test_the_same_wrong_digest_at_two_reads_in_a_row_is_refused_at_the_second(self):
+        fake = FakeTime()
+        other = b"other bytes"
+        with self.assertRaises(registries.RegistryVerificationError) as raised:
+            self.wait(fake, downloader=npm_bytes(*[other] * 500))
+        self.assertEqual(
+            str(raised.exception),
+            "release 0.8.0 refused: npm serves npm tarball with sha1 "
+            f"{hashlib.sha1(other).hexdigest()}, not the expected "
+            f"{artifact_digest(NPM_TARBALL, 'sha1')} (the same answer at two reads in a row)",
+        )
+        self.assertEqual(raised.exception.registries, ("npm",))
+        # At the second read, not at the deadline.
+        self.assertEqual(fake.sleeps, [10.0])
+        self.assertEqual(fake.now, 10.0)
+        self.assertEqual(len(self.lines), 1)
+        self.assertIn("attempt 1 incomplete (0 s of 1800 s): npm: npm tarball checksum mismatch",
+                      self.lines[0])
+
+    def test_a_crate_served_with_other_bytes_than_the_verified_ones_is_refused_at_the_second_read(self):
+        fake = FakeTime()
+        served = artifact_digest("https://crates.example/meerkat-meta-0.8.0.crate", "sha256")
+        with self.assertRaises(registries.RegistryVerificationError) as raised:
+            self.wait(fake, crate_sha256={"meerkat-meta": "0" * 64})
+        self.assertEqual(
+            str(raised.exception),
+            f"release 0.8.0 refused: crates.io serves meerkat-meta 0.8.0 with sha256 {served}, "
+            f"not the expected {'0' * 64} (the same answer at two reads in a row)",
+        )
+        self.assertEqual(raised.exception.registries, ("crates.io",))
+        self.assertEqual(fake.sleeps, [10.0])
+
+    def test_a_wrong_digest_once_and_then_the_right_bytes_pass(self):
+        fake = FakeTime()
+        lines = self.wait(fake, downloader=npm_bytes(b"other bytes"))
+        self.assertEqual(fake.sleeps, [10.0])
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_a_wrong_digest_that_changes_between_reads_keeps_waiting(self):
+        fake = FakeTime()
+        lines = self.wait(fake, downloader=npm_bytes(b"first", b"second", b"third"))
+        self.assertEqual(fake.sleeps, [10.0] * 3)
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+        never = FakeTime()
+        changing = npm_bytes(*[str(read).encode() for read in range(500)])
+        with self.assertRaisesRegex(
+            registries.RegistryVerificationError,
+            r"not fully public after 181 attempts in 1800 s \(deadline 1800 s\); still failing: npm; "
+            r"last answer: npm: npm tarball checksum mismatch",
+        ):
+            self.wait(never, downloader=changing)
+        self.assertEqual(never.now, 1800.0)
+
+    def test_the_same_wrong_digest_with_a_read_that_did_not_serve_in_between_keeps_waiting(self):
+        fake = FakeTime()
+        reads = 0
+
+        def reader(url: str) -> dict:
+            nonlocal reads
+            if "npmjs.org" in url:
+                reads += 1
+                if reads == 2:
+                    raise HTTPError(url, 404, "Not Found", None, None)
+            return exact_payload(url)
+
+        # Read 1: other bytes. Read 2: 404 (no download). Read 3: the same
+        # other bytes, not in a row with read 1. Read 4: exact.
+        lines = self.wait(fake, reader=reader, downloader=npm_bytes(b"other", b"other"))
+        self.assertEqual(fake.sleeps, [10.0] * 3)
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_a_version_not_served_and_then_served_passes(self):
+        fake = FakeTime()
+        lines = self.wait(fake, reader=npm_serving_from(fake, 10.0))
+        self.assertEqual(fake.sleeps, [10.0])
+        self.assertEqual(
+            lines[0],
+            "Registry verification attempt 1 incomplete (0 s of 1800 s): "
+            "npm: HTTP Error 404: Not Found",
+        )
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_the_same_transport_error_at_two_reads_in_a_row_is_not_a_refusal(self):
+        for error in (TimeoutError("timed out"), URLError("connection reset"), OSError("unreachable")):
+            with self.subTest(error=type(error).__name__):
+                fake = FakeTime()
+                reads = 0
+
+                def reader(url: str) -> dict:
+                    nonlocal reads
+                    if "npmjs.org" in url:
+                        reads += 1
+                        if reads <= 3:
+                            raise error
+                    return exact_payload(url)
+
+                lines = self.wait(fake, reader=reader)
+                self.assertEqual(fake.sleeps, [10.0] * 3)
+                self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_other_incomplete_answers_repeated_keep_waiting(self):
+        """A release still missing an artifact kind, twice the same, waits."""
+        fake = FakeTime()
+        reads = 0
+
+        def reader(url: str) -> dict:
+            nonlocal reads
+            payload = exact_payload(url)
+            if "pypi.org" in url:
+                reads += 1
+                if reads <= 3:
+                    payload["urls"] = payload["urls"][:1]
+            return payload
+
+        lines = self.wait(fake, reader=reader)
+        self.assertEqual(fake.sleeps, [10.0] * 3)
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
 
 
 class RegistrySelectionTests(unittest.TestCase):

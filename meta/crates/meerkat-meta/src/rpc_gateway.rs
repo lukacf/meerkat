@@ -19191,6 +19191,13 @@ external_addressable = true
                 notify_orchestrator_on_resume: true,
                 default_llm_client: default_llm_client.clone(),
             });
+        // The launch has a schedule service: it says so before its runtime is
+        // built, so that a create under a mob's id waits for the release of
+        // that mob's schedules to be bound to the runtime and never goes on
+        // without it.
+        if schedule_host_inputs.is_some() {
+            spec = spec.with_mob_schedules_declared();
+        }
         spec.committed_boundary_recoverer = Some(committed_boundary_recoverer);
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             spec = spec.with_session_identity_config_root(root.clone());

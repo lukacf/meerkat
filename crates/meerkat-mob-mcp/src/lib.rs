@@ -2183,6 +2183,24 @@ pub const MOB_CREATE_REFUSED_KIND: &str = "mob_create_refused";
 const BEFORE_CREATE_PANICKED: &str =
     "the host's create admission panicked, so the create is refused";
 
+/// A create's hold of its mob's id ([`MobMcpState::hold_create_id`]). Dropping
+/// it frees the id: when the create has inserted its mob, and on every way
+/// a create ends without one.
+struct CreateIdHold<'a> {
+    state: &'a MobMcpState,
+    mob_id: MobId,
+}
+
+impl Drop for CreateIdHold<'_> {
+    fn drop(&mut self) {
+        self.state
+            .creates_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.mob_id);
+    }
+}
+
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -2294,6 +2312,10 @@ pub struct MobMcpState {
     /// recovery sweep automatically instead of requiring a caller to run
     /// maintenance by hand.
     self_weak: std::sync::OnceLock<std::sync::Weak<MobMcpState>>,
+    /// The ids a create of this state holds, each from the create's first
+    /// step until its mob is inserted or the create ends without one
+    /// ([`Self::hold_create_id`]).
+    creates_in_flight: std::sync::Mutex<BTreeSet<MobId>>,
     /// Test seam: when set, a create parks after its native mob started and
     /// before the managed-set insertion.
     #[cfg(test)]
@@ -2504,6 +2526,7 @@ impl MobMcpState {
             ),
             temporary_council_inflight: std::sync::Mutex::new(HashMap::new()),
             self_weak: std::sync::OnceLock::new(),
+            creates_in_flight: std::sync::Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             create_insert_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -4359,6 +4382,23 @@ impl MobMcpState {
                 "retryable": false,
             }),
         })
+    }
+
+    /// Hold `mob_id` for one create, as the create's first step: before the
+    /// id is checked against the mobs this state hosts and before the host's
+    /// create admission is asked. `None` when a create in flight holds the
+    /// id already: that create is the one the admission is asked for, and
+    /// the caller is refused with nothing of its mob built. The hold ends
+    /// when the answer is dropped.
+    fn hold_create_id(&self, mob_id: &MobId) -> Option<CreateIdHold<'_>> {
+        self.creates_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mob_id.clone())
+            .then(|| CreateIdHold {
+                state: self,
+                mob_id: mob_id.clone(),
+            })
     }
 
     /// Admit or refuse the create `request` describes, before anything of
@@ -7034,6 +7074,14 @@ impl MobMcpState {
         let mut definition = MobBuilder::lower_mobpack_definition(definition, &packed_skills)?;
         definition.source_identity = Some(source_identity);
         let mob_id = definition.id.clone();
+        // From here until this create has inserted its mob or ended without
+        // one, the id is this create's: a create of the same id that comes
+        // meanwhile is refused before the host is asked.
+        let Some(_id_hold) = self.hold_create_id(&mob_id) else {
+            return Err(MobError::Internal(format!(
+                "duplicate mobpack create raced for mob id '{mob_id}' before verified identity could be committed"
+            )));
+        };
         self.ensure_restored().await?;
         // A quarantined store is kept as found and a held child keeps its
         // store: no create takes the id of either (the hosted sets are read
@@ -7307,6 +7355,12 @@ impl MobMcpState {
         self.hydrate_definition_skill_sources(&mut definition)
             .await?;
         let mob_id = definition.id.clone();
+        // From here until this create has inserted its mob or ended without
+        // one, the id is this create's: a create of the same id that comes
+        // meanwhile is refused before the host is asked.
+        let Some(_id_hold) = self.hold_create_id(&mob_id) else {
+            return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
+        };
         self.ensure_restored().await?;
         // The hosted sets, read as one: a quarantined store is kept as
         // found and a held child keeps its store, so no create takes the id

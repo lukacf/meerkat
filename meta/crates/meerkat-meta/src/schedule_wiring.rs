@@ -631,6 +631,58 @@ impl ScheduleMobTargetRegistry {
         }
     }
 
+    /// Whether `mob_id` is the adopted runtime's own mob, the launch's mob,
+    /// which is never created again. `false` while no runtime is adopted.
+    fn is_own_mob(&self, mob_id: &meerkat_mob::MobId) -> bool {
+        self.mob
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|mob| mob.mob_id() == mob_id))
+            .unwrap_or(false)
+    }
+
+    /// The mob member the stored session `session_id` names, for a schedule
+    /// that names the session. It is read as Core's schedule host reads it
+    /// when it fires a resumable-session target whose session is gone
+    /// (`meerkat::surface::recover_mob_member_identity_from_session_target`):
+    /// from what the session's stored record keeps, which an archived
+    /// session keeps too
+    /// ([`meerkat_mob::MobSessionService::load_retained_session_metadata`]).
+    ///
+    /// `Ok(None)`: no mob state was adopted (the launch hosts no mob a
+    /// create could be asked for), its session service keeps no stored
+    /// record, nothing is stored under the id, or the stored session names
+    /// no mob member. An error: the adopted mob state is gone, or the stored
+    /// record cannot be read.
+    async fn stored_session_member(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<meerkat_core::MobMemberBinding>, String> {
+        let adopted = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => Some(state.upgrade()),
+            Ok(AdoptedMobState::Unset) => None,
+            Err(_) => return Err("which mob state was adopted is unknown".to_string()),
+        };
+        let state = match adopted {
+            None => return Ok(None),
+            Some(None) => {
+                return Err("the mob state its sessions are read from is gone".to_string());
+            }
+            Some(Some(state)) => state,
+        };
+        match state
+            .session_service()
+            .load_retained_session_metadata(session_id)
+            .await
+        {
+            Ok(stored) => Ok(stored
+                .and_then(|stored| stored.session_metadata)
+                .and_then(|metadata| metadata.mob_member_binding)),
+            Err(meerkat_core::service::SessionError::Unsupported(_)) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     /// Core's entry of the member `member` in the adopted runtime's mob:
     /// `None` when no runtime was adopted, when `mob_id` names another mob,
     /// and for a name that is no identity entry. Read from the machine state
@@ -1024,14 +1076,116 @@ impl MobAgentSchedules {
     /// End every schedule that names the mob `mob_id`, for a mob that is
     /// about to be created under that id, and name the schedules ended.
     ///
-    /// It ends nothing yet: the rows beside the follow's rows say what a
-    /// create under an id needs of it.
+    /// A schedule names a mob by its id and a member by its name, and
+    /// nothing in it says which mob of that id it was made for, nor who
+    /// wrote it. So a create under an id first ends each schedule that
+    /// names the id (`names_mob`): a member, flow or helper target of the
+    /// mob, an identity target that names a member of it, and the runner of
+    /// one of its announcement sources. Each is deleted, as a removed
+    /// agent's schedules are
+    /// ([`crate::identity_creation::AgentSchedules::follow`]), and named in
+    /// the host's log by its id, never by what it sends.
+    ///
+    /// A schedule can also name a session, and a fire follows a session
+    /// that is gone to the member its stored record names: a mob's id and a
+    /// member's name. So a schedule that names a session whose stored record
+    /// names a member of the mob names the id too, and is ended
+    /// (`names_a_session_of`). A schedule that names any other
+    /// session stays, and so does a Console caller's schedule: it is for an
+    /// agent of the launch's own mob.
+    ///
+    /// The launch's own mob is not created again and its schedules are
+    /// never released: asked for it, this ends nothing. A schedule that
+    /// cannot be listed or ended is an error, and so is a named session
+    /// whose stored record cannot be read. On an error the caller refuses
+    /// the create; asked again, the release ends what is left.
     pub async fn release_mob(
         &self,
         mob_id: &meerkat_mob::MobId,
     ) -> Result<Vec<crate::identity_creation::ScheduleRef>, meerkat::ScheduleDomainError> {
-        let _ = (mob_id, &self.service);
-        Ok(Vec::new())
+        if self.targets.is_own_mob(mob_id) {
+            return Ok(Vec::new());
+        }
+        let mut released = Vec::new();
+        for schedule in self.service.list().await? {
+            if !names_mob(&schedule, mob_id) && !self.names_a_session_of(&schedule, mob_id).await? {
+                continue;
+            }
+            let ended = self.service.delete(&schedule.schedule_id).await?;
+            if ended.phase != SchedulePhase::Deleted {
+                return Err(meerkat::ScheduleDomainError::Internal(format!(
+                    "schedule {} names mob '{mob_id}' and was not ended",
+                    schedule.schedule_id
+                )));
+            }
+            tracing::warn!(
+                mob_id = %mob_id,
+                schedule_id = %schedule.schedule_id,
+                "a schedule that named a mob's id is ended before a mob is created under the id"
+            );
+            released.push(Self::named(&schedule));
+        }
+        Ok(released)
+    }
+
+    /// Whether `schedule` names a session whose stored record names a member
+    /// of the mob `mob_id`: the one form in which a schedule names a mob
+    /// that the schedule itself does not spell ([`names_mob`] reads the
+    /// others). Only the target form that follows a session that is gone is
+    /// read. A stored record that cannot be read is an error.
+    async fn names_a_session_of(
+        &self,
+        schedule: &Schedule,
+        mob_id: &meerkat_mob::MobId,
+    ) -> Result<bool, meerkat::ScheduleDomainError> {
+        let TargetBinding::Session(session) = &schedule.target else {
+            return Ok(false);
+        };
+        let SessionTargetBinding::ResumableSession { session_id, .. } = session.as_ref() else {
+            return Ok(false);
+        };
+        let named = self
+            .targets
+            .stored_session_member(session_id)
+            .await
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "schedule {} names a session whose stored record was not read: {error}",
+                    schedule.schedule_id
+                ))
+            })?;
+        Ok(named.is_some_and(|member| member.mob_id == mob_id.as_str()))
+    }
+}
+
+/// Whether `schedule` names the mob `mob_id`, in any form a schedule names
+/// a mob: a member, flow or helper target of it; an identity target that
+/// names a member of it; or the runner of one of its announcement sources.
+/// A session target spells no mob (what its stored record names is read by
+/// [`MobAgentSchedules::names_a_session_of`]), and neither does an identity
+/// target that gives a name alone, nor a Console caller's schedule (it is
+/// for an agent of the launch's own mob).
+fn names_mob(schedule: &Schedule, mob_id: &meerkat_mob::MobId) -> bool {
+    let target = &schedule.target;
+    if crate::console_schedules::ConsoleScheduledSend::of_target(target).is_some() {
+        return false;
+    }
+    match target {
+        TargetBinding::Mob(binding) => match binding.as_ref() {
+            MobTargetBinding::Member { mob_id: named, .. }
+            | MobTargetBinding::Flow { mob_id: named, .. }
+            | MobTargetBinding::SpawnHelper { mob_id: named, .. }
+            | MobTargetBinding::ForkHelper { mob_id: named, .. } => named == mob_id.as_str(),
+        },
+        TargetBinding::Identity(binding) => parse_mob_member_schedule_identity(binding.identity())
+            .is_some_and(|member| member.mob_id == mob_id.as_str()),
+        TargetBinding::HostRunnable(_) => {
+            schedule.config.labels.contains_key(SOURCE_RUNNER_LABEL)
+                && host_runnable_target(target).is_some_and(|(_, params)| {
+                    params.get("mob_id").and_then(Value::as_str) == Some(mob_id.as_str())
+                })
+        }
+        TargetBinding::Session(_) => false,
     }
 }
 

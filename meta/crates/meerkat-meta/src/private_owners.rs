@@ -190,38 +190,6 @@ pub(crate) trait PrivateMemberEndFollower: Send + Sync {
     async fn member_ended(&self, ended: &EndedPrivateMember);
 }
 
-/// What a create is refused with when a release it asks before its mob
-/// exists fails ([`MobCreateRelease`]): one sentence for every release. What
-/// the release itself said goes to the host's log.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the answer of a create whose release fails; no create asks a release yet"
-    )
-)]
-pub(crate) const CREATE_RELEASE_FAILED: &str = "what an earlier mob of this id left with the host could not be released, so the mob \
-     is not created; the create can be retried, and the host's log has the cause";
-
-/// One release the host owes before a mob is created under an id
-/// ([`PrivateOwners::bind_create_release`]): what the host keeps under that
-/// id is of an earlier mob of the same id, and the new mob is to find none
-/// of it.
-#[allow(
-    dead_code,
-    reason = "the seat of a create's releases; no create asks a release yet"
-)]
-#[async_trait::async_trait]
-pub(crate) trait MobCreateRelease: Send + Sync {
-    /// What this releases, in a few words, for the host's log.
-    fn what(&self) -> &'static str;
-
-    /// Release what the host keeps under `mob_id`. Asked again, it releases
-    /// what is left. An error means some may be left; its text is for the
-    /// host's log, never for a caller.
-    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String>;
-}
-
 /// The follower of the ends of members private to a person, and the ends
 /// seen while none was installed.
 #[derive(Default)]
@@ -290,6 +258,68 @@ impl Default for PrivateOwnerRecordId {
     }
 }
 
+/// What a create is refused with when a release it asks before its mob
+/// exists fails ([`MobCreateRelease`]): one sentence for every release. What
+/// the release itself said goes to the host's log.
+///
+/// It says nothing of whose the kept things were (a first create under an
+/// id is asked the same release) and nothing of a retry: the refusal's data
+/// says `retryable: false` for every reason, this one included.
+pub(crate) const CREATE_RELEASE_FAILED: &str = "what the host keeps under this mob id could not be released, so the mob is not created; \
+     the host's log has the cause";
+
+/// One release the host owes before a mob is created under an id
+/// ([`PrivateOwners::bind_create_release`]): what the host keeps under that
+/// id was not written for the new mob (it is of an earlier mob of the id,
+/// or was written before any mob held it), and the new mob is to find none
+/// of it.
+#[async_trait::async_trait]
+pub(crate) trait MobCreateRelease: Send + Sync {
+    /// What this releases, in a few words, for the host's log.
+    fn what(&self) -> &'static str;
+
+    /// Release what the host keeps under `mob_id`. Asked again, it releases
+    /// what is left. An error means some may be left; its text is for the
+    /// host's log, never for a caller.
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String>;
+}
+
+/// The schedules a launch keeps under a mob's id, as a release a create
+/// asks ([`crate::mob_schedules_release`]): a launch that declared no
+/// schedules has none to release; one that declared them and has not bound
+/// their release yet fails the release, so the create is refused; a bound
+/// release ends the schedules that name the id and says in the host's log
+/// how many it ended.
+#[async_trait::async_trait]
+impl MobCreateRelease for crate::mob_schedules_release::MobSchedulesSlot {
+    fn what(&self) -> &'static str {
+        "the schedules that name the mob"
+    }
+
+    async fn release_before_create(&self, mob_id: &meerkat_mob::MobId) -> Result<(), String> {
+        use crate::mob_schedules_release::MobSchedulesStanding;
+        match self.standing() {
+            MobSchedulesStanding::NotDeclared => Ok(()),
+            MobSchedulesStanding::Owed => Err(
+                "the launch declared its schedules and has not bound their release to the \
+                 runtime yet"
+                    .to_string(),
+            ),
+            MobSchedulesStanding::Bound(release) => {
+                let ended = release.release_mob(mob_id).await?;
+                if ended > 0 {
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        ended,
+                        "a create ended the schedules that named the mob's id"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// The owner of each member of one runtime's mobs (see the module docs).
 /// Cheap to clone; clones share the record.
 #[derive(Clone, Default)]
@@ -312,6 +342,9 @@ enum MobOwner {
 struct Inner {
     /// Which record this is among the records of the process.
     id: PrivateOwnerRecordId,
+    /// The releases a create asks before its mob exists, in the order they
+    /// were bound ([`PrivateOwners::bind_create_release`]).
+    create_releases: RwLock<Vec<Arc<dyn MobCreateRelease>>>,
     /// What each member build recorded: the member's owner, or `None` for a
     /// member private to no one. The newest truth about a member.
     built: RwLock<BTreeMap<MemberKey, Option<String>>>,
@@ -336,9 +369,6 @@ struct Inner {
     /// Who follows the end of a member private to a person, and the ends
     /// held for it.
     ends: std::sync::Mutex<MemberEnds>,
-    /// The releases a create asks before its mob exists, in the order they
-    /// were bound ([`PrivateOwners::bind_create_release`]).
-    create_releases: RwLock<Vec<Arc<dyn MobCreateRelease>>>,
 }
 
 impl std::fmt::Debug for PrivateOwners {
@@ -549,8 +579,9 @@ impl PrivateOwners {
         }
     }
 
-    /// Record who mob `mob_id` is private to. The first record of a mob
-    /// stands: its creator's owner does not change.
+    /// Record who mob `mob_id` is private to, as a durable record read at
+    /// the seed says it. The first record of a mob stands: its creator's
+    /// owner does not change.
     fn record_mob(&self, mob_id: &str, owner: MobOwner) {
         self.inner
             .mob_owners
@@ -558,6 +589,29 @@ impl PrivateOwners {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(mob_id.to_string())
             .or_insert(owner);
+    }
+
+    /// Record who the mob the create admission admits under `mob_id` is
+    /// private to. It takes the place of a record that stands under the id:
+    /// the admission is asked only for an id no mob holds, so a record
+    /// there is not this mob's. What the record holds of members is left as
+    /// it is: each member is recorded by its own build.
+    fn record_created_mob(&self, mob_id: &str, owner: MobOwner) {
+        self.inner
+            .mob_owners
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.to_string(), owner);
+    }
+
+    /// The releases a create asks before its mob exists, in the order they
+    /// were bound.
+    fn create_releases(&self) -> Vec<Arc<dyn MobCreateRelease>> {
+        self.inner
+            .create_releases
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// What this record holds of who mob `mob_id` is private to, for tests
@@ -1065,9 +1119,15 @@ impl PrivateOwners {
     }
 
     /// The create admission of the agent mob tools: `then` (the host's own,
-    /// when there is one) decides first, then the mob is recorded as private
-    /// to its creator's owner. A creator whose owner cannot be read refuses
-    /// the create.
+    /// when there is one) decides first, then each release bound to this
+    /// record is asked ([`Self::bind_create_release`]), then the mob is
+    /// recorded as private to its creator's owner. A creator whose owner
+    /// cannot be read refuses the create, and so does a release that fails
+    /// ([`CREATE_RELEASE_FAILED`]).
+    ///
+    /// The record written here is the admitted mob's own: it takes the
+    /// place of a record that stands under the mob's id
+    /// ([`Self::record_created_mob`]).
     ///
     /// The creator is the member whose session the create names: the owner
     /// session, or, for the mob of a temporary council, the session that
@@ -1116,7 +1176,24 @@ impl PrivateOwners {
                     }
                     _ => None,
                 };
-                owners.record_mob(request.mob_id.as_str(), MobOwner::Known(owner));
+                // Each bound release goes before anything of the mob
+                // exists, and before the record below is written: a release
+                // that fails refuses the create, and the record stays as it
+                // was.
+                for release in owners.create_releases() {
+                    if let Err(error) = release.release_before_create(&request.mob_id).await {
+                        // The release's own words stay with the host: they
+                        // can name a file or a key of a store.
+                        tracing::warn!(
+                            mob_id = %request.mob_id,
+                            release = release.what(),
+                            error = %error,
+                            "a release owed before a create failed; the create is refused"
+                        );
+                        return Err(CREATE_RELEASE_FAILED.to_string());
+                    }
+                }
+                owners.record_created_mob(request.mob_id.as_str(), MobOwner::Known(owner));
                 Ok(())
             })
         })

@@ -791,10 +791,11 @@ State `[confinement]` in the user document or select it with the flags:
 | The `--confinement` flags ([operator flags](#operator-flags)) | The one process that carries them, for every launch kind |
 
 On Linux a start that confines every launch kind is refused when its realm
-state lies inside a confinement write grant, as `rkat`'s default state root
-`<project>/.rkat/realms` does for a command started in the project's root
-directory: start it with `--state-root <dir>` outside every confinement write
-grant. See [the host's own inputs](#the-host%E2%80%99s-own-inputs).
+state lies inside a confinement write grant. For `rkat` that is so when the
+realm state would lie inside the directory the command is started in: that
+directory holds a `.rkat` entry, or no directory above it does. Start it then
+with `--state-root <dir>` outside every confinement write grant. See
+[the host's own inputs](#the-host%E2%80%99s-own-inputs).
 
 The other document a host reads the section from is the realm's own,
 `<state-root>/<realm>/config.toml` (`rkat doctor` prints its path on the

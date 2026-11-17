@@ -19816,6 +19816,13 @@ external_addressable = true
     // The memory-stack region below also fills the slot a console side
     // chat's `memory` tool is bound to its own identity with.
     let side_chat_memory_slot = mob_spec.side_chat_memory_slot();
+    // The mob is built before that region runs, and a member that owes work
+    // at this start is built with the mob: say now that a recorder will be
+    // bound, so a side chat built until then is wrapped and offers no
+    // `memory` tool until it is.
+    if gateway_options.agent_memory.is_some() {
+        side_chat_memory_slot.expect_recorder();
+    }
 
     let timeout = GATEWAY_RUNTIME_EVENT_DRAIN_TIMEOUT;
     let persistent_metadata: Arc<dyn PersistentMetadataStore> = if persistent_state.is_some() {

@@ -50,8 +50,9 @@ thread_local! {
     /// The calling thread's checkpoint for its next
     /// [`Router::remove_trusted_peer_for_source`]. The removal runs it once,
     /// after it has read the peer's remaining source descriptors and
-    /// immediately before it writes the union trust row. A thread that armed
-    /// nothing is unaffected, and nothing outside test builds has the slot.
+    /// immediately before it writes the union trust row, while it holds its
+    /// source guards. A thread that armed nothing is unaffected, and nothing
+    /// outside test builds has the slot.
     static TRUST_REMOVAL_CHECKPOINT: std::cell::RefCell<Option<TrustRemovalCheckpoint>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -530,41 +531,35 @@ impl Router {
         peer_id: &PeerId,
         source_kind: GeneratedCommsTrustAuthoritySourceKind,
     ) -> bool {
-        let source_removed = {
-            let mut sources = self.trusted_peer_sources.write();
-            let Some(peer_sources) = sources.get_mut(peer_id) else {
-                return false;
-            };
-            if !peer_sources.remove(&source_kind) {
-                return false;
-            }
-            if peer_sources.is_empty() {
-                sources.remove(peer_id);
-            }
-            true
+        // The same three write guards as `add_trusted_peer_for_source`, in the
+        // same order, held to the end. The read of the peer's remaining
+        // sources and the write of the union row are one step, so two
+        // removals, or a removal and an add, of one peer never interleave.
+        let mut sources = self.trusted_peer_sources.write();
+        let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
+        let mut private_sources = self.private_peer_sources.write();
+
+        let Some(peer_sources) = sources.get_mut(peer_id) else {
+            return false;
         };
-        if !source_removed {
+        if !peer_sources.remove(&source_kind) {
             return false;
         }
-        let remaining_descriptor = {
-            let mut descriptors_by_source = self.trusted_peer_descriptors_by_source.write();
-            let Some(descriptors) = descriptors_by_source.get_mut(peer_id) else {
-                return false;
-            };
-            descriptors.remove(&source_kind);
-            let remaining = descriptors.values().next().cloned();
-            if descriptors.is_empty() {
-                descriptors_by_source.remove(peer_id);
-            }
-            remaining
+        if peer_sources.is_empty() {
+            sources.remove(peer_id);
+        }
+        let Some(descriptors) = descriptors_by_source.get_mut(peer_id) else {
+            return false;
         };
-        {
-            let mut private_sources = self.private_peer_sources.write();
-            if let Some(peer_sources) = private_sources.get_mut(peer_id) {
-                peer_sources.remove(&source_kind);
-                if peer_sources.is_empty() {
-                    private_sources.remove(peer_id);
-                }
+        descriptors.remove(&source_kind);
+        let remaining_descriptor = descriptors.values().next().cloned();
+        if descriptors.is_empty() {
+            descriptors_by_source.remove(peer_id);
+        }
+        if let Some(peer_sources) = private_sources.get_mut(peer_id) {
+            peer_sources.remove(&source_kind);
+            if peer_sources.is_empty() {
+                private_sources.remove(peer_id);
             }
         }
         if let Some(peer) = remaining_descriptor {
@@ -574,7 +569,8 @@ impl Router {
             // projection becomes that source's descriptor.
             return self.trusted_peers.write().upsert(peer).is_ok();
         }
-        if self.trusted_peer_sources.read().contains_key(peer_id) {
+        // The guards are held: read the held map, never lock it again.
+        if sources.contains_key(peer_id) {
             return true;
         }
         #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -582,7 +578,7 @@ impl Router {
         if self.trusted_peers.write().remove(peer_id).is_none() {
             return false;
         }
-        self.private_peer_sources.write().remove(peer_id);
+        private_sources.remove(peer_id);
         true
     }
 

@@ -302,4 +302,203 @@ mod tests {
         );
         assert_eq!(policy.matches("(allow process-info").count(), 1, "{policy}");
     }
+
+    // The granted paths below exist on no host and pass through no system
+    // alias, so the lowering is the same on every platform that runs the row.
+    fn subtrees(paths: &[&str]) -> FilesystemAccess {
+        FilesystemAccess::Paths(
+            paths
+                .iter()
+                .map(|path| PathAccess::Subtree(PathBuf::from(path)))
+                .collect(),
+        )
+    }
+
+    fn policy(
+        read: FilesystemAccess,
+        write: FilesystemAccess,
+        deny_read: &[&str],
+        network: IpNetworkAccess,
+    ) -> String {
+        let requirement = ExecutionConfinement::try_from(ConfinementSpec {
+            baseline: PlatformBaseline::CommandRuntimeV1,
+            read,
+            write,
+            deny_read: deny_read
+                .iter()
+                .map(|path| PathAccess::Subtree(PathBuf::from(path)))
+                .collect(),
+            deny_write: Vec::new(),
+            network,
+            unix_connect: Vec::new(),
+            require_descendant_termination: false,
+        })
+        .unwrap();
+        lower(&requirement, &[]).unwrap()
+    }
+
+    fn metadata(path: &str) -> String {
+        format!("(allow file-read-metadata (literal \"{path}\"))\n")
+    }
+
+    /// A program that resolves a path component by component (a script
+    /// runtime resolving its main file, `realpath`) reads the metadata of
+    /// every directory above a granted path. Each of them is allowed, for
+    /// metadata alone: no listing and no file data above a grant.
+    #[test]
+    fn profile_allows_metadata_alone_on_each_directory_above_a_granted_path() {
+        let policy = policy(
+            subtrees(&["/meerkat-row/work/project", "/meerkat-row/tool/bin"]),
+            subtrees(&["/meerkat-row/work/project", "/meerkat-row/out/build"]),
+            &[],
+            IpNetworkAccess::Denied,
+        );
+        for above in [
+            "/meerkat-row",
+            "/meerkat-row/work",
+            "/meerkat-row/tool",
+            "/meerkat-row/out",
+        ] {
+            assert_eq!(
+                policy.matches(&metadata(above)).count(),
+                1,
+                "{above}: {policy}"
+            );
+            for broader in ["file-read*", "file-read-data", "file-write*"] {
+                assert!(
+                    !policy.contains(&format!("(allow {broader} (literal \"{above}\"))"))
+                        && !policy.contains(&format!("(subpath \"{above}\")")),
+                    "{above} gets more than metadata: {policy}"
+                );
+            }
+        }
+        // The root is readable by the baseline; a granted path is granted whole.
+        for granted in ["/", "/meerkat-row/work/project", "/meerkat-row/tool/bin"] {
+            assert!(!policy.contains(&metadata(granted)), "{granted}: {policy}");
+        }
+    }
+
+    /// A denied read stays denied where it lies above a granted path: its
+    /// deny rule follows the metadata allowance, and the later rule wins.
+    #[test]
+    fn profile_denies_a_read_after_allowing_metadata_above_granted_paths() {
+        let policy = policy(
+            subtrees(&["/meerkat-row/private/shared"]),
+            subtrees(&[]),
+            &["/meerkat-row/private"],
+            IpNetworkAccess::Denied,
+        );
+        let allow = policy.find(&metadata("/meerkat-row/private"));
+        let deny = policy.find(
+            "(deny file-read* (require-any (literal \"/meerkat-row/private\") (subpath \"/meerkat-row/private\")))\n",
+        );
+        assert!(
+            matches!((allow, deny), (Some(allow), Some(deny)) if allow < deny),
+            "{policy}"
+        );
+    }
+
+    /// With every read allowed there is nothing above a grant left to allow.
+    #[test]
+    fn profile_with_unrestricted_reads_names_no_directory_above_a_grant() {
+        let policy = policy(
+            FilesystemAccess::Unrestricted,
+            subtrees(&["/meerkat-row/work/project"]),
+            &[],
+            IpNetworkAccess::Denied,
+        );
+        assert!(!policy.contains("\"/meerkat-row/work\""), "{policy}");
+    }
+
+    /// `uname` reads the host name and the kernel version besides the names
+    /// the baseline already allowed, and fails as a whole when one is
+    /// refused. The system aliases `/etc`, `/tmp` and `/var` are links: a
+    /// path spelled through one resolves only when the link itself can be
+    /// read. The fixed system directories above baseline paths are allowed
+    /// for metadata like the directories above a grant.
+    #[test]
+    fn baseline_allows_the_names_uname_reads_and_system_link_metadata() {
+        let policy = policy(subtrees(&[]), subtrees(&[]), &[], IpNetworkAccess::Denied);
+        for name in ["kern.hostname", "kern.version"] {
+            assert_eq!(
+                policy.matches(&format!("(sysctl-name \"{name}\")")).count(),
+                1,
+                "{name}: {policy}"
+            );
+        }
+        // The baseline's one metadata allowance, up to its closing line.
+        let allowance = policy
+            .split_once("(allow file-read-metadata\n")
+            .and_then(|(_, rest)| rest.split_once("))\n"))
+            .map(|(allowance, _)| format!("{allowance})"))
+            .unwrap_or_default();
+        for path in [
+            "/etc", "/tmp", "/var", "/private", "/usr", "/System", "/dev",
+        ] {
+            assert_eq!(
+                allowance.matches(&format!("(literal \"{path}\")")).count(),
+                1,
+                "{path}: {policy}"
+            );
+        }
+        assert!(!allowance.contains("subpath"), "{policy}");
+    }
+
+    const RESOLVER_SOCKET: &str = "(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")))\n";
+    const RESOLVER_SERVICE: &str =
+        "(allow mach-lookup (global-name \"com.apple.dnssd.service\"))\n";
+    const SYSTEM_CA_FILES: &str = "(allow file-read* (require-any (literal \"/private/etc/ssl\") (subpath \"/private/etc/ssl\")))\n";
+
+    /// IP access without name resolution reaches addresses only. A launch
+    /// with IP access also reaches the system resolver (its socket and its
+    /// service name, nothing else of either kind) and reads the system
+    /// certificate authority files. The service allowance follows the
+    /// general service denial, so it is the one that holds.
+    #[test]
+    fn unrestricted_network_reaches_the_system_resolver_and_ca_files() {
+        let policy = policy(
+            subtrees(&[]),
+            subtrees(&[]),
+            &[],
+            IpNetworkAccess::Unrestricted,
+        );
+        for rule in [
+            "(allow system-socket (socket-domain AF_UNIX))\n",
+            RESOLVER_SOCKET,
+            RESOLVER_SERVICE,
+            SYSTEM_CA_FILES,
+        ] {
+            assert_eq!(policy.matches(rule).count(), 1, "{rule}: {policy}");
+        }
+        assert_eq!(policy.matches("unix-socket").count(), 1, "{policy}");
+        assert_eq!(policy.matches("(allow mach-lookup").count(), 1, "{policy}");
+        let denial = policy.find("(deny mach-lookup (xpc-service-name-prefix \"\"))\n");
+        let service = policy.find(RESOLVER_SERVICE);
+        assert!(
+            matches!((denial, service), (Some(denial), Some(service)) if denial < service),
+            "{policy}"
+        );
+    }
+
+    /// Without IP access a launch reaches no resolver, no service and no
+    /// Unix socket, and reads no certificate authority files: resolving a
+    /// name is itself a way to send data out.
+    #[test]
+    fn denied_network_reaches_no_resolver_service_or_socket() {
+        for network in [
+            IpNetworkAccess::Denied,
+            IpNetworkAccess::Connect(Vec::new()),
+        ] {
+            let policy = policy(subtrees(&[]), subtrees(&[]), &[], network);
+            for absent in [
+                "mDNSResponder",
+                "(allow mach-lookup",
+                "system-socket",
+                "network-outbound",
+                "/private/etc/ssl",
+            ] {
+                assert!(!policy.contains(absent), "{absent}: {policy}");
+            }
+        }
+    }
 }

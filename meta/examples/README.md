@@ -18,9 +18,10 @@ Numbered packs are intentionally browser-first and can include:
 - `004-mdm-console-pack`
 - `005-access-control-pack`
 
-One example is a host program and not a browser pack:
+Two examples are host programs and not browser packs:
 
 - `006-long-term-agents` (Python and TypeScript; no console, no provider key)
+- `009-mob-announcements` (Python and TypeScript; no console; a provider key for the steps in which agents run)
 
 ## Prerequisites
 
@@ -104,4 +105,11 @@ builds the gateway unless `META_GATEWAY_BIN` names one):
 
 ```bash
 ./006-long-term-agents/examples.sh
+```
+
+Run the mob announcements example (Python and TypeScript, twice each on one
+state directory; with `OPENAI_API_KEY` set it also runs the agents):
+
+```bash
+./009-mob-announcements/examples.sh
 ```

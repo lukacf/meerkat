@@ -370,6 +370,13 @@ struct TestState {
     /// the server's path, answers with this status and no document, in
     /// place of `404`.
     origin_root_resource_answer: Mutex<Option<StatusCode>>,
+    /// The `401` of the location under the endpoint path carries a
+    /// challenge that names resource metadata.
+    endpoint_path_challenge_names_resource_metadata: AtomicBool,
+    /// The origin-root location without the server's path serves a
+    /// protected resource metadata document that names this authorization
+    /// server.
+    origin_root_resource_authorization_server: Mutex<Option<String>>,
     /// The server publishes no authorization-server metadata: the RFC 8414
     /// and the OpenID Connect discovery documents are both absent.
     authorization_metadata_absent: AtomicBool,
@@ -702,10 +709,44 @@ fn documentless_answer(status: Option<StatusCode>) -> axum::response::Response {
 }
 
 async fn endpoint_path_resource(State(state): State<Arc<TestState>>) -> axum::response::Response {
-    documentless_answer(*state.endpoint_path_resource_answer.lock())
+    let answer = *state.endpoint_path_resource_answer.lock();
+    if answer == Some(StatusCode::UNAUTHORIZED)
+        && state
+            .endpoint_path_challenge_names_resource_metadata
+            .load(Ordering::SeqCst)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "www-authenticate",
+                r#"Bearer error="invalid_token", resource_metadata="/guarded/resource-metadata""#,
+            )],
+            "",
+        )
+            .into_response();
+    }
+    documentless_answer(answer)
 }
 
-async fn origin_root_resource(State(state): State<Arc<TestState>>) -> axum::response::Response {
+async fn origin_root_resource(
+    State(state): State<Arc<TestState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(authorization_server) = state
+        .origin_root_resource_authorization_server
+        .lock()
+        .clone()
+    {
+        let host = headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        return Json(serde_json::json!({
+            "resource": format!("http://{host}/mcp"),
+            "authorization_servers": [authorization_server],
+        }))
+        .into_response();
+    }
     documentless_answer(*state.origin_root_resource_answer.lock())
 }
 
@@ -11890,4 +11931,130 @@ async fn an_origin_root_metadata_location_that_demands_authorization_is_not_abse
             assert!(state.registration_requests.lock().is_empty());
         }
     }
+}
+
+/// A `401` under the endpoint path whose own challenge names resource
+/// metadata is the server saying it publishes a document: it is not absent,
+/// whether or not the caller passed the endpoint's challenge on. The login
+/// is refused as before and the server's own origin metadata is not read.
+#[tokio::test]
+async fn an_endpoint_path_401_whose_challenge_names_resource_metadata_is_not_absent() {
+    for challenge in [None, Some(CHALLENGE_WITHOUT_RESOURCE_METADATA)] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+        state
+            .endpoint_path_challenge_names_resource_metadata
+            .store(true, Ordering::SeqCst);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "guarded-document");
+
+        let refused = authority
+            .login_start(&target, SPLIT_REDIRECT, challenge)
+            .await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the resource metadata refusal, got {refused:?}");
+        };
+        assert_eq!(reason, "no oauth-protected-resource metadata found");
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(!asked_for(
+            &state,
+            "/.well-known/oauth-authorization-server"
+        ));
+        assert!(!asked_for(&state, "/guarded/resource-metadata"));
+        assert!(authority.pending_attempt(&target).unwrap().is_none());
+        assert!(state.registration_requests.lock().is_empty());
+        assert!(!asked_for(&state, "/authorize"));
+    }
+}
+
+/// A later location that serves the document is followed although the
+/// location under the endpoint path answers its guard's `401`: the
+/// authorization server that document names is used, and the server's own
+/// origin metadata is not read.
+#[tokio::test]
+async fn a_document_at_the_origin_root_is_followed_past_a_guarded_endpoint_path() {
+    let (resource_base, resource_state) = spawn_oauth_fixture().await;
+    let (issuer_base, issuer_state) = spawn_oauth_fixture().await;
+    resource_state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *resource_state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+    *resource_state
+        .origin_root_resource_authorization_server
+        .lock() = Some(issuer_base.clone());
+    let authority = split_authority(&issuer_state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&resource_base, "root-document");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the document at the origin root names the authorization server");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{issuer_base}/authorize?")),
+        "the authorization server the document names is used"
+    );
+    let paths = resource_state.request_paths.lock().clone();
+    let guarded = paths
+        .iter()
+        .position(|path| path == ENDPOINT_PATH_RESOURCE_METADATA)
+        .expect("the location under the endpoint path is asked");
+    let root = paths
+        .iter()
+        .position(|path| path == ORIGIN_ROOT_RESOURCE_METADATA)
+        .expect("the origin-root location is asked");
+    assert!(guarded < root, "{paths:?}");
+    assert!(!asked_for(
+        &resource_state,
+        "/.well-known/oauth-authorization-server"
+    ));
+    assert_eq!(issuer_state.registration_requests.lock().len(), 1);
+}
+
+/// When two locations serve different documents the earlier location wins:
+/// the origin-root URL with the server's path inserted is asked first, and
+/// a later location is not asked once it serves a document.
+#[tokio::test]
+async fn the_earlier_of_two_locations_that_serve_a_document_is_followed() {
+    let (resource_base, resource_state) = spawn_oauth_fixture().await;
+    let (other_base, other_state) = spawn_oauth_fixture().await;
+    *resource_state
+        .origin_root_resource_authorization_server
+        .lock() = Some(other_base.clone());
+    let authority = split_authority(&resource_state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&resource_base, "two-documents");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the first location's document names the authorization server");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{resource_base}/authorize?")),
+        "the earlier location's document is the one followed"
+    );
+    assert!(asked_for(
+        &resource_state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(!asked_for(&resource_state, ENDPOINT_PATH_RESOURCE_METADATA));
+    assert!(!asked_for(&resource_state, ORIGIN_ROOT_RESOURCE_METADATA));
+    assert!(other_state.registration_requests.lock().is_empty());
+    assert!(other_state.request_paths.lock().is_empty());
 }

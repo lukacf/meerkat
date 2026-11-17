@@ -101,16 +101,35 @@ self-hosted models, and 0.9.17 adds `gpt-6.2-astra` and `gpt-6.2-sol` to the
 catalog. A realm or project configuration, or a mob definition, that has
 `[models."gpt-6.2-astra"]` or `[models."gpt-6.2-sol"]` (quoted, as the ids
 contain dots) is refused with
-`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
-a configuration by configuration validation, a mob definition when one of
-its members is built. You have such an entry if you ran one of the models
-before the catalog listed it. (Read from the source, not run on 0.9.17. On
-the published 0.9.16, in one run each: `gpt-6.2-sol` ran with such an
-entry, and `rkat config patch` refused an entry for an id its catalog
-lists, `gpt-6.1-sol`, with this message.)
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`.
+You have such an entry if you ran one of the models before the catalog
+listed it (on the published 0.9.16 `gpt-6.2-sol` ran with one).
 
-**Do:** remove the entry. The catalog row then serves the model with its own
-limits and reasoning effort levels (see [Providers](/concepts/providers)).
+The refusal comes when the configuration is loaded, not when the model is
+first used, so the server does not start on a realm that holds the entry:
+`rkat-rpc` ends with exit code 1 before it serves anything, its error line
+is
+`rkat-rpc: invalid runtime config: Validation error: model id 'gpt-6.2-sol' must be unique across built-in, custom, and self-hosted entries`,
+and an SDK's connect reports `rkat-rpc process closed`, so no
+configuration call reaches that server. (Run on an `rkat-rpc` built from
+the commit that adds the two models, on a realm that the published 0.9.16
+`rkat-rpc` had written with a `[models."gpt-6.2-sol"]` entry. `rkat`, the
+REST server and a Meta gateway were not run. A mob definition's entry is
+refused when one of the mob's members is built: read from the source,
+not run.)
+
+**Do:** remove the entry, in one of the two ways that were run:
+
+- Before the upgrade, on 0.9.16: JSON-RPC `config/patch` with the patch
+  `{"models": {"gpt-6.2-sol": null}}` removes the one key.
+- After the upgrade: delete the `[models."gpt-6.2-sol"]` table from the
+  realm's `config.toml` (in the run,
+  `~/.local/share/meerkat/realms/<realm>/config.toml`).
+
+After either, the new `rkat-rpc` started on that realm and a turn on
+`gpt-6.2-sol` answered, served by the catalog row with its own limits and
+reasoning effort levels (see [Providers](/concepts/providers)).
+
 After going back to 0.9.16 the catalog has no such row again: there
 `--model gpt-6.2-sol` is refused (`cannot infer provider from model
 'gpt-6.2-sol'`, or, with the provider named, `model 'openai:gpt-6.2-sol' is

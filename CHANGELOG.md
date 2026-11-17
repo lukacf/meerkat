@@ -644,12 +644,23 @@ them.
   not `shell` no longer admits the monitor. The rule goes by the tool's
   name: a host's or an MCP server's tool exposed as `monitor_start` is
   bound to `shell` in the same way, and where shell is on with durable
-  stores the built-in tool takes the name.
+  stores the built-in tool takes the name (the built-in is on only where
+  the build also has a realm id and a job delivery projector). (These
+  notes on `monitor_start`. Shown by tests: that a deny, an access policy,
+  a filter, a block list or a grant gate on `shell` closes it; what a live
+  session with shell is offered; which recorded monitors are run again; an
+  operator's monitor on a session that may not start one. Read from the
+  source: the guards that go by the tool's name, and going back to an
+  earlier release, read at 0.9.15.)
 - A pre-tool hook or a host's dispatch admission that refuses or inspects
   `shell` calls by the tool's name does not take a `monitor_start` call for
   one, and nothing in Meerkat can teach it the name: add `monitor_start` to
   such a guard, or deny the tool. A governed application tool policy admits
   only the tools it names, so it refuses `monitor_start` until it names it.
+  A tool permission rule is such a guard: a rule that refuses `shell` by
+  name does not refuse a `monitor_start` call, and a rule that permits
+  `shell` by name does not permit it. A monitor's command does pass the
+  `[shell]` section's command rules when it is started.
 - A live session of an agent with shell is offered `monitor_start` from its
   next build. Its stored session and its stored system prompt are not
   rewritten; the tool list sent to the provider gains one definition.
@@ -689,7 +700,9 @@ them.
   files out of the mob directory, and read `rkat mob inspect <pack>`
   before a pack leaves your machine.
 
-- No host setting bounds a monitor's notification rate below the hard caps:
+- No host setting bounds a monitor's notification rate below the hard caps
+  (at most 1000 notifications per window, a window of 1 second to 24
+  hours, 1048576 bytes per line):
   a monitor with event delivery starts turns of its own session at a rate
   the model chooses. `deny` is the control.
 - The host's own monitor route is not bound by a member's deny: an
@@ -706,6 +719,12 @@ them.
   job's id cancels one. Cancel before the restart that brings the deny:
   after a restart, the host's cancel of a lost resumable monitor starts it
   once more before it cancels it.
+
+- A `[shell]` command rule that was tightened after a monitor was started
+  does not stop that monitor's re-run after a restart: the recorded
+  command is started again with no new check of the rules, as in earlier
+  releases. A deny, a grant gate, a read-only profile or a tool filter
+  does stop the re-run. Read from the source.
 
 ## [0.9.16] - 2026-11-16
 

@@ -78,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart, and the grant that opens `shell` opens it, for as long as that
   grant is in force. A member whose
   `shell` is closed by name is therefore not offered the monitor by the
-  upgrade.
+  upgrade. (Shown by tests on a gateway for the grant gate and for a
+  resumed member whose profile denies `shell`; the other closures by the
+  Meerkat tests named in its changelog.)
 - An operator's monitor on a member that may not start one: in earlier
   releases the member's next shell job call resumed an operator's lost
   resumable monitor after a gateway restart. Now it does not, and the

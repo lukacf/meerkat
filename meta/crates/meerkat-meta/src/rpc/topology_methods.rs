@@ -122,7 +122,7 @@ fn project_node_affordances(
             editable
                 && view
                     .filter(|view| view.enforced())
-                    .is_none_or(|view| view.allows_agent(action, identity))
+                    .is_none_or(|view| view.allows_name(action, identity))
         };
         node.affordances = Some(TopologyNodeAffordances {
             can_connect: allowed(crate::access::ACTION_TOPOLOGY_CONNECT),
@@ -246,9 +246,9 @@ pub(crate) async fn handle_operation(
                     [&result.edge.a, &result.edge.b]
                         .into_iter()
                         .all(|endpoint| {
-                            view.can_view_agent(endpoint.identity.as_str())
+                            view.can_view_name(endpoint.identity.as_str())
                                 && view
-                                    .allows_agent(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
+                                    .allows_name(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
                         })
                 });
                 if !visible {
@@ -317,9 +317,9 @@ pub(crate) async fn handle_audit(
                 [&operation.edge.a, &operation.edge.b]
                     .into_iter()
                     .all(|endpoint| {
-                        view.can_view_agent(endpoint.identity.as_str())
-                            && view.allows_agent(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
-                            && view.allows_agent(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
+                        view.can_view_name(endpoint.identity.as_str())
+                            && view.allows_name(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
+                            && view.allows_name(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
                     })
             })
         });
@@ -380,7 +380,7 @@ fn authorize_operations(
     if operations.len() > 1 {
         for operation in operations {
             for endpoint in [&operation.edge.a, &operation.edge.b] {
-                if !view.allows_agent(ACTION_TOPOLOGY_BULK, endpoint.identity.as_str()) {
+                if !view.allows_name(ACTION_TOPOLOGY_BULK, endpoint.identity.as_str()) {
                     return Some(AccessViolation {
                         action: ACTION_TOPOLOGY_BULK,
                         resource: Some(endpoint.identity.clone()),
@@ -398,8 +398,8 @@ fn authorize_operations(
         .flatten()
         .any(|authority| !authority.is_empty() && authority != local_authority);
         for endpoint in [&operation.edge.a, &operation.edge.b] {
-            if !view.can_view_agent(endpoint.identity.as_str())
-                || !view.allows_agent(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
+            if !view.can_view_name(endpoint.identity.as_str())
+                || !view.allows_name(ACTION_TOPOLOGY_VIEW, endpoint.identity.as_str())
             {
                 return Some(AccessViolation {
                     action: ACTION_TOPOLOGY_VIEW,
@@ -407,7 +407,7 @@ fn authorize_operations(
                 });
             }
             if mutation
-                && !view.allows_agent(operation.action.access_action(), endpoint.identity.as_str())
+                && !view.allows_name(operation.action.access_action(), endpoint.identity.as_str())
             {
                 return Some(AccessViolation {
                     action: operation.action.access_action(),
@@ -415,7 +415,7 @@ fn authorize_operations(
                 });
             }
             if cross_authority
-                && !view.allows_agent(ACTION_TOPOLOGY_CROSS_AUTHORITY, endpoint.identity.as_str())
+                && !view.allows_name(ACTION_TOPOLOGY_CROSS_AUTHORITY, endpoint.identity.as_str())
             {
                 return Some(AccessViolation {
                     action: ACTION_TOPOLOGY_CROSS_AUTHORITY,
@@ -436,8 +436,8 @@ fn attribution_allowed_for_operations(
             [&operation.edge.a, &operation.edge.b]
                 .into_iter()
                 .all(|endpoint| {
-                    view.can_view_agent(endpoint.identity.as_str())
-                        && view.allows_agent(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
+                    view.can_view_name(endpoint.identity.as_str())
+                        && view.allows_name(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
                 })
         })
     })
@@ -452,8 +452,8 @@ fn attribution_allowed_for_results(
             [&result.edge.a, &result.edge.b]
                 .into_iter()
                 .all(|endpoint| {
-                    view.can_view_agent(endpoint.identity.as_str())
-                        && view.allows_agent(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
+                    view.can_view_name(endpoint.identity.as_str())
+                        && view.allows_name(ACTION_TOPOLOGY_AUDIT, endpoint.identity.as_str())
                 })
         })
     })
@@ -615,7 +615,7 @@ mod tests {
         for endpoint in [&operation.edge.a, &operation.edge.b] {
             let expected = endpoint.identity == "a";
             assert_eq!(
-                allowed.allows_agent(operation.action.access_action(), &endpoint.identity),
+                allowed.allows_name(operation.action.access_action(), &endpoint.identity),
                 expected
             );
         }

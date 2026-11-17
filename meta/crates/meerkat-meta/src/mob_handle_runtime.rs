@@ -2872,6 +2872,16 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     crate::member_comms_id::reserved_authority_label_refusal(key),
                 ));
             }
+            // Nor does an agent's spawn set a key of a member's row that is
+            // the Console's own: the row says those itself.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && let Some(key) = crate::console_spawn::console_row_label_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    crate::console_spawn::console_row_label_refusal(key),
+                ));
+            }
             let identity_runtime = self
                 .identity_runtime
                 .read()
@@ -3400,7 +3410,32 @@ impl AutoWireParentMobToolDispatcher {
             }
         }
         for seed in &seeds {
+            // An entry is of the one member its spawn seated. Before this
+            // spawn's is registered the mob's journal is read to its head,
+            // which ends what an earlier member of the name left there; the
+            // entry then notes the seat it was registered for.
+            let mob_id = seed
+                .mob_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|mob_id| !mob_id.is_empty());
+            let handle = match mob_id {
+                Some(mob_id) => {
+                    let handle = self
+                        .implicit_delegate_retirement_overrides
+                        .mob_handle(mob_id)
+                        .await;
+                    sink.settle_before_registering(mob_id, handle.as_ref())
+                        .await;
+                    handle
+                }
+                None => None,
+            };
             sink.project_spawned_member(seed).await;
+            if let Some(handle) = handle.as_ref() {
+                sink.note_registered_seat(handle, seed.identity.trim(), seed.member_id.trim())
+                    .await;
+            }
         }
     }
 
@@ -12723,15 +12758,80 @@ impl MobRuntime {
         }
     }
 
-    /// Console identity metadata registered by agent-tool spawns, keyed by
-    /// console identity. Empty when no console sink is installed.
-    pub(crate) async fn console_identity_labels(
-        &self,
-    ) -> BTreeMap<String, BTreeMap<String, String>> {
+    /// Console identity metadata registered by agent-tool spawns: the spawn
+    /// registry, each entry under its mob and console identity, settled
+    /// against the member lifecycle journal of each mob it holds an entry of
+    /// ([`Self::settled_spawn_registry`]). Empty when no console sink is
+    /// installed.
+    pub(crate) async fn console_identity_labels(&self) -> crate::console_spawn::SpawnRegistry {
         match self.console_spawn_sink() {
-            Some(sink) => sink.identity_labels_snapshot().await,
-            None => BTreeMap::new(),
+            Some(sink) => self.settled_spawn_registry(&sink).await,
+            None => crate::console_spawn::SpawnRegistry::default(),
         }
+    }
+
+    /// The registry of `sink` as a reader takes it: each mob it holds an
+    /// entry of is first settled against that mob's member lifecycle
+    /// journal ([`ConsoleSpawnSink::settle_with_journal`]), so an entry
+    /// registered for a member whose name was seated anew since is gone
+    /// before the reader meets the new member's row. A mob whose journal
+    /// could not be read is noted in the copy: its entries cannot be told
+    /// for this request. A mob this runtime finds no handle of is a mob it
+    /// reads no roster row of, and nothing takes its entries.
+    pub(crate) async fn settled_spawn_registry(
+        &self,
+        sink: &ConsoleSpawnSink,
+    ) -> crate::console_spawn::SpawnRegistry {
+        let mut unread = Vec::new();
+        let mobs = sink.spawn_registry_mobs().await;
+        if !mobs.is_empty() {
+            let own = self.handle();
+            let managed = match self.agent_mob_mcp_state() {
+                Some(state)
+                    if mobs
+                        .iter()
+                        .any(|mob_id| mob_id.as_str() != own.mob_id().as_str()) =>
+                {
+                    Box::pin(state.mob_handles_snapshot())
+                        .await
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            for mob_id in mobs {
+                let handle = if mob_id == own.mob_id().as_str() {
+                    Some(own.clone())
+                } else {
+                    managed
+                        .iter()
+                        .find(|(managed_id, _)| managed_id.as_str() == mob_id)
+                        .map(|(_, handle)| handle.clone())
+                };
+                if let Some(handle) = handle
+                    && sink.settle_with_journal(&handle).await.unread
+                {
+                    unread.push(mob_id);
+                }
+            }
+        }
+        let mut registry = sink.identity_labels_snapshot().await;
+        for mob_id in unread {
+            registry.note_unread_mob(&mob_id);
+        }
+        registry
+    }
+
+    /// The console identities of `earlier`, a copy of the registry a request
+    /// took before it read the roster, whose entry cannot be told now that
+    /// the roster is read: the registry is settled once more, and a name
+    /// seated anew by no rotation between the two has no entry any more.
+    /// What the request read of such a member may be either member's.
+    pub(crate) async fn spawn_entries_not_told(
+        &self,
+        earlier: &crate::console_spawn::SpawnRegistry,
+    ) -> BTreeSet<String> {
+        let now = self.console_identity_labels().await;
+        earlier.identities_not_told(&now)
     }
 
     pub(crate) fn implicit_delegate_retirement_overrides(
@@ -15071,6 +15171,167 @@ mod tests {
         assert!(
             matches!(passed, meerkat_core::ToolError::NotFound { .. }),
             "a spawn without a reserved label reaches the mob tools: {passed:?}"
+        );
+    }
+
+    /// The Console writes some keys of a member's row from its own facts
+    /// (the member's role, the mob it sits in, the host of an implicit
+    /// delegate, its group, whether it can be addressed) and reads the
+    /// host's marks from others (`console_watched`, `console_alert_level`,
+    /// `console_degraded`, `console_degraded_reason`, `singleton`).
+    /// An agent's spawn naming such a key among its labels is refused typed,
+    /// as invalid arguments naming the label, before the mob tools see it:
+    /// in the call's own labels or an entry's, on each spawn tool the
+    /// wrapper serves. A spawn with a display name only reaches them.
+    #[tokio::test]
+    async fn an_agent_spawn_naming_a_key_the_row_writes_itself_is_refused_typed() {
+        use meerkat_core::AgentToolDispatcher as _;
+        let dispatcher = wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default());
+        let refused_spawns = [
+            (
+                "mob_spawn_member",
+                "role",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-1",
+                    "labels": { "role": "delegate" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "source_mob_id",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [{
+                        "profile": "worker",
+                        "member_id": "worker-2",
+                        "labels": { "source_mob_id": "another-mob" },
+                    }],
+                }),
+            ),
+            (
+                "delegate",
+                "delegate_host_identity",
+                serde_json::json!({
+                    "member_id": "worker-3",
+                    "task": "look",
+                    "labels": { "delegate_host_identity": "another-host" },
+                }),
+            ),
+            (
+                "fork_off",
+                "addressable",
+                serde_json::json!({
+                    "member_id": "worker-4",
+                    "members": [{ "labels": { "addressable": "false" } }],
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "group",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-6",
+                    "labels": { "group": "workers" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "console_watched",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-7",
+                    "labels": { "console_watched": "true" },
+                }),
+            ),
+            (
+                "delegate",
+                "console_alert_level",
+                serde_json::json!({
+                    "member_id": "worker-8",
+                    "task": "look",
+                    "labels": { "console_alert_level": "critical" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "console_degraded",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [{
+                        "profile": "worker",
+                        "member_id": "worker-9",
+                        "labels": { "console_degraded": "true" },
+                    }],
+                }),
+            ),
+            (
+                "fork_off",
+                "console_degraded_reason",
+                serde_json::json!({
+                    "member_id": "worker-10",
+                    "labels": { "console_degraded_reason": "a reason" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "singleton",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-11",
+                    "labels": { "singleton": "true" },
+                }),
+            ),
+        ];
+        for (tool, label, args) in refused_spawns {
+            let args =
+                serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+            let refused = dispatcher
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "spawn-row-key",
+                        name: tool,
+                        args: &args,
+                    },
+                    &meerkat_core::ToolDispatchContext::default(),
+                )
+                .await
+                .expect_err("a key the row writes itself is refused");
+            assert!(
+                matches!(&refused, meerkat_core::ToolError::InvalidArguments { name, reason }
+                    if name == tool && reason.contains(label)),
+                "{tool} meets the refusal typed, naming {label}: {refused:?}"
+            );
+        }
+
+        let display = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "mob_id": "child",
+                "profile": "worker",
+                "member_id": "worker-5",
+                "labels": { "display_name": "Worker 5" },
+            })
+            .to_string(),
+        )
+        .expect("raw args");
+        let passed = dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "spawn-display",
+                    name: "mob_spawn_member",
+                    args: &display,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+            )
+            .await
+            .expect_err("the empty mob tools know no tool");
+        assert!(
+            matches!(passed, meerkat_core::ToolError::NotFound { .. }),
+            "a spawn with a display name reaches the mob tools: {passed:?}"
         );
     }
 
@@ -25206,7 +25467,7 @@ image_generation = true
                     "profile": "person-worker",
                     "member_id": "worker-3",
                     "initial_message": "Find the person",
-                    "labels": { "group": "workers" }
+                    "labels": { "team": "workers" }
                 }),
             )
             .await;
@@ -25218,10 +25479,10 @@ image_generation = true
             );
 
             let labels = store
-                .identity_labels("worker-3")
+                .identity_labels("ops", "worker-3")
                 .await
                 .expect("spawn registers console identity labels");
-            assert_eq!(labels.get("group").map(String::as_str), Some("workers"));
+            assert_eq!(labels.get("team").map(String::as_str), Some("workers"));
             assert_eq!(
                 labels.get("spawned_by").map(String::as_str),
                 Some("ops-lead")
@@ -25374,7 +25635,7 @@ image_generation = true
                 kickoff_events(&store).await.is_empty(),
                 "failed spawns must not seed console chats"
             );
-            assert!(store.identity_labels("worker-3").await.is_none());
+            assert!(store.identity_labels("ops", "worker-3").await.is_none());
         }
     }
 

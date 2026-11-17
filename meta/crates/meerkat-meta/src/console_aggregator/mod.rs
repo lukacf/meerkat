@@ -636,12 +636,20 @@ async fn capture_member_lineage(
 /// One captured lineage link, in the namespace the access attribute cache
 /// uses for the same member (identity, runtime member id and the lineage
 /// parent labels, `spawned_by` and `side_chat_of`, are namespaced alike).
+///
+/// The labels are the member's own. The record carries the member's role in
+/// its mob under `role`, where a label of that name would sit: a member
+/// that carries such a label (`own_role_label`) is captured with its own.
 fn lineage_link_for_record(
     record: &ConsoleIdentityRecord,
     namespace: &str,
     role: &str,
+    own_role_label: Option<&str>,
 ) -> ConsoleFrameLineageLink {
     let mut labels = record.labels.clone();
+    if let Some(own) = own_role_label {
+        labels.insert("role".to_string(), own.to_string());
+    }
     for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
         if let Some(parent) = labels.get_mut(key) {
             *parent = apply_namespace(parent, namespace);
@@ -668,6 +676,7 @@ fn retain_member_provenance(
         record,
         namespace,
         resolved.member.role.as_str(),
+        resolved.member.labels.get("role").map(String::as_str),
     )];
     if let Some(parent) = crate::console_spawn::lineage_parent(&record.labels) {
         lineage.push(ConsoleFrameLineageLink {
@@ -1938,16 +1947,30 @@ impl MetaConsoleAggregator {
             .collect::<Vec<_>>();
         let mut registered = vec![None; identities.len()];
         for entry in entries {
-            let registry = entry.console_events.identity_labels_snapshot().await;
+            let registry = entry
+                .runtime
+                .settled_spawn_registry(&crate::console_spawn::ConsoleSpawnSink::new(
+                    entry.console_events.clone(),
+                ))
+                .await;
+            let own_mob = entry.runtime.handle().mob_id().to_string();
             for (index, record) in identities
                 .iter()
                 .enumerate()
                 .filter(|(_, record)| record.runtime_key == entry.runtime_key)
             {
+                // The record's mob: a sub-mob member's record names it
+                // (`identity_record_for_resolved_member`), and every other
+                // record is of the runtime's own mob.
+                let record_mob = record
+                    .labels
+                    .get("source_mob_id")
+                    .map(String::as_str)
+                    .unwrap_or(own_mob.as_str());
                 registered[index] =
                     namespace_match_candidates(&record.identity, &entry.identity_namespace)
                         .iter()
-                        .find_map(|candidate| registry.get(candidate))
+                        .find_map(|candidate| registry.labels_of_row(record_mob, candidate))
                         .cloned();
             }
         }
@@ -10522,7 +10545,10 @@ pub(crate) fn timeline_frame_visible_to(
         if runtime_plane_record_text(frame) {
             return view.can_view_uncaptured_member(&frame.identity);
         }
-        return view.can_view_agent(&frame.identity);
+        // A runtime-plane identity is a reserved name of the console's
+        // own records and no agent: the access records never hold it, and
+        // the name alone decides it.
+        return view.can_view_name(&frame.identity);
     }
     match frame
         .source
@@ -10838,9 +10864,11 @@ async fn identity_record_for_member(
         .await
         .map(|sid| sid.to_string());
     let mut labels = member.labels.clone();
-    labels
-        .entry("role".to_string())
-        .or_insert_with(|| member.role.to_string());
+    // The record's `role` is the member's role in its mob, which only its
+    // roster row says. A label named `role` that the member carries (its
+    // spawn chose it) never stands in its place: the identity list and the
+    // rules on a role read this value.
+    labels.insert("role".to_string(), member.role.to_string());
     // Spawn-time console metadata (group/display labels, spawned_by lineage)
     // registered by the agent-tool spawn path fills gaps the roster does not
     // carry; roster labels win on conflict — except lineage, which only the
@@ -10848,8 +10876,24 @@ async fn identity_record_for_member(
     // attribute priming), and a side chat's source, which only Meerkat's
     // fork record asserts.
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-    if let Some(registered) = entry.console_events.identity_labels(durable_identity).await {
-        crate::console_spawn::merge_registered_labels(&mut labels, &registered);
+    // The member is in hand: what a spawn registered is this incarnation's,
+    // or cannot be told, and then no record of the member is made.
+    match crate::console_spawn::ConsoleSpawnSink::new(entry.console_events.clone())
+        .labels_of_seated_row(
+            handle,
+            durable_identity,
+            member.agent_identity.as_str(),
+            member
+                .binding_atoms()
+                .map(|(runtime_id, _)| runtime_id.generation.get()),
+        )
+        .await
+    {
+        Ok(Some(registered)) => {
+            crate::console_spawn::merge_registered_labels(&mut labels, &registered);
+        }
+        Ok(None) => {}
+        Err(crate::console_spawn::SpawnEntryNotTold) => return None,
     }
     // A side chat's source, as the roster's fork facts verify it, kept per
     // incarnation by the runtime: a read lists the fork facts at most once,
@@ -10905,11 +10949,17 @@ async fn identity_record_for_resolved_member(
 ) -> Option<ConsoleIdentityRecord> {
     let mut record =
         identity_record_for_member(&resolved.entry, &resolved.handle, &resolved.member).await?;
-    if *resolved.entry.runtime.handle().mob_id() != resolved.source_mob_id {
+    // The record says which mob its member is of, and only this says it: a
+    // sub-mob member's record names its mob, whatever its roster labels
+    // hold, and a record of the runtime's own mob names none. The spawn
+    // registry's entry of a record is found by it
+    // (`spawn_registry_labels_for_identities`).
+    if *resolved.entry.runtime.handle().mob_id() == resolved.source_mob_id {
+        record.labels.remove("source_mob_id");
+    } else {
         record
             .labels
-            .entry("source_mob_id".to_string())
-            .or_insert_with(|| resolved.source_mob_id.clone());
+            .insert("source_mob_id".to_string(), resolved.source_mob_id.clone());
     }
     Some(record)
 }
@@ -10956,6 +11006,10 @@ fn identity_record_for_status(
     // access decisions while the identity has no live member.
     let mut labels = status.labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
+    // Nor does a declaration say which mob the record is of: a record made
+    // from a status is of its runtime's own mob, and a record of that mob
+    // names none (`identity_record_for_resolved_member`).
+    labels.remove("source_mob_id");
     // The record's role is the identity's profile, as the record of a
     // live member carries the member's role: a rule that names a role
     // decides both. A `role` the declaration names stays.
@@ -18053,6 +18107,34 @@ comms = true
         runtime.shutdown().await;
     }
 
+    /// A record names a mob only when its member sits in a mob other than
+    /// its runtime's own (`identity_record_for_resolved_member`), and a
+    /// record made from an identity's status is of the runtime's own mob. A
+    /// declared `source_mob_id` label says nothing of that: the record keeps
+    /// every other declared label and names no mob.
+    #[tokio::test]
+    async fn a_status_record_names_no_declared_mob() {
+        let runtime = build_empty_runtime("status-record-mob").await;
+        let entry = runtime_entry_for_test("runtime-a", &runtime);
+        let status: crate::identity_first::IdentityStatus = serde_json::from_value(json!({
+            "identity": "domain:declared",
+            "state": "dormant",
+            "addressability": "addressable",
+            "labels": {
+                "team": "review",
+                "source_mob_id": "another-mob",
+            },
+        }))
+        .expect("a declared identity's status");
+        let record = identity_record_for_status(&entry, &status);
+        assert_eq!(
+            record.labels,
+            BTreeMap::from([("team".to_string(), "review".to_string())]),
+            "the record keeps the declared labels and names no mob"
+        );
+        runtime.shutdown().await;
+    }
+
     /// A provenance captured before lineage was holds the member's record
     /// only. Side chats came after lineage capture, so a `side_chat_of` label
     /// on such a record is an ordinary label: it names no parent and makes no
@@ -23485,7 +23567,7 @@ comms = true
             member_id: "worker-3".to_string(),
             identity: "worker-3".to_string(),
             initial_message: Some(json!("Kick off the person hunt")),
-            labels: BTreeMap::from([("group".to_string(), "workers".to_string())]),
+            labels: BTreeMap::from([("team".to_string(), "workers".to_string())]),
             spawned_by: Some("ops-lead".to_string()),
             spawned_by_session: None,
             session_id: Some(member_session),
@@ -23559,7 +23641,8 @@ comms = true
         assert_eq!(live_frame.identity, "test/worker-3");
 
         // The identity list must carry the registered spawn labels so the
-        // sidebar can group the member and ABAC can see its lineage.
+        // console shows them and ABAC can see its lineage. (A `group` label
+        // is the Console's own and no spawn sets it.)
         let identities = aggregator
             .list_identities_fresh()
             .await
@@ -23571,7 +23654,7 @@ comms = true
                 panic!("spawned member missing from identity list: {identities:#?}")
             });
         assert_eq!(
-            record.labels.get("group").map(String::as_str),
+            record.labels.get("team").map(String::as_str),
             Some("workers")
         );
         assert_eq!(

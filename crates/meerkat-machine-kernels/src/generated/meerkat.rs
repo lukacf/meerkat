@@ -17254,6 +17254,7 @@ pub mod inputs {
     pub struct ClassifyRecoveredInputDurability {
         pub input_id: String,
         pub durability: InputDurabilityKind,
+        pub pending_terminal_carrier: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveInputPublicLifecycle {
@@ -24380,6 +24381,12 @@ pub enum TransitionId {
     ClassifyRecoveredInputDurabilityDiscardEphemeralRunning,
     ClassifyRecoveredInputDurabilityDiscardEphemeralRetired,
     ClassifyRecoveredInputDurabilityDiscardEphemeralStopped,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped,
     ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing,
     ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle,
     ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached,

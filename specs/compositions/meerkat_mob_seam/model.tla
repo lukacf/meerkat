@@ -24459,15 +24459,17 @@ meerkat_NormalizeRecoveredInputQueuedStopped(arg_input_id, arg_phase, arg_applie
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Initializing"
        /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = FALSE)
        /\ meerkat_phase' = "Initializing"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -24480,15 +24482,17 @@ meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(arg_input_i
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
        /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = FALSE)
        /\ meerkat_phase' = "Idle"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -24501,15 +24505,17 @@ meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(arg_input_id, arg_d
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
        /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = FALSE)
        /\ meerkat_phase' = "Attached"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -24522,15 +24528,17 @@ meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(arg_input_id, a
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = FALSE)
        /\ meerkat_phase' = "Running"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -24543,15 +24551,17 @@ meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(arg_input_id, ar
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Retired"
        /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = FALSE)
        /\ meerkat_phase' = "Retired"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -24564,15 +24574,17 @@ meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(arg_input_id, ar
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Stopped"
        /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = FALSE)
        /\ meerkat_phase' = "Stopped"
        /\ UnchangedFrame_728f09b58e7c3af6
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -24585,12 +24597,151 @@ meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(arg_input_id, ar
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = TRUE)
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecoveredInputDurabilityClassified", payload |-> [disposition |-> "Retain", input_id |-> packet.payload.input_id], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ClassifyRecoveredInputDurability"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = TRUE)
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecoveredInputDurabilityClassified", payload |-> [disposition |-> "Retain", input_id |-> packet.payload.input_id], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ClassifyRecoveredInputDurability"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = TRUE)
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecoveredInputDurabilityClassified", payload |-> [disposition |-> "Retain", input_id |-> packet.payload.input_id], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ClassifyRecoveredInputDurability"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = TRUE)
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecoveredInputDurabilityClassified", payload |-> [disposition |-> "Retain", input_id |-> packet.payload.input_id], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ClassifyRecoveredInputDurability"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = TRUE)
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecoveredInputDurabilityClassified", payload |-> [disposition |-> "Retain", input_id |-> packet.payload.input_id], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ClassifyRecoveredInputDurability"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (packet.payload.durability = "Ephemeral")
+       /\ (packet.payload.pending_terminal_carrier = TRUE)
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_728f09b58e7c3af6
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RecoveredInputDurabilityClassified", payload |-> [disposition |-> "Retain", input_id |-> packet.payload.input_id], effect_id |-> (model_step_count + 1), source_transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ClassifyRecoveredInputDurability"
+       /\ packet.payload.input_id = arg_input_id
+       /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Initializing"
        /\ (IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing")))
@@ -24606,12 +24757,13 @@ meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializin
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
        /\ (IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing")))
@@ -24627,12 +24779,13 @@ meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(arg_in
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
        /\ (IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing")))
@@ -24648,12 +24801,13 @@ meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(ar
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ (IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing")))
@@ -24669,12 +24823,13 @@ meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(arg
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Retired"
        /\ (IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing")))
@@ -24690,12 +24845,13 @@ meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(arg
        /\ model_step_count' = model_step_count + 1
 
 
-meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(arg_input_id, arg_durability) ==
+meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(arg_input_id, arg_durability, arg_pending_terminal_carrier) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "meerkat"
        /\ packet.variant = "ClassifyRecoveredInputDurability"
        /\ packet.payload.input_id = arg_input_id
        /\ packet.payload.durability = arg_durability
+       /\ packet.payload.pending_terminal_carrier = arg_pending_terminal_carrier
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Stopped"
        /\ (IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing")))
@@ -143487,12 +143643,18 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "NormalizeRecoveredInputLifecycle") /\ (meerkat_phase = "Running") /\ ((packet.payload.phase = "Queued"))
     \/ /\ (packet.variant = "NormalizeRecoveredInputLifecycle") /\ (meerkat_phase = "Retired") /\ ((packet.payload.phase = "Queued"))
     \/ /\ (packet.variant = "NormalizeRecoveredInputLifecycle") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.phase = "Queued"))
-    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Initializing") /\ ((packet.payload.durability = "Ephemeral"))
-    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Idle") /\ ((packet.payload.durability = "Ephemeral"))
-    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Attached") /\ ((packet.payload.durability = "Ephemeral"))
-    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Running") /\ ((packet.payload.durability = "Ephemeral"))
-    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Retired") /\ ((packet.payload.durability = "Ephemeral"))
-    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.durability = "Ephemeral"))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Initializing") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = FALSE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Idle") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = FALSE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Attached") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = FALSE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Running") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = FALSE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Retired") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = FALSE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = FALSE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Initializing") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = TRUE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Idle") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = TRUE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Attached") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = TRUE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Running") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = TRUE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Retired") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = TRUE))
+    \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.durability = "Ephemeral")) /\ ((packet.payload.pending_terminal_carrier = TRUE))
     \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Initializing") /\ ((IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing"))))
     \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Idle") /\ ((IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing"))))
     \/ /\ (packet.variant = "ClassifyRecoveredInputDurability") /\ (meerkat_phase = "Attached") /\ ((IF (packet.payload.durability = "Durable") THEN TRUE ELSE (IF (packet.payload.durability = "Derived") THEN TRUE ELSE (packet.payload.durability = "Missing"))))
@@ -149745,18 +149907,24 @@ CoreNext ==
     \/ \E arg_input_id \in StringValues : \E arg_phase \in RecoveredInputObservedPhaseValues : \E arg_applied_boundary_committed \in OptionBoolValues : \E arg_bound_run_resumable \in BOOLEAN : meerkat_NormalizeRecoveredInputQueuedRunning(arg_input_id, arg_phase, arg_applied_boundary_committed, arg_bound_run_resumable)
     \/ \E arg_input_id \in StringValues : \E arg_phase \in RecoveredInputObservedPhaseValues : \E arg_applied_boundary_committed \in OptionBoolValues : \E arg_bound_run_resumable \in BOOLEAN : meerkat_NormalizeRecoveredInputQueuedRetired(arg_input_id, arg_phase, arg_applied_boundary_committed, arg_bound_run_resumable)
     \/ \E arg_input_id \in StringValues : \E arg_phase \in RecoveredInputObservedPhaseValues : \E arg_applied_boundary_committed \in OptionBoolValues : \E arg_bound_run_resumable \in BOOLEAN : meerkat_NormalizeRecoveredInputQueuedStopped(arg_input_id, arg_phase, arg_applied_boundary_committed, arg_bound_run_resumable)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(arg_input_id, arg_durability)
-    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(arg_input_id, arg_durability)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(arg_input_id, arg_durability, FALSE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(arg_input_id, arg_durability, FALSE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(arg_input_id, arg_durability, FALSE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(arg_input_id, arg_durability, FALSE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(arg_input_id, arg_durability, FALSE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(arg_input_id, arg_durability, FALSE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing(arg_input_id, arg_durability, TRUE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle(arg_input_id, arg_durability, TRUE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached(arg_input_id, arg_durability, TRUE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning(arg_input_id, arg_durability, TRUE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired(arg_input_id, arg_durability, TRUE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : meerkat_ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped(arg_input_id, arg_durability, TRUE)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : \E arg_pending_terminal_carrier \in BOOLEAN : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(arg_input_id, arg_durability, arg_pending_terminal_carrier)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : \E arg_pending_terminal_carrier \in BOOLEAN : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(arg_input_id, arg_durability, arg_pending_terminal_carrier)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : \E arg_pending_terminal_carrier \in BOOLEAN : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(arg_input_id, arg_durability, arg_pending_terminal_carrier)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : \E arg_pending_terminal_carrier \in BOOLEAN : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(arg_input_id, arg_durability, arg_pending_terminal_carrier)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : \E arg_pending_terminal_carrier \in BOOLEAN : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(arg_input_id, arg_durability, arg_pending_terminal_carrier)
+    \/ \E arg_input_id \in StringValues : \E arg_durability \in InputDurabilityKindValues : \E arg_pending_terminal_carrier \in BOOLEAN : meerkat_ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(arg_input_id, arg_durability, arg_pending_terminal_carrier)
     \/ \E arg_batch_key \in StringValues : \E arg_directed_publication_pending \in BOOLEAN : meerkat_ClassifyRecoveredTerminalCompletionBatchRecoverInitializing(arg_batch_key, TRUE, TRUE, arg_directed_publication_pending)
     \/ \E arg_batch_key \in StringValues : \E arg_directed_publication_pending \in BOOLEAN : meerkat_ClassifyRecoveredTerminalCompletionBatchRecoverIdle(arg_batch_key, TRUE, TRUE, arg_directed_publication_pending)
     \/ \E arg_batch_key \in StringValues : \E arg_directed_publication_pending \in BOOLEAN : meerkat_ClassifyRecoveredTerminalCompletionBatchRecoverAttached(arg_batch_key, TRUE, TRUE, arg_directed_publication_pending)

@@ -35,6 +35,11 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-mob-pack`: new module `content_warnings`, the rules behind the
+  `rkat mob pack` report. Its six public items are named under Changed.
+
 ### Changed
 
 - `rkat`: `rkat mob pack` now reports on standard error how many files it

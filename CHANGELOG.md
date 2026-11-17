@@ -35,6 +35,10 @@ them.
 
 ## [Unreleased]
 
+### Security
+
+- Comms: when two different sources of trust in one peer were removed from a member at the same moment, the peer could stay trusted by that member until that member's runtime was rebuilt, and it was then listed among that member's peers even where it had been kept out of the directory. The two removals now settle in order: the peer's trust is removed, and with it the listing. Read from the source: an agent's own tools do not bring two such removals together on a member that stays seated (its mob's unwire and retirement lanes, a mob's destroy, a retirement that is re-driven, placed and dormant members), and on a placed member with an external binding that carries the supervisor's key the two removals do not run at the same time during an operator's supervisor rotation. Not read: that a session has exactly one comms drain task, every arm of the retirement's stage order, and how a key rotation reaches a live placed member to its end. 0.7.0 through 0.9.16.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

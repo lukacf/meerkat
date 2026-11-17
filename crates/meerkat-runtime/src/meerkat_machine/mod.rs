@@ -2461,6 +2461,20 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
     epoch_id: meerkat_core::RuntimeEpochId,
 }
 
+/// A run whose terminal commit landed and whose terminal work (the completion
+/// receipt of its inputs, or the publication of its interaction terminals)
+/// has stood unsettled for the run settlement notice. The session that holds
+/// it starts nothing further until the work is settled. An observation, read
+/// by [`MeerkatMachine::unsettled_run`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsettledRun {
+    /// The run whose terminal work is unsettled.
+    pub run_id: RunId,
+    /// How long the work has stood unsettled.
+    pub unsettled_for: std::time::Duration,
+}
+
 /// What a run-start hold (#1500) found when it took effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunStartsHold {
@@ -7266,6 +7280,21 @@ impl RuntimeSessionEntry {
         )
     }
 
+    /// Recompute this session's run settlement health from its input ledger.
+    ///
+    /// Nothing is latched and no state exists for this probe: the rows that
+    /// own a run's unsettled terminal work and their clocks live in the
+    /// driver's ledger, read with a non-blocking try. No runtime loop has to
+    /// be alive for it. See [`crate::run_progress::observe_run_settlement`]
+    /// for the predicate and the void condition.
+    fn run_settlement_health(
+        &self,
+        notice: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::run_progress::RunSettlementHealth {
+        crate::run_progress::observe_run_settlement(&self.driver, notice, now)
+    }
+
     fn generated_executor_registration_has_viable_attachment(&self) -> bool {
         self.generated_executor_registration_active()
             && match &self.attachment_slot {
@@ -7848,6 +7877,121 @@ impl MeerkatMachine {
             None
         } else {
             Some(parked)
+        }
+    }
+
+    /// How many registered sessions hold a run whose terminal work has stood
+    /// unsettled for `run_progress::RUN_SETTLEMENT_NOTICE`: the run's
+    /// terminal commit landed, and the completion receipt of its inputs (or,
+    /// for a directed run, the publication of its interaction terminals) did
+    /// not follow.
+    ///
+    /// Such a session starts nothing further: input it is handed is accepted
+    /// and never run. It is counted whether or not a runtime loop is alive
+    /// for it, because both shapes exist: a settling step that does not
+    /// return, and a settling step that failed so that the loop left with
+    /// the work unsettled and the registration kept. The census reads the
+    /// input rows that own the work, so neither shape needs the loop's
+    /// cooperation.
+    ///
+    /// Each session it counts is also named in an error line, with the run
+    /// and how long its work has stood unsettled: a session whose loop left
+    /// before this process started has no other reporter.
+    ///
+    /// `None` carries the same meaning and obligation as on its siblings: the
+    /// registry or a session's input ledger was not readable without
+    /// blocking, and nothing was positively unsettled, so a health caller
+    /// must publish the failed read rather than a zero nobody measured. The
+    /// per-entry miss propagates because a step that holds the session's
+    /// driver across a store write that does not return is one of the states
+    /// this exists to see. When some other session IS positively unsettled,
+    /// the observed fault wins and publishes.
+    ///
+    /// Not `async` on purpose, like its siblings: the one lock this touches
+    /// per session is a non-blocking try, so the signature proves the probe
+    /// cannot park behind the state it is trying to report.
+    pub fn unsettled_run_session_count(&self) -> Option<usize> {
+        self.unsettled_run_session_count_at(
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            chrono::Utc::now(),
+        )
+    }
+
+    /// [`Self::unsettled_run_session_count`] for a given notice bound and
+    /// clock reading.
+    fn unsettled_run_session_count_at(
+        &self,
+        notice: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<usize> {
+        let sessions = self.sessions.try_read().ok()?;
+        let mut unsettled = 0_usize;
+        let mut entry_unreadable = false;
+        for (session_id, entry) in sessions.iter() {
+            match entry.run_settlement_health(notice, now) {
+                crate::run_progress::RunSettlementHealth::Unsettled {
+                    run_id,
+                    unsettled_for,
+                } => {
+                    unsettled += 1;
+                    tracing::error!(
+                        %session_id,
+                        %run_id,
+                        unsettled_secs = unsettled_for.as_secs(),
+                        notice_secs = notice.as_secs(),
+                        "session holds a run whose terminal work is not settled; it starts \
+                         nothing further until it is"
+                    );
+                }
+                crate::run_progress::RunSettlementHealth::Unreadable => entry_unreadable = true,
+                crate::run_progress::RunSettlementHealth::Clear => {}
+            }
+        }
+        if unsettled == 0 && entry_unreadable {
+            None
+        } else {
+            Some(unsettled)
+        }
+    }
+
+    /// The run of `session_id` whose terminal work has stood unsettled for
+    /// `run_progress::RUN_SETTLEMENT_NOTICE`, if the session holds one: the
+    /// per-session form of [`Self::unsettled_run_session_count`], for an
+    /// owner that knows whose session this is and reports it under that
+    /// name.
+    ///
+    /// `None` when the session is not registered, holds no such run, or
+    /// could not be read without blocking. An observation only: nothing may
+    /// branch on it (see the void condition on
+    /// `run_progress::observe_run_settlement`).
+    ///
+    /// Not `async` on purpose, like the census.
+    pub fn unsettled_run(&self, session_id: &SessionId) -> Option<UnsettledRun> {
+        self.unsettled_run_at(
+            session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            chrono::Utc::now(),
+        )
+    }
+
+    /// [`Self::unsettled_run`] for a given notice bound and clock reading.
+    fn unsettled_run_at(
+        &self,
+        session_id: &SessionId,
+        notice: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<UnsettledRun> {
+        let sessions = self.sessions.try_read().ok()?;
+        match sessions.get(session_id)?.run_settlement_health(notice, now) {
+            crate::run_progress::RunSettlementHealth::Unsettled {
+                run_id,
+                unsettled_for,
+            } => Some(UnsettledRun {
+                run_id,
+                unsettled_for,
+            }),
+            crate::run_progress::RunSettlementHealth::Clear
+            | crate::run_progress::RunSettlementHealth::Unreadable => None,
         }
     }
 

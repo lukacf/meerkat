@@ -25322,8 +25322,10 @@ mod tests {
         use meerkat_core::SessionCheckpointer as _;
 
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        // The builder keeps the build's checkpointer alive, as a real agent
+        // does; the service holds it weakly.
         let service = PersistentSessionService::new(
-            DummyBuilder,
+            CheckpointerHoldingBuilder::new(DummyBuilder),
             4,
             Arc::new(MemoryStore::new()),
             runtime_store.clone(),

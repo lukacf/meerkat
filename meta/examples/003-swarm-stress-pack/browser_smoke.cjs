@@ -214,7 +214,6 @@ function ensureParams(agent) {
     agent_identity: agent.identity,
     labels: {
       display_name: agent.displayName,
-      role: agent.role,
       console_group: agent.title,
       group: agent.title,
       swarm_mob: agent.mob,

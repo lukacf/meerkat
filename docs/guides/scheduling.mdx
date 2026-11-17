@@ -357,6 +357,17 @@ agents to schedule fresh sessions sets
 configuration; the key is read when the host starts and is off by default.
 A schedule of this form stored earlier is not changed and fires as before.
 
+A session target that names another session by id (`exact_session` or
+`resumable_session` with a `session_id` that is not the writer's own) has the
+host send into that session when it fires. For an agent that is no mob
+member it is held the same way: the agent's schedule tools take a create,
+any update and the resume of such a schedule only when the agent's own
+session is built as the host builds one by default and nothing narrows its
+tools, or when the host sets the same key. Any other such agent's write is
+refused with the same code, and nothing is stored. An agent always schedules
+into its own session, by its id or by `current_session`, and a mob member's
+schedule into another session is answered by its wiring, as before.
+
 Example flow target:
 
 ```json

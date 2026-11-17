@@ -1532,10 +1532,11 @@ mod tests {
     }
 
     /// A model whose first request calls `meerkat_schedule_create` for a
-    /// schedule whose target is a session created on demand, and whose later
-    /// requests answer text. It keeps the last message of each later
-    /// request: what its tool call was answered.
+    /// schedule whose target is `target`, and whose later requests answer
+    /// text. It keeps the last message of each later request: what its tool
+    /// call was answered.
     struct SessionSchedulingLlmClient {
+        target: serde_json::Value,
         calls: std::sync::atomic::AtomicUsize,
         answers: std::sync::Mutex<Vec<String>>,
     }
@@ -1588,12 +1589,7 @@ mod tests {
                                 "due_at_utc":
                                     (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
                             },
-                            "target": {
-                                "target_kind": "session",
-                                "type": "materialize_on_demand_session",
-                                "create": { "model": "claude-sonnet-4-5" },
-                                "action": { "type": "prompt", "prompt": "Run the report." }
-                            }
+                            "target": self.target.clone(),
                         }),
                         meta: None,
                     }),
@@ -1680,6 +1676,12 @@ mod tests {
                 .expect("compose the RPC session runtime"),
             );
             let scripted = Arc::new(SessionSchedulingLlmClient {
+                target: serde_json::json!({
+                    "target_kind": "session",
+                    "type": "materialize_on_demand_session",
+                    "create": { "model": "claude-sonnet-4-5" },
+                    "action": { "type": "prompt", "prompt": "Run the report." }
+                }),
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 answers: std::sync::Mutex::new(Vec::new()),
             });
@@ -1762,6 +1764,147 @@ mod tests {
                         .expect("the schedules are read")
                         .is_empty(),
                     "the deleted schedule is listed no more"
+                );
+            }
+            runtime.try_shutdown().await.expect("the runtime stops");
+        }
+    }
+
+    /// On the RPC host with the factory `rkat-rpc` builds, through the
+    /// runtime a `session/create` and a `turn/start` reach: a session no
+    /// member holds, created with nothing said, is built as the host builds
+    /// one, and its model's schedule into another session of the host by
+    /// id is stored as before. A session created with the shell off (what
+    /// `enable_shell: false` on `session/create` sets) is not built so: its
+    /// schedule into another session is refused with the code of a schedule
+    /// that creates a session and nothing is stored, while its schedule
+    /// into its own session is stored as before.
+    #[tokio::test]
+    async fn a_session_created_without_the_shell_schedules_into_no_other_session_on_the_rpc_host() {
+        use meerkat_core::ToolCategoryOverride::{Disable, Inherit};
+
+        for (case, shell, into_another, stored) in [
+            (
+                "a session created with nothing said, into another session",
+                Inherit,
+                true,
+                1,
+            ),
+            (
+                "a session created with the shell off, into another session",
+                Disable,
+                true,
+                0,
+            ),
+            (
+                "a session created with the shell off, into its own session",
+                Disable,
+                false,
+                1,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                temp.path(),
+                "schedule-other-session-door",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("realm persistence");
+            let runtime = Arc::new(
+                SessionRuntime::new(
+                    meerkat::AgentFactory::new(temp.path().join("sessions"))
+                        .builtins(true)
+                        .shell(true)
+                        .schedule(true)
+                        .memory(true),
+                    meerkat_core::Config::default(),
+                    2,
+                    bundle,
+                    crate::router::NotificationSink::noop(),
+                )
+                .expect("compose the RPC session runtime"),
+            );
+            let scripted_client = |target: serde_json::Value| {
+                Arc::new(SessionSchedulingLlmClient {
+                    target,
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    answers: std::sync::Mutex::new(Vec::new()),
+                })
+            };
+            let idle: Arc<dyn meerkat_client::LlmClient> = scripted_client(serde_json::Value::Null);
+            runtime.set_default_llm_client(Some(Arc::clone(&idle)));
+            let mut others_build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+            others_build.llm_client_override = Some(idle);
+            let other = runtime
+                .create_session(others_build, None, None, Vec::new())
+                .await
+                .expect("the other session is created");
+
+            let action = serde_json::json!({ "type": "prompt", "prompt": "Run the report." });
+            let scripted = scripted_client(if into_another {
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "resumable_session",
+                    "session_id": other.to_string(),
+                    "action": action,
+                })
+            } else {
+                serde_json::json!({
+                    "target_kind": "session",
+                    "type": "current_session",
+                    "action": action,
+                })
+            });
+            let client: Arc<dyn meerkat_client::LlmClient> = scripted.clone();
+            let mut build = meerkat::AgentBuildConfig::new("claude-sonnet-4-5");
+            build.llm_client_override = Some(client);
+            build.override_shell = shell;
+            let id = runtime
+                .create_session(build, None, None, Vec::new())
+                .await
+                .expect("the session is created");
+            let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+            runtime
+                .start_turn_via_runtime(
+                    &id,
+                    "Schedule the report.".to_string().into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("the session's turn ends");
+            let schedules = runtime
+                .schedule_service()
+                .list()
+                .await
+                .expect("the schedules are read");
+            let answers = scripted.answers.lock().expect("the answers lock").clone();
+            assert_eq!(
+                schedules.len(),
+                stored,
+                "{case}: {schedules:?}; the tool call was answered {answers:?}"
+            );
+            assert_eq!(
+                answers
+                    .first()
+                    .is_some_and(|answer| answer.contains("schedule_session_creation_not_allowed")),
+                stored == 0,
+                "{case}: a writer is refused by the rule and by nothing else: {answers:?}"
+            );
+            if let Some(schedule) = schedules.first() {
+                let aimed_at = if into_another { &other } else { &id };
+                assert!(
+                    serde_json::to_string(&schedule.target)
+                        .expect("the target encodes")
+                        .contains(&aimed_at.to_string()),
+                    "{case}: the stored schedule names the session: {:?}",
+                    schedule.target
                 );
             }
             runtime.try_shutdown().await.expect("the runtime stops");

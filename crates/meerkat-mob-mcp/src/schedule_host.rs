@@ -117,7 +117,8 @@ impl MobMcpState {
     /// that has the host act in a mob (a helper to spawn, a flow) is
     /// accepted for a mob the writer may schedule in
     /// ([`Self::member_may_schedule_in_mob`]). A turn of a session no
-    /// member holds is not a member's write, and a target that names
+    /// member holds is not a member's write: the answer is that the writer
+    /// is no member, whatever the target. A member's target that names
     /// neither a member nor a mob (a host runnable, a session created on
     /// demand, any other identity) is not judged here.
     pub async fn judge_schedule_write(
@@ -125,10 +126,10 @@ impl MobMcpState {
         writer_session: &meerkat_core::types::SessionId,
         target: &meerkat::TargetBinding,
     ) -> meerkat::ScheduleWriteVerdict {
-        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
         let writer = match self.session_member_matches(writer_session).await {
             Ok(matches) => match matches.as_slice() {
-                [] => return Accepted,
+                [] => return NotAMember,
                 [writer] => (writer.mob_id.clone(), writer.identity.clone()),
                 _ => return Unavailable,
             },
@@ -267,7 +268,7 @@ impl meerkat::ScheduleWriteJudge for MobScheduleWriteJudge {
     ) -> meerkat::ScheduleWriteVerdict {
         match (self.state)() {
             JudgedMobState::Mobs(state) => state.judge_schedule_write(writer_session, target).await,
-            JudgedMobState::NoMobs => meerkat::ScheduleWriteVerdict::Accepted,
+            JudgedMobState::NoMobs => meerkat::ScheduleWriteVerdict::NotAMember,
             JudgedMobState::Stopped => meerkat::ScheduleWriteVerdict::Unavailable,
         }
     }
@@ -3419,10 +3420,11 @@ mod tests {
     /// for the member itself and for a member it is wired to, out of reach
     /// for a member it is not wired to, a member of another mob, a name no
     /// member holds, a mob the host does not hold and a session no member
-    /// holds. A turn of a session no member holds is not a member's write.
+    /// holds. A turn of a session no member holds is not a member's write:
+    /// the judge answers that the writer is no member, whatever the target.
     #[tokio::test]
     async fn a_members_schedule_write_is_judged_by_the_wiring_of_the_hosts_mobs() {
-        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
 
         let state = MobMcpState::new_in_memory();
         let ops = worker_mob(&state, "ops", &["anna", "boris", "carl"]).await;
@@ -3527,7 +3529,19 @@ mod tests {
                 "a writer no member is",
                 &nobodys,
                 send_to("ops", "carl"),
-                Accepted,
+                NotAMember,
+            ),
+            (
+                "a writer no member is, for a member's session",
+                &nobodys,
+                session_of(&carl),
+                NotAMember,
+            ),
+            (
+                "a writer no member is, for its own session",
+                &nobodys,
+                session_of(&nobodys),
+                NotAMember,
             ),
         ] {
             assert_eq!(
@@ -3556,7 +3570,7 @@ mod tests {
                 &send_to("ops", "carl")
             )
             .await,
-            Accepted,
+            NotAMember,
             "a host without mobs holds no member"
         );
         drop(state);
@@ -3599,7 +3613,7 @@ mod tests {
     /// is not a member's write.
     #[tokio::test]
     async fn a_members_schedule_that_acts_in_a_mob_is_judged_by_whose_mob_it_is() {
-        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach};
+        use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach};
 
         let state = MobMcpState::new_in_memory();
         let ops = worker_mob(&state, "ops", &["anna"]).await;
@@ -3618,7 +3632,7 @@ mod tests {
                 "elsewhere",
                 OutOfReach,
             ),
-            ("a writer no member is", &nobodys, "ops", Accepted),
+            ("a writer no member is", &nobodys, "ops", NotAMember),
         ] {
             for form in ["spawn_helper", "flow"] {
                 assert_eq!(

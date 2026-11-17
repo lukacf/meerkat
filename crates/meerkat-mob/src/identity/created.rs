@@ -437,7 +437,7 @@ pub enum IdentityEntered {
 /// first; recorded and shown. Whether an adoption from a roster spec wrote
 /// the row is read for two decisions: by an import of the row, and for the
 /// seat labels of the member such an adoption found
-/// ([`CreatedIdentityRecord::adopted_from_roster`]).
+/// (`CreatedIdentityRecord::adopted_from_roster`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]

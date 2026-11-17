@@ -921,7 +921,7 @@ impl AccessController {
     /// Refresh the cached resource attributes for one agent. The record is
     /// of the whole agent: its role, its labels and its spawner are known
     /// as given, and an earlier record of the agent with a field that was
-    /// not known ([`Self::record_ended_agent_attributes`]) ends with it.
+    /// not known (`Self::record_ended_agent_attributes`) ends with it.
     pub fn record_agent_attributes(&self, attributes: AgentResourceAttributes) {
         self.record_agent(CachedAgent::whole(attributes));
     }
@@ -1720,7 +1720,7 @@ impl AccessView {
     /// rule keyed on such a
     /// field is decided closed for that link, the agent's own or an
     /// ancestor's: a deny applies, an allow grants nothing
-    /// ([`AccessController::record_ended_agent_attributes`]).
+    /// (`AccessController::record_ended_agent_attributes`).
     ///
     /// An agent the attribute cache does not know ([`Self::knows_agent`])
     /// has no entry to match a rule against. It is refused, for every

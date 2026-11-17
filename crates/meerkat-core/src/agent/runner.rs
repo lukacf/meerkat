@@ -1226,7 +1226,7 @@ where
     ///
     /// The target's lease is acquired when absent; the previous credential's
     /// lease is left as it is (see
-    /// [`Self::stage_auth_lease_credential_identity`]).
+    /// `Self::stage_auth_lease_credential_identity`).
     pub fn rotate_auth_lease_auth_binding(
         &self,
         previous: Option<&crate::AuthBindingRef>,

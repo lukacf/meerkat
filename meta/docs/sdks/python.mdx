@@ -448,7 +448,8 @@ DispatchInput.scheduler("nightly sync")
 # A dispatch that is safe to repeat carries both keys.
 DispatchInput(
     content="event from slack", origin="connector",
-    idempotency_key="evt-1", correlation_id="msg-1",
+    idempotency_key="evt-1",
+    correlation_id="7c2d9a4b-3e18-4b7a-8f55-1a9e0c6b2d10",
 )
 ```
 
@@ -458,9 +459,8 @@ dispatch that carries one of the two without the other is refused with
 nothing delivered (`invalid delivery identity (... (half-pair))`).
 `DispatchInput.connector(text, correlation_id=...)` sets a correlation id
 and no key, so an input built that way is refused: build a keyed input with
-the full constructor, or pass both to `dispatch_text`. With the origin
-`connector` or `system` the correlation id may be any text; the other
-origins need a canonical UUID.
+the full constructor, or pass both to `dispatch_text`. Give the correlation
+id as a canonical UUID.
 
 ### Scope-bound dispatch
 

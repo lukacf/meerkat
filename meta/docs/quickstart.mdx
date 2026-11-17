@@ -205,14 +205,14 @@ To make a dispatch safe to repeat, give it an `idempotency_key` and a
 `correlation_id` together. A repeat with the same pair to the same agent
 starts no second turn in that agent's session. One of the two without the
 other is refused and nothing is delivered: `invalid delivery identity
-(idempotency key without a correlation id (half-pair))`. With the origin
-`connector`, or the default `system`, the correlation id may be any text of
-your own, such as a message id:
+(idempotency key without a correlation id (half-pair))`. Give the correlation
+id as a canonical UUID:
 
 ```python
 await triage.dispatch_text(
     "New event from connector", origin="connector",
-    idempotency_key="event-42", correlation_id="msg-42",
+    idempotency_key="event-42",
+    correlation_id="0b5f6f0e-6a1c-4f0e-9d6e-2f4a8c1d7e42",
 )
 ```
 

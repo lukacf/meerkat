@@ -761,6 +761,97 @@ async fn a_schedule_no_member_writes_is_not_judged() {
     launch.stop().await;
 }
 
+/// A session no member holds is no member of the launch: its judge says
+/// so, whatever the target. Such a session's schedule into another session
+/// no member holds, by id, is refused with the code of a schedule that
+/// creates a session and stores nothing, and its schedule into its own
+/// session is taken as before. A plain resumable prompt that names a
+/// MEMBER's session is written on a gateway as that member's target, so it
+/// is a schedule for a member, taken from such a writer as before; the
+/// exact form, or an event, into a member's session is not written so, and
+/// is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_no_member_holds_schedules_into_no_other_session() {
+    let launch = launch().await;
+    let anna = launch.session("anna").await;
+    let nobodys = SessionId::new();
+    let somebody_elses = SessionId::new();
+    let into = |session: &SessionId| {
+        json!({
+            "name": "a note for a session",
+            "trigger": { "type": "once", "due_at_utc": far().to_rfc3339() },
+            "target": {
+                "target_kind": "session",
+                "type": "resumable_session",
+                "session_id": session.to_string(),
+                "action": { "type": "prompt", "prompt": "Run the report." },
+            },
+        })
+    };
+    let judge = launch
+        .service
+        .write_judge()
+        .expect("the launch judges its agents' schedule writes");
+    for (case, args) in [
+        ("a member's session", into(&anna)),
+        ("another session no member holds", into(&somebody_elses)),
+        ("its own session", into(&nobodys)),
+        ("a member", one_send(&launch.mob_id, "anna")),
+    ] {
+        let target: TargetBinding =
+            serde_json::from_value(args["target"].clone()).expect("the target decodes");
+        assert_eq!(
+            judge.judge_schedule_write(&nobodys, &target).await,
+            meerkat::ScheduleWriteVerdict::NotAMember,
+            "a session no member holds is no member here: {case}"
+        );
+    }
+
+    let refused = launch
+        .schedule_call(&nobodys, "meerkat_schedule_create", into(&somebody_elses))
+        .await;
+    assert!(
+        refused_session_creation(&refused),
+        "its schedule into another session is refused: {refused:?}"
+    );
+    let mut exact = into(&anna);
+    exact["target"]["type"] = json!("exact_session");
+    let mut event = into(&anna);
+    event["target"]["action"] =
+        json!({ "type": "event", "event_type": "report.due", "payload": {} });
+    for (case, args) in [("the exact form", exact), ("an event", event)] {
+        let refused = launch
+            .schedule_call(&nobodys, "meerkat_schedule_create", args)
+            .await;
+        assert!(
+            refused_session_creation(&refused),
+            "{case} into a member's session is not written for the member, and is refused: \
+             {refused:?}"
+        );
+    }
+    assert!(
+        launch.service.list().await.unwrap().is_empty(),
+        "nothing is stored"
+    );
+    let own = launch
+        .schedule_call(&nobodys, "meerkat_schedule_create", into(&nobodys))
+        .await;
+    assert!(
+        own.is_ok(),
+        "its schedule into its own session is taken: {own:?}"
+    );
+    let members = launch
+        .schedule_call(&nobodys, "meerkat_schedule_create", into(&anna))
+        .await
+        .expect("a schedule naming a member's session is written for the member");
+    let members: Value = serde_json::from_str(&members).expect("the created schedule");
+    assert_eq!(
+        members["target"]["target_kind"], "mob",
+        "a member's session is written as the member's target: {members}"
+    );
+    launch.stop().await;
+}
+
 /// The arguments of a create whose target is a session created on demand.
 fn one_fresh_session() -> Value {
     json!({

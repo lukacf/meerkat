@@ -28,11 +28,15 @@ import { CONTRACT_VERSION } from "../dist/generated/types.js";
 const CLIENT_URL = new URL("../dist/client.js", import.meta.url).href;
 
 /**
- * A descendant's script: once the process that started it has exited and
- * been reaped, it writes one more line to the stderr it inherited.
+ * A descendant's script. Its arguments are the pid of the process that
+ * started it and a path: it creates that file first, to say that it runs.
+ * Once the process that started it has exited and been reaped, it writes one
+ * more line to the stderr it inherited. It never lives longer than 10 s.
  */
 const LATE_STDERR = `
-const parent = process.ppid;
+require("node:fs").writeFileSync(process.argv[2], "");
+setTimeout(() => process.exit(1), 10000).unref();
+const parent = Number(process.argv[1]);
 const poll = setInterval(() => {
   try {
     process.kill(parent, 0);
@@ -48,7 +52,9 @@ const poll = setInterval(() => {
  * stderr; `exitAfterHandshake` exits once the handshake is answered.
  * `exitOnRequest` writes two stderr lines and exits with code 7, without a
  * reply, on the first request after the handshake; `lateStderr` leaves a
- * descendant on its stderr that writes one more line just after that exit.
+ * descendant on its stderr that writes one more line just after that exit;
+ * the exit then waits until that descendant runs, and after 2 s, inside the
+ * 3 s the exit probe allows the exit, says on stderr that it never did.
  * `corruptOnRequest` answers that first request with a line that is not
  * JSON and keeps running.
  */
@@ -64,12 +70,14 @@ function writeFixture(
   },
 ) {
   const bin = path.join(root, "rkat-rpc.cjs");
+  const ready = JSON.stringify(path.join(root, "descendant.ready"));
+  const exitNow = lateStderr ? "() => exitOnceDescendantRuns(Date.now() + 2000)" : "() => process.exit(7)";
   writeFileSync(bin, `#!/usr/bin/env node
 const rl = require("node:readline").createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   const msg = JSON.parse(line);
   ${exitOnRequest ? `if (msg.method !== "initialize" && msg.method !== "capabilities/get") {
-    process.stderr.write("fixture: first stderr line\\nfixture: last stderr line\\n", () => process.exit(7));
+    process.stderr.write("fixture: first stderr line\\nfixture: last stderr line\\n", ${exitNow});
     return;
   }` : ""}
   ${corruptOnRequest ? `if (msg.method !== "initialize" && msg.method !== "capabilities/get") {
@@ -84,7 +92,12 @@ rl.on("line", (line) => {
 });
 ${stubborn ? 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);' : ""}
 ${holder ? 'require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] }).unref();' : ""}
-${lateStderr ? `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(LATE_STDERR)}], { stdio: ["ignore", "ignore", "inherit"] }).unref();` : ""}
+${lateStderr ? `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(LATE_STDERR)}, String(process.pid), ${ready}], { stdio: ["ignore", "ignore", "inherit"] }).unref();
+const exitOnceDescendantRuns = (deadline) => {
+  if (require("node:fs").existsSync(${ready})) process.exit(7);
+  else if (Date.now() < deadline) setTimeout(exitOnceDescendantRuns, 5, deadline);
+  else process.stderr.write("fixture: the descendant never ran\\n", () => process.exit(7));
+};` : ""}
 `);
   chmodSync(bin, 0o755);
   return bin;

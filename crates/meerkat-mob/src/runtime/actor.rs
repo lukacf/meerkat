@@ -9854,7 +9854,9 @@ pub(super) struct MobActor {
     pub(super) autonomous_stop_interrupts: BTreeMap<AgentIdentity, AutonomousStopInterruptTask>,
     /// Same-process exact successes so one slow host does not make command
     /// retries re-interrupt already-quiesced peers. Cold replay may safely
-    /// repeat the exact fenced interrupt.
+    /// repeat the exact fenced interrupt. A kept success is true only while
+    /// the hold taken with it is in place: a failed Stop that releases the
+    /// holds drops them all.
     pub(super) autonomous_stop_interrupted: BTreeMap<AgentIdentity, AutonomousStopInterrupted>,
     /// Per-member outcomes of the current Stop (#1500), reported on its reply.
     pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
@@ -22918,14 +22920,25 @@ impl MobActor {
             // The Stop's error stays the reported one. An actor
             // fail-stopping for cold recovery releases none: cold replay
             // alone decides whether work can start.
-            if !self.durable_uncertainty_fail_stop.is_set()
-                && let Err(error) = self.release_all_member_run_starts().await
-            {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "a failed stop could not release every member's run-start hold"
-                );
+            if !self.durable_uncertainty_fail_stop.is_set() {
+                // The interrupts kept as done stand for members held since
+                // they were interrupted. Releasing the holds ends that: a
+                // released member can start a run its kept interrupt never
+                // saw, and a Stop or Shutdown issued again would skip the
+                // member and wait for a run nobody cancels. So the kept
+                // interrupts go with the holds, and so do the ones still in
+                // flight, whose results belong to this failed Stop. The Stop
+                // or Shutdown issued again holds each member and cancels
+                // exactly the run the member has then.
+                self.autonomous_stop_interrupted.clear();
+                self.autonomous_stop_interrupts.clear();
+                if let Err(error) = self.release_all_member_run_starts().await {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %error,
+                        "a failed stop could not release every member's run-start hold"
+                    );
+                }
             }
         }
         stop_result

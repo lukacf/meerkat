@@ -457,9 +457,10 @@ All three are reads: they never wake an agent and load nothing.
 
 ## Where no person answers questions
 
-From 0.9.15 every member is offered the `ask_user` tool (see
-[Question sets](/concepts/gating#question-sets)), an agent an agent created
-included, also on a host where no person will see its questions:
+From 0.9.15 a member is offered the `ask_user` tool (see
+[Question sets](/concepts/gating#question-sets), which lists the members that
+are not), an agent an agent created included, also on a host where no person
+will see its questions:
 
 - Where the gateway's Console signs nobody in (`console_auth_required(False)`
   without access control), a call answers `no_human_surface` and holds
@@ -484,7 +485,7 @@ the change is declared as an
 [update](/reference/configuration#one-shot-mob-definition-update); from the
 start that commits it, the profile's members are built without the tool, an
 agent that existed before included. Such a profile can be used for every
-member: through 0.9.15 the build of a member whose host decides the member's
+member: in 0.9.15 the build of a member whose host decides the member's
 tool surface itself (a host that installs a member registration hook, as
 Connect's native host does) was refused with such a deny; from 0.9.16 the
 deny is accepted, and such members are still not offered the tool.

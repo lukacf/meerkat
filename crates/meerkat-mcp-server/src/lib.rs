@@ -15636,9 +15636,9 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
-    /// The realm profile tools take the public profile input: a profile
-    /// field outside it is an argument error naming the field, and nothing is
-    /// stored or changed.
+    /// The realm profile tools take the public profile input and
+    /// `auth_binding`: any other profile field is an argument error naming
+    /// the field, and nothing is stored or changed.
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_public_mcp_server_profile_tools_take_the_public_profile_input() {
@@ -15656,11 +15656,19 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         let outside = [
             ("mcp_servers", json!([])),
             ("rust_bundles", json!(["internal-only"])),
-            (
-                "auth_binding",
-                json!({ "realm": "global", "binding": "some-binding" }),
-            ),
         ];
+
+        let bound = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_create",
+            &json!({
+                "name": "bound",
+                "profile": with("auth_binding", json!({ "realm": "global", "binding": "some-binding" })),
+            }),
+        ))
+        .await
+        .expect("a profile naming a binding is stored");
+        assert_eq!(unwrap_tool_payload_json(bound)["revision"], 1);
 
         for (field, value) in &outside {
             let err = Box::pin(handle_tools_call(

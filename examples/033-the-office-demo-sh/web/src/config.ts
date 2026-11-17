@@ -6,11 +6,12 @@ export type Provider = "anthropic" | "openai" | "gemini";
 
 export const MODEL_PROVIDER: Record<string, Provider> = {
   "claude-sonnet-5-5": "anthropic",
-  "claude-sonnet-4-6": "anthropic",
-  "claude-opus-4-8": "anthropic",
-  "gpt-5.5": "openai",
-  "gemini-3.5-flash": "gemini",
-  "gemini-3.1-pro-preview": "gemini",
+  "claude-opus-5-5": "anthropic",
+  "gpt-6-astra": "openai",
+  // The one Gemini model offered here. Ten agents start at once in this demo;
+  // with gemini-4-argon not all of them answered within the start limit
+  // (KICKOFF_TIMEOUT_MS in main.ts), so it is left out.
+  "gemini-4-hydrogen": "gemini",
 };
 
 export const ALL_MODELS = Object.keys(MODEL_PROVIDER);

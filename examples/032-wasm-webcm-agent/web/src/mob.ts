@@ -54,9 +54,14 @@ export interface MobRuntime {
 
 /**
  * Resolve model assignments based on available API keys.
- * Preferred: main=opus, planner=gpt-5.5, coder=gpt-5.3-codex, reviewer=gemini-3.1-pro-preview.
+ * Preferred: main=claude-opus-5-5, planner=gpt-6-astra, coder=gpt-5.3-codex, reviewer=gemini-4-hydrogen.
  * Falls back to available providers when keys are missing.
  */
+// The one Gemini model used here. gemini-4-hydrogen answers on the free tier
+// of the Gemini API as well; the larger Gemini 4 models need a paid tier, and
+// a visitor with only a free Gemini key would see every agent fail.
+const GEMINI_FALLBACK = "gemini-4-hydrogen";
+
 export function resolveModels(keys: ApiKeys): ModelAssignments {
   const hasAnthropic = !!keys.anthropic;
   const hasOpenAI = !!keys.openai;
@@ -65,24 +70,24 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
   // Main agent: prefer Anthropic Opus
   let main: string;
   let mainKey: string;
-  if (hasAnthropic) { main = "claude-opus-4-8"; mainKey = keys.anthropic!; }
-  else if (hasOpenAI) { main = "gpt-5.5"; mainKey = keys.openai!; }
-  else { main = "gemini-3.1-pro-preview"; mainKey = keys.gemini!; }
+  if (hasAnthropic) { main = "claude-opus-5-5"; mainKey = keys.anthropic!; }
+  else if (hasOpenAI) { main = "gpt-6-astra"; mainKey = keys.openai!; }
+  else { main = GEMINI_FALLBACK; mainKey = keys.gemini!; }
 
-  // Planner: prefer OpenAI GPT-5.5
-  const planner = hasOpenAI ? "gpt-5.5"
-    : hasAnthropic ? "claude-sonnet-4-6"
-    : "gemini-3.1-pro-preview";
+  // Planner: prefer OpenAI gpt-6-astra
+  const planner = hasOpenAI ? "gpt-6-astra"
+    : hasAnthropic ? "claude-sonnet-5-5"
+    : GEMINI_FALLBACK;
 
   // Coder: prefer OpenAI gpt-5.3-codex
   const coder = hasOpenAI ? "gpt-5.3-codex"
-    : hasAnthropic ? "claude-sonnet-4-6"
-    : "gemini-3.1-pro-preview";
+    : hasAnthropic ? "claude-sonnet-5-5"
+    : GEMINI_FALLBACK;
 
   // Reviewer: prefer Gemini (schema issues fixed in PR #93)
-  const reviewer = hasGemini ? "gemini-3.5-flash"
-    : hasAnthropic ? "claude-sonnet-4-6"
-    : "gpt-5.5";
+  const reviewer = hasGemini ? GEMINI_FALLBACK
+    : hasAnthropic ? "claude-sonnet-5-5"
+    : "gpt-6-astra";
 
   return { main, mainKey, planner, coder, reviewer };
 }

@@ -37,7 +37,7 @@ id = "pipeline"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-8"
+model = "claude-opus-5-5"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -48,7 +48,7 @@ comms = true
 mob = true
 
 [profiles.worker]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["worker"]
 peer_description = "Worker"
 external_addressable = false
@@ -170,7 +170,7 @@ id = "cicd-pipeline"
 orchestrator = "coordinator"
 
 [profiles.coordinator]
-model = "claude-opus-4-8"
+model = "claude-opus-5-5"
 skills = ["pipeline-coordinator"]
 peer_description = "Pipeline coordinator -- drives sequential stage execution"
 external_addressable = true
@@ -181,7 +181,7 @@ comms = true
 mob = true
 
 [profiles.linter]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["lint-stage"]
 peer_description = "Stage 1: Code linting and style checks"
 external_addressable = true
@@ -191,7 +191,7 @@ builtins = true
 comms = true
 
 [profiles.tester]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["test-stage"]
 peer_description = "Stage 2: Test execution and coverage analysis"
 external_addressable = true
@@ -201,7 +201,7 @@ builtins = true
 comms = true
 
 [profiles.deployer]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["deploy-stage"]
 peer_description = "Stage 3: Deployment and smoke testing"
 
@@ -433,7 +433,7 @@ mod tests {
                     requests.push(request.clone());
                     requests.len()
                 };
-                assert_eq!(request.model, "claude-sonnet-4-6");
+                assert_eq!(request.model, "claude-sonnet-5-5");
                 self.entered.notify_one();
                 self.release.notified().await;
                 if self.fail_on == Some(call) {

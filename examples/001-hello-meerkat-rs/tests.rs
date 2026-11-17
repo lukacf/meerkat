@@ -59,7 +59,7 @@ async fn scoped_jsonl_persists_content_not_service_lifecycle_then_cleans_up() {
     let result = service
         .create_session(CreateSessionRequest {
             injected_context: vec![],
-            model: "claude-sonnet-4-6".into(),
+            model: "claude-sonnet-5-5".into(),
             prompt: "synthetic prompt".into(),
             system_prompt: meerkat::SystemPromptOverride::Set("synthetic instructions".into()),
             max_tokens: Some(32),

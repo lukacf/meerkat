@@ -33,6 +33,8 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-16
+
 ### Fixed
 
 - A profile used for agents hosted by Connect's native host may list
@@ -58,10 +60,19 @@ guides give the conditional wording for Connect 0.9.14.
 
 - Release tooling: the request that adds a file to a Connect release now
   states the length of the file. The upload host refuses a request without
-  one ("Bad Content-Length"). The tooling of 0.9.10 through 0.9.15 sends the
-  earlier request (the release upload tool exists since 0.9.15). An empty
-  file is now refused before any request is made. The installed product is
-  unchanged.
+  one ("Bad Content-Length"). The candidate tool of 0.9.10 through 0.9.15
+  sends the earlier request, and so does the release upload tool, which
+  exists since 0.9.15 and uploads through it. An empty file is now refused
+  before any request is made. The installed product is unchanged.
+
+- Package README: the install line is corrected. The README inside the
+  published `@rkat/toolkit` 0.9.15 package says "Install the tagged 0.9.0
+  release" and gives an address in the former standalone repository that
+  does not exist (it answers 404); the Python SDK's `HOME_ASSISTANT.md`
+  gives the same for the wheel. The published `@rkat/toolkit` 0.9.15 package
+  keeps that line; the Python guide is a repository file and is in no
+  published 0.9.15 package. From 0.9.16 both name no fixed release and point
+  to the SDK page; install as that page says.
 
 ## [0.9.15] - 2026-11-15
 

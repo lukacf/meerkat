@@ -325,11 +325,12 @@ carry `auth_binding`, `tools.mcp_servers` and `tools.rust_bundles`, and its
 build on the binding, start the servers and mount the bundles of
 `tools.rust_bundles` and `tools.bundles` that the host registered for child
 mobs. A profile read back (`mob/profile/get`, `mob/profile/list`, and the
-answers of create and update) shows none of these four fields. The MCP
-profile tools and the agent profile tools take `MobProfileInput` only and
-refuse all four on a realm profile; an update through them replaces the
-stored profile whole, so it removes these fields from a profile a host
-stored.
+answers of create and update) shows none of these four fields. The agent
+profile tools take `MobProfileInput` only and refuse all four on a realm
+profile; the MCP profile tools take `MobProfileInput` and `auth_binding`, and
+refuse the other three. An update through either replaces the stored profile
+whole, so it removes from a profile a host stored every one of these fields
+that the update does not send.
 
 <Note>
 Every `Schedule` result is one flattened public object. Configuration fields
@@ -650,9 +651,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.15"
+      "version": "0.9.16"
     },
-    "contract_version": "0.9.15",
+    "contract_version": "0.9.16",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -982,7 +983,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.15",
+    "agent_version": "0.9.16",
     "model_name": "claude-opus-5"
   }
 }
@@ -4146,7 +4147,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 15},
+    "contract_version": {"major": 0, "minor": 9, "patch": 16},
     "providers": [
       {
         "provider": "anthropic",
@@ -4210,7 +4211,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 15},
+    "contract_version": {"major": 0, "minor": 9, "patch": 16},
     "capabilities": [
       {
         "id": "sessions",

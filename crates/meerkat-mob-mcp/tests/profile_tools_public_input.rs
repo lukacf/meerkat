@@ -1,6 +1,6 @@
 //! The realm profile tools of the public MCP surface take the public profile
-//! input: a profile field outside it is an argument error that names the
-//! field, and nothing is stored.
+//! input and `auth_binding`: any other profile field is an argument error
+//! that names the field, and nothing is stored.
 //!
 //! Every write goes through `handle_public_tools_call`, the dispatch that
 //! both the unified MCP server and the mob MCP binary serve; one row drives
@@ -404,8 +404,20 @@ async fn profile_update_refuses_tools_mcp_servers_and_keeps_the_stored_profile()
 // auth_binding
 // ---------------------------------------------------------------------------
 
+/// The stored profile's binding, by name.
+fn stored_binding(stored: &meerkat_mob::StoredRealmProfile) -> Option<String> {
+    stored
+        .profile
+        .auth_binding
+        .as_ref()
+        .map(|binding| binding.binding.as_str().to_string())
+}
+
+/// The create tool takes `auth_binding` beside the public profile input: the
+/// binding is stored, the answer does not show it, and a member spawned from
+/// the realm profile builds on it. A null binding is no binding.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn profile_create_refuses_auth_binding_and_stores_nothing() {
+async fn profile_create_takes_auth_binding_and_stores_it() {
     let recorded: Recorded = Arc::new(Mutex::new(Vec::new()));
     let fixture = CouncilFixture::new(recording_script(Arc::clone(&recorded)));
 
@@ -414,26 +426,54 @@ async fn profile_create_refuses_auth_binding_and_stores_nothing() {
         CREATE,
         json!({ "name": "bound", "profile": profile_with_key("auth_binding", binding_value()) }),
     )
-    .await;
+    .await
+    .unwrap_or_else(|error| panic!("a profile naming a binding is stored: {error:?}"));
     let stored = fixture
         .state
         .realm_profile_get("bound")
         .await
-        .expect("read the realm profile store");
+        .expect("read the realm profile store")
+        .expect("the profile is stored");
+    let unbound = public(
+        &fixture,
+        CREATE,
+        json!({ "name": "unbound", "profile": profile_with_key("auth_binding", Value::Null) }),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("a null binding is no binding: {error:?}"));
+    let stored_unbound = fixture
+        .state
+        .realm_profile_get("unbound")
+        .await
+        .expect("read the realm profile store")
+        .expect("the profile is stored");
     let mob_id = format!("bound-{}", fixture.scope);
-    let seated = seat_on_realm_profile(&fixture, &mob_id, "bound", "worker-1").await;
+    seat_on_realm_profile(&fixture, &mob_id, "bound", "worker-1")
+        .await
+        .expect("a member is seated on the stored profile");
+    let _ = turn_tools(&fixture, &recorded, &mob_id, "worker-1").await;
+    let binding = recorded_binding(&fixture, &mob_id, "worker-1").await;
     finish(&fixture, &mob_id).await;
 
-    assert_refused_naming(&answer, "auth_binding");
-    assert!(stored.is_none(), "nothing is stored");
+    assert_eq!(answer["revision"], 1, "{answer}");
     assert!(
-        seated.is_err(),
-        "no member is seated on a profile that was not stored"
+        answer["profile"].get("auth_binding").is_none(),
+        "the answer does not show the binding: {answer}"
+    );
+    assert_eq!(stored_binding(&stored).as_deref(), Some(BINDING));
+    assert_eq!(unbound["revision"], 1, "{unbound}");
+    assert_eq!(stored_binding(&stored_unbound), None);
+    assert_eq!(
+        binding.as_deref(),
+        Some(BINDING),
+        "the member's session records the profile's binding"
     );
 }
 
+/// The update tool takes `auth_binding` the same way: it replaces the stored
+/// profile whole, binding included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn profile_update_refuses_auth_binding_and_keeps_the_stored_profile() {
+async fn profile_update_takes_auth_binding_and_stores_it() {
     let recorded: Recorded = Arc::new(Mutex::new(Vec::new()));
     let fixture = CouncilFixture::new(recording_script(Arc::clone(&recorded)));
     store_public(&fixture, "worker-profile").await;
@@ -447,7 +487,8 @@ async fn profile_update_refuses_auth_binding_and_keeps_the_stored_profile() {
             "expected_revision": 1,
         }),
     )
-    .await;
+    .await
+    .unwrap_or_else(|error| panic!("an update naming a binding is stored: {error:?}"));
     let stored = fixture
         .state
         .realm_profile_get("worker-profile")
@@ -462,10 +503,18 @@ async fn profile_update_refuses_auth_binding_and_keeps_the_stored_profile() {
     let binding = recorded_binding(&fixture, &mob_id, "worker-1").await;
     finish(&fixture, &mob_id).await;
 
-    assert_refused_naming(&answer, "auth_binding");
-    assert_eq!(stored.revision, 1, "the stored profile is unchanged");
-    assert!(stored.profile.auth_binding.is_none());
-    assert_eq!(binding, None, "the member's session records no binding");
+    assert_eq!(answer["revision"], 2, "{answer}");
+    assert!(
+        answer["profile"].get("auth_binding").is_none(),
+        "the answer does not show the binding: {answer}"
+    );
+    assert_eq!(stored.revision, 2);
+    assert_eq!(stored_binding(&stored).as_deref(), Some(BINDING));
+    assert_eq!(
+        binding.as_deref(),
+        Some(BINDING),
+        "the member's session records the profile's binding"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +655,7 @@ async fn assert_both_tools_refuse(profile: Value, named: &str) {
         "{named}: the stored profile is unchanged"
     );
     assert!(stored.profile.tools.bundles.is_empty(), "{named}");
+    assert!(stored.profile.auth_binding.is_none(), "{named}");
 }
 
 /// A realm profile cannot opt into tool bundles through the profile tools:
@@ -621,15 +671,11 @@ async fn the_profile_tools_refuse_tools_bundles_and_store_nothing() {
     .await;
 }
 
-/// A key outside the public profile input is refused whatever its value, a
-/// null included, and so is a key no profile form has.
+/// A key outside what the tools take is refused whatever its value, a null
+/// included, and so is a key no profile form has.
 #[tokio::test]
 async fn the_profile_tools_refuse_a_null_value_and_an_unknown_key() {
     for (profile, named) in [
-        (
-            profile_with_key("auth_binding", Value::Null),
-            "auth_binding",
-        ),
         (
             profile_with_tools_key("mcp_servers", Value::Null),
             "mcp_servers",
@@ -646,6 +692,28 @@ async fn the_profile_tools_refuse_a_null_value_and_an_unknown_key() {
     ] {
         assert_both_tools_refuse(profile, named).await;
     }
+}
+
+/// A binding beside another field does not carry that field in: with
+/// `auth_binding` present, `tools.mcp_servers`, `tools.rust_bundles` and
+/// `tools.bundles` are refused as without it, and nothing is stored or
+/// changed. A binding of the wrong shape is an argument error too.
+#[tokio::test]
+async fn the_profile_tools_refuse_the_other_fields_beside_a_binding() {
+    for (key, value, named) in [
+        ("mcp_servers", json!([]), "mcp_servers"),
+        ("rust_bundles", json!(["some-bundle"]), "rust_bundles"),
+        ("bundles", json!(["some-bundle"]), "tools.bundles"),
+    ] {
+        let mut profile = profile_with_tools_key(key, value);
+        profile["auth_binding"] = binding_value();
+        assert_both_tools_refuse(profile, named).await;
+    }
+    assert_both_tools_refuse(
+        profile_with_key("auth_binding", json!("not-a-binding")),
+        "invalid arguments",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -736,8 +804,9 @@ fn schema_node<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
     }
 }
 
-/// Both tools advertise the public profile input as their `profile`
-/// argument: a closed object with the public keys and none beyond them.
+/// Both tools advertise the public profile input and `auth_binding` as their
+/// `profile` argument: a closed object with the public keys, the binding,
+/// and none beyond them.
 #[test]
 fn the_profile_tools_advertise_the_public_profile_input() {
     let listed = public_tools_list();
@@ -755,7 +824,7 @@ fn the_profile_tools_advertise_the_public_profile_input() {
             keys.contains_key("model") && keys.contains_key("tools"),
             "{tool}: {profile}"
         );
-        assert!(!keys.contains_key("auth_binding"), "{tool}: {profile}");
+        assert!(keys.contains_key("auth_binding"), "{tool}: {profile}");
         assert_eq!(
             profile["additionalProperties"],
             json!(false),
@@ -815,7 +884,7 @@ fn the_mob_mcp_binary_refuses_a_profile_field_outside_the_public_input() {
         call(
             2,
             CREATE,
-            json!({ "name": "p", "profile": profile_with_key("auth_binding", binding_value()) }),
+            json!({ "name": "bound", "profile": profile_with_key("auth_binding", binding_value()) }),
         ),
         call(3, GET, json!({ "name": "p" })),
         call(
@@ -852,7 +921,7 @@ fn the_mob_mcp_binary_refuses_a_profile_field_outside_the_public_input() {
             .unwrap_or_else(|| panic!("a tool payload: {answer}"));
         serde_json::from_str(text).expect("payload is JSON")
     };
-    for (index, field) in [(0, "rust_bundles"), (1, "auth_binding"), (4, "mcp_servers")] {
+    for (index, field) in [(0, "rust_bundles"), (4, "mcp_servers")] {
         let error = &answers[index]["error"];
         assert_eq!(error["code"], -32602, "{}", answers[index]);
         assert!(
@@ -863,6 +932,11 @@ fn the_mob_mcp_binary_refuses_a_profile_field_outside_the_public_input() {
             answers[index]
         );
     }
+    assert_eq!(
+        payload(&answers[1])["revision"],
+        1,
+        "a profile naming a binding is stored"
+    );
     assert_eq!(
         payload(&answers[2])["not_found"],
         true,

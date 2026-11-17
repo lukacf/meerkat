@@ -12,9 +12,9 @@ It is designed to stress:
 - parent-driven sub-agent burst waves spaced over a few seconds
 - sub-agent replies back to parent timelines followed by parent peer fan-out
 - Meerkat session-service capacity under broad parallel fan-out
-- real `gemini-3.1-flash-lite-preview` completions at high roster cardinality
+- real `gemini-3.5-flash-lite` completions at high roster cardinality
 
-The configured model is `gemini-3.1-flash-lite-preview`, matching the cheap/fast flash-lite family available in the local Meerkat model catalog. The live example requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`; `--demo-llm` is only for an explicitly shape-only local check and is not the real stress scenario.
+The configured model is `gemini-3.5-flash-lite`, matching the cheap/fast flash-lite family available in the local Meerkat model catalog. The live example requires `GEMINI_API_KEY` or `GOOGLE_API_KEY`; `--demo-llm` is only for an explicitly shape-only local check and is not the real stress scenario.
 
 For live and browser runs, complete the
 [shared prerequisites](../README.md#prerequisites), including console build

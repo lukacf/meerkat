@@ -5,11 +5,11 @@
 export type Provider = "anthropic" | "openai" | "gemini";
 
 export const MODEL_PROVIDER: Record<string, Provider> = {
-  "claude-sonnet-4-6": "anthropic",
-  "claude-opus-4-8": "anthropic",
-  "gpt-5.5": "openai",
-  "gemini-3.5-flash": "gemini",
-  "gemini-3.1-pro-preview": "gemini",
+  "claude-sonnet-5-5": "anthropic",
+  "claude-opus-5-5": "anthropic",
+  "gpt-6-astra": "openai",
+  "gemini-4-hydrogen": "gemini",
+  "gemini-4-argon": "gemini",
 };
 
 export const ALL_MODELS = Object.keys(MODEL_PROVIDER);

@@ -476,6 +476,20 @@ them.
   longer ends with `failed to release previous auth lease ... credential
   lifecycle owner is busy` (0.8.52 and later).
 
+- `meerkat-copilot`, `meerkat-openai`: a connection that the peer resets
+  after it was established (a reset, an aborted connection, a broken pipe,
+  or a stream cut off below HTTP) is now classed as a connection failure by
+  the GitHub Copilot token exchange and by the OpenAI and OpenAI-compatible
+  clients when they send a request. The turn's error reads
+  `llm_provider_error` with `provider_error_kind` `connection_reset` where
+  it read `unknown`, and a session with a model fallback can fall back on
+  it, as it can on a refused connection. Retries are unchanged. A peer that
+  closes the connection cleanly before it answers still reads `unknown`. A
+  host that matched on `unknown` for these errors sees `connection_reset`,
+  and the OpenAI clients' error no longer carries the transport's own text.
+  Affects the Copilot token exchange since 0.9.9, the OpenAI client since
+  0.3.4 and the OpenAI-compatible client since 0.5.2.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

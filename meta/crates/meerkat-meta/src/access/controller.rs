@@ -17,7 +17,76 @@ use super::model::{
     check_declared_ingresses, private_owner, private_to_another, validate_access_config,
 };
 use crate::console_aggregator::ConsoleAggregatorId;
-use crate::private_owners::PrivateOwnerRecordId;
+use crate::private_owners::{HeldBy, NameSeatings, PrivateOwnerRecordId};
+
+/// The members seated under each name over time, as one runtime's record
+/// holds them: for each name, one list per mob.
+pub(crate) type NameSeatingsByName = BTreeMap<String, Vec<NameSeatings>>;
+
+/// What the members seated under an origin's name say of a record made
+/// under it at a moment ([`origin_at`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OriginAt<'a> {
+    /// No member private to a person was ever seated under the name, or a
+    /// member private to no one held it at the moment: the rule on the
+    /// name's holder now decides alone.
+    HolderNow,
+    /// A member private to this person held the name at the moment.
+    Private(&'a str),
+    /// The record is its asking member's and that member cannot be named:
+    /// members private to different people held the name at the moment (in
+    /// different mobs), or a member private to a person was seated under
+    /// the name and the moment is not known or is before the name's first
+    /// known seating. Shown to administrators only.
+    AdministratorsOnly,
+}
+
+/// What the member that held an origin's name when a record was made says
+/// of a caller, before any agent attribute is read
+/// ([`AccessView::origin_then`]).
+enum OriginThen {
+    /// The caller may see the record, as far as its asking member goes.
+    Allowed,
+    /// The record is another person's, or an administrator's only.
+    Refused,
+    /// Members private to no one held the name then, and a member was
+    /// seated under it since (another one, or the same one again): the
+    /// caller must also be allowed to view each as it was seated then.
+    SharedThen(Vec<AgentResourceAttributes>),
+}
+
+/// What `seatings`, the lists of the members seated under one name, say of
+/// a record made under the name at `made_at_ms` (`None` when the record's
+/// time is not known).
+fn origin_at<'a>(
+    seatings: impl Iterator<Item = &'a NameSeatings> + Clone,
+    made_at_ms: Option<u64>,
+) -> OriginAt<'a> {
+    if !seatings.clone().any(NameSeatings::ever_private) {
+        return OriginAt::HolderNow;
+    }
+    let Some(made_at_ms) = made_at_ms else {
+        return OriginAt::AdministratorsOnly;
+    };
+    let mut owner = None;
+    let mut shared = false;
+    for held_by in seatings.map(|seatings| seatings.held_at(made_at_ms)) {
+        match held_by {
+            HeldBy::Private(person) => match owner {
+                Some(other) if other != person => return OriginAt::AdministratorsOnly,
+                _ => owner = Some(person),
+            },
+            HeldBy::Shared => shared = true,
+            HeldBy::NoKnownMember => {}
+            HeldBy::HandedOver => return OriginAt::AdministratorsOnly,
+        }
+    }
+    match owner {
+        Some(person) => OriginAt::Private(person),
+        None if shared => OriginAt::HolderNow,
+        None => OriginAt::AdministratorsOnly,
+    }
+}
 
 /// Cached resource attributes for one agent, keyed by console identity.
 ///
@@ -268,6 +337,14 @@ struct AccessControllerInner {
     /// The runtime alias of each durable identity's current incarnation,
     /// keyed like `attributes` (console namespace included).
     current_runtime_aliases: RwLock<BTreeMap<String, String>>,
+    /// Who held each member name over time, for each runtime a priming of
+    /// this controller read (by its private-owner record): how many journal
+    /// rows that reading had noted, and for each name (keyed like
+    /// `attributes`) one list of seatings per mob
+    /// ([`AccessController::record_name_seatings`]). A record of a moment
+    /// is its asking member's, whoever holds the name now
+    /// ([`AccessView::sees_origin`]).
+    name_seatings: RwLock<BTreeMap<PrivateOwnerRecordId, (u64, Arc<NameSeatingsByName>)>>,
     /// Serializes the read-modify-write of every config mutation so two
     /// concurrent admin edits can't lose an update (clone-under-read then
     /// unconditional swap would otherwise drop one writer's delta) and so
@@ -352,6 +429,7 @@ impl AccessController {
                 unread_private_owner_records: RwLock::new(BTreeMap::new()),
                 read_private_owner_records: RwLock::new(BTreeSet::new()),
                 current_runtime_aliases: RwLock::new(BTreeMap::new()),
+                name_seatings: RwLock::new(BTreeMap::new()),
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
                 revision_signal: watch::Sender::new(0),
@@ -1064,6 +1142,42 @@ impl AccessController {
         });
     }
 
+    /// How many journal rows the reading of the runtime `record` had noted
+    /// when this controller last recorded who held its members' names
+    /// ([`Self::record_name_seatings`]); `None` before the first record.
+    pub(crate) fn name_seatings_noted(&self, record: PrivateOwnerRecordId) -> Option<u64> {
+        self.inner
+            .name_seatings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&record)
+            .map(|(noted, _)| *noted)
+    }
+
+    /// Record who held each member name of the runtime `record` over time,
+    /// as its private-owner record reads it after `noted` journal rows:
+    /// `seatings` holds, for each name (keyed like the cached attributes,
+    /// console namespace included), one list of seatings per mob. A record
+    /// made under a name at a moment (a gating entry of an origin, a
+    /// question set of an asker) is decided by who held the name then
+    /// ([`AccessView::sees_origin`]).
+    pub(crate) fn record_name_seatings(
+        &self,
+        record: PrivateOwnerRecordId,
+        noted: u64,
+        seatings: NameSeatingsByName,
+    ) {
+        if self.name_seatings_noted(record) == Some(noted) {
+            return;
+        }
+        let _published = self.publish_owner_change();
+        self.inner
+            .name_seatings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(record, (noted, Arc::new(seatings)));
+    }
+
     /// Record which runtime alias is each durable identity's current
     /// incarnation: `(identity, Some(alias))` sets it, `(identity, None)`
     /// forgets it. Keys and aliases use the cached attributes' console
@@ -1256,14 +1370,32 @@ impl AccessDecisionFence<'_> {
     }
 
     /// Whether this caller may see a gating request recorded with the origin
-    /// `identity`, as the pending list and the audit read decide it:
-    /// `agent.view` on the agent ([`Self::can_view_agent`]), and, for a
-    /// caller the console keeps apart from other people
-    /// ([`AccessView::kept_apart_from_other_people`]), only an agent the
-    /// held attributes know ([`AccessView::withholds_unknown_member`]): an
-    /// origin the console does not know may have been private to a person.
-    pub(crate) fn can_see_origin(&self, identity: &str) -> bool {
-        self.can_view_agent(identity) && !self.withholds_unknown_member(identity)
+    /// `identity` at `made_at_ms` (`None` when the request's time is not
+    /// known), as the pending list and the audit read decide it
+    /// ([`AccessView::sees_origin`]): `agent.view` on the agent
+    /// ([`Self::can_view_agent`]); for a caller the console keeps apart from
+    /// other people ([`AccessView::kept_apart_from_other_people`]), only an
+    /// agent the held attributes know
+    /// ([`AccessView::withholds_unknown_member`]): an origin the console
+    /// does not know may have been private to a person; and the request is
+    /// its asking member's ([`AccessView::origin_then_allows`]).
+    pub(crate) fn can_see_origin(&self, identity: &str, made_at_ms: Option<u64>) -> bool {
+        self.can_view_agent(identity)
+            && !self.withholds_unknown_member(identity)
+            && match self.view.origin_then(identity, made_at_ms) {
+                OriginThen::Allowed => true,
+                OriginThen::Refused => false,
+                // Decided on the held attributes: the view's own method
+                // would take the cache this fence holds.
+                OriginThen::SharedThen(holders) => holders.iter().all(|holder| {
+                    let lineage = AccessView::lineage_of_attributes_in(&self.attributes, holder);
+                    matches!(
+                        self.view
+                            .decide_attributes_on(ACTION_AGENT_VIEW, holder, &lineage),
+                        AccessDecision::Allow
+                    )
+                }),
+            }
     }
 
     /// [`AccessView::withholds_unknown_member`], with the agent looked up in
@@ -2214,6 +2346,143 @@ impl AccessView {
             || cache
                 .values()
                 .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
+    }
+
+    /// Whether this caller may see a record made under the name `identity`
+    /// at `made_at_ms` (`None` when the record's time is not known): a
+    /// gating entry of an origin, a question set of an asking member. The
+    /// one rule of every gating door:
+    ///
+    /// - the rule on the name's holder now: `agent.view` on the agent
+    ///   ([`Self::can_view_agent`]), and, for a caller the console keeps
+    ///   apart from other people, only an agent the console knows
+    ///   ([`Self::withholds_unknown_member`]);
+    /// - and the record is its asking member's
+    ///   ([`Self::origin_then_allows`]): what a member private to a person
+    ///   left under a name stays that person's, whoever holds the name
+    ///   later.
+    pub(crate) fn sees_origin(&self, identity: &str, made_at_ms: Option<u64>) -> bool {
+        self.can_view_agent(identity)
+            && !self.withholds_unknown_member(identity)
+            && self.origin_then_allows(identity, made_at_ms)
+    }
+
+    /// Whether the member that held the name `identity` at `made_at_ms`
+    /// lets this caller see a record made under the name then. An
+    /// administrator sees every record. For every other caller:
+    ///
+    /// - while a runtime this controller was primed from still owes the
+    ///   first read of who its members are private to, no record: who held
+    ///   a name cannot be told yet ([`Self::awaits_first_read`]; a door
+    ///   answers such a caller that it must ask again);
+    /// - a name under which no member private to a person was ever seated,
+    ///   and a moment at which a member private to no one held the name:
+    ///   every caller the rule on the holder now lets through;
+    /// - a moment at which a member private to a person held the name (from
+    ///   its seating up to the next seating under the name, that moment
+    ///   included, whether or not it ended in between): that person only;
+    /// - a name under which a member private to a person was seated, when
+    ///   the record's time is not known or is before the name's first known
+    ///   seating, or when members private to different people held it then
+    ///   in different mobs: no caller but an administrator.
+    ///
+    /// - a moment at which a member private to no one held the name, where
+    ///   a member was seated under the name since (another member that
+    ///   replaced it, or the same member seated again, as a respawn does):
+    ///   every caller that may also view an agent of the role and labels
+    ///   that earlier seating recorded. A record made under the name's last
+    ///   seating is decided by the rule on the holder now alone, so a member
+    ///   is judged by its labels now for what it recorded since it was last
+    ///   seated, and by both for what it recorded before.
+    ///
+    /// A runtime alias is judged as the member it names.
+    pub(crate) fn origin_then_allows(&self, identity: &str, made_at_ms: Option<u64>) -> bool {
+        match self.origin_then(identity, made_at_ms) {
+            OriginThen::Allowed => true,
+            OriginThen::Refused => false,
+            OriginThen::SharedThen(holders) => holders.iter().all(|holder| {
+                matches!(
+                    self.decide_agent_with_attributes(ACTION_AGENT_VIEW, holder),
+                    AccessDecision::Allow
+                )
+            }),
+        }
+    }
+
+    /// [`Self::origin_then_allows`], up to the earlier shared holders the
+    /// caller must be allowed to view. It reads no agent attributes, so a
+    /// decision fence asks it while it holds them and decides those holders
+    /// on the attributes it holds.
+    fn origin_then(&self, identity: &str, made_at_ms: Option<u64>) -> OriginThen {
+        if self.is_admin {
+            return OriginThen::Allowed;
+        }
+        if self.awaits_private_owner_record() {
+            // Who held a name cannot be told yet. A person is told to ask
+            // again ([`Self::awaits_first_read`]); for the one operator of a
+            // console that identifies nobody the rule on the holder now
+            // decides alone meanwhile.
+            return if self.console_identifies_people {
+                OriginThen::Refused
+            } else {
+                OriginThen::Allowed
+            };
+        }
+        let alias = self.runtime_alias_member(identity);
+        let member_key = alias.member_key(identity);
+        let records: Vec<Arc<NameSeatingsByName>> = self
+            .inner
+            .name_seatings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|(_, seatings)| Arc::clone(seatings))
+            .collect();
+        let seatings = records
+            .iter()
+            .filter_map(|names| names.get(member_key))
+            .flatten();
+        match origin_at(seatings.clone(), made_at_ms) {
+            OriginAt::HolderNow => {
+                let holders: Vec<AgentResourceAttributes> = made_at_ms
+                    .into_iter()
+                    .flat_map(|made_at_ms| {
+                        seatings
+                            .clone()
+                            .filter_map(move |name| name.earlier_shared_holder_at(made_at_ms))
+                    })
+                    .map(|seated_as| AgentResourceAttributes {
+                        identity: member_key.to_string(),
+                        agent_id: None,
+                        role: (!seated_as.role.is_empty()).then(|| seated_as.role.clone()),
+                        labels: seated_as.labels.clone(),
+                    })
+                    .collect();
+                if holders.is_empty() {
+                    OriginThen::Allowed
+                } else {
+                    OriginThen::SharedThen(holders)
+                }
+            }
+            OriginAt::Private(person) if self.private_owner_key.as_deref() == Some(person) => {
+                OriginThen::Allowed
+            }
+            OriginAt::Private(_) | OriginAt::AdministratorsOnly => OriginThen::Refused,
+        }
+    }
+
+    /// Whether a caller who is not an administrator, on a console that
+    /// identifies people, cannot be told yet who held a name at a moment: a
+    /// runtime this view's controller was primed from still owes a first
+    /// read of who its members are private to, for as long as such a read
+    /// keeps failing. A gating door answers such a caller that it must ask
+    /// again, whatever it holds. The one operator of a console that
+    /// identifies nobody is no such caller: for it the rule on the name's
+    /// holder now decides alone meanwhile (a record of an origin the
+    /// console does not know is withheld; a record under a name a shared
+    /// member holds now is shown, whoever held the name when it was made).
+    pub(crate) fn awaits_first_read(&self) -> bool {
+        !self.is_admin && self.console_identifies_people && self.awaits_private_owner_record()
     }
 
     /// Whether a console that can identify a person withholds from this
@@ -3588,7 +3857,7 @@ mod tests {
             ] {
                 let names = ["known", "hidden", "never-told"];
                 let fence = controller.decision_fence(Some(subject), None);
-                let by_fence = names.map(|identity| fence.can_see_origin(identity));
+                let by_fence = names.map(|identity| fence.can_see_origin(identity, None));
                 drop(fence);
                 let view = controller.view_for_subject(Some(subject));
                 let by_list = names.map(|identity| {
@@ -3657,7 +3926,7 @@ mod tests {
             let view = controller.view_for_subject(Some(BOB));
             let by_fence = controller
                 .decision_fence(Some(BOB), None)
-                .can_see_origin("aide");
+                .can_see_origin("aide", None);
             (
                 view.can_view_agent("aide"),
                 by_fence,
@@ -4049,7 +4318,7 @@ mod tests {
                 .can_view_agent(identity);
             let by_fence = controller
                 .decision_fence(Some(subject), None)
-                .can_see_origin(identity);
+                .can_see_origin(identity, None);
             assert_eq!(
                 by_view, by_fence,
                 "{subject} on {identity}: the view and the fence"
@@ -5053,6 +5322,109 @@ mod tests {
             assert!(owner.can_view_captured_member(&captured));
             assert!(!other.can_view_captured_member(&captured));
         }
+    }
+
+    fn seatings(of: &[(u64, Option<&str>)]) -> NameSeatings {
+        NameSeatings::of(
+            of.iter()
+                .map(|(at_ms, owner)| (*at_ms, owner.map(str::to_string)))
+                .collect(),
+        )
+    }
+
+    /// Whose a record made under a name is, from the members seated under
+    /// the name over time: the member's that held the name when the record
+    /// was made. The edges that only an administrator passes apply only
+    /// under a name a member private to a person was seated under.
+    #[test]
+    fn a_record_is_the_members_that_held_its_name_when_it_was_made() {
+        const A: &str = "person-a";
+        const B: &str = "person-b";
+
+        // A name no member private to a person ever held: the rule on the
+        // holder now decides alone, whatever is known of the record's time.
+        let shared = [seatings(&[(100, None), (300, None)])];
+        for made_at in [None, Some(50), Some(100), Some(500)] {
+            assert_eq!(origin_at(shared.iter(), made_at), OriginAt::HolderNow);
+        }
+        assert_eq!(
+            origin_at(std::iter::empty::<&NameSeatings>(), Some(5)),
+            OriginAt::HolderNow,
+            "a name the record holds no seating of"
+        );
+
+        // Private to a person, then shared.
+        let private_then_shared = [seatings(&[(100, Some(A)), (300, None)])];
+        let at = |made_at| origin_at(private_then_shared.iter(), made_at);
+        assert_eq!(at(Some(100)), OriginAt::Private(A));
+        assert_eq!(at(Some(299)), OriginAt::Private(A), "also after its end");
+        assert_eq!(
+            at(Some(300)),
+            OriginAt::Private(A),
+            "the moment of the next seating is still the private member's"
+        );
+        assert_eq!(at(Some(301)), OriginAt::HolderNow, "the later member's own");
+        assert_eq!(
+            at(Some(99)),
+            OriginAt::AdministratorsOnly,
+            "before the name's first known seating"
+        );
+        assert_eq!(at(None), OriginAt::AdministratorsOnly, "no time known");
+
+        // Private to one person, shared, private to another.
+        let two_owners = [seatings(&[(100, Some(A)), (300, None), (500, Some(B))])];
+        let at = |made_at| origin_at(two_owners.iter(), Some(made_at));
+        assert_eq!(at(200), OriginAt::Private(A));
+        assert_eq!(at(400), OriginAt::HolderNow);
+        assert_eq!(at(500), OriginAt::Private(B));
+        assert_eq!(at(600), OriginAt::Private(B));
+
+        // The same name in two mobs of one runtime: a private holder in
+        // either decides; holders private to different people leave it to
+        // administrators.
+        let private_and_shared = [seatings(&[(100, Some(A))]), seatings(&[(100, None)])];
+        assert_eq!(
+            origin_at(private_and_shared.iter(), Some(200)),
+            OriginAt::Private(A)
+        );
+        let private_and_later = [seatings(&[(100, Some(A))]), seatings(&[(900, None)])];
+        assert_eq!(
+            origin_at(private_and_later.iter(), Some(200)),
+            OriginAt::Private(A)
+        );
+        let different_owners = [seatings(&[(100, Some(A))]), seatings(&[(100, Some(B))])];
+        assert_eq!(
+            origin_at(different_owners.iter(), Some(200)),
+            OriginAt::AdministratorsOnly
+        );
+    }
+
+    /// A record made at exactly the moment a member private to one person
+    /// was seated under a name a member private to another person held
+    /// before is neither person's: administrators only. The moment before
+    /// is the earlier person's, the moment after the later person's; a
+    /// member of the same person seated again, and a private member seated
+    /// after a shared one, take their own moment.
+    #[test]
+    fn a_record_at_the_moment_one_persons_member_follows_anothers_is_neither_persons() {
+        const A: &str = "person-a";
+        const B: &str = "person-b";
+        let handed_over = [seatings(&[(100, Some(A)), (300, Some(B))])];
+        let at = |made_at| origin_at(handed_over.iter(), Some(made_at));
+        assert_eq!(at(299), OriginAt::Private(A));
+        assert_eq!(at(300), OriginAt::AdministratorsOnly);
+        assert_eq!(at(301), OriginAt::Private(B));
+
+        let seated_again = [seatings(&[(100, Some(A)), (300, Some(A))])];
+        assert_eq!(
+            origin_at(seated_again.iter(), Some(300)),
+            OriginAt::Private(A)
+        );
+        let after_a_shared_member = [seatings(&[(100, None), (300, Some(B))])];
+        assert_eq!(
+            origin_at(after_a_shared_member.iter(), Some(300)),
+            OriginAt::Private(B)
+        );
     }
 }
 

@@ -924,48 +924,126 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
         .and_then(Value::as_str)
 }
 
-/// Whether a caller may see a gating entry recorded with the origin
-/// `identity`: only a caller that may view that agent, and, for a caller the
+/// When each gating request an audit holds was made: the time of the row
+/// that opens its action, by action id. A request is its asking member's,
+/// so every row of an action, its pending entry and the delivery record of
+/// its approval notification are decided by who held the origin's name when
+/// the request was made, not when a later row (a decision, an escalation
+/// successor, a timeout) was written.
+///
+/// The opening row of an action is the first row an evaluation writes for
+/// it: one of the evaluation's own event types, and never the pending row
+/// of an escalation successor. Where the audit no longer retains it (the
+/// audit keeps its newest rows), the request's time is not known.
+pub(crate) struct GatingRequestTimes(BTreeMap<String, Option<u64>>);
+
+impl GatingRequestTimes {
+    /// The request times `audit`, the owner's retained audit rows in the
+    /// order they were written, holds.
+    pub(crate) fn of(audit: &[crate::runtime::GatingAuditEntry]) -> Self {
+        let mut times = BTreeMap::new();
+        for entry in audit {
+            times.entry(entry.action_id.clone()).or_insert_with(|| {
+                let opens = match entry.event_type.as_str() {
+                    "evaluated"
+                    | "conflict_blocked"
+                    | crate::runtime::MEMORY_CONFLICT_LOOKUP_FAILED_EVENT => true,
+                    "pending_created" => entry.detail.get("escalated_from_pending_id").is_none(),
+                    _ => false,
+                };
+                opens.then_some(entry.timestamp_ms)
+            });
+        }
+        Self(times)
+    }
+
+    /// When the request of the action `action_id` was made, if the audit
+    /// still holds the row that opens it.
+    pub(crate) fn made_at(&self, action_id: &str) -> Option<u64> {
+        self.0.get(action_id).copied().flatten()
+    }
+}
+
+/// The refusal of a gating door for a caller who cannot be told yet whose
+/// an entry is: a runtime the Console reads still owes the first read of
+/// who its members are private to, so who held a name when an entry was
+/// made is not known ([`AccessView::awaits_first_read`]). The door answers
+/// it to every request of such a caller, whatever its owner holds (an
+/// owner that holds nothing too): the caller asks again, is never answered
+/// a list that silently lacks an entry, and learns nothing from the refusal
+/// of what it may not see. Once that read has landed no request is answered
+/// it. It names no member. The documented retryable form of a history that
+/// cannot be read now.
+pub(crate) fn gating_origins_not_read_error() -> JsonRpcError {
+    JsonRpcError {
+        code: crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+        message: "who held a member's name when this was recorded is still being read; ask again"
+            .to_string(),
+        data: Some(json!({
+            "kind": "identity_history_unavailable",
+            "retryable": true,
+        })),
+    }
+}
+
+/// Whether `access_view`'s caller cannot be told yet whose an entry is
+/// ([`gating_origins_not_read_error`]).
+pub(crate) fn gating_origins_not_read(access_view: Option<&AccessView>) -> bool {
+    access_view.is_some_and(AccessView::awaits_first_read)
+}
+
+/// Whether a caller may see a record made under the name `identity` at
+/// `made_at_ms` (`None` when its time is not known): a gating entry
+/// recorded with that origin, or a question set that member asked. The one
+/// rule of every gating door ([`AccessView::sees_origin`]): only a caller
+/// that may view the agent that holds the name now; for a caller the
 /// console keeps apart from other people, only when the console knows the
 /// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
-/// know may have been private to a person. The pending list, the audit read,
-/// the question-set read and a decide by a request's id all ask it: a
-/// request withheld from a caller is not one the caller may decide.
-pub(crate) fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
-    access_view.is_none_or(|view| {
-        view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
-    })
+/// know may have been private to a person; and only a caller the member
+/// that held the name when the record was made lets through: what a member
+/// private to a person left under a name stays that person's. The pending
+/// list, the audit read, the question-set read, the decisions family and a
+/// decide by a request's id all ask it: a request withheld from a caller is
+/// not one the caller may decide.
+pub(crate) fn gating_origin_visible(
+    access_view: Option<&AccessView>,
+    identity: &str,
+    made_at_ms: Option<u64>,
+) -> bool {
+    access_view.is_none_or(|view| view.sees_origin(identity, made_at_ms))
 }
 
 /// Whether the caller of a decide is shown the request it decides, asked
 /// once, on the entry the gating owner holds when the decision is applied:
-/// a request with no origin is shown, and one with an origin is shown as the
-/// pending list shows it ([`gating_origin_visible`]). With an access
-/// controller the decision fence answers, by the same rule on the
-/// configuration and roster it holds
+/// a request with no origin is shown, and one with an origin (its name and
+/// the time the request was made) is shown as the pending list shows it
+/// ([`gating_origin_visible`]). With an access controller the decision
+/// fence answers, by the same rule on the configuration and roster it holds
 /// ([`crate::access::AccessDecisionFence::can_see_origin`]); the caller's
 /// view is asked only when there is no fence, since its reads take the lock
 /// a fence holds.
 pub(crate) fn gating_origin_shown_when_applied(
     fence: Option<&crate::access::AccessDecisionFence<'_>>,
     access_view: Option<&AccessView>,
-    origin: Option<&str>,
+    origin: Option<(&str, Option<u64>)>,
 ) -> bool {
-    origin.is_none_or(|identity| match fence {
-        Some(fence) => fence.can_see_origin(identity),
-        None => gating_origin_visible(access_view, identity),
+    origin.is_none_or(|(identity, made_at_ms)| match fence {
+        Some(fence) => fence.can_see_origin(identity, made_at_ms),
+        None => gating_origin_visible(access_view, identity, made_at_ms),
     })
 }
 
 /// Whether a caller may see an audit entry: entries recorded with an origin
-/// are visible only to callers that may see that origin
-/// ([`gating_origin_visible`]).
+/// are visible only to callers that may see that origin's record of the
+/// time the entry's request was made ([`gating_origin_visible`]).
 fn gating_audit_entry_visible(
     entry: &crate::runtime::GatingAuditEntry,
+    times: &GatingRequestTimes,
     access_view: Option<&AccessView>,
 ) -> bool {
-    gating_audit_entry_origin(entry)
-        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+    gating_audit_entry_origin(entry).is_none_or(|identity| {
+        gating_origin_visible(access_view, identity, times.made_at(&entry.action_id))
+    })
 }
 
 /// Whether a caller may see the delivery record of an approval notification
@@ -973,9 +1051,9 @@ fn gating_audit_entry_visible(
 /// request's id and action text, so the record is shown as the pending list
 /// shows the request: by [`gating_origin_visible`] on the request's origin,
 /// read from the pending entry or, once the request is settled, from its
-/// audit entries. A request the gating owner no longer holds is attributed
-/// by nothing: its notification is withheld from every caller the console
-/// keeps apart from other people
+/// audit entries, at the time the request was made. A request the gating
+/// owner no longer holds is attributed by nothing: its notification is
+/// withheld from every caller the console keeps apart from other people
 /// ([`AccessView::kept_apart_from_other_people`]). Every other delivery
 /// record is shown here and left to the caller's audience
 /// ([`admin_read_answer_for_audience`]).
@@ -983,6 +1061,7 @@ fn approval_notification_shown(
     record: &crate::runtime::DeliveryRecord,
     pending: &[crate::runtime::GatingPendingEntry],
     audit: &[crate::runtime::GatingAuditEntry],
+    times: &GatingRequestTimes,
     access_view: Option<&AccessView>,
 ) -> bool {
     if record.payload.get("kind").and_then(Value::as_str)
@@ -995,10 +1074,13 @@ fn approval_notification_shown(
         .iter()
         .find(|entry| Some(entry.pending_id.as_str()) == pending_id)
     {
-        return entry
-            .origin
-            .as_ref()
-            .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity));
+        return entry.origin.as_ref().is_none_or(|origin| {
+            gating_origin_visible(
+                access_view,
+                &origin.identity,
+                times.made_at(&entry.action_id),
+            )
+        });
     }
     let mut settled = audit
         .iter()
@@ -1008,8 +1090,10 @@ fn approval_notification_shown(
         return !access_view.is_some_and(AccessView::kept_apart_from_other_people);
     }
     settled
-        .find_map(gating_audit_entry_origin)
-        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+        .find_map(|entry| gating_audit_entry_origin(entry).map(|identity| (entry, identity)))
+        .is_none_or(|(entry, identity)| {
+            gating_origin_visible(access_view, identity, times.made_at(&entry.action_id))
+        })
 }
 
 /// An audit entry as the console serves it to a caller who may see it. The
@@ -1154,10 +1238,21 @@ async fn console_gating_stream_handler(
             if ended {
                 break;
             }
-            let page = owner.lock().await.gating_audit_after(cursor.as_deref());
+            // The new rows, and when each row's request was made (read from
+            // the whole retained audit, under the same hold of the owner).
+            let (page, times) = {
+                let mut owner = owner.lock().await;
+                let page = owner.gating_audit_after(cursor.as_deref());
+                let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
+                (page, times)
+            };
             if let Some(runtime) = &runtime {
                 let probe = audience.refreshed();
-                if (!page.entries.is_empty() && prime_age.due(Instant::now()))
+                // Rows held for a caller who could not be told yet whose
+                // they are are decided once that read has landed: read
+                // again whether it has.
+                if (!page.entries.is_empty()
+                    && (prime_age.due(Instant::now()) || probe.awaits_first_read()))
                     || page
                         .entries
                         .iter()
@@ -1180,6 +1275,16 @@ async fn console_gating_stream_handler(
                     .data("{}"));
                 break;
             }
+            // A caller who cannot be told yet whose a row is gets no frame
+            // now, whatever the rows are (a frame says "a row you may see
+            // was recorded"):
+            // the cursor stays, and the rows are read again at the next
+            // wake or periodic re-check, which decides them once that read
+            // has landed. The caller's reads answer meanwhile that it must
+            // ask again.
+            if view.awaits_first_read() {
+                continue;
+            }
             if page.gap {
                 cursor = page.entries.last().map(|entry| entry.audit_id.clone());
                 yield Ok(axum::response::sse::Event::default()
@@ -1193,7 +1298,7 @@ async fn console_gating_stream_handler(
             if page
                 .entries
                 .iter()
-                .any(|entry| gating_audit_entry_visible(entry, Some(&view)))
+                .any(|entry| gating_audit_entry_visible(entry, &times, Some(&view)))
             {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.changed")
@@ -4264,6 +4369,10 @@ mod console_private_side_chat_tests;
 #[cfg(test)]
 #[path = "console_private_member_schedule_end_tests.rs"]
 mod console_private_member_schedule_end_tests;
+
+#[cfg(test)]
+#[path = "console_gating_request_time_tests.rs"]
+mod console_gating_request_time_tests;
 
 #[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
@@ -16749,9 +16858,14 @@ async fn handle_console_runtime_rpc_with_visibility(
                 )
             };
             // The record of an approval notification is shown as the pending
-            // list shows its request.
+            // list shows its request. A caller who cannot be told yet whose
+            // a request is asks again, whatever the history holds.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
+            let times = GatingRequestTimes::of(&audit);
             history.deliveries.retain(|record| {
-                approval_notification_shown(record, &pending, &audit, access_view)
+                approval_notification_shown(record, &pending, &audit, &times, access_view)
             });
             // Every delivery that names a member hidden from the caller, as
             // its recipient or in its payload, is left out.
@@ -16780,16 +16894,29 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }),
                 );
             };
-            let pending = module_runtime
-                .lock()
-                .await
-                .list_gating_pending()
+            // The pending entries, and when each one's request was made:
+            // its action's opening audit row, read under the same hold.
+            let (pending, times) = {
+                let mut owner = module_runtime.lock().await;
+                let pending = owner.list_gating_pending();
+                let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
+                (pending, times)
+            };
+            // A caller who cannot be told yet whose a request is asks again,
+            // whatever the owner holds.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
+            let pending = pending
                 .into_iter()
                 .filter(|entry| {
-                    entry
-                        .origin
-                        .as_ref()
-                        .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity))
+                    entry.origin.as_ref().is_none_or(|origin| {
+                        gating_origin_visible(
+                            access_view,
+                            &origin.identity,
+                            times.made_at(&entry.action_id),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>();
             response_value(response_id, Some(json!({ "pending": pending })), None)
@@ -16835,7 +16962,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             // With a cursor, the gap is computed on the owner's full audit;
             // the caller then sees only entries whose origin it may view, and
             // the next cursor never names an entry it cannot see.
-            let (entries, gap, retention) = {
+            let (entries, gap, retention, times) = {
                 let mut owner = module_runtime.lock().await;
                 let (entries, gap) = match after_audit_id {
                     Some(cursor) => {
@@ -16844,11 +16971,19 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }
                     None => (owner.gating_audit_entries(limit), false),
                 };
-                (entries, gap, owner.gating_retention())
+                // When each row's request was made, from the whole retained
+                // audit: a page need not hold the row that opens an action.
+                let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
+                (entries, gap, owner.gating_retention(), times)
             };
+            // A caller who cannot be told yet whose a row is asks again,
+            // whatever the audit holds.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
             let entries = entries
                 .into_iter()
-                .filter(|entry| gating_audit_entry_visible(entry, access_view))
+                .filter(|entry| gating_audit_entry_visible(entry, &times, access_view))
                 .take(limit)
                 .map(|entry| gating_audit_entry_served(entry, access_view))
                 .collect::<Vec<_>>();
@@ -16889,6 +17024,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             // The gating owner trims IDs. Authorize that same canonical value.
             let pending_id = pending_id.trim();
+            // A caller who cannot be told yet whose a request or a question
+            // set is asks again, whatever id the request names.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
             // The approver comes from the connection alone: a request that
             // names one is refused rather than decided as someone else.
             if request.params.get("approver_id").is_some() {
@@ -16971,6 +17111,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             // origin private to someone else, or one the console does not
             // know, is not one they may decide for). A request the person is
             // not shown is decided as an id that is not pending.
+            // When the request was made: its action's opening audit row,
+            // read while the owner is held, before the fence is taken.
+            let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
             let fence = access.map(|controller| {
                 controller.decision_fence(
                     Some(&decider.principal),
@@ -16984,10 +17127,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                     gating_origin_shown_when_applied(
                         fence.as_ref(),
                         access_view,
-                        entry
-                            .origin
-                            .as_ref()
-                            .map(|origin| origin.identity.as_str()),
+                        entry.origin.as_ref().map(|origin| {
+                            (origin.identity.as_str(), times.made_at(&entry.action_id))
+                        }),
                     )
                 },
                 |_| {
@@ -21236,6 +21378,22 @@ async fn prime_access_cache_from_runtime_in_namespace(
         access.record_private_owner_record(owners.record_id(), first_read_reader, true);
     }
     let mut known_members = owners.memory_members();
+    // Who held each member name over time, as the record reads its journals
+    // now: a gating entry and a question set are decided by who held their
+    // origin's name when they were made. Handed over when the record noted
+    // a journal row since the controller last took it.
+    let noted = owners.name_seatings_noted();
+    if access.name_seatings_noted(owners.record_id()) != Some(noted) {
+        access.record_name_seatings(
+            owners.record_id(),
+            noted,
+            owners
+                .name_seatings()
+                .into_iter()
+                .map(|(name, seatings)| (namespace_console_identity(&name, namespace), seatings))
+                .collect(),
+        );
+    }
     known_members.retain(|identity, _| !live_rows.contains(identity));
     let unseated = unseated_agent_access_attributes(
         &runtime.handle(),

@@ -12153,6 +12153,14 @@ impl MobRuntime {
         // their durable records in the background from the start, and read
         // again until it is read; no request waits for it.
         spec.private_owners.seed_in_background(&handle);
+        // The question sets a member private to a person asked end with it,
+        // in every launch that speaks for its composition, whatever else it
+        // composes. A candidate launch follows no end: it changes nothing.
+        if spec.composition_authority.speaks_for_composition() {
+            spec.ask_user_slot
+                .follow_private_member_ends(&spec.private_owners)
+                .await;
+        }
         let runtime = Self {
             handle,
             runtime_delivery,

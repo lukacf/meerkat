@@ -1899,11 +1899,45 @@ pub fn build_runtime_decision_state(
     })
 }
 
+/// The floor of the times this process stamps its gating entries, audit rows
+/// and question sets with: the newest time a mob journal row was recorded at
+/// that a runtime of this process has been shown
+/// ([`raise_entry_time_floor`]). An entry is placed against the seatings of
+/// its origin's name by time, and the journal's rows are stamped by the same
+/// host clock: after that clock steps back, an entry stamped at the floor
+/// still follows the seating of the member that made it.
+static ENTRY_TIME_FLOOR_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Raise the floor of this process's entry times to `at_ms`, the time a mob
+/// journal row was recorded at. It never falls.
+pub(crate) fn raise_entry_time_floor(at_ms: u64) {
+    ENTRY_TIME_FLOOR_MS.fetch_max(at_ms, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// The floor of this process's entry times ([`raise_entry_time_floor`]).
+pub(crate) fn entry_time_floor_ms() -> u64 {
+    ENTRY_TIME_FLOOR_MS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The time this process stamps an entry with when its wall clock reads
+/// `wall_ms`: that time, never earlier than the floor
+/// ([`entry_time_floor_ms`]). So a wall clock that stepped back does not
+/// move a new entry before a seating the process has been shown.
+pub(crate) fn entry_time_ms(wall_ms: u64) -> u64 {
+    wall_ms.max(entry_time_floor_ms())
+}
+
 fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// The time the gating owner stamps an entry or an audit row with, and
+/// judges its deadlines by ([`entry_time_ms`] of the wall clock).
+fn gating_time_ms() -> u64 {
+    entry_time_ms(current_time_ms())
 }
 
 /// A fresh random 128-bit epoch for one gating owner. Every gate identity the

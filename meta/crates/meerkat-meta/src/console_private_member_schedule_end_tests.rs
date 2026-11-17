@@ -4480,3 +4480,8 @@ mod spawned_member_adopted_as_an_identity {
         launch.finish().await;
     }
 }
+
+/// The rows on the question sets of a member private to a person once it
+/// ends, on this rig.
+#[path = "console_private_member_question_set_end_tests.rs"]
+mod question_set_end;

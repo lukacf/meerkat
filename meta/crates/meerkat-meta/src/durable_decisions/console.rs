@@ -127,6 +127,24 @@ impl ConsoleDecisionCaller<'_> {
     fn reads_undecodable(&self) -> bool {
         self.administers() && !self.kept_apart()
     }
+
+    /// Whether the caller cannot be told yet whose a question set is: who
+    /// held its asker's name when it was asked is still being read
+    /// (`crate::http_console::gating_origins_not_read`). Every request of
+    /// such a caller is answered that it must ask again, whatever the store
+    /// holds: an answer that depended on the store would tell the caller
+    /// of what it may not see.
+    fn awaits_askers(&self) -> bool {
+        crate::http_console::gating_origins_not_read(self.access_view)
+    }
+}
+
+/// The answer to a caller who cannot be told yet whose a question set is:
+/// the Console's retryable refusal
+/// (`crate::http_console::gating_origins_not_read_error`).
+fn askers_not_read(id: &Value) -> Value {
+    let error = crate::http_console::gating_origins_not_read_error();
+    wire::failure(id, error.code, error.message, error.data)
 }
 
 /// The caller's sight of decisions, fixed for one request: the approver ids
@@ -182,7 +200,13 @@ impl<'a> Viewer<'a> {
         match crate::ask_user::question_set_asker(row) {
             crate::ask_user::QuestionSetAsker::NotAQuestionSet => true,
             crate::ask_user::QuestionSetAsker::Asker(asker) => {
-                crate::http_console::gating_origin_visible(self.caller.access_view, &asker)
+                // A set is its asking member's: decided by who held the
+                // asker's name when the set was asked.
+                crate::http_console::gating_origin_visible(
+                    self.caller.access_view,
+                    &asker,
+                    Some(row.descriptor.created_at_ms),
+                )
             }
             crate::ask_user::QuestionSetAsker::Unreadable => !self.caller.kept_apart(),
         }
@@ -277,6 +301,9 @@ pub(crate) fn handle_console_decision_rpc(
     let answer = match method {
         LIST_METHOD | GET_METHOD | RENDERING_METHOD if !caller.may(ACTION_DECISIONS_VIEW) => {
             access_denied(id, ACTION_DECISIONS_VIEW)
+        }
+        LIST_METHOD | GET_METHOD | RENDERING_METHOD if caller.awaits_askers() => {
+            askers_not_read(id)
         }
         LIST_METHOD => list(decisions, caller, id, params),
         GET_METHOD => get(decisions, caller, id, params),
@@ -620,12 +647,18 @@ fn withdraw(
             return wire::invalid_params(id, format!("invalid decision request: {error}"));
         }
     };
+    // A caller who cannot be told yet whose a question set is asks again,
+    // before any store is read.
+    if caller.awaits_askers() {
+        return askers_not_read(id);
+    }
     if !decisions.is_available() {
         return wire::no_decision_store(id);
     }
     // The read records nothing: the withdraw's own touch still answers
     // what it records (the expiry of a decision past its deadline).
-    let hidden = match decisions.owner().for_candidate_launch().get(&decision_id) {
+    let read = decisions.owner().for_candidate_launch().get(&decision_id);
+    let hidden = match read {
         Ok(row) => Viewer::of(caller).sight(&row) == Sight::Nothing,
         Err(DecisionError::Unreadable { .. }) => !caller.reads_undecodable(),
         Err(_) => false,

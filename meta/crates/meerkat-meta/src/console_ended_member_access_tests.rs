@@ -264,7 +264,7 @@ async fn refused_through_the_console(
     }
     if access
         .decision_fence(Some(BOB), Some("person:bob"))
-        .can_see_origin(member)
+        .can_see_origin(member, None)
     {
         wrong.push(format!(
             "{case}: the decision fence shows the refused person a request of the member"

@@ -110,7 +110,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "provider_params": {
                         "type": "object",
-                        "description": "Typed provider parameters for a NEW session only. Continuation inherits the original configuration; supplying provider_params with session_id is rejected. Examples: {\"reasoning_effort\": \"high\"}, {\"thinking_budget_tokens\": 5000}, {\"temperature\": 0.2}",
+                        "description": "Typed provider parameters for a NEW session only. Continuation inherits the original configuration; supplying provider_params with session_id is rejected. Example: {\"reasoning_effort\": \"high\"}, one reasoning effort level that every model listed for `model` accepts.",
                         "additionalProperties": true
                     },
                     "session_id": {
@@ -161,7 +161,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "provider_params": {
                         "type": "object",
-                        "description": "Typed per-turn provider parameters applied to ALL agents in the pack. Examples: {\"reasoning_effort\": \"high\"} for one reasoning effort level on every provider, {\"thinking_budget_tokens\": 5000} for Anthropic extended thinking, {\"temperature\": 0.2} for deterministic output. Per-agent overrides not yet supported.",
+                        "description": "Typed per-turn provider parameters applied to ALL agents in the pack. Example: {\"reasoning_effort\": \"high\"} for one reasoning effort level on every provider. Per-agent overrides not yet supported.",
                         "additionalProperties": true
                     },
                     "session_id": {

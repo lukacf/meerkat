@@ -1698,23 +1698,22 @@ async fn an_ephemeral_terminal_carrier_is_finalized_by_the_first_drain_after_a_r
     the_first_drain_after_a_restart_finalizes_a_terminal_carrier(InputDurability::Ephemeral).await;
 }
 
-/// The same host end, for a run whose commit carried its session: the first
-/// drain after the restart takes the session checkpoint the batch requires,
-/// once and with the committed snapshot, and then finalizes the completion
-/// with the run's result.
-async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_carrier(
+/// Consume `input_id` in a run whose commit carries its session, so its
+/// completion batch requires a session checkpoint, and answer the snapshot
+/// that commit stored. The completion is left pending.
+async fn consume_with_committed_session(
+    fixture: &Fixture,
+    input_id: &InputId,
     durability: InputDurability,
-) {
+) -> Arc<Vec<u8>> {
     use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 
-    let fixture = Fixture::with_initial_input(false).await;
-    let input_id = old_input_id();
     let mut session = meerkat_core::Session::with_id(fixture.session_id.clone());
     session.push(Message::User(UserMessage::text("retained history")));
     session.push(Message::User(UserMessage::text("the committed turn")));
     let terminal = CoreApplyTerminal::RunResult(Box::new(carrier_run_result(
         &fixture.session_id,
-        "the run committed this result before its host ended",
+        COMMITTED_RUN_TEXT,
     )));
     fixture
         .consume_batch(
@@ -1725,7 +1724,7 @@ async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_c
         .await;
     let pending = fixture
         .store
-        .load_input_state(&fixture.runtime_id(), &input_id)
+        .load_input_state(&fixture.runtime_id(), input_id)
         .await
         .unwrap()
         .unwrap();
@@ -1737,7 +1736,7 @@ async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_c
         completion.phase,
         InputTerminalCompletionPhase::Pending
     ));
-    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 1);
+    assert_eq!(fixture.pending_terminal_owner_rows(input_id), 1);
     let committed_snapshot = fixture
         .store
         .load_session_snapshot(&fixture.runtime_id())
@@ -1748,23 +1747,17 @@ async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_c
         committed_snapshot, fixture.transcript,
         "the committed session is the run's, not the earlier history"
     );
+    committed_snapshot
+}
 
-    let driver = fixture
-        .fresh_driver_from_durable()
-        .await
-        .expect("the next start recovers the store");
-    let mut executor = SessionCheckpointRecorder::default();
-    crate::runtime_loop::test_drain_recovered_input_terminal_completions(&driver, &mut executor)
-        .await
-        .expect("the startup drain checkpoints the session and finalizes the completion");
-    assert_eq!(
-        executor.snapshots,
-        vec![committed_snapshot],
-        "the drain takes the session checkpoint once, with the committed snapshot"
-    );
+const COMMITTED_RUN_TEXT: &str = "the run committed this result before its host ended";
+
+/// The completion of `input_id` is finalized with the committed run's result
+/// and the store names no pending terminal owner for it.
+async fn assert_committed_run_finalized(fixture: &Fixture, input_id: &InputId) {
     let row = fixture
         .store
-        .load_input_state(&fixture.runtime_id(), &input_id)
+        .load_input_state(&fixture.runtime_id(), input_id)
         .await
         .unwrap()
         .unwrap();
@@ -1780,11 +1773,35 @@ async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_c
     let Some(crate::completion::CompletionOutcome::Completed(result)) = completion.outcome else {
         panic!("the committed run result must survive finalization");
     };
+    assert_eq!(result.text, COMMITTED_RUN_TEXT);
+    assert_eq!(fixture.pending_terminal_owner_rows(input_id), 0);
+}
+
+/// The same host end, for a run whose commit carried its session: the first
+/// drain after the restart takes the session checkpoint the batch requires,
+/// once and with the committed snapshot, and then finalizes the completion
+/// with the run's result.
+async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_carrier(
+    durability: InputDurability,
+) {
+    let fixture = Fixture::with_initial_input(false).await;
+    let input_id = old_input_id();
+    let committed_snapshot = consume_with_committed_session(&fixture, &input_id, durability).await;
+
+    let driver = fixture
+        .fresh_driver_from_durable()
+        .await
+        .expect("the next start recovers the store");
+    let mut executor = SessionCheckpointRecorder::default();
+    crate::runtime_loop::test_drain_recovered_input_terminal_completions(&driver, &mut executor)
+        .await
+        .expect("the startup drain checkpoints the session and finalizes the completion");
     assert_eq!(
-        result.text,
-        "the run committed this result before its host ended"
+        executor.snapshots,
+        vec![committed_snapshot],
+        "the drain takes the session checkpoint once, with the committed snapshot"
     );
-    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 0);
+    assert_committed_run_finalized(&fixture, &input_id).await;
 }
 
 #[tokio::test]
@@ -1799,6 +1816,87 @@ async fn the_first_drain_after_a_restart_checkpoints_the_session_of_a_durable_te
 async fn the_first_drain_after_a_restart_checkpoints_the_session_of_an_ephemeral_terminal_carrier()
 {
     the_first_drain_after_a_restart_checkpoints_the_session_of_a_terminal_carrier(
+        InputDurability::Ephemeral,
+    )
+    .await;
+}
+
+/// A stored-only publisher for a drain that must publish nothing.
+struct NoPublication;
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorPublicationHandle for NoPublication {
+    async fn publish_interaction_terminals(
+        &self,
+        _events: &[meerkat_core::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        CoreExecutorError,
+    > {
+        panic!("a non-directed recovered completion must not invent a publication")
+    }
+}
+
+/// A drain without an executor cannot take a session checkpoint. It refuses
+/// a recovered carrier whose batch requires one, typed, and leaves the row
+/// and the pending terminal index as they were; the executor's drain then
+/// takes the checkpoint and finalizes the completion. An ephemeral carrier
+/// is treated exactly as a durable one.
+async fn a_drain_without_an_executor_leaves_a_checkpoint_owing_terminal_carrier_as_it_was(
+    durability: InputDurability,
+) {
+    let fixture = Fixture::with_initial_input(false).await;
+    let input_id = old_input_id();
+    let committed_snapshot = consume_with_committed_session(&fixture, &input_id, durability).await;
+
+    let driver = fixture
+        .fresh_driver_from_durable()
+        .await
+        .expect("the next start recovers the store");
+    let pending = fixture.raw_row(&input_id);
+    let hooks = Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+        fixture.session_id.clone(),
+    ));
+    let refused = crate::runtime_loop::drain_recovered_terminals_with_stored_only_publisher(
+        &driver,
+        &hooks,
+        None,
+        &NoPublication,
+    )
+    .await
+    .expect_err("a drain without an executor cannot take the session checkpoint");
+    assert!(
+        matches!(refused, RuntimeDriverError::ValidationFailed { .. }),
+        "unexpected refusal: {refused}"
+    );
+    assert_eq!(
+        pending,
+        fixture.raw_row(&input_id),
+        "the refused drain leaves the carrier as it was"
+    );
+    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 1);
+
+    let mut executor = SessionCheckpointRecorder::default();
+    crate::runtime_loop::test_drain_recovered_input_terminal_completions(&driver, &mut executor)
+        .await
+        .expect("the executor's drain checkpoints the session and finalizes the completion");
+    assert_eq!(executor.snapshots, vec![committed_snapshot]);
+    assert_committed_run_finalized(&fixture, &input_id).await;
+}
+
+#[tokio::test]
+async fn a_drain_without_an_executor_leaves_a_checkpoint_owing_durable_terminal_carrier_as_it_was()
+{
+    a_drain_without_an_executor_leaves_a_checkpoint_owing_terminal_carrier_as_it_was(
+        InputDurability::Durable,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_drain_without_an_executor_leaves_a_checkpoint_owing_ephemeral_terminal_carrier_as_it_was()
+ {
+    a_drain_without_an_executor_leaves_a_checkpoint_owing_terminal_carrier_as_it_was(
         InputDurability::Ephemeral,
     )
     .await;
@@ -1848,52 +1946,81 @@ async fn an_unregister_after_a_restart_succeeds_with_an_ephemeral_terminal_carri
         .await;
 }
 
-/// A store in the state an earlier release leaves: an ephemeral terminal
-/// carrier that a registration left out of its live driver, and an unregister
-/// that was refused for it. The first registration of this build recovers the
-/// carrier, its first drain finalizes it, and the session unregisters.
+/// A store in the state an earlier release leaves: a consumed ephemeral
+/// input whose run committed its session and whose completion is pending,
+/// durable inputs still queued beside it, a registration that left the
+/// carrier out of its live driver, and that registration's release refused
+/// with its progress stored. The first registration of this build recovers
+/// the carrier, its first drain takes the session checkpoint and finalizes
+/// the completion, the registration is released, and the queued inputs are
+/// still queued.
 #[tokio::test]
 async fn a_store_holding_an_unrecovered_ephemeral_terminal_carrier_heals_at_the_next_start() {
     let fixture = Fixture::with_initial_input(false).await;
     let input_id = old_input_id();
-    fixture
-        .consume_batch(
-            &[(input_id.clone(), InputDurability::Ephemeral)],
-            None,
-            None,
-        )
-        .await;
-    fixture.pending(&input_id).await;
+    let queued = [InputId::new(), InputId::new()];
+    {
+        let mut entry = fixture.driver.lock().await;
+        for queued_id in &queued {
+            let input = carrier_input(queued_id.clone(), InputDurability::Durable);
+            let admission = entry
+                .resolve_admission_with_active_turn_boundary(&input, true)
+                .unwrap();
+            entry.accept_resolved_input(input, admission).await.unwrap();
+        }
+    }
+    let committed_snapshot =
+        consume_with_committed_session(&fixture, &input_id, InputDurability::Ephemeral).await;
+    let committed_carrier = fixture.raw_row(&input_id);
 
     // The earlier release's host: its registration does not load the carrier
     // (the index row is hidden from it and put back, which leaves the store
-    // and the live driver exactly as that registration left them), and its
-    // unregister is refused.
+    // and the live driver exactly as that registration left them), and the
+    // release of that registration, which keeps what it recovered, is
+    // refused.
     fixture.set_pending_terminal_owner_row(&input_id, false);
     let earlier = fixture.next_host();
-    earlier
-        .register_session(fixture.session_id.clone())
+    let mut earlier_registration = earlier
+        .prepare_session_materialization(fixture.session_id.clone())
         .await
         .expect("the earlier host registers the session");
     fixture.set_pending_terminal_owner_row(&input_id, true);
-    let refused = earlier
-        .unregister_session(&fixture.session_id)
+    let refused = earlier_registration
+        .rollback_now()
         .await
-        .expect_err("a live driver that lacks an owner the store names refuses the unregister");
+        .expect_err("a live driver that lacks an owner the store names refuses its release");
     assert!(
         refused
             .to_string()
             .contains("is absent from the live shell"),
         "unexpected refusal: {refused}"
     );
+    drop(earlier_registration);
     drop(earlier);
-    fixture.pending(&input_id).await;
+
+    // What that host left in the store.
+    let left = crate::store::load_machine_lifecycle(fixture.store.as_ref(), &fixture.runtime_id())
+        .await
+        .unwrap()
+        .expect("the refused release left the session's lifecycle row");
+    assert_eq!(left.runtime_state(), crate::RuntimeState::Stopped);
+    assert!(
+        left.unregister_progress()
+            .is_some_and(|progress| progress.keeps_recovered_inputs()),
+        "the refused release left its progress, keeping what it recovered: {:?}",
+        left.unregister_progress()
+    );
+    assert_eq!(
+        committed_carrier,
+        fixture.raw_row(&input_id),
+        "the carrier is as the run's commit left it"
+    );
     assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 1);
 
     // This build's host, on the same store.
     let machine = fixture.next_host();
-    machine
-        .register_session(fixture.session_id.clone())
+    let mut registration = machine
+        .prepare_session_materialization(fixture.session_id.clone())
         .await
         .expect("the next start registers the session");
     let recovered = machine
@@ -1908,19 +2035,34 @@ async fn a_store_holding_an_unrecovered_ephemeral_terminal_carrier_heals_at_the_
         .lock_current_session_driver_gate(&fixture.session_id, &recovered)
         .await
         .unwrap();
-    crate::runtime_loop::test_drain_recovered_input_terminal_completions(
-        &recovered,
-        &mut NoExecution,
-    )
-    .await
-    .expect("the first drain finalizes the carrier the earlier release left");
-    drop(mutation);
-    fixture.assert_finalized(&input_id).await;
-    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 0);
-    machine
-        .unregister_session(&fixture.session_id)
+    let mut executor = SessionCheckpointRecorder::default();
+    crate::runtime_loop::test_drain_recovered_input_terminal_completions(&recovered, &mut executor)
         .await
-        .expect("the healed session unregisters");
+        .expect("the first drain finalizes the carrier the earlier release left");
+    drop(mutation);
+    assert_eq!(
+        executor.snapshots,
+        vec![committed_snapshot],
+        "the drain takes the session checkpoint the committed run still owed"
+    );
+    assert_committed_run_finalized(&fixture, &input_id).await;
+    registration
+        .rollback_now()
+        .await
+        .expect("the healed session's registration is released");
+    assert!(!machine.contains_session(&fixture.session_id).await);
+    for queued_id in &queued {
+        let row = fixture
+            .store
+            .load_input_state(&fixture.runtime_id(), queued_id)
+            .await
+            .unwrap()
+            .expect("a queued durable input stays stored");
+        assert!(
+            row.seed.terminal_outcome.is_none(),
+            "a queued durable input is still unfinished work"
+        );
+    }
 }
 
 /// One run consumed a durable and an ephemeral input in one boundary, so one

@@ -218,9 +218,10 @@ later occurrences stay pending.
 
 These TypeScript methods are unreleased; use the SDK from this checkout.
 They work with Meta gateways 0.9.15 and 0.9.16; compatibility with earlier
-gateway versions is not established. An occurrence that came due while the
-gateway was stopped is delivered once to the handler the builder registered
-at the next start. This exposes an existing gateway
+gateway versions is not established. At the next start, an occurrence that
+came due while the gateway was stopped is delivered to the handler the
+builder registered if it remains eligible under the schedule's misfire
+policy. This exposes an existing gateway
 contract: existing callers, stored schedules and wire schemas do not need
 migration. Omitting `hostRunnables`, or passing an empty list, sends no
 declaration and changes no default. The gateway continues to validate

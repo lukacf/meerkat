@@ -4597,3 +4597,351 @@ async fn a_composed_gateways_schedule_tools_keep_a_closed_side_chats_schedule_hi
     );
     Ok(())
 }
+
+// Caller label keys Core reserves for runtime facts, on the two member
+// creation roads a caller who is not the host reaches: a person's
+// `meta/ensure_member` on the console, and an agent's spawn tools. Core's
+// rule (`meerkat_core::validate_public_labels`) names the mob discovery
+// labels and the `meerkat` namespace, without regard to letter case.
+
+/// One key of each class Core's label rule refuses beyond the keys only
+/// Meta writes, and the forms the rule covers beyond the plain keys: another
+/// letter case and the bare namespace token.
+const CORE_RESERVED_LABEL_KEYS: [&str; 8] = [
+    "role",
+    "mob_id",
+    "meerkat_id",
+    "meerkat.runtime_id",
+    "Role",
+    "MOB_ID",
+    "Agent_Identity",
+    "meerkat",
+];
+
+fn core_reserved_label_refusal(key: &str) -> String {
+    format!("metadata label key '{key}' is reserved for Meerkat-owned runtime facts")
+}
+
+/// A person's member creation on the console does not carry a label key
+/// Core reserves: `meta/ensure_member` answers invalid params with Core's
+/// own message, naming the key, and seats nothing.
+#[tokio::test]
+async fn console_member_creation_refuses_the_label_keys_core_reserves() -> TestResult {
+    let (_temp_dir, runtime) = runtime("core-reserved-console-labels").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+
+    let mut wrong = Vec::new();
+    for (index, key) in CORE_RESERVED_LABEL_KEYS.into_iter().enumerate() {
+        let member = format!("eve-{index}");
+        let answer = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/ensure_member",
+            json!({
+                "role": "worker",
+                "agent_identity": member,
+                "labels": { key: "public" },
+            }),
+        )
+        .await;
+        let seated = runtime
+            .handle()
+            .get_member(&AgentIdentity::from(member.as_str()))
+            .await?
+            .is_some();
+        let refused = answer["error"]["code"] == json!(-32602)
+            && answer["error"]["message"] == json!(core_reserved_label_refusal(key));
+        if !refused || seated {
+            wrong.push(format!(
+                "label '{key}' on '{member}': seated = {seated}; answered {answer}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "console member creation did not refuse the keys as Core's rule answers:\n{}",
+        wrong.join("\n")
+    );
+    Ok(())
+}
+
+/// The labels only Meta writes, each in another letter case, with the label
+/// it differs from.
+const META_LABEL_CASE_VARIANTS: [(&str, &str); 4] = [
+    ("Side_Chat_Of", "side_chat_of"),
+    ("SIDE_CHAT_OF_SESSION", "side_chat_of_session"),
+    ("Side_Chat_Creator", "side_chat_creator"),
+    ("Console.Private_To", "console.private_to"),
+];
+
+fn meta_label_case_variant_refusal(key: &str, reserved: &str) -> String {
+    format!(
+        "labels.{key} is refused: its key differs only by letter case from the reserved label '{reserved}', which only Meta writes; a caller may not supply it"
+    )
+}
+
+/// A label key that differs only by letter case from a label only Meta
+/// writes is refused on both roads, naming the label it differs from, and
+/// nothing is seated: a near miss of a reserved label is refused, not
+/// stored. A case variant of `agent_identity` is one of the names Core
+/// reserves and gets Core's message.
+#[tokio::test]
+async fn a_case_variant_of_a_label_only_meta_writes_is_refused_on_both_roads() -> TestResult {
+    const MOB: &str = "meta-label-case-variants";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let mut wrong = Vec::new();
+
+    // A person, through the console's `meta/ensure_member`.
+    let console_cases = META_LABEL_CASE_VARIANTS
+        .map(|(key, reserved)| (key, meta_label_case_variant_refusal(key, reserved)))
+        .into_iter()
+        .chain([(
+            "Agent_Identity",
+            core_reserved_label_refusal("Agent_Identity"),
+        )]);
+    for (index, (key, refusal)) in console_cases.enumerate() {
+        let member = format!("eve-{index}");
+        let answer = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/ensure_member",
+            json!({
+                "role": "worker",
+                "agent_identity": member,
+                "labels": { key: "alpha" },
+            }),
+        )
+        .await;
+        let seated = runtime
+            .handle()
+            .get_member(&AgentIdentity::from(member.as_str()))
+            .await?
+            .is_some();
+        let refused = answer["error"]["code"] == json!(-32602)
+            && answer["error"]["message"] == json!(refusal);
+        if !refused || seated {
+            wrong.push(format!(
+                "console: label '{key}' on '{member}': seated = {seated}; error answered: {}",
+                answer["error"]
+            ));
+        }
+    }
+
+    // An agent, through its spawn tools.
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let session = member_session(&runtime, "alpha").await?;
+    for (key, reserved) in META_LABEL_CASE_VARIANTS {
+        let refusal = meta_label_case_variant_refusal(key, reserved);
+        let calls = [
+            (
+                "mob_spawn_member",
+                json!({
+                    "mob_id": MOB,
+                    "member_id": "eve",
+                    "profile": "worker",
+                    "labels": { key: "alpha" },
+                }),
+            ),
+            (
+                "spawn_many_members",
+                json!({
+                    "members": [
+                        { "member_id": "eve", "profile": "worker", "labels": { key: "alpha" } },
+                    ],
+                }),
+            ),
+        ];
+        for (tool, args) in calls {
+            let tools = OwnedMemberTools::new(runtime.handle(), "alpha");
+            let wrapper = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+                tools.clone(),
+                overrides.clone(),
+                &runtime,
+                session.clone(),
+            );
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_mins(1),
+                agent_tool_call(&wrapper, tool, args),
+            )
+            .await;
+            let refused = matches!(
+                &outcome,
+                Ok(Err(meerkat_core::ToolError::InvalidArguments { name, reason }))
+                    if name == tool && *reason == refusal
+            );
+            if !refused || !tools.calls().is_empty() {
+                wrong.push(format!(
+                    "agent: {tool} with label '{key}': meerkat's tools that ran = {:?}; answered {}",
+                    tools.calls(),
+                    match &outcome {
+                        Ok(Ok(_)) => "a result".to_string(),
+                        Ok(Err(error)) => format!("{error:?}"),
+                        Err(_) => "nothing within a minute".to_string(),
+                    }
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a label key that differs only by letter case from a reserved one was not refused:\n{}",
+        wrong.join("\n")
+    );
+    Ok(())
+}
+
+/// An agent's spawn tools refuse a label key Core reserves, as invalid
+/// arguments with Core's own message, naming the key, before meerkat's tool
+/// runs: in a spawn's own labels and in those of a `members` entry.
+#[tokio::test]
+async fn an_agents_spawn_tools_refuse_the_label_keys_core_reserves() -> TestResult {
+    const MOB: &str = "core-reserved-agent-labels";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let session = member_session(&runtime, "alpha").await?;
+
+    let mut wrong = Vec::new();
+    for key in CORE_RESERVED_LABEL_KEYS {
+        let calls = [
+            (
+                "mob_spawn_member",
+                json!({
+                    "mob_id": MOB,
+                    "member_id": "eve",
+                    "profile": "worker",
+                    "labels": { key: "public" },
+                }),
+            ),
+            (
+                "spawn_member",
+                json!({
+                    "member_id": "eve",
+                    "profile": "worker",
+                    "labels": { key: "public" },
+                }),
+            ),
+            (
+                "spawn_many_members",
+                json!({
+                    "members": [
+                        { "member_id": "eve-plain", "profile": "worker" },
+                        { "member_id": "eve", "profile": "worker", "labels": { key: "public" } },
+                    ],
+                }),
+            ),
+        ];
+        // `delegate` and `fork_off` carry labels the same way.
+        let more = [
+            (
+                "delegate",
+                json!({ "task": "Count the herons.", "labels": { key: "public" } }),
+            ),
+            (
+                "fork_off",
+                json!({ "task": "Count the herons.", "labels": { key: "public" } }),
+            ),
+        ];
+        for (tool, args) in calls.into_iter().chain(more) {
+            let tools = OwnedMemberTools::new(runtime.handle(), "alpha");
+            let wrapper = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+                tools.clone(),
+                overrides.clone(),
+                &runtime,
+                session.clone(),
+            );
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_mins(1),
+                agent_tool_call(&wrapper, tool, args),
+            )
+            .await;
+            let refused = matches!(
+                &outcome,
+                Ok(Err(meerkat_core::ToolError::InvalidArguments { name, reason }))
+                    if name == tool && *reason == core_reserved_label_refusal(key)
+            );
+            if !refused || !tools.calls().is_empty() {
+                wrong.push(format!(
+                    "{tool} with label '{key}': meerkat's tools that ran = {:?}; answered {}",
+                    tools.calls(),
+                    match &outcome {
+                        Ok(Ok(_)) => "a result".to_string(),
+                        Ok(Err(error)) => format!("{error:?}"),
+                        Err(_) => "nothing within a minute".to_string(),
+                    }
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "an agent's spawn tools did not refuse the keys as Core's rule answers:\n{}",
+        wrong.join("\n")
+    );
+    Ok(())
+}
+
+/// The host's own member creation takes a `role` label, as before: a host
+/// labels its own members as it likes beyond the keys only Meta writes (the
+/// Rust `spawn`, and the SDK gateway's `meta/ensure_member`, which the
+/// host's own process calls). The stricter check is for a caller who is not
+/// the host.
+#[tokio::test]
+async fn the_hosts_own_member_creation_takes_a_role_label() -> TestResult {
+    let (_state, runtime, _app) = signed_in_unified_runtime("host-role-labels").await?;
+    let labels = BTreeMap::from([
+        ("role".to_string(), "team".to_string()),
+        ("mob_id".to_string(), "blue".to_string()),
+    ]);
+    runtime
+        .spawn(SpawnMemberSpec::new("worker", AgentIdentity::from("eve")).with_labels(labels))
+        .await?;
+    assert_eq!(
+        roster_labels(&runtime.mob_handle(), "eve")
+            .await?
+            .get("role"),
+        Some(&"team".to_string()),
+        "the Rust spawn seats the member with the host's label"
+    );
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "host-role",
+        "method": "meta/ensure_member",
+        "params": {
+            "role": "worker",
+            "agent_identity": "frank",
+            "labels": { "role": "team", "meerkat_id": "blue" },
+        },
+    })
+    .to_string();
+    let raw = crate::rpc::handle_unified_rpc_json(
+        &runtime,
+        &request,
+        std::time::Duration::from_secs(5),
+        None,
+        None,
+    )
+    .await;
+    let answer: Value = serde_json::from_str(&raw)?;
+    assert!(answer["error"].is_null(), "{answer:#}");
+    assert_eq!(
+        roster_labels(&runtime.mob_handle(), "frank")
+            .await?
+            .get("role"),
+        Some(&"team".to_string()),
+        "the SDK gateway's ensure_member seats the member with the host's label"
+    );
+    Ok(())
+}

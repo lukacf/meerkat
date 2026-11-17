@@ -1222,6 +1222,43 @@ fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
     }
 }
 
+/// MeerkatMachine's recovery verdict that keeps a consumed ephemeral input
+/// whose terminal carrier is pending (0.9.17) is declared beside its sibling
+/// verdicts in the catalog and emitted on the late tail: its six arms
+/// directly follow `DeferInputBehindBacklogEndedWithRefusedRunStopped`, the
+/// last variant 0.9.16 published, which keeps index 2878, so no published
+/// `TransitionId` discriminant moves.
+#[test]
+fn meerkat_recovered_pending_carrier_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.16 published.
+    let published_last = index("DeferInputBehindBacklogEndedWithRefusedRunStopped");
+    assert_eq!(published_last, 2878);
+    let arms = [
+        "Initializing",
+        "Idle",
+        "Attached",
+        "Running",
+        "Retired",
+        "Stopped",
+    ]
+    .map(|phase| {
+        format!("ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier{phase}")
+    });
+    assert_eq!(
+        variants[published_last + 1..published_last + 1 + arms.len()].to_vec(),
+        arms.to_vec(),
+        "the pending carrier verdict's arms directly follow the last variant 0.9.16 published"
+    );
+}
+
 /// MobMachine's stale respawn abandonment arm (0.9.11) is declared beside
 /// its siblings in the catalog and emitted on the late tail, after every
 /// variant 0.9.10 published and after the arms 0.9.11 appended before it:
@@ -1293,6 +1330,99 @@ fn mob_dispatch_admission_arms_follow_every_published_variant() {
             index(arm),
             first + offset,
             "`{arm}` keeps its place in the dispatch admission block"
+        );
+    }
+}
+
+/// MobMachine's removal twin of the reciprocal trust request (0.9.17) is
+/// declared beside the request in the catalog and emitted on the late tail:
+/// its two arms directly follow `RecordMemberInstructionLineageStopped`, the
+/// last variant 0.9.16 published, which keeps index 2039, so no published
+/// `TransitionId` discriminant moves.
+#[test]
+fn mob_reciprocal_trust_removal_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
+    // The last TransitionId variant 0.9.16 published.
+    let published_last = index("RecordMemberInstructionLineageStopped");
+    assert_eq!(published_last, 2039);
+    assert_eq!(
+        variants[published_last + 1..published_last + 3].to_vec(),
+        vec![
+            "AuthorizeExternalPeerReciprocalTrustRemovalRunning".to_string(),
+            "AuthorizeExternalPeerReciprocalTrustRemovalStopped".to_string(),
+        ],
+        "the reciprocal trust removal's arms directly follow the last variant 0.9.16 published"
+    );
+}
+
+/// The variants of a rendered kernel's `pub enum <name>`, in order, without
+/// their payloads.
+fn enum_variant_names(rendered: &str, name: &str) -> Vec<String> {
+    let head = format!("pub enum {name} {{");
+    let start = rendered
+        .find(&head)
+        .expect("the kernel renders the named enum")
+        + head.len();
+    let body = &rendered[start..];
+    let end = body.find("\n}").expect("the named enum closes");
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(|first: char| first.is_ascii_uppercase()))
+        .map(|line| {
+            line.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        })
+        .collect()
+}
+
+/// MobMachine's `Input`, `InputKind`, `Effect` and `EffectKind` follow the
+/// catalog's declaration order, so a new input or effect is declared last.
+/// `RecordMemberInstructionLineage` and `MemberDispatchAdmissionResolved`,
+/// the last input and the last effect 0.9.16 published, keep their indexes
+/// (258 and 204), and the input and the effect of the reciprocal trust
+/// removal (0.9.17) directly follow them. An input or effect declared
+/// mid-list moves one of these pins.
+#[test]
+fn mob_input_and_effect_enums_keep_the_published_order() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let input = (
+        "RecordMemberInstructionLineage",
+        258,
+        "AuthorizeExternalPeerReciprocalTrustRemoval",
+    );
+    let effect = (
+        "MemberDispatchAdmissionResolved",
+        204,
+        "ExternalPeerReciprocalTrustRemovalRequested",
+    );
+    for (name, (published_last, published_index, appended)) in [
+        ("Input", input),
+        ("InputKind", input),
+        ("Effect", effect),
+        ("EffectKind", effect),
+    ] {
+        let variants = enum_variant_names(&rendered, name);
+        assert_eq!(
+            variants
+                .iter()
+                .position(|variant| variant == published_last),
+            Some(published_index),
+            "`{name}::{published_last}`, the last variant 0.9.16 published, keeps its index"
+        );
+        assert_eq!(
+            variants.get(published_index + 1).map(String::as_str),
+            Some(appended),
+            "`{name}::{appended}` directly follows the last variant 0.9.16 published"
         );
     }
 }

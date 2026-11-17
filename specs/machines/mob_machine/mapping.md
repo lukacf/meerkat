@@ -6440,9 +6440,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExternalPeerReciprocalTrustRequested`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `ExternalPeerReciprocalTrustRemovalRequested`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `PersistSupervisorAuthority`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6786,6 +6783,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
 - `MemberDispatchAdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExternalPeerReciprocalTrustRemovalRequested`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

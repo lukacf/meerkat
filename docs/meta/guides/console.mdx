@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [67c14b7142c4](https://github.com/lukacf/meerkat/commit/67c14b7142c4131482e0779eace8b5e8ab6e97b3) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -455,6 +455,63 @@ none), or when its item is closed.
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/meta/reference/configuration#sdk-and-gateway-runtime-options).
 That option does not configure unrelated HTTP or library entrypoints.
+
+### Decisions held for a person
+
+A change that a host rule holds for a person's decision shows under
+**Approvals** as a card of its own kind: a created agent under a
+`require_approval` rule of the
+[identity policy](/meta/reference/identity-policy#approval-rules) is the common
+one. The card shows what is asked, its approver, who asked, the deadline and
+where the decision was shown (**Presented in**), and an open one reads
+"Decide where it was presented." It is shown to the holders of the
+decision's approver id in the approver map, to the person who asked and,
+while access control is enforced, to a caller granted `decisions.admin`;
+while access control is enforced each of them also needs `decisions.view`;
+other callers see nothing of it, and a Console that signs nobody in shows
+none.
+
+In 0.9.15 and 0.9.16 the Console shows such a decision and does not decide
+it. The card has no Approve or Reject for anyone, and the Console's own RPC
+does not serve `meta/decisions/decide`. **Withdraw request**, where the card
+offers it, takes the request back.
+
+The decision is taken through the host that started the gateway, with
+`meta/decisions/decide` on its stdio connection (`decisions_decide` in the
+Python SDK, `decisionsDecide` in the TypeScript SDK), in one of two ways:
+
+- **The stdio operator decides.** When the host lists the decisions on that
+  connection (`meta/decisions/list`), the gateway presents to the operator
+  each open one whose approver id the approver map lists the operator for (a
+  `presented` notice). The operator then decides with the decision's
+  `subject_digest` as `presented_digest`, without an attestation. A decide
+  on a connection that has not listed the decision is refused
+  `not_eligible`.
+- **A person the host authenticated decides.** The host passes an
+  attestation of the person, from a channel of its own such as a chat. This
+  needs the channel declared as an ingress in `runtime_options.decisions`,
+  the person listed for the approver id under `ingress_subjects` in the
+  approver map, a presentation of the decision to the approver, and the
+  decision's `subject_digest` as `presented_digest`. The gateway works out
+  who decided from the attestation; the request names no approver. The
+  gateway does not authenticate the person, and an attestation carries no
+  expiry: an observed time more than the ingress's `max_clock_skew_ms` ahead
+  of the gateway's clock is refused, and an old one is accepted as long as
+  it is not earlier than the decision's presentation to the approver
+  (`decided_before_presentation`); the `scope` is taken as given and
+  compared with nothing; an `event_ref` is accepted for one decision only.
+  So the host owns the person's authentication and how fresh it is, and
+  gives each decision an event reference of its own.
+
+The approver map is the `[approvers]` part of the launch's access file (see
+[Approver identities](/meta/concepts/access-control#approver-identities)). Where
+it lists neither the operator nor a person on a declared ingress for the
+approver id, nobody can decide: the change stays held until it is withdrawn
+or its deadline passes. A person cannot approve their own request. The call,
+its attestation and the fields of a presentation are under
+[`meta/decisions/decide`](/meta/api/rpc#meta%2Fdecisions%2Fdecide); the SDK pages
+have a sample each ([Python](/meta/sdks/python#durable-decisions),
+[TypeScript](/meta/sdks/typescript#durable-decisions)).
 
 ### Question sets
 

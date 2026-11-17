@@ -4,7 +4,7 @@ description: "The host's rules for changes of long-term agents: who may create, 
 icon: "id-card"
 ---
 
-*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [67c14b7142c4](https://github.com/lukacf/meerkat/commit/67c14b7142c4131482e0779eace8b5e8ab6e97b3) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -222,7 +222,12 @@ or lapses at its deadline, when its operation answers `refused` with
 `decision_closed` and the change has to be asked again. Until then a change
 held that way can still be decided: start the gateway again with an access
 file whose binding for the approver id lists the stdio operator or a person
-a declared ingress attests.
+a declared ingress attests. In 0.9.15 and 0.9.16 the decision itself is
+taken through the host (`meta/decisions/decide` on its stdio connection), by
+the operator
+or with the host's attestation of a person; the Console shows a held change
+and does not decide it (see
+[Decisions held for a person](/meta/guides/console#decisions-held-for-a-person)).
 
 A person's approval is evidence, never authority over the policy. When an
 approved change is carried out, the policy the launch has then is asked

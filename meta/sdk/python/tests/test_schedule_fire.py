@@ -10,6 +10,8 @@ place before the runtime first connects, so a schedule that is due when the
 gateway starts finds it while the init is still settling.
 """
 import json
+import re
+import types
 
 import pytest
 
@@ -207,6 +209,33 @@ class TestBuilderSeam:
     def test_a_declared_name_with_no_handler_is_allowed_at_build(self):
         MetaBuilder().host_runnables(["digest"])._validate()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["digest ", " digest", "Digest"])
+    async def test_a_name_that_differs_by_padding_or_case_is_undeclared(self, name):
+        # Names are compared exactly, as the gateway keeps them.
+        builder = (
+            MetaBuilder()
+            .host_runnables(["digest"])
+            .on_schedule_fire(name, lambda occurrence: None)
+        )
+        with pytest.raises(ValueError, match=re.escape(repr(name))):
+            await builder.build()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_comes_before_anything_is_started(self, tmp_path):
+        script = _gateway(tmp_path, "never_started", """
+            accepted()
+        """)
+        builder = (
+            MetaBuilder()
+            .gateway(str(script))
+            .host_runnables(["backup.rotate"])
+            .on_schedule_fire("digest", lambda occurrence: None)
+        )
+        with pytest.raises(ValueError, match="digest"):
+            await builder.build()
+        assert _records(script) == [], "no gateway was started"
+
     def test_builder_handlers_send_nothing_in_the_init_request(self):
         plain = MetaRuntime(MetaBuilder().host_runnables(["digest"])._config)
         with_handler = MetaRuntime(
@@ -218,6 +247,32 @@ class TestBuilderSeam:
         assert json.dumps(with_handler._build_init_params(), sort_keys=True) == json.dumps(
             plain._build_init_params(), sort_keys=True
         )
+
+
+class TestRuntimeConstructor:
+    @pytest.mark.asyncio
+    async def test_the_handlers_are_taken_from_any_mapping(self):
+        config = MetaBuilder().host_runnables(["digest"])._config
+        config.schedule_fire_handlers = types.MappingProxyType(
+            {"digest": lambda occurrence: "from a mapping"}
+        )
+        runtime = MetaRuntime(config)
+        assert (
+            await runtime._dispatcher.handle_callback("callback/schedule_fire", FIRE)
+            == "from a mapping"
+        )
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            object(),
+            types.SimpleNamespace(),
+            types.SimpleNamespace(schedule_fire_handlers=None),
+            types.SimpleNamespace(schedule_fire_handlers=["digest"]),
+        ],
+    )
+    def test_a_config_that_is_no_builder_config_does_not_break_the_constructor(self, config):
+        MetaRuntime(config)
 
 
 class TestFireDuringTheFirstInit:
@@ -239,12 +294,15 @@ class TestFireDuringTheFirstInit:
                       "schedule_id": "sch-1", "occurrence_id": "occ-1",
                       "due_at": "2026-07-10T07:00:00+00:00"}}})
             log({"fire_answer": json.loads(sys.stdin.readline())})
-            settled(outcome="ready", http_base_url="http://127.0.0.1:9", stdio_shutdown_handshake=True)
+            settled(outcome="ready", http_base_url="http://127.0.0.1:9",
+                    stdio_shutdown_handshake=True)
             serve_shutdown()
         """)
         seen = []
+        order = []
 
         def handler(occurrence):
+            order.append("the handler ran")
             seen.append(occurrence["occurrence_id"])
             return {"digest": "sent"}
 
@@ -252,6 +310,7 @@ class TestFireDuringTheFirstInit:
         if registered == "on the builder":
             builder.on_schedule_fire("digest", handler)
         runtime = await builder.build()
+        order.append("build() returned")
         try:
             if registered == "on the runtime after build":
                 # The earliest a program can register on the runtime: the
@@ -266,6 +325,9 @@ class TestFireDuringTheFirstInit:
         if registered == "on the builder":
             assert answer.get("result") == {"digest": "sent"}, answer
             assert seen == ["occ-1"]
+            # The handler ran while build() was still connecting: it had no
+            # runtime to use.
+            assert order == ["the handler ran", "build() returned"]
         else:
             assert answer["error"]["code"] == -32000, answer
             assert (
@@ -273,3 +335,4 @@ class TestFireDuringTheFirstInit:
                 in answer["error"]["message"]
             )
             assert seen == []
+            assert order == ["build() returned"]

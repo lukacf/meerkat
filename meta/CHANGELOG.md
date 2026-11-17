@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A mob runtime whose storage provider has no WorkGraph binds no resume
+  check for durable workers. Its resume check was bound over a store that
+  refuses every operation, so each of its reads failed, and after Meerkat's
+  bounded retries every interrupted run of a durable worker was settled as
+  superseded when the worker resumed. Such a runtime now binds no resume
+  check, as a runtime without a WorkGraph service does, and the run
+  continues. Present in every release since the resume check was added in
+  0.9.5.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without
@@ -2176,14 +2187,6 @@ Security, Upgrade and Changed.
 
 ### Fixed
 
-- A mob runtime whose storage provider has no WorkGraph binds no resume
-  check for durable workers. Its resume check was bound over a store that
-  refuses every operation, so each of its reads failed, and after Meerkat's
-  bounded retries every interrupted run of a durable worker was settled as
-  superseded when the worker resumed. Such a runtime now binds no resume
-  check, as a runtime without a WorkGraph service does, and the run
-  continues. Present in every release since the resume check was added in
-  0.9.5.
 - An agent created at run time that the mob's start seats before the
   host's identity runtime is composed is not built from its row alone.
   That is an agent created with a first message whose first spawn failed

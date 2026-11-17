@@ -1020,10 +1020,31 @@ const PROVIDER_KEY_VARIABLES: [&str; 7] = [
 ];
 
 /// One `meta/init` to a fresh `meta_gateway` process whose environment
-/// carries `keys`; the first stdout line as JSON.
+/// carries `keys`; the first stdout line as JSON. The gateway home is the
+/// workspace's own (`<workspace>/xdg-state`).
 fn init_child(
     workspace: &Path,
     store_path: &Path,
+    extra: Value,
+    timeout: Duration,
+    keys: ProviderKeys,
+) -> Value {
+    init_child_at_home(
+        workspace,
+        store_path,
+        &workspace.join("xdg-state"),
+        extra,
+        timeout,
+        keys,
+    )
+}
+
+/// [`init_child`] with the gateway home (`XDG_STATE_HOME`) given, so that
+/// starts from two workspaces can share one, as one operator's launches do.
+fn init_child_at_home(
+    workspace: &Path,
+    store_path: &Path,
+    home: &Path,
     extra: Value,
     timeout: Duration,
     keys: ProviderKeys,
@@ -1046,7 +1067,7 @@ fn init_child(
     let mut command = Command::new(bin);
     command
         .current_dir(workspace)
-        .env("XDG_STATE_HOME", workspace.join("xdg-state"))
+        .env("XDG_STATE_HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1499,9 +1520,20 @@ fn assert_stopped_for_the_missing_secret(answer: &Value) {
 /// and the start then stops at the fallback `alpha` member
 /// ([`assert_stopped_for_the_missing_secret`]).
 fn create_default_mob(workspace: &Path, store_path: &Path, keys: ProviderKeys) -> String {
-    let started = init_child(
+    create_default_mob_at_home(workspace, store_path, &workspace.join("xdg-state"), keys)
+}
+
+/// [`create_default_mob`] with the gateway home given.
+fn create_default_mob_at_home(
+    workspace: &Path,
+    store_path: &Path,
+    home: &Path,
+    keys: ProviderKeys,
+) -> String {
+    let started = init_child_at_home(
         workspace,
         store_path,
+        home,
         json!({ "persistent_sessions": true }),
         Duration::from_secs(90),
         keys,
@@ -1661,6 +1693,294 @@ fn meta_gateway_answers_an_untyped_bootstrap_failure_on_the_request_id_with_its_
         message.starts_with("Runtime bootstrap failed: ") && message.contains("nobody"),
         "the message carries the reason: {failed}"
     );
+}
+
+/// The composition manifest of `store_path`'s state directory, as JSON.
+fn read_composition_manifest(store_path: &Path) -> Value {
+    let manifest = composition_manifest(store_path);
+    let bytes = std::fs::read(&manifest)
+        .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()));
+    serde_json::from_slice(&bytes).expect("the manifest is JSON")
+}
+
+/// The mob id `store_path`'s state directory records.
+fn recorded_mob_id(store_path: &Path) -> String {
+    let recorded = read_composition_manifest(store_path);
+    recorded["definition"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the manifest records the mob id: {recorded}"))
+        .to_owned()
+}
+
+/// One state directory and one gateway home, as one operator's launches
+/// share them, for rows that start the gateway from more than one workspace.
+struct SharedState {
+    _root: TempDir,
+    store: std::path::PathBuf,
+    home: std::path::PathBuf,
+}
+
+impl SharedState {
+    fn new() -> Self {
+        let root = TempDir::new().expect("state tempdir");
+        let store = root.path().join("store");
+        let home = root.path().join("xdg-state");
+        Self {
+            _root: root,
+            store,
+            home,
+        }
+    }
+
+    /// A persistent start from `workspace` on this state directory, on
+    /// whatever definition the workspace supplies (the built-in default mob
+    /// when it holds no definition file).
+    fn start(&self, workspace: &Path, keys: ProviderKeys) -> Value {
+        init_child_at_home(
+            workspace,
+            &self.store,
+            &self.home,
+            json!({ "persistent_sessions": true }),
+            Duration::from_secs(90),
+            keys,
+        )
+    }
+}
+
+/// `answer` is a start that serves the mob `recorded_id` its state directory
+/// records. With the suite's dummy secrets: a runtime of that id. Without
+/// any key: the start is past the composition judgement and stops where the
+/// default mob's alpha member needs a secret
+/// ([`assert_stopped_for_the_missing_secret`]), which is as far as a keyless
+/// start of the built-in default mob gets on a state directory of its own
+/// too.
+fn assert_serves_the_recorded_mob(answer: &Value, recorded_id: &str, keys: ProviderKeys) {
+    match keys {
+        ProviderKeys::SuiteDummies => {
+            assert!(answer.get("error").is_none(), "{answer}");
+            assert_eq!(
+                answer["result"]["runtime_id"],
+                json!(recorded_id),
+                "{answer}"
+            );
+        }
+        ProviderKeys::Removed => assert_stopped_for_the_missing_secret(answer),
+    }
+}
+
+/// The built-in default mob's id does not depend on the launch once a state
+/// directory holds the mob: created from one workspace, the state directory
+/// is started from another (whose own derivation gives another id) and
+/// serves the recorded mob, with no definition file and no step.
+fn default_mob_takes_the_recorded_id(keys: ProviderKeys) {
+    let first_workspace = TempDir::new().expect("first workspace tempdir");
+    let second_workspace = TempDir::new().expect("second workspace tempdir");
+    let state = SharedState::new();
+    let recorded =
+        create_default_mob_at_home(first_workspace.path(), &state.store, &state.home, keys);
+
+    let again = state.start(second_workspace.path(), keys);
+    assert_serves_the_recorded_mob(&again, &recorded, keys);
+    assert_eq!(
+        recorded_mob_id(&state.store),
+        recorded,
+        "the state directory still records its one mob"
+    );
+}
+
+/// For CI (the suite's dummy secrets): the full answer, a runtime whose
+/// `runtime_id` is the recorded id.
+#[test]
+fn meta_gateway_default_mob_takes_the_id_its_state_directory_records() {
+    default_mob_takes_the_recorded_id(ProviderKeys::SuiteDummies);
+}
+
+/// The keyless twin: no provider key at all.
+#[test]
+fn meta_gateway_default_mob_takes_the_id_its_state_directory_records_keyless() {
+    default_mob_takes_the_recorded_id(ProviderKeys::Removed);
+}
+
+/// The keys of a composition manifest as the released gateways write it
+/// (0.9.15 and 0.9.16 alike), sorted.
+const RELEASED_MANIFEST_KEYS: [&str; 5] = [
+    "created_by_authority",
+    "created_by_meta",
+    "definition",
+    "legacy_synthesized_profile_normalization",
+    "manifest_version",
+];
+
+/// An id of the form the released gateways gave the built-in default mob
+/// (`tux-` and eight hex digits of the launch's fingerprint), which no
+/// derivation of this build computes for the rows' launches.
+const EARLIER_RELEASE_MOB_ID: &str = "tux-0915f1d0";
+
+/// A state directory that holds the built-in default mob as an earlier
+/// release recorded it: its manifest and mob event log carry the default
+/// definition under [`EARLIER_RELEASE_MOB_ID`], and the manifest names
+/// `created_by_meta` as its creator. Written by this test through the
+/// gateway itself: the default definition is taken from a scratch state
+/// directory's manifest, given that id, and started once as
+/// `<workspace>/definition.json`, which is then removed. `workspace` is left
+/// without a definition file.
+fn state_recorded_by_an_earlier_release(
+    workspace: &Path,
+    state: &SharedState,
+    created_by_meta: &str,
+    keys: ProviderKeys,
+) {
+    let scratch_workspace = TempDir::new().expect("scratch workspace tempdir");
+    let scratch = SharedState::new();
+    create_default_mob_at_home(
+        scratch_workspace.path(),
+        &scratch.store,
+        &scratch.home,
+        keys,
+    );
+    let mut definition = read_composition_manifest(&scratch.store)["definition"].clone();
+    definition["id"] = json!(EARLIER_RELEASE_MOB_ID);
+
+    let definition_json = workspace.join("definition.json");
+    std::fs::write(&definition_json, definition.to_string()).expect("definition.json");
+    let created = state.start(workspace, keys);
+    assert!(created.get("error").is_none(), "{created}");
+    assert_eq!(
+        created["result"]["runtime_id"],
+        json!(EARLIER_RELEASE_MOB_ID),
+        "the fixture's creating start: {created}"
+    );
+    std::fs::remove_file(&definition_json).expect("remove definition.json");
+
+    let mut recorded = read_composition_manifest(&state.store);
+    let mut keys_written: Vec<&str> = recorded
+        .as_object()
+        .expect("the manifest is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys_written.sort_unstable();
+    assert_eq!(
+        keys_written, RELEASED_MANIFEST_KEYS,
+        "the manifest has the released shape"
+    );
+    recorded["created_by_meta"] = json!(created_by_meta);
+    std::fs::write(
+        composition_manifest(&state.store),
+        serde_json::to_vec_pretty(&recorded).expect("manifest bytes"),
+    )
+    .expect("write the manifest");
+}
+
+/// A start on the built-in default mob takes over a state directory an
+/// earlier release recorded, without a step: for 0.9.15 and for 0.9.16, the
+/// start with no definition file serves the mob under the id that release
+/// gave it.
+fn default_mob_starts_on_state_recorded_by_an_earlier_release(keys: ProviderKeys) {
+    for created_by_meta in ["0.9.15", "0.9.16"] {
+        let workspace = TempDir::new().expect("workspace tempdir");
+        let state = SharedState::new();
+        state_recorded_by_an_earlier_release(workspace.path(), &state, created_by_meta, keys);
+
+        let started = state.start(workspace.path(), keys);
+        assert_serves_the_recorded_mob(&started, EARLIER_RELEASE_MOB_ID, keys);
+        assert_eq!(
+            recorded_mob_id(&state.store),
+            EARLIER_RELEASE_MOB_ID,
+            "state recorded by {created_by_meta} keeps its mob"
+        );
+    }
+}
+
+/// For CI (the suite's dummy secrets): the full answer.
+#[test]
+fn meta_gateway_default_mob_starts_on_state_recorded_by_an_earlier_release() {
+    default_mob_starts_on_state_recorded_by_an_earlier_release(ProviderKeys::SuiteDummies);
+}
+
+/// The keyless twin: no provider key at all.
+#[test]
+fn meta_gateway_default_mob_starts_on_state_recorded_by_an_earlier_release_keyless() {
+    default_mob_starts_on_state_recorded_by_an_earlier_release(ProviderKeys::Removed);
+}
+
+/// The built-in default mob's state directory, and a second workspace that
+/// was given the 0.9.16 upgrade step: the manifest's `definition` copied to
+/// `<workspace>/definition.json`. The recorded id and that file's path.
+fn default_mob_with_the_definition_json_step(
+    first_workspace: &Path,
+    second_workspace: &Path,
+    state: &SharedState,
+    keys: ProviderKeys,
+) -> (String, std::path::PathBuf) {
+    let recorded = create_default_mob_at_home(first_workspace, &state.store, &state.home, keys);
+    let definition = read_composition_manifest(&state.store)["definition"].clone();
+    let definition_json = second_workspace.join("definition.json");
+    std::fs::write(&definition_json, definition.to_string()).expect("definition.json");
+    (recorded, definition_json)
+}
+
+/// The 0.9.16 upgrade step keeps working: a workspace given the manifest's
+/// `definition` as `definition.json` starts on the state directory and
+/// serves the recorded mob. Keyless, with the full answer: a start on a
+/// definition file builds no default member.
+#[test]
+fn meta_gateway_keeps_starting_on_a_definition_json_copied_from_the_manifest() {
+    let first_workspace = TempDir::new().expect("first workspace tempdir");
+    let second_workspace = TempDir::new().expect("second workspace tempdir");
+    let state = SharedState::new();
+    let (recorded, _definition_json) = default_mob_with_the_definition_json_step(
+        first_workspace.path(),
+        second_workspace.path(),
+        &state,
+        ProviderKeys::Removed,
+    );
+
+    let started = state.start(second_workspace.path(), ProviderKeys::Removed);
+    assert!(started.get("error").is_none(), "{started}");
+    assert_eq!(
+        started["result"]["runtime_id"],
+        json!(recorded),
+        "{started}"
+    );
+}
+
+/// The 0.9.16 upgrade step is no longer needed: after a start on the copied
+/// `definition.json`, the file is removed again and the same workspace
+/// still starts on the state directory, on the built-in default, and serves
+/// the recorded mob.
+fn default_mob_starts_after_the_definition_json_is_removed(keys: ProviderKeys) {
+    let first_workspace = TempDir::new().expect("first workspace tempdir");
+    let second_workspace = TempDir::new().expect("second workspace tempdir");
+    let state = SharedState::new();
+    let (recorded, definition_json) = default_mob_with_the_definition_json_step(
+        first_workspace.path(),
+        second_workspace.path(),
+        &state,
+        keys,
+    );
+    let with_the_file = state.start(second_workspace.path(), keys);
+    assert_eq!(
+        with_the_file["result"]["runtime_id"],
+        json!(recorded),
+        "{with_the_file}"
+    );
+    std::fs::remove_file(&definition_json).expect("remove definition.json");
+
+    let started = state.start(second_workspace.path(), keys);
+    assert_serves_the_recorded_mob(&started, &recorded, keys);
+}
+
+/// For CI (the suite's dummy secrets): the full answer.
+#[test]
+fn meta_gateway_default_mob_starts_after_the_definition_json_is_removed() {
+    default_mob_starts_after_the_definition_json_is_removed(ProviderKeys::SuiteDummies);
+}
+
+/// The keyless twin: no provider key at all.
+#[test]
+fn meta_gateway_default_mob_starts_after_the_definition_json_is_removed_keyless() {
+    default_mob_starts_after_the_definition_json_is_removed(ProviderKeys::Removed);
 }
 
 /// `rpc_gateway`: the four exposure/config options live inside

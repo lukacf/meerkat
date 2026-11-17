@@ -222,11 +222,16 @@ async fn assert_hidden_from(app: &Router, runtime: &MobRuntime, bearer: &str, si
         |name| json!({ "member_id": name }),
     )
     .await;
+    const ABSENT: &str = "member-absent-here";
     let (status, sent) = send_on_console(app, bearer, side_chat).await;
+    let (absent_status, absent_sent) = send_on_console(app, bearer, ABSENT).await;
     assert_eq!(
-        (status, &sent["error"]),
-        (StatusCode::NOT_FOUND, &json!("unknown_identity")),
-        "a send to the side chat is answered as a send to an unknown member: {sent:#}"
+        (status, sent.to_string().replace(side_chat, "<member>")),
+        (
+            absent_status,
+            absent_sent.to_string().replace(ABSENT, "<member>")
+        ),
+        "a send to the side chat is answered as the same send to a name no member holds"
     );
     assert_answers_as_absent(
         app,

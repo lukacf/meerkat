@@ -291,6 +291,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        ":package_runfiles",
         "//crates/meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {

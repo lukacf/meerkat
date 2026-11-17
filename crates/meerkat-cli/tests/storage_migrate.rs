@@ -1777,3 +1777,215 @@ fn storage_migrate_archive_refuses_a_held_copy() {
     assert_eq!(split[0]["resolution"]["kind"], "archived", "{report:#}");
     assert!(!root_b.join("team").exists(), "the copy was archived");
 }
+
+/// [`run_rkat`] from `context` (below `<temp>/project`).
+fn run_rkat_from(temp: &TempDir, context: &Path, args: &[&str]) -> Output {
+    let binary = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .map(PathBuf::from)
+        .expect("Cargo or Nextest must provide the runtime rkat binary path");
+    std::fs::create_dir_all(context).unwrap();
+    let mut command = Command::new(binary);
+    command
+        .current_dir(context)
+        .env("HOME", temp.path())
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .env("RKAT_TEST_CLIENT", "1")
+        .arg("--context-root")
+        .arg(context)
+        .args(args);
+    command.output().unwrap()
+}
+
+/// `storage prune` and `storage migrate` with no root given act on the
+/// context root's own state root and the user-global root only: an
+/// ancestor's state root is touched only when `--root` names it.
+#[test]
+fn prune_and_migrate_without_a_root_leave_an_ancestor_state_root_alone() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let nested = project.join("sub");
+    std::fs::create_dir_all(nested.join(".rkat")).unwrap();
+    let project_realms = project.join(".rkat").join("realms");
+    let paths = write_manifest(&project_realms, "artifacts");
+    let old_backup = paths.root.join("sessions.sqlite3.pre-0.0.1-1700000000");
+    std::fs::write(&old_backup, b"old-backup").unwrap();
+    backdate(&old_backup, 90);
+
+    let prune = run_rkat_from(&temp, &nested, &["storage", "prune", "--apply", "--json"]);
+    assert_success(&prune, "prune --apply without a root");
+    let report = parse_json(&prune);
+    assert_eq!(report["mode"], "apply");
+    assert!(
+        report["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .is_empty(),
+        "{report:#}"
+    );
+    assert!(old_backup.is_file(), "an ancestor's artifact is not pruned");
+
+    let migrate = run_rkat_from(&temp, &nested, &["storage", "migrate", "--apply", "--json"]);
+    assert_success(&migrate, "migrate --apply without a root");
+    let report = parse_json(&migrate);
+    assert!(
+        report["realms"].as_array().expect("realms").is_empty(),
+        "{report:#}"
+    );
+    assert!(
+        !paths.root.join("realm.mfence").exists(),
+        "an ancestor's realm is not fenced"
+    );
+
+    // Naming the ancestor's root reaches it.
+    let named = run_rkat_from(
+        &temp,
+        &nested,
+        &[
+            "storage",
+            "prune",
+            "--apply",
+            "--json",
+            "--root",
+            project_realms.to_str().unwrap(),
+        ],
+    );
+    assert_success(&named, "prune --apply with the root named");
+    assert!(!old_backup.exists(), "the named root's artifact is pruned");
+}
+
+/// The arguments of the `rkat ... storage migrate ...` command a refusal
+/// prints between backticks, split as a shell splits them (single quotes
+/// around the paths).
+fn pasted_migrate_arguments(text: &str) -> Vec<String> {
+    let command = text
+        .split('`')
+        .find(|part| part.starts_with("rkat ") && part.contains("storage migrate"))
+        .unwrap_or_else(|| panic!("no storage migrate command in:\n{text}"));
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in command.chars() {
+        match ch {
+            '\'' => quoted = !quoted,
+            ' ' if !quoted => {
+                if !current.is_empty() {
+                    arguments.push(std::mem::take(&mut current));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        arguments.push(current);
+    }
+    arguments.remove(0);
+    arguments
+}
+
+/// A workspace realm present under two ancestors' state roots refuses the
+/// run: the refusal names both realm directories and the two remedies, and
+/// no other realm is used in its place.
+#[test]
+fn workspace_realm_under_two_ancestor_state_roots_refuses_the_run() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let nested = project.join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    let workspace_realm = meerkat_core::derive_workspace_realm_id(&nested);
+    let project_realms = project.join(".rkat").join("realms");
+    let nested_realms = nested.join(".rkat").join("realms");
+    create_healthy_realm(&project_realms, &workspace_realm);
+    create_healthy_realm(&nested_realms, &workspace_realm);
+
+    let output = run_rkat_from(&temp, &nested, &["a prompt", "--json"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "the run must be refused\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("exists under more than one candidate state root"),
+        "{stderr}"
+    );
+    for root in [&nested_realms, &project_realms] {
+        assert!(
+            stderr.contains(&root.join(&workspace_realm).display().to_string()),
+            "the refusal names the realm directory under {}:\n{stderr}",
+            root.display()
+        );
+    }
+    assert!(stderr.contains("--state-root"), "{stderr}");
+    assert!(stderr.contains("--adopt-root"), "{stderr}");
+    assert!(!stderr.contains("fell back"), "{stderr}");
+    for root in [&nested_realms, &project_realms] {
+        let realms: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(realms, vec![workspace_realm.clone()], "{}", root.display());
+    }
+    assert!(
+        !temp
+            .path()
+            .join("data")
+            .join("meerkat")
+            .join("realms")
+            .exists(),
+        "nothing is created in the user-global root"
+    );
+
+    // The refusal prefers neither copy: it says which is nearer and which
+    // farther, gives `--state-root` for each, and leaves the root to keep
+    // in the migrate command to the reader.
+    for root in [&nested_realms, &project_realms] {
+        assert!(
+            stderr.contains(&format!("--state-root '{}'", root.display())),
+            "the refusal gives --state-root for {}:\n{stderr}",
+            root.display()
+        );
+    }
+    assert!(stderr.contains("nearer"), "{stderr}");
+    assert!(stderr.contains("farther"), "{stderr}");
+    assert!(stderr.contains("storage doctor"), "{stderr}");
+    assert!(
+        stderr.contains("--adopt-root <ROOT-TO-KEEP>"),
+        "the root to keep is left open:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("--adopt-root '"),
+        "no root is filled in after --adopt-root:\n{stderr}"
+    );
+
+    // The second remedy as the refusal prints it, with the root to keep
+    // filled in (the farther one here): keep one copy, archive the other.
+    let keep = project_realms.to_str().unwrap().to_string();
+    let printed = pasted_migrate_arguments(&stderr);
+    assert!(
+        printed.iter().any(|argument| argument == "<ROOT-TO-KEEP>"),
+        "{printed:?}"
+    );
+    let pasted: Vec<String> = printed
+        .into_iter()
+        .map(|argument| {
+            if argument == "<ROOT-TO-KEEP>" {
+                keep.clone()
+            } else {
+                argument
+            }
+        })
+        .collect();
+    let pasted: Vec<&str> = pasted.iter().map(String::as_str).collect();
+    let resolved = run_rkat_from(&temp, &nested, &pasted);
+    assert_success(&resolved, "the refusal's storage migrate command");
+    assert!(project_realms.join(&workspace_realm).is_dir());
+    assert!(!nested_realms.join(&workspace_realm).exists());
+    let again = run_rkat_from(&temp, &nested, &["a prompt", "--json"]);
+    assert_success(&again, "the run after the pair is reconciled");
+    assert!(
+        !String::from_utf8_lossy(&again.stderr).contains("fell back"),
+        "the reconciled realm is used: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+}

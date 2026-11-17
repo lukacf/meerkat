@@ -322,6 +322,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        ":package_runfiles",
         "//crates/meerkat-rest:rkat_rest_bin",
     ],
     env = {

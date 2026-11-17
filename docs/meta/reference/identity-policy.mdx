@@ -4,7 +4,7 @@ description: "The host's rules for changes of long-term agents: who may create, 
 icon: "id-card"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -318,7 +318,16 @@ and a `get`, a `plan` or a change of it answers `identity_unknown`,
 exactly as a name no agent holds. A create under its name is the one
 thing that differs from a name no agent holds: one namespace holds every
 name, so a taken name cannot be created, and the create is refused
-`name_taken`. In 0.9.15 that refusal comes at once only where the rules
+`name_taken`. Where the host's rules allow the create, it is refused at
+once. Where they hold it for a person, it is refused before anything is
+held when an agent the caller is shown holds the name; the stdio gateway's
+own caller, which is shown everything, is refused the same way under a
+removed agent's name and under a worker member's name. The plan of a
+create that would be held is refused the same way. Any other taken name is
+held like a name no agent holds and refused when the approved create is
+carried out; on the Console that includes a removed agent's name and a
+worker member's name, for every caller.
+In 0.9.15 that refusal comes at once only where the rules
 allow the create: where a rule requires approval for it, the create is held
 first and is refused when the approved change is carried out (see Known
 limitations in the Meta changelog). On the Console there is one exception: when the name is

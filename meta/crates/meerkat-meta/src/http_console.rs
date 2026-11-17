@@ -4289,6 +4289,10 @@ mod console_announcement_audience_tests;
 mod console_question_set_tests;
 
 #[cfg(test)]
+#[path = "console_request_name_tests.rs"]
+mod console_request_name_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,

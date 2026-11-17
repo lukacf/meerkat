@@ -985,40 +985,75 @@ pub(crate) enum RunSettlementHealth {
     Unreadable,
 }
 
-/// Recompute one session's run settlement health from its input ledger.
+/// Recompute one session's run settlement health from machine lane truth and
+/// its input ledger.
 ///
-/// The verdict is a pure function of the ledger's rows, `notice` and `now`:
-/// which rows own unsettled terminal work is [`unsettled_run_terminal`], and
-/// the clock is each row's [`InputState::updated_at`](crate::input_state::InputState::updated_at),
-/// stamped when the row entered its terminal state in the run's terminal
-/// commit. Nothing is stored, latched, or trusted from an earlier read, and
-/// no runtime loop has to be alive for it: a session whose loop left with the
-/// work unsettled reads the same as one whose loop still stands in it.
+/// The verdict is a pure function of the shared generated authority, the
+/// ledger's rows, `notice` and `now`. No runtime loop has to be alive for it:
+/// a session whose loop left with the work unsettled reads the same as one
+/// whose loop still stands in it.
 ///
-/// The ledger is read through the driver's own `tokio` mutex with `try_lock`.
-/// A step that holds that mutex across a store write that does not return is
-/// one of the states this observes, so a miss reports
-/// [`RunSettlementHealth::Unreadable`] and never parks.
+/// - **Stage 1, machine lane truth.** A row that owns a run's unsettled
+///   terminal work is the row of an input the machine holds in a terminal
+///   phase: the terminal commit ends the input and stages the carrier
+///   together, and an input is archived only once it owns no open carrier.
+///   A session whose machine holds no input in a terminal phase therefore
+///   reads `Clear` here, and its driver is never touched. This is what keeps
+///   the probe off the driver of a session in the middle of a turn.
+/// - **Stage 2, the ledger.** Which rows own unsettled terminal work is
+///   [`unsettled_run_terminal`], and the clock is each row's
+///   [`InputState::updated_at`](crate::input_state::InputState::updated_at),
+///   stamped when the row entered its terminal state in the run's terminal
+///   commit.
+///
+/// The two locks are taken strictly in sequence, never nested, and both are
+/// non-blocking tries (the driver's `tokio` mutex through its synchronous
+/// `try_lock`). Either miss reports [`RunSettlementHealth::Unreadable`]: the
+/// read established nothing, and what a caller publishes for that is the
+/// caller's decision (see `MeerkatMachine::unsettled_run_session_count`).
 ///
 /// # Void condition
 ///
 /// **The moment any admission, dispatch, backpressure or lifecycle path
 /// branches on this observation, it becomes a semantic fact, needs a machine
 /// owner, and this design is void.** The permitted consumers are the runtime
-/// host health census
-/// (`MeerkatMachine::unsettled_run_session_count`) and the report of
-/// [`RunSettlementWatchdog`], both read-only by contract. The
+/// host health census (`MeerkatMachine::unsettled_run_session_count`), the
+/// per-session read an owner reports under its own name
+/// (`MeerkatMachine::unsettled_run`) and the report of
+/// [`RunSettlementWatchdog`], all read-only by contract. The
 /// `run_start_window_stays_out_of_machine_authority` test pins this boundary
 /// with a source grep over the machine-authority files.
 pub(crate) fn observe_run_settlement(
+    authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
     driver: &crate::meerkat_machine::driver::SharedDriver,
     notice: Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> RunSettlementHealth {
-    // RED-FIRST PLACEHOLDER: reads nothing yet.
-    if notice > Duration::ZERO {
-        return RunSettlementHealth::Clear;
+    // Stage 1: machine lane truth, released before stage 2 begins. A direct
+    // authority read, for the reason `observe_parked_queued_work` gives.
+    {
+        let authority = match authority.try_lock() {
+            Ok(authority) => authority,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return RunSettlementHealth::Unreadable;
+            }
+        };
+        let holds_terminal_input = authority.state().input_phases.values().any(|phase| {
+            matches!(
+                phase,
+                mm_dsl::InputPhase::Consumed
+                    | mm_dsl::InputPhase::Superseded
+                    | mm_dsl::InputPhase::Coalesced
+                    | mm_dsl::InputPhase::Abandoned
+            )
+        });
+        if !holds_terminal_input {
+            return RunSettlementHealth::Clear;
+        }
     }
+
+    // Stage 2: the rows that own unsettled terminal work, and their clocks.
     let Ok(driver) = driver.try_lock() else {
         return RunSettlementHealth::Unreadable;
     };
@@ -1059,7 +1094,8 @@ pub(crate) enum RunSettlementObservation {
     /// An input row still owns unsettled terminal work of the run.
     Unsettled,
     /// The session's input ledger could not be read without blocking. Not
-    /// evidence that the work settled, so the watchdog keeps reporting.
+    /// evidence either way: the watchdog keeps looking, and reports such a
+    /// tick only while its runtime loop still stands in the settling steps.
     Unreadable,
     /// The session's driver is gone: nothing is left to observe.
     SessionGone,
@@ -1114,10 +1150,6 @@ impl LedgerRunSettlement {
 
 impl RunSettlementSource for LedgerRunSettlement {
     fn observe(&self) -> RunSettlementObservation {
-        // RED-FIRST PLACEHOLDER: reads nothing yet.
-        if self.driver.strong_count() < usize::MAX {
-            return RunSettlementObservation::Settled;
-        }
         let Some(driver) = self.driver.upgrade() else {
             return RunSettlementObservation::SessionGone;
         };
@@ -1155,9 +1187,21 @@ impl RunSettlementSource for LedgerRunSettlement {
 /// the loop ends it early on the one path where it settled the work itself
 /// ([`Self::settled`]).
 ///
+/// One line per unsettled run and notice interval, and none for a settled
+/// run. While the loop holds the handle it stands in the settling steps, so
+/// the work is unsettled whatever the ledger read says, and a tick whose
+/// read missed the ledger is reported too (a step that holds the driver
+/// across a store write that does not return is that shape). Once the handle
+/// is dropped only a row that reads unsettled is reported: a missed read
+/// then proves nothing, and the run may have been settled on a path that
+/// did not end this task.
+///
 /// It never terminalizes, retries or refuses anything.
 pub(crate) struct RunSettlementWatchdog {
     handle: crate::tokio::task::JoinHandle<()>,
+    /// Held for as long as the runtime loop stands in the settling steps;
+    /// the task watches it weakly.
+    _loop_stands: Arc<()>,
 }
 
 impl RunSettlementWatchdog {
@@ -1169,16 +1213,19 @@ impl RunSettlementWatchdog {
         committed_at: Instant,
         notice_every: Duration,
     ) -> Self {
+        let loop_stands = Arc::new(());
+        let loop_standing = Arc::downgrade(&loop_stands);
         let handle = crate::tokio::spawn(async move {
-            // RED-FIRST PLACEHOLDER: observes nothing yet.
-            if notice_every > Duration::ZERO {
-                return;
-            }
             loop {
                 crate::tokio::time::sleep(notice_every).await;
                 let observed = source.observe();
                 if observed.ends_supervision() {
                     return;
+                }
+                if observed == RunSettlementObservation::Unreadable
+                    && loop_standing.upgrade().is_none()
+                {
+                    continue;
                 }
                 let inputs = input_ids
                     .iter()
@@ -1197,7 +1244,10 @@ impl RunSettlementWatchdog {
                 );
             }
         });
-        Self { handle }
+        Self {
+            handle,
+            _loop_stands: loop_stands,
+        }
     }
 
     /// The runtime loop settled the run's terminal work itself: nothing is
@@ -1928,22 +1978,87 @@ mod tests {
         }
     }
 
+    /// A tick whose read missed the ledger is reported only while the loop
+    /// stands in the settling steps. Once the loop has left, a missed read
+    /// proves nothing, and the run may have been settled on a path that did
+    /// not end the task: no line, and the task keeps looking.
+    #[tokio::test(start_paused = true)]
+    async fn the_settlement_watchdog_reports_a_missed_read_only_while_its_loop_stands() {
+        let errors = CapturedErrors::default();
+        let writer = errors.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let lines = || {
+            String::from_utf8_lossy(
+                &errors
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .lines()
+            .filter(|line| line.contains("committed run's terminal work is not settled"))
+            .count()
+        };
+
+        let source = CountingSettlement::new(RunSettlementObservation::Unreadable);
+        let watchdog = settlement_watchdog(&source);
+        crate::tokio::time::sleep(RUN_SETTLEMENT_NOTICE * 2 + Duration::from_secs(1)).await;
+        assert_eq!(source.observations.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            lines(),
+            2,
+            "while the loop stands the work is unsettled whatever the read says"
+        );
+
+        // The loop leaves without having settled the work itself.
+        drop(watchdog);
+        crate::tokio::time::sleep(RUN_SETTLEMENT_NOTICE * 3).await;
+        assert_eq!(
+            source.observations.load(Ordering::SeqCst),
+            5,
+            "the task keeps looking after the loop left"
+        );
+        assert_eq!(
+            lines(),
+            2,
+            "a missed read after the loop left is not a report of an unsettled run"
+        );
+    }
+
+    /// A machine authority that holds each of `rows` in the terminal phase a
+    /// run's terminal commit leaves it in.
+    fn authority_holding_consumed(
+        rows: &[crate::input_state::InputState],
+    ) -> crate::driver::ephemeral::SharedIngressDslAuthority {
+        let inputs = rows
+            .iter()
+            .map(|row| (row.input_id.clone(), mm_dsl::InputPhase::Consumed, 1))
+            .collect::<Vec<_>>();
+        parked_census_authority(true, None, &inputs)
+    }
+
     #[tokio::test]
     async fn run_settlement_reads_unsettled_only_past_the_notice() {
         let run = run_id();
         let now = chrono::Utc::now();
-        let driver = driver_with_rows(vec![pending_completion_row(
+        let rows = vec![pending_completion_row(
             &run,
             now - chrono::Duration::seconds(90),
-        )]);
+        )];
+        let authority = authority_holding_consumed(&rows);
+        let driver = driver_with_rows(rows);
 
         assert_eq!(
-            observe_run_settlement(&driver, Duration::from_mins(2), now),
+            observe_run_settlement(&authority, &driver, Duration::from_mins(2), now),
             RunSettlementHealth::Clear,
             "work unsettled for less than the notice is not reported"
         );
         assert_eq!(
-            observe_run_settlement(&driver, RUN_SETTLEMENT_NOTICE, now),
+            observe_run_settlement(&authority, &driver, RUN_SETTLEMENT_NOTICE, now),
             RunSettlementHealth::Unsettled {
                 run_id: run.clone(),
                 unsettled_for: Duration::from_secs(90),
@@ -1951,12 +2066,43 @@ mod tests {
             "work unsettled for the notice is reported with its run and its age"
         );
 
-        // The ledger is read with a try: a held driver is neither Clear nor
-        // Unsettled.
+        // Each of the two reads is a try: a held driver, and a held
+        // authority, are neither Clear nor Unsettled.
         let held = driver.lock().await;
         assert_eq!(
-            observe_run_settlement(&driver, RUN_SETTLEMENT_NOTICE, now),
+            observe_run_settlement(&authority, &driver, RUN_SETTLEMENT_NOTICE, now),
             RunSettlementHealth::Unreadable,
+        );
+        drop(held);
+        let held = authority.lock().unwrap();
+        assert_eq!(
+            observe_run_settlement(&authority, &driver, RUN_SETTLEMENT_NOTICE, now),
+            RunSettlementHealth::Unreadable,
+        );
+        drop(held);
+    }
+
+    /// The machine pre-stage: a session whose machine holds no input in a
+    /// terminal phase cannot hold a row that owns unsettled terminal work,
+    /// so its driver is never touched, held or not. This is what keeps the
+    /// probe off the driver of a session in the middle of a turn.
+    #[tokio::test]
+    async fn run_settlement_never_touches_the_driver_without_a_terminal_input() {
+        let now = chrono::Utc::now();
+        let authority = parked_census_authority(
+            true,
+            Some(uuid::Uuid::new_v4()),
+            &[
+                (InputId::new(), mm_dsl::InputPhase::Queued, 0),
+                (InputId::new(), mm_dsl::InputPhase::Queued, 1),
+            ],
+        );
+        let driver = driver_with_rows(Vec::new());
+        let held = driver.lock().await;
+        assert_eq!(
+            observe_run_settlement(&authority, &driver, RUN_SETTLEMENT_NOTICE, now),
+            RunSettlementHealth::Clear,
+            "no terminal input means no driver read, held or not"
         );
         drop(held);
     }
@@ -1993,9 +2139,11 @@ mod tests {
         assert_eq!(unsettled_run_terminal(&plain), None);
         assert_eq!(unsettled_run_terminal(&finalized), None);
         assert_eq!(unsettled_run_terminal(&runless), None);
-        let driver = driver_with_rows(vec![plain, finalized, runless]);
+        let rows = vec![plain, finalized, runless];
+        let authority = authority_holding_consumed(&rows);
+        let driver = driver_with_rows(rows);
         assert_eq!(
-            observe_run_settlement(&driver, RUN_SETTLEMENT_NOTICE, now),
+            observe_run_settlement(&authority, &driver, RUN_SETTLEMENT_NOTICE, now),
             RunSettlementHealth::Clear,
         );
     }

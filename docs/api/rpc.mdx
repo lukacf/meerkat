@@ -399,6 +399,15 @@ no run in flight, including repeated staging churn. `session_run_start` covers
 a current staged run that is overdue to begin. Neither claims to measure a run
 that began and then stopped producing progress.
 
+The host also measures `session_run_settlement`: `degraded` while a registered
+session holds a run whose terminal commit landed and whose completion has
+stayed unsettled for a minute, whether or not its runtime loop is still alive.
+Such a session accepts input and runs none of it. The host logs an error that
+names the session, the run and its inputs once a minute for as long as it
+lasts, and a mob logs an error that names the member when the member's status
+is read. A session that is busy at the moment of a health read is not a failed
+read: the check then keeps its last complete reading.
+
 ## Protocol
 
 Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message types:

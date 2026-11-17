@@ -61777,53 +61777,6 @@ async fn parked_queued_input_session_count_sees_the_five_day_wedge_shape() {
     .await;
 }
 
-/// The log of one row, captured on the row's own thread.
-#[derive(Clone, Default)]
-struct RunSettlementLog(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for RunSettlementLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl RunSettlementLog {
-    fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
-        let log = Self::default();
-        let writer = log.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        (log, tracing::subscriber::set_default(subscriber))
-    }
-
-    /// The captured lines that carry `message`.
-    fn lines_with(&self, message: &str) -> Vec<String> {
-        String::from_utf8_lossy(
-            &self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-        .lines()
-        .filter(|line| line.contains(message))
-        .map(str::to_string)
-        .collect()
-    }
-}
-
-const UNSETTLED_SESSION_LINE: &str = "session holds a run whose terminal work is not settled";
-
 /// A clock reading past the run settlement notice, for the census reads of
 /// the rows below: the rows stay as the runtime wrote them, and only the
 /// reader's clock moves.
@@ -61870,6 +61823,22 @@ struct HeldAfterTerminalCommit {
     apply_release: Arc<Notify>,
     release: crate::tokio::sync::oneshot::Sender<()>,
     completion_handle: crate::completion::CompletionHandle,
+    /// [`run_settlement_watchers`] before the run was accepted.
+    watchers_before: usize,
+}
+
+/// How many weak handles stand on the session's driver. A run settlement
+/// watchdog holds exactly one from the run's terminal commit until it ends,
+/// so the difference to the count before the run is the number of watchdogs
+/// alive for the session.
+async fn run_settlement_watchers(machine: &Arc<MeerkatMachine>, session_id: &SessionId) -> usize {
+    let sessions = machine.sessions.read().await;
+    Arc::weak_count(
+        &sessions
+            .get(session_id)
+            .expect("registered session entry")
+            .driver,
+    )
 }
 
 async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
@@ -61899,6 +61868,7 @@ async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
     )
     .await;
 
+    let watchers_before = run_settlement_watchers(&machine, &session_id).await;
     let (entered, release) =
         machine.arm_runtime_loop_before_boundary_acknowledgement_test_hook(session_id.clone());
     let (accept_outcome, completion_handle) = machine
@@ -61915,6 +61885,13 @@ async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
         .expect("the run should commit")
         .expect("the armed pause should be reached");
 
+    // The watchdog of the run is alive from its terminal commit.
+    assert_eq!(
+        run_settlement_watchers(&machine, &session_id).await,
+        watchers_before + 1,
+        "the terminal commit starts exactly one run settlement watchdog"
+    );
+
     HeldAfterTerminalCommit {
         machine,
         session_id,
@@ -61923,6 +61900,7 @@ async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
         release,
         completion_handle: completion_handle
             .expect("accepted input should register a completion waiter"),
+        watchers_before,
     }
 }
 
@@ -61934,7 +61912,6 @@ async fn hold_a_run_after_its_terminal_commit() -> HeldAfterTerminalCommit {
 /// session past it, and nothing again once the loop settles the work.
 #[tokio::test]
 async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
-    let (log, _log_guard) = RunSettlementLog::capture();
     let held = hold_a_run_after_its_terminal_commit().await;
     let machine = &held.machine;
 
@@ -61971,15 +61948,35 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         None,
         "the production clock reads a run committed a moment ago as inside the notice"
     );
-    let named = log.lines_with(UNSETTLED_SESSION_LINE);
-    assert!(
-        named.iter().any(|line| {
-            line.contains("ERROR")
-                && line.contains(&format!("session_id={}", held.session_id))
-                && line.contains(&format!("run_id={}", unsettled.run_id))
-        }),
-        "the census names each session it counts, and its run, in an error line: {named:?}"
-    );
+
+    // A read that cannot take the session's driver establishes nothing, and
+    // a lock miss alone is never published as a failed read: the census
+    // answers with its last completed reading, the per-session read with
+    // nothing.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let driver_held = entry.driver.lock().await;
+        assert_eq!(
+            machine.unsettled_run_session_count_at(
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            Some(1),
+            "a lock miss with nothing read keeps the last completed reading"
+        );
+        assert_eq!(
+            machine.unsettled_run_at(
+                &held.session_id,
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            None
+        );
+        drop(driver_held);
+    }
 
     held.release
         .send(())
@@ -61995,6 +61992,25 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         "a run whose terminal work the loop settled owes nothing, however old its rows",
     )
     .await;
+    // The same miss on a healthy session: the last completed reading is
+    // zero, and that is what a busy healthy host publishes, not a failed
+    // read.
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&held.session_id)
+            .expect("registered session entry");
+        let driver_held = entry.driver.lock().await;
+        assert_eq!(
+            machine.unsettled_run_session_count_at(
+                crate::run_progress::RUN_SETTLEMENT_NOTICE,
+                past_run_settlement_notice(),
+            ),
+            Some(0),
+            "a lock miss on a healthy session is not a failed read"
+        );
+        drop(driver_held);
+    }
     assert_eq!(
         machine.unsettled_run_at(
             &held.session_id,
@@ -62003,21 +62019,15 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
         ),
         None
     );
-    // The line that reports a settled run says whose run it was.
+    // The loop settled the work itself, so it ended the run's watchdog: its
+    // weak handle on the session's driver is gone.
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if log
-                .lines_with("runtime run finalization ended")
-                .iter()
-                .any(|line| line.contains(&format!("session_id={}", held.session_id)))
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
+        while run_settlement_watchers(machine, &held.session_id).await != held.watchers_before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the settled run's info line should name its session");
+    .expect("the loop should end the watchdog of a run it settled");
 }
 
 /// The `session_run_settlement` census after a runtime loop LEFT with a
@@ -62028,7 +62038,6 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
 /// loop.
 #[tokio::test]
 async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
-    let (log, _log_guard) = RunSettlementLog::capture();
     let held = hold_a_run_after_its_terminal_commit().await;
     let machine = &held.machine;
 
@@ -62106,14 +62115,14 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
             past_run_settlement_notice(),
         )
         .expect("the per-session read names the unsettled run with no loop alive");
-    let named = log.lines_with(UNSETTLED_SESSION_LINE);
-    assert!(
-        named.iter().any(|line| {
-            line.contains("ERROR")
-                && line.contains(&format!("session_id={}", held.session_id))
-                && line.contains(&format!("run_id={}", unsettled.run_id))
-        }),
-        "the census names the session and its run with no loop alive: {named:?}"
+    assert!(unsettled.unsettled_for >= crate::run_progress::RUN_SETTLEMENT_NOTICE);
+
+    // The run's watchdog outlives the loop that left: it is what keeps
+    // reporting the session, the run and its inputs once a minute.
+    assert_eq!(
+        run_settlement_watchers(machine, &held.session_id).await,
+        held.watchers_before + 1,
+        "the watchdog of a run whose loop left with its work unsettled is still alive"
     );
 
     // The session still accepts input, and runs none of it.
@@ -62136,10 +62145,19 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_left() {
         "the unsettled run stays counted for as long as its rows stand",
     )
     .await;
-    eprintln!(
-        "READING dead_runtime_loop_session_count after the loop left: {:?}",
-        machine.dead_runtime_loop_session_count()
-    );
+    // The kept registration of a loop that is gone is what the runtime loop
+    // dimension counts: the two dimensions read this session together.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match machine.dead_runtime_loop_session_count() {
+                Some(1) => break,
+                Some(count) => panic!("the loop that left is one dead loop, read {count}"),
+                None => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("the runtime loop dimension should count the loop that left");
 }
 
 /// The loop-side arming pin for `session_run_start`: a real turn through the

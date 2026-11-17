@@ -10513,6 +10513,95 @@ async fn observe_member_runtime_run_state(
     None
 }
 
+/// Name the member whose session holds a committed run with unsettled
+/// terminal work: the member starts nothing further until it is settled.
+/// The runtime knows the session and the run; the mob knows whose they are.
+fn report_member_unsettled_run(
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+    session_id: &SessionId,
+    run_id: &meerkat_core::lifecycle::RunId,
+    unsettled_for: Duration,
+) {
+    tracing::error!(
+        %mob_id,
+        member = %agent_identity,
+        %session_id,
+        %run_id,
+        unsettled_secs = unsettled_for.as_secs(),
+        "member's committed run is not settled; the member starts nothing further until it is"
+    );
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod unsettled_run_report_tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedErrors(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedErrors {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_unsettled_member_run_is_reported_by_member_and_session() {
+        let errors = CapturedErrors::default();
+        let writer = errors.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mob_id = MobId::from("review-mob");
+        let member = AgentIdentity::from("reviewer");
+        let session_id = SessionId::new();
+        let run_id = meerkat_core::lifecycle::RunId::new();
+        report_member_unsettled_run(
+            &mob_id,
+            &member,
+            &session_id,
+            &run_id,
+            Duration::from_secs(75),
+        );
+
+        let log = String::from_utf8_lossy(
+            &errors
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned();
+        for expected in [
+            "ERROR".to_string(),
+            "member's committed run is not settled".to_string(),
+            "mob_id=review-mob".to_string(),
+            "member=reviewer".to_string(),
+            format!("session_id={session_id}"),
+            format!("run_id={run_id}"),
+            "unsettled_secs=75".to_string(),
+        ] {
+            assert!(
+                log.contains(&expected),
+                "the report must carry `{expected}`: {log}"
+            );
+        }
+    }
+}
+
 pub(super) fn unavailable_member_progress(
     include_local_session_details: bool,
 ) -> Option<super::handle::MemberProgressSnapshot> {

@@ -7145,6 +7145,7 @@ mod tests {
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ] {
             assert_eq!(
                 checks.get(measured).and_then(serde_json::Value::as_str),
@@ -7189,6 +7190,7 @@ mod tests {
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ]
         .into_iter()
         .filter_map(|key| checks.get(key).and_then(serde_json::Value::as_str))

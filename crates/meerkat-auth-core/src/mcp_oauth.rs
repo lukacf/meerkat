@@ -4806,8 +4806,9 @@ impl McpOAuthAuthority {
     /// The first protected-resource well-known URL of the server that
     /// answers. `None` when every candidate says that no document is
     /// published there ([`ResourceMetadataPlace::says_absent`]: `404` or
-    /// `410`, and under the server's own endpoint path also `401`, `403`
-    /// and `405`): the server publishes none. With any other answer of a
+    /// `410`, and under the server's own endpoint path also `403`, `405`
+    /// and a `401` whose challenge names no resource metadata): the server
+    /// publishes none. With any other answer of a
     /// candidate and no later candidate answering, the server may publish
     /// a document that could not be read, which is the refusal it has
     /// always been.
@@ -4826,7 +4827,7 @@ impl McpOAuthAuthority {
                 Ok(response) if response.status().is_success() => return Ok(Some(candidate.url)),
                 // Only an answer that says no document is published at this
                 // place lets the server be one that publishes none.
-                Ok(response) if candidate.place.says_absent(response.status()) => {}
+                Ok(response) if candidate.place.says_absent(&response) => {}
                 // The egress profile's own resolver refusal is typed, and so is
                 // a probe that passed its client's bound; neither is ever taken
                 // as an absent document.
@@ -5947,20 +5948,39 @@ enum ResourceMetadataPlace {
 }
 
 impl ResourceMetadataPlace {
-    /// Whether `status` says that no document is published at a candidate
+    /// Whether `response` says that no document is published at a candidate
     /// in this place: `404` or `410` anywhere, and under the endpoint path
-    /// also the answers of the endpoint's own guard (`401`, `403`, `405`).
-    /// Every other answer leaves open that a document is published there.
-    fn says_absent(self, status: reqwest::StatusCode) -> bool {
+    /// also the answers of the endpoint's own guard: `403`, `405`, and a
+    /// `401` whose challenge names no resource metadata (one that names it
+    /// is the server saying that it publishes a document). Every other
+    /// answer leaves open that a document is published there.
+    fn says_absent(self, response: &reqwest::Response) -> bool {
         use reqwest::StatusCode;
-        match status {
+        match response.status() {
             StatusCode::NOT_FOUND | StatusCode::GONE => true,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED => {
+            StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED => {
                 self == Self::UnderEndpointPath
+            }
+            StatusCode::UNAUTHORIZED => {
+                self == Self::UnderEndpointPath && !challenge_names_resource_metadata(response)
             }
             _ => false,
         }
     }
+}
+
+/// Whether a `WWW-Authenticate` challenge of `response` names resource
+/// metadata. A challenge that cannot be read counts as one that does.
+fn challenge_names_resource_metadata(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .any(|challenge| {
+            challenge.to_str().map_or(true, |header| {
+                resource_metadata_from_header(header).is_some()
+            })
+        })
 }
 
 /// One URL a server's protected resource metadata may be published at.

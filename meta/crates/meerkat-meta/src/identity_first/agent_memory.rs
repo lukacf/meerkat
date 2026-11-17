@@ -265,6 +265,23 @@ pub trait AgentMemoryProvider: Send + Sync {
         request: AgentMemoryRecallRequest,
     ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError>;
 
+    /// [`Self::recall`] over the active records of `scope` instead of the
+    /// identity scope `request` names: the request's selection, query and
+    /// bound apply, and its `identity` and `realm` are not consulted. It is
+    /// the recall of a member whose memory is kept in a scope no
+    /// `AgentIdentity` names (a member private to a person). The default
+    /// answers unsupported and never falls back to [`Self::recall`]: the
+    /// identity a request names is not that scope.
+    async fn recall_in_scope(
+        &self,
+        _scope: &MemoryScope,
+        _request: AgentMemoryRecallRequest,
+    ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+        Err(AgentMemoryError::Unsupported(
+            "provider does not support a recall in a given scope".to_string(),
+        ))
+    }
+
     async fn remember(
         &self,
         _realm: &str,
@@ -1104,15 +1121,15 @@ impl AgentCustomizer for AgentMemoryCustomizer {
                      agent_memory.recorder_tool"
                 );
             }
-            let recorder = MemoryRecorder {
+            let recorder = MemoryRecorder::new(
                 provider,
-                identity: context.identity.clone(),
-                mob: context
+                config,
+                context.identity.clone(),
+                context
                     .runtime_services
                     .mob_handle()
                     .map(|handle| handle.mob_id().as_str().to_string()),
-                config,
-            };
+            );
             let inner_tools = draft.local_external_tools.dispatcher();
             draft.local_external_tools = super::types::LocalExternalToolOverlay::new(Arc::new(
                 RecorderToolDispatcher::new(inner_tools, recorder),
@@ -1398,12 +1415,54 @@ pub(crate) struct MemoryRecorder {
     identity: AgentIdentity,
     /// Mob scope key for `propose_to_mob`, when the build ran inside a mob.
     mob: Option<String>,
+    /// Where the member's own records are kept.
+    keeping: RecorderKeeping,
 }
+
+/// Where a recorder keeps its member's own records. The author of every
+/// record stays the member's name, whichever it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberMemoryKept {
+    /// In the identity scope of the member's name.
+    UnderItsName,
+    /// In the identity scope of the person the member is private to and the
+    /// member's name
+    /// ([`crate::memory::records::IdentityScopeKey::PrivateMember`]). The
+    /// value is the member's private-owner label value.
+    UnderItsOwner(String),
+    /// Nowhere: every action of the member's `memory` tool answers this
+    /// text as a tool error.
+    Nowhere(&'static str),
+}
+
+/// What decides where a member's records are kept, asked at a `memory`
+/// call: `None` while it cannot tell yet.
+pub(crate) type MemberMemoryKeptLater = Arc<dyn Fn() -> Option<MemberMemoryKept> + Send + Sync>;
+
+/// [`MemberMemoryKept`], fixed at the build or decided at the member's
+/// first `memory` call that can be decided, and fixed from then on.
+enum RecorderKeeping {
+    Fixed(MemberMemoryKept),
+    Late {
+        decide: MemberMemoryKeptLater,
+        decided: std::sync::OnceLock<MemberMemoryKept>,
+    },
+}
+
+/// The answer of every `memory` action of a temporary council's participant
+/// that keeps no memory of its own.
+pub(crate) const COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY: &str =
+    "a council participant keeps no memory of its own";
+
+/// The answer of every `memory` action while where the member's records are
+/// kept cannot be decided yet. Nothing is read or written.
+pub(crate) const MEMBER_MEMORY_NOT_READY: &str = "memory is not ready yet";
 
 impl MemoryRecorder {
     /// Shared constructor for the two recorder hosts: the identity-first
     /// `AgentMemoryCustomizer` and the classic-mob
-    /// `crate::memory::spawn_customizer::MemorySpawnCustomizer`.
+    /// `crate::memory::spawn_customizer::MemorySpawnCustomizer`. The
+    /// member's records are kept under its name.
     pub(crate) fn new(
         provider: Arc<dyn AgentMemoryProvider>,
         config: AgentMemoryConfig,
@@ -1415,14 +1474,51 @@ impl MemoryRecorder {
             config,
             identity,
             mob,
+            keeping: RecorderKeeping::Fixed(MemberMemoryKept::UnderItsName),
         }
     }
 
-    fn identity_scope(&self) -> MemoryScope {
-        MemoryScope::Identity {
+    /// This recorder, keeping its member's records as `kept` says.
+    pub(crate) fn kept(mut self, kept: MemberMemoryKept) -> Self {
+        self.keeping = RecorderKeeping::Fixed(kept);
+        self
+    }
+
+    /// This recorder, keeping its member's records as `decide` says at the
+    /// member's first `memory` call it can answer; until then every action
+    /// answers [`MEMBER_MEMORY_NOT_READY`].
+    pub(crate) fn kept_as_decided_later(mut self, decide: MemberMemoryKeptLater) -> Self {
+        self.keeping = RecorderKeeping::Late {
+            decide,
+            decided: std::sync::OnceLock::new(),
+        };
+        self
+    }
+
+    /// The scope the member's own records are kept in, or why no action
+    /// reaches one.
+    fn own_scope(&self) -> Result<MemoryScope, String> {
+        let kept = match &self.keeping {
+            RecorderKeeping::Fixed(kept) => kept.clone(),
+            RecorderKeeping::Late { decide, decided } => match decided.get() {
+                Some(kept) => kept.clone(),
+                None => {
+                    let kept = decide().ok_or_else(|| MEMBER_MEMORY_NOT_READY.to_string())?;
+                    decided.get_or_init(|| kept).clone()
+                }
+            },
+        };
+        let identity = match kept {
+            MemberMemoryKept::UnderItsName => self.identity.as_str().to_string(),
+            MemberMemoryKept::UnderItsOwner(owner) => {
+                crate::memory::records::private_member_scope_key(&owner, self.identity.as_str())
+            }
+            MemberMemoryKept::Nowhere(reason) => return Err(reason.to_string()),
+        };
+        Ok(MemoryScope::Identity {
             realm: self.config.realm.clone(),
-            identity: self.identity.as_str().to_string(),
-        }
+            identity,
+        })
     }
 
     fn mob_scope(&self) -> Option<MemoryScope> {
@@ -1433,14 +1529,16 @@ impl MemoryRecorder {
     }
 
     /// The typed memory operation a `memory` call with `action` performs:
-    /// that action on a scope this recorder pinned at build time (the
-    /// member's identity scope, or its mob scope for `propose_to_mob`),
-    /// never a scope named by the call's arguments.
+    /// that action on a scope this recorder pinned (the scope the member's
+    /// own records are kept in, or its mob scope for `propose_to_mob`),
+    /// never a scope named by the call's arguments. A member whose records
+    /// are kept nowhere performs none.
     fn operation_target(&self, action: &str) -> Result<meerkat_core::ToolOperationTarget, String> {
+        let own_scope = self.own_scope()?;
         let (scope, operation) = match action {
-            "remember" | "update" => (self.identity_scope(), meerkat_core::MemoryOperation::Write),
-            "forget" => (self.identity_scope(), meerkat_core::MemoryOperation::Delete),
-            "recall" => (self.identity_scope(), meerkat_core::MemoryOperation::Read),
+            "remember" | "update" => (own_scope, meerkat_core::MemoryOperation::Write),
+            "forget" => (own_scope, meerkat_core::MemoryOperation::Delete),
+            "recall" => (own_scope, meerkat_core::MemoryOperation::Read),
             "propose_to_mob" => (
                 self.mob_scope().ok_or_else(propose_outside_mob)?,
                 meerkat_core::MemoryOperation::Propose,
@@ -1595,6 +1693,9 @@ impl MemoryRecorder {
         args: MemoryToolArgs,
         operator_requester: Option<&meerkat_core::PrincipalRef>,
     ) -> Result<String, MemoryToolFailure> {
+        // Every action reads or writes the scope the member's own records
+        // are kept in, or answers why it reaches none.
+        let own_scope = self.own_scope()?;
         match args.action.as_str() {
             "remember" => {
                 let record = self.new_record(&args, "remember")?;
@@ -1603,7 +1704,7 @@ impl MemoryRecorder {
                 }
                 let receipt = self
                     .provider
-                    .remember_authored(&self.identity_scope(), record, self.author())
+                    .remember_authored(&own_scope, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 Ok(self.describe_receipt("Stored", &receipt))
@@ -1621,7 +1722,7 @@ impl MemoryRecorder {
                 let record = self.new_record(&args, "update")?;
                 let receipt = self
                     .provider
-                    .supersede_authored(&self.identity_scope(), prior, record, self.author())
+                    .supersede_authored(&own_scope, prior, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 let mut message = self.describe_receipt("Updated: new record", &receipt);
@@ -1642,7 +1743,7 @@ impl MemoryRecorder {
                     .ok_or_else(|| "`memory_id` is required for action \"forget\"".to_string())?;
                 let result = self
                     .provider
-                    .forget_authored(&self.identity_scope(), memory_id, self.author())
+                    .forget_authored(&own_scope, memory_id, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 if result.deleted {
@@ -1671,18 +1772,23 @@ impl MemoryRecorder {
                 } else {
                     AgentMemorySelection::Always
                 };
-                let records = self
-                    .provider
-                    .recall(AgentMemoryRecallRequest {
-                        identity: self.identity.clone(),
-                        realm: self.config.realm.clone(),
-                        query_text,
-                        query_terms: Vec::new(),
-                        selection,
-                        max_entries,
-                    })
-                    .await
-                    .map_err(|err| err.to_string())?;
+                let request = AgentMemoryRecallRequest {
+                    identity: self.identity.clone(),
+                    realm: self.config.realm.clone(),
+                    query_text,
+                    query_terms: Vec::new(),
+                    selection,
+                    max_entries,
+                };
+                // A scope kept under an owner is no identity's: it is
+                // recalled as a scope, never as the request's identity,
+                // which would be the member's bare name.
+                let recalled = if own_scope.kept_apart_by_its_key() {
+                    self.provider.recall_in_scope(&own_scope, request).await
+                } else {
+                    self.provider.recall(request).await
+                };
+                let records = recalled.map_err(|err| err.to_string())?;
                 // §9.2: an explicit pull is the strongest mechanical
                 // usefulness signal. Telemetry never fails the read.
                 if !records.is_empty() {

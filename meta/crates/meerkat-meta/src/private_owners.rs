@@ -702,12 +702,19 @@ impl PrivateOwners {
             loop {
                 match store.private_retired_identities(&realm).await {
                     Ok(identities) => {
+                        // The store also marks the key of every identity
+                        // scope it keeps apart from the members of a name
+                        // (`crate::memory::records::IdentityScopeKey`) as
+                        // private. Such a key is a scope, not a member's
+                        // name: only plain names are members here.
                         owners
                             .inner
                             .retired
                             .write()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .extend(identities);
+                            .extend(identities.into_iter().filter(|identity| {
+                                crate::memory::records::IdentityScopeKey::of(identity).is_named()
+                            }));
                         owners.inner.first_reads.0.send_modify(|reads| {
                             // On its first attempt unless it failed or a
                             // reader's wait made every read in flight overdue.
@@ -1137,6 +1144,26 @@ impl PrivateOwners {
         }
     }
 
+    /// The person the member `spec` spawns in the runtime's own mob will be
+    /// private to once [`Self::apply`] has run, or `None` for a member
+    /// private to nobody: the owner [`Self::requested_owner`] names, else
+    /// the owner `spec` carries where it is kept ([`keeps_carried_owner`]);
+    /// a host's own spawn keeps what it carries.
+    /// For a customizer that runs before the owner is written on the spec.
+    pub(crate) fn owner_a_spawn_takes(
+        &self,
+        mob_id: &str,
+        spawner: Option<&meerkat_mob::AgentIdentity>,
+        spec: &SpawnMemberSpec,
+    ) -> Result<Option<String>, MobError> {
+        let carried = carried_owner(spec).filter(|_| keeps_carried_owner(spawner, spec));
+        let forks = matches!(spec.launch_mode, MemberLaunchMode::Fork { .. });
+        if spawner.is_none() && !forks {
+            return Ok(carried);
+        }
+        Ok(self.requested_owner(mob_id, spawner, spec)?.or(carried))
+    }
+
     /// The customizer body of the runtime's own mob, factored off the trait
     /// so tests can drive it. A spawn asked for by a member, `spawner` (the
     /// member whose turn spawns), or a prompt-context fork, carries no label
@@ -1154,7 +1181,7 @@ impl PrivateOwners {
         if spawner.is_none() && !forks {
             return Ok(());
         }
-        let owner = self.requested_owner(mob_id, spawner, spec)?;
+        let owner = self.owner_a_spawn_takes(mob_id, spawner, spec)?;
         give_owner(spec, owner);
         Ok(())
     }
@@ -1181,33 +1208,78 @@ impl PrivateOwners {
             }
             (mob_owner, requested) => mob_owner.or(requested),
         };
-        give_owner(spec, owner);
+        let carried = carried_owner(spec).filter(|_| keeps_carried_owner(spawner, spec));
+        give_owner(spec, owner.or(carried));
         Ok(())
     }
 }
 
-/// Strip the labels only Meta writes from `spec` and, for a member private
-/// to `owner`, write the owner and seat it exempt from the definition's
-/// wiring rules. A spawn whose owner no record names keeps the private
-/// owner it carries (a fork Meerkat made copies its source's labels): it
-/// holds that person's conversation.
-fn give_owner(spec: &mut SpawnMemberSpec, owner: Option<String>) {
-    let carried = spec
-        .labels
+/// The private owner the labels of `spec` carry.
+fn carried_owner(spec: &SpawnMemberSpec) -> Option<String> {
+    spec.labels
         .as_ref()
         .and_then(crate::access::private_owner)
-        .map(str::to_string);
+        .map(str::to_string)
+}
+
+/// Whether a spawn whose owner no record names keeps the private owner its
+/// spec carries: a fork does (a fork Meerkat made copies its source's
+/// labels: it holds that person's conversation), and so does a spawn no
+/// member asked for (a host's own). A spawn a member asks for that is no
+/// fork takes its owner from the record alone: no caller path hands such a
+/// spawn an owner label, and one that did would not be believed.
+fn keeps_carried_owner(
+    spawner: Option<&meerkat_mob::AgentIdentity>,
+    spec: &SpawnMemberSpec,
+) -> bool {
+    spawner.is_none() || matches!(spec.launch_mode, MemberLaunchMode::Fork { .. })
+}
+
+/// Strip the labels only Meta writes from `spec` and, for a member private
+/// to `owner`, write the owner and seat it exempt from the definition's
+/// wiring rules.
+fn give_owner(spec: &mut SpawnMemberSpec, owner: Option<String>) {
     if let Some(labels) = spec.labels.as_mut() {
         labels.retain(|key, _| {
             !crate::member_comms_id::RESERVED_AUTHORITY_LABELS.contains(&key.as_str())
         });
     }
-    if let Some(owner) = owner.or(carried) {
+    if let Some(owner) = owner {
         spec.labels
             .get_or_insert_with(BTreeMap::new)
             .insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner);
         spec.definition_wiring = meerkat_mob::DefinitionWiring::Exempt;
     }
+}
+
+/// The spawn on a mob of a member whose name lies under a key namespace
+/// agent memory reserves is refused
+/// ([`crate::member_comms_id::refuse_reserved_memory_name`]) wherever the
+/// mob's spawn customizer is asked about a spawn that creates a member: a
+/// host's own fresh spawn, a member's spawn or fork, a respawn under the
+/// name, and a member's spawn with a resume launch, which seats a member on
+/// an existing session (`spawner`, the member that asked for it, is what
+/// tells that spawn from a rebuild).
+///
+/// A `SpawnSource::Resume` request that names no spawner is not asked. It
+/// is the rebuild of a member already seated (a restart's restore, a wake,
+/// an explicit resume; a fork-derived member's rebuild asks through
+/// `customize_spawn` with that source too), which creates nothing, or a
+/// host's own spawn on the mob handle with a resume launch, which the
+/// request does not tell from such a rebuild. Core admits a resume only on
+/// a session whose own durable records name the same mob and the same
+/// member, so that spawn can only seat again, on its old session, a member
+/// that was seated under the very name before.
+fn admit_member_name(
+    source: meerkat_mob::SpawnSource,
+    spawner: Option<&meerkat_mob::ids::AgentIdentity>,
+    spec: &SpawnMemberSpec,
+) -> Result<(), MobError> {
+    if matches!(source, meerkat_mob::SpawnSource::Resume) && spawner.is_none() {
+        return Ok(());
+    }
+    crate::member_comms_id::refuse_reserved_memory_name(spec.identity.as_str())
+        .map_err(MobError::WiringError)
 }
 
 /// [`PrivateOwners::spawn_customizer`].
@@ -1279,6 +1351,7 @@ impl SpawnMemberCustomizer for PrivateOwnerPropagation {
         ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
+        admit_member_name(ctx.spawn_source, ctx.spawner_identity.as_ref(), spec)?;
         self.owners
             .apply(ctx.mob_id.as_str(), ctx.spawner_identity.as_ref(), spec)
     }
@@ -1290,6 +1363,7 @@ impl SpawnMemberCustomizer for ChildOwnerPropagation {
         ctx: &SpawnCustomizationContext,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
+        admit_member_name(ctx.spawn_source, ctx.spawner_identity.as_ref(), spec)?;
         self.owners
             .apply_child(ctx.mob_id.as_str(), ctx.spawner_identity.as_ref(), spec)
     }
@@ -1531,6 +1605,144 @@ mod tests {
             "a host's own spawn is left as it is"
         );
         assert_eq!(owners.owner_of("other-mob", "side"), None);
+    }
+
+    /// A spawn the customizer is asked about that creates a member is
+    /// refused a name under a key namespace agent memory reserves: a host's
+    /// fresh spawn, a member's spawn, a fork, a respawn under the name, with
+    /// and without a member that asked for it, and a spawn with a resume
+    /// launch that a member asked for. A resume request that names no
+    /// member that asked for it (the rebuild of a member already seated, or
+    /// a host's own resume spawn) is not refused. A name that holds a `/`
+    /// outside those namespaces is admitted. This row tests the function,
+    /// not which requests Core sends it.
+    #[test]
+    fn a_member_is_created_under_no_reserved_memory_name_and_a_rebuild_is_not_refused() {
+        use meerkat_mob::SpawnSource;
+        let named = |name: &str| {
+            SpawnMemberSpec::new("worker", crate::member_comms_id::mob_member_id(name))
+        };
+        let reserved = [
+            "private/console-caller:v1:aa/ledger-side",
+            "set-aside/ledger-side",
+        ];
+        let asking = meerkat_mob::ids::AgentIdentity::from("alpha");
+        for source in [
+            SpawnSource::Consumer,
+            SpawnSource::AgentSpawnMember,
+            SpawnSource::HelperSpawn,
+            SpawnSource::BatchItem,
+            SpawnSource::FlowProvisioning,
+            SpawnSource::PolicySpawn,
+            SpawnSource::Respawn,
+            SpawnSource::Fork,
+            SpawnSource::PersistedForkResume,
+        ] {
+            for spawner in [None, Some(&asking)] {
+                for name in reserved {
+                    assert!(
+                        matches!(
+                            admit_member_name(source, spawner, &named(name)),
+                            Err(MobError::WiringError(_))
+                        ),
+                        "{source:?} under '{name}' is refused"
+                    );
+                }
+                for name in ["ledger-side", "team/ledger-side", "privateer/ledger-side"] {
+                    assert!(
+                        admit_member_name(source, spawner, &named(name)).is_ok(),
+                        "{source:?} under '{name}' is admitted"
+                    );
+                }
+            }
+        }
+        for name in reserved {
+            assert!(
+                matches!(
+                    admit_member_name(SpawnSource::Resume, Some(&asking), &named(name)),
+                    Err(MobError::WiringError(_))
+                ),
+                "a resume spawn a member asked for under '{name}' is refused"
+            );
+            assert!(
+                admit_member_name(SpawnSource::Resume, None, &named(name)).is_ok(),
+                "a resume request under '{name}' that no member asked for is not refused"
+            );
+        }
+        assert!(
+            admit_member_name(SpawnSource::Resume, Some(&asking), &named("ledger-side")).is_ok(),
+            "a resume spawn a member asked for under a plain name is admitted"
+        );
+    }
+
+    /// A spawn a member asks for that is no fork takes its owner from this
+    /// record alone: an owner label its spec carries is not kept, in the
+    /// runtime's own mob and in a mob a member created. A fork keeps the
+    /// owner its spec carries (its source's), and a host's own spawn is left
+    /// as it is.
+    #[test]
+    fn a_spawn_that_is_no_fork_keeps_no_owner_label_it_carries() {
+        let owners = PrivateOwners::default();
+        owners.record("mob", "shared", Some(&BTreeMap::new()));
+        owners.record_mob("child-mob", MobOwner::Known(None));
+        let shared = meerkat_mob::AgentIdentity::from("shared");
+        let carrying = || {
+            SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from("helper"))
+                .with_labels(private_labels())
+        };
+        let owner_of = |spec: &SpawnMemberSpec| {
+            spec.labels
+                .as_ref()
+                .and_then(crate::access::private_owner)
+                .map(str::to_string)
+        };
+
+        let mut spawned = carrying();
+        owners
+            .apply("mob", Some(&shared), &mut spawned)
+            .expect("a spawn of a shared member");
+        assert_eq!(
+            owner_of(&spawned),
+            None,
+            "a shared member's spawn is private to nobody, whatever label it carries"
+        );
+        let mut spawned = carrying();
+        owners
+            .apply_child("child-mob", Some(&shared), &mut spawned)
+            .expect("a spawn of a shared member in a mob a member created");
+        assert_eq!(
+            owner_of(&spawned),
+            None,
+            "and so in a mob a member created that is private to nobody"
+        );
+
+        let mut forked = carrying();
+        forked.launch_mode = MemberLaunchMode::Fork {
+            source_member_id: meerkat_mob::AgentIdentity::from("unrecorded-source"),
+            fork_context: meerkat_mob::launch::ForkContext::default(),
+        };
+        owners
+            .apply("mob", Some(&shared), &mut forked)
+            .expect("a fork");
+        assert_eq!(
+            owner_of(&forked),
+            Some(OWNER.to_string()),
+            "a fork keeps the owner its source's labels carry"
+        );
+        for mob in ["mob", "child-mob"] {
+            let mut hosts = carrying();
+            let applied = if mob == "mob" {
+                owners.apply(mob, None, &mut hosts)
+            } else {
+                owners.apply_child(mob, None, &mut hosts)
+            };
+            applied.expect("a host's spawn");
+            assert_eq!(
+                owner_of(&hosts),
+                Some(OWNER.to_string()),
+                "a spawn no member asked for is left as it is in {mob}"
+            );
+        }
     }
 
     /// The memory owners name each private member by its logical memory
@@ -1981,6 +2193,65 @@ mod tests {
         assert_eq!(
             reads, HISTORY_READ_ATTEMPTS,
             "a store error that can pass is read again"
+        );
+    }
+
+    /// The memory store marks as private the plain names of the private
+    /// members whose end it recorded, and the key of every identity scope it
+    /// keeps apart from the members of a name. Only the plain names are
+    /// members to this record: a key is a scope, not a member's name.
+    #[tokio::test]
+    async fn the_private_rows_of_the_memory_store_name_members_by_plain_names_only() {
+        use crate::identity_first::agent_memory::AgentMemoryProvider as _;
+        use crate::memory::capabilities::StewardStore as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::memory::sqlite_store::SqliteAgentMemoryStore::open(dir.path()).unwrap(),
+        );
+        store
+            .record_private_retirement("default", "ledger-side", None, "retired", 5)
+            .await
+            .unwrap();
+        store
+            .remember_authored(
+                &crate::memory::records::MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: "private/console-caller:v1:aa/ledger-side".to_string(),
+                },
+                crate::memory::records::NewMemoryRecord {
+                    kind: crate::memory::records::MemoryKind::Fact,
+                    title: "Where the heron is".to_string(),
+                    description: String::new(),
+                    body: "The heron is at the north pond.".to_string(),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                crate::memory::records::MemoryAuthor::Application,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.private_retired_identities("default").await.unwrap(),
+            BTreeSet::from([
+                "ledger-side".to_string(),
+                "private/console-caller:v1:aa/ledger-side".to_string(),
+            ]),
+            "the store marks the name and the key"
+        );
+
+        let owners = PrivateOwners::default();
+        owners.bind_private_retirements(store, "default".to_string());
+        owners
+            .first_attempts_settled(std::time::Duration::from_secs(10))
+            .await;
+        assert_eq!(
+            owners.memory_members(),
+            BTreeMap::from([(
+                "ledger-side".to_string(),
+                Some(crate::access::UNKNOWN_PRIVATE_OWNER.to_string()),
+            )])
         );
     }
 }

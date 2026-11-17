@@ -4235,10 +4235,13 @@ mod console_kept_apart_tests;
 #[cfg(test)]
 #[path = "console_access_save_refusal_tests.rs"]
 mod console_access_save_refusal_tests;
-
 #[cfg(test)]
 #[path = "console_ended_member_access_tests.rs"]
 mod console_ended_member_access_tests;
+
+#[cfg(test)]
+#[path = "console_member_memory_scope_tests.rs"]
+mod console_member_memory_scope_tests;
 
 #[cfg(test)]
 #[path = "console_stored_session_seat_tests.rs"]
@@ -7873,8 +7876,51 @@ fn memory_panel_scope_visible(
 /// lineage ancestor cannot match, so such an identity is withheld while a
 /// deny of that kind applies to either action (fails closed). An agent
 /// private to another person is withheld, enforced access or not.
+///
+/// The key of an identity scope says what it names
+/// ([`crate::memory::records::IdentityScopeKey`]), and the rule above is the
+/// rule of a plain name. A scope kept under an owner and a member's name
+/// is that owner's member's memory whether or not the member still exists,
+/// whoever holds the name now and whatever this console has read of its
+/// members: it is shown to a caller who is that owner or an access
+/// administrator, and whom the access rules allow the read on that member
+/// ([`memory_panel_owned_member_allowed`]). Any other key that is no plain
+/// name is no member's memory and is shown to access administrators only.
+/// A caller of a console with no access view is kept apart from nobody.
 fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
-    !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+    use crate::memory::records::IdentityScopeKey;
+    match IdentityScopeKey::of(identity) {
+        IdentityScopeKey::Named(_) => {
+            !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+        }
+        IdentityScopeKey::PrivateMember { owner, member } => caller.view.is_none_or(|view| {
+            (view.is_admin() || view.private_owner_key() == Some(owner.as_str()))
+                && [ACTION_AGENT_MEMORY_READ, ACTION_AGENT_VIEW]
+                    .iter()
+                    .all(|action| {
+                        memory_panel_owned_member_allowed(caller, view, action, &owner, member)
+                    })
+        }),
+        IdentityScopeKey::Reserved => caller.view.is_none_or(AccessView::is_admin),
+    }
+}
+
+/// Whether the access rules allow the caller `action` on the member named
+/// `member` that is, or was, private to the person `owner`: the rules half
+/// of every read and decision on that member's memory, asked for the member
+/// as the console names it ([`AccessView::allows_owned_member`]).
+fn memory_panel_owned_member_allowed(
+    caller: MemoryPanelCaller<'_>,
+    view: &AccessView,
+    action: &str,
+    owner: &str,
+    member: &str,
+) -> bool {
+    view.allows_owned_member(
+        action,
+        &namespace_console_identity(member, caller.namespace),
+        owner,
+    )
 }
 
 /// The access rules' half of [`memory_panel_identity_visible`]: whether the
@@ -8023,7 +8069,9 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// is then among the realm's scopes, and quarantine evidence stays. Without
 /// enforced access every scope is readable. The identity scope of an agent
 /// private to another person ([`MemoryPanelCaller::hides_private_identity`])
-/// is left out of the count: no dream covers a member private to a person,
+/// is left out of the count, and so is every identity scope kept apart by
+/// its key (`MemoryScope::kept_apart_by_its_key`), for every caller: no
+/// dream covers a member private to a person,
 /// so its runs name nothing of it, and counting it would withhold every run
 /// from everyone else and tell them private memory exists. The scope of an
 /// agent the console withholds from the caller only because it does not
@@ -8045,11 +8093,16 @@ async fn memory_panel_realm_fully_readable(
         .await?
         .iter()
         .filter(|scope| {
-            !matches!(
-                scope,
-                crate::memory::records::MemoryScope::Identity { identity, .. }
-                    if caller.hides_private_identity(identity)
-            )
+            // No dream covers the memory of a member private to a person,
+            // under its plain name or kept apart by its key: counting such
+            // a scope would withhold every run from everyone else and tell
+            // them that private memory exists.
+            !scope.kept_apart_by_its_key()
+                && !matches!(
+                    scope,
+                    crate::memory::records::MemoryScope::Identity { identity, .. }
+                        if caller.hides_private_identity(identity)
+                )
         })
         .all(|scope| match scope {
             crate::memory::records::MemoryScope::Identity { identity, .. } => {
@@ -8207,9 +8260,23 @@ async fn handle_memory_panel_records(
     let identity = normalized_console_rpc_string_param(params, "identity")
         .filter(|identity| !identity.is_empty());
     let scope_kind = scope_kind.or_else(|| identity.as_ref().map(|_| "identity".to_string()));
-    let scope_key = normalized_console_rpc_string_param(params, "scope_key")
-        .filter(|key| !key.is_empty())
-        .or(identity);
+    let named_key =
+        normalized_console_rpc_string_param(params, "scope_key").filter(|key| !key.is_empty());
+    // A listing that names a member and no scope key also lists the
+    // caller's own private member of that name: its memory is kept under
+    // the caller and the name, not under the name alone.
+    let own_private_key = match (&named_key, &identity, scope_kind.as_deref()) {
+        (None, Some(name), Some("identity"))
+            if crate::memory::records::IdentityScopeKey::of(name).is_named() =>
+        {
+            caller
+                .view
+                .and_then(AccessView::private_owner_key)
+                .map(|owner| crate::memory::records::private_member_scope_key(owner, name))
+        }
+        _ => None,
+    };
+    let scope_key = named_key.or(identity);
     let status =
         normalized_console_rpc_string_param(params, "status").filter(|status| !status.is_empty());
     if let Some(status) = &status
@@ -8239,13 +8306,20 @@ async fn handle_memory_panel_records(
         Ok(realms) => realms,
         Err(err) => return memory_panel_store_error(response_id, err),
     };
-    // A caller who may read no row of this listing reads no realm.
-    if !memory_panel_listing_may_be_readable(
-        caller,
-        scope_kind.as_deref(),
-        scope_key.as_deref(),
-        status.as_deref(),
-    ) {
+    // A caller who may read no row of this listing reads no realm. The
+    // listing reads each scope key it names that can hold a row the caller
+    // may read.
+    let scope_keys: Vec<Option<&str>> = [
+        Some(scope_key.as_deref()),
+        own_private_key.as_deref().map(Some),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|key| {
+        memory_panel_listing_may_be_readable(caller, scope_kind.as_deref(), *key, status.as_deref())
+    })
+    .collect();
+    if scope_keys.is_empty() {
         return response_value(
             response_id,
             Some(json!({ "records": [], "next_cursor": null, "realms": realms })),
@@ -8258,10 +8332,16 @@ async fn handle_memory_panel_records(
     // `limit + 1` rows past the cursor that the caller may read: a realm holds
     // at most one row at a position, so that is enough to cut this page, keep
     // the rows that share its last position together, and tell whether a
-    // readable row follows it.
+    // readable row follows it. The same holds for each scope key of a realm.
     let wanted = limit + 1;
     let mut records = Vec::new();
+    let mut sources: Vec<(&String, Option<&str>)> = Vec::new();
     for realm in &realms {
+        for scope_key in &scope_keys {
+            sources.push((realm, *scope_key));
+        }
+    }
+    for (realm, scope_key) in sources {
         let mut realm_cursor = cursor.clone();
         let mut batch = wanted;
         let mut readable = Vec::new();
@@ -8270,7 +8350,7 @@ async fn handle_memory_panel_records(
                 .records_page(
                     realm,
                     scope_kind.as_deref(),
-                    scope_key.as_deref(),
+                    scope_key,
                     status.as_deref(),
                     batch,
                     realm_cursor.clone(),
@@ -9031,8 +9111,16 @@ fn console_memory_author(
 /// reviewer is the signed-in person the connection names, never a name the
 /// caller asserts: any other caller decides nothing
 /// (`approver_unauthenticated`).
+///
+/// The call names a member by its name. The quarantined record of a member
+/// private to a person lies in the scope of that owner and that name, and
+/// is decided there by its owner and by an access administrator
+/// ([`memory_quarantine_decision_scope`]); for everyone else, the holder of
+/// a later member of the name included, the decision is made in the named
+/// scope, where the record is not.
 async fn handle_memory_quarantine_decide(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
+    caller: MemoryPanelCaller<'_>,
     decider: Option<ConsoleApprovalDecider>,
     params: &Value,
     response_id: Value,
@@ -9063,15 +9151,16 @@ async fn handle_memory_quarantine_decide(
         return response_value(response_id, None, Some(error));
     }
     let realm = request.realm.clone();
+    let scope = match memory_quarantine_decision_scope(store, caller, &request).await {
+        Ok(scope) => scope,
+        Err(err) => return memory_panel_store_error(response_id, err),
+    };
     let reviewer = crate::memory::review::QuarantineReviewer::Operator {
         principal: Some(decider.principal.clone()),
     };
     let outcome = store
         .review_quarantined(crate::memory::review::QuarantineReviewRequest {
-            scope: crate::memory::records::MemoryScope::Identity {
-                realm: request.realm,
-                identity: request.identity.as_str().to_string(),
-            },
+            scope,
             memory_id: request.memory_id,
             decision: request.decision,
             expected_content_hash: request.expected_content_hash,
@@ -9096,6 +9185,53 @@ async fn handle_memory_quarantine_decide(
             Some(crate::rpc::agent_memory_rpc_error("quarantine review", err)),
         ),
     }
+}
+
+/// The scope a quarantine decision is made in: the identity scope of the
+/// name the call names, or, when the record lies in the scope kept under an
+/// owner and that same name, that scope, for a caller who may read it there
+/// ([`memory_panel_identity_visible`]: the owner or an access administrator,
+/// as the access rules decide the member) and whom the rules allow the
+/// verdict's effect on that member ([`memory_panel_owned_member_allowed`]).
+/// Every other caller decides in the named scope, where the record is not:
+/// the store answers as for a record that does not exist, and so never
+/// tells such a caller that the record exists.
+async fn memory_quarantine_decision_scope(
+    store: &dyn crate::memory::capabilities::MemoryPanelStore,
+    caller: MemoryPanelCaller<'_>,
+    request: &crate::rpc::memory_methods::MemoryQuarantineDecideRpcRequest,
+) -> Result<
+    crate::memory::records::MemoryScope,
+    crate::identity_first::agent_memory::AgentMemoryError,
+> {
+    use crate::memory::records::{IdentityScopeKey, MemoryScope};
+    let named = MemoryScope::Identity {
+        realm: request.realm.clone(),
+        identity: request.identity.as_str().to_string(),
+    };
+    let records = store
+        .records_by_ids(&request.realm, std::slice::from_ref(&request.memory_id))
+        .await?;
+    let Some(kept @ MemoryScope::Identity { identity: key, .. }) =
+        records.first().map(|record| &record.scope)
+    else {
+        return Ok(named);
+    };
+    let IdentityScopeKey::PrivateMember { owner, member } = IdentityScopeKey::of(key) else {
+        return Ok(named);
+    };
+    if member != request.identity.as_str() {
+        return Ok(named);
+    }
+    let effect = match request.decision {
+        crate::memory::review::QuarantineDecision::Release => ACTION_AGENT_MEMORY_WRITE,
+        crate::memory::review::QuarantineDecision::Tombstone => ACTION_AGENT_MEMORY_DELETE,
+    };
+    let decides = memory_panel_identity_visible(caller, key)
+        && caller.view.is_none_or(|view| {
+            memory_panel_owned_member_allowed(caller, view, effect, &owner, member)
+        });
+    Ok(if decides { kept.clone() } else { named })
 }
 
 /// Receipts for both records as they stand now, plus the committed
@@ -14881,6 +15017,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/quarantine/decide" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_quarantine_decide(
                 memory_panel,
+                MemoryPanelCaller::own(access_view),
                 ConsoleApprovalDecider::of(governance, authenticated_principal, access_view),
                 &request.params,
                 response_id,

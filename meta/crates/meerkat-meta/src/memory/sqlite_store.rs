@@ -854,10 +854,20 @@ impl SqliteAgentMemoryStore {
             realm: request.realm.clone(),
             identity: request.identity.as_str().to_string(),
         };
+        self.recall_in_scope_blocking(&scope, &request)
+    }
+
+    /// The recall of `request`'s selection over the active records of
+    /// `scope`, whatever identity and realm the request names.
+    fn recall_in_scope_blocking(
+        &self,
+        scope: &MemoryScope,
+        request: &AgentMemoryRecallRequest,
+    ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
         let records =
-            self.with_realm_conn(&request.realm, |conn| active_scope_records(conn, &scope))?;
+            self.with_realm_conn(scope.realm(), |conn| active_scope_records(conn, scope))?;
         let projected = records.into_iter().map(project_record).collect();
-        Ok(select_recall_records(projected, &request))
+        Ok(select_recall_records(projected, request))
     }
 
     fn remember_blocking(
@@ -1577,6 +1587,16 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
     ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
         let store = self.clone();
         run_blocking(move || store.recall_blocking(request)).await
+    }
+
+    async fn recall_in_scope(
+        &self,
+        scope: &MemoryScope,
+        request: AgentMemoryRecallRequest,
+    ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+        let store = self.clone();
+        let scope = scope.clone();
+        run_blocking(move || store.recall_in_scope_blocking(&scope, &request)).await
     }
 
     fn supports_remember(&self) -> bool {
@@ -3259,6 +3279,9 @@ fn apply_batch_in_tx(
     let mut memory_ids = Vec::with_capacity(batch.ops.len());
     for (op_index, op) in batch.ops.iter().enumerate() {
         let memory_id = apply_op(conn, batch, op, quarantine, now)?;
+        if let StagedOp::Create { scope, .. } = op {
+            mark_identity_scope_kept_apart(conn, scope, now)?;
+        }
         let mut detail = serde_json::json!({
             "op": op.kind_str(),
             "author": batch.author,
@@ -3290,6 +3313,38 @@ fn apply_batch_in_tx(
         applied_ops: batch.ops.len(),
         memory_ids,
     })
+}
+
+/// The cause of the `pending_harvests` row [`mark_identity_scope_kept_apart`]
+/// writes. A stored value.
+const KEPT_APART_SCOPE_CAUSE: &str = "private_scope";
+
+/// With a record created in an identity scope whose key is no plain name
+/// ([`MemoryScope::kept_apart_by_its_key`]), in the caller's transaction:
+/// the one `pending_harvests` row of status `private` whose identity is the
+/// scope's whole key, unless the key already has one. Every steward reads
+/// the identities of those rows as private
+/// ([`StewardStore::private_retired_identities`]) and compares them with a
+/// scope's key as whole strings, so a steward that does not judge a scope
+/// by the shape of its key keeps out of it all the same. The row is no
+/// pending harvest: the exit-interview queue lists status `pending` only.
+fn mark_identity_scope_kept_apart(
+    conn: &Connection,
+    scope: &MemoryScope,
+    now: u64,
+) -> Result<(), AgentMemoryError> {
+    if !scope.kept_apart_by_its_key() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO pending_harvests \
+         (identity, session_key, cause, retired_at_ms, status) \
+         SELECT ?1, NULL, ?2, ?3, 'private' WHERE NOT EXISTS \
+         (SELECT 1 FROM pending_harvests WHERE identity = ?1 AND status = 'private')",
+        params![scope.key(), KEPT_APART_SCOPE_CAUSE, now as i64],
+    )
+    .map_err(sql_err)?;
+    Ok(())
 }
 
 /// One quarantine review inside the caller's transaction
@@ -4470,6 +4525,90 @@ mod tests {
         }
         // An unknown kind is still a loud parse error, not a silent default.
         assert!(scope_from_parts("galaxy", "g", "team").is_err());
+        Ok(())
+    }
+
+    /// A store that holds a scope kept under an owner answers every call
+    /// that names a bare identity as it did before: with the bare name's
+    /// records only. The first record of a scope kept under an owner also
+    /// leaves the row that marks its key as a private identity, which is no
+    /// pending harvest.
+    #[tokio::test]
+    async fn a_store_with_scopes_kept_under_an_owner_answers_the_bare_name_calls_as_before()
+    -> Result<(), Box<dyn Error>> {
+        use crate::memory::capabilities::StewardStore as _;
+
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let name = AgentIdentity::parse("ledger-side")?;
+        let key = "private/console-caller:v1:aa/ledger-side";
+        let kept = MemoryScope::Identity {
+            realm: "team".to_string(),
+            identity: key.to_string(),
+        };
+        let bare = MemoryScope::Identity {
+            realm: "team".to_string(),
+            identity: name.as_str().to_string(),
+        };
+        let under_owner = store
+            .remember_authored(
+                &kept,
+                payload("Kept under an owner", "The heron is at the north pond."),
+                MemoryAuthor::Application,
+            )
+            .await?;
+        let under_name = store
+            .remember(
+                "team",
+                &name,
+                new_memory("Kept under the name", "The otter is at the weir."),
+            )
+            .await?;
+
+        let recalled: Vec<String> = store
+            .recall(recall_all(name.clone(), "team"))
+            .await?
+            .into_iter()
+            .map(|record| record.memory_id)
+            .collect();
+        assert_eq!(recalled, vec![under_name.memory_id.clone()]);
+        let listed: Vec<String> = store
+            .manifest(std::slice::from_ref(&bare), ManifestTier::Full)
+            .await?
+            .into_iter()
+            .map(|meta| meta.id)
+            .collect();
+        assert_eq!(listed, vec![under_name.memory_id.clone()]);
+        assert!(
+            !store
+                .forget("team", &name, &under_owner.memory_id)
+                .await?
+                .deleted,
+            "a forget under the bare name removes no record kept under an owner"
+        );
+        assert!(
+            store
+                .supersede(
+                    &bare,
+                    &under_owner.memory_id,
+                    payload("Changed", "Changed under the bare name."),
+                )
+                .await
+                .is_err(),
+            "an update under the bare name changes no record kept under an owner"
+        );
+        let records = store
+            .records_by_ids("team", std::slice::from_ref(&under_owner.memory_id))
+            .await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].scope, kept);
+        assert_eq!(records[0].status, RecordStatus::Active);
+
+        assert!(store.pending_harvests("team", 10).await?.is_empty());
+        assert_eq!(
+            store.private_retired_identities("team").await?,
+            std::collections::BTreeSet::from([key.to_string()])
+        );
         Ok(())
     }
 

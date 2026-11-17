@@ -5,15 +5,17 @@ All notable changes to the Python SDK are documented here.
 ## Unreleased
 
 - Added `Meta.builder().on_schedule_fire(name, handler)`: the handler for a
-  host runnable, in place before `build()` first connects. Until now a
-  handler could only be registered on the runtime `build()` returns
+  host runnable, in place before `build()` first connects. A program that
+  uses `build()` could register a handler only on the runtime it returns
   (`runtime.on_schedule_fire`), and the gateway can fire a schedule that is
   due at its start before that: the fire found no handler and the occurrence
-  ended `delivery_failed`. A later call for one name replaces the earlier; a
-  handler for a name `host_runnables()` does not declare raises `ValueError`
-  at `build()`. `runtime.on_schedule_fire` is unchanged and still replaces
-  or adds a handler afterwards. Mirrors the TypeScript builder's
-  `onScheduleFire(name, handler)`.
+  ended `delivery_failed`. A host that makes `MetaRuntime(config)` itself and
+  registers before `connect()` had no such window. A handler given to the
+  builder can run before `build()` returns, so it must not need the runtime
+  object. A later call for one name replaces the earlier; a handler for a
+  name `host_runnables()` does not declare raises `ValueError` at `build()`.
+  `runtime.on_schedule_fire` is unchanged and still replaces or adds a
+  handler afterwards.
 
 ## 0.9.16
 

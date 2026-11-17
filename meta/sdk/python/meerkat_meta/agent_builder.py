@@ -23,6 +23,8 @@ from .live import LiveAssistantOutputAddress
 from .tool_requester import ToolCallRequester, _accepts_requester
 from .types import ErrorEvent
 
+_log = logging.getLogger("meerkat_meta")
+
 
 def _check_schedule_fire_registration(name: Any, handler: Any) -> None:
     """Refuse a schedule-fire registration whose name or handler is unusable."""
@@ -30,8 +32,6 @@ def _check_schedule_fire_registration(name: Any, handler: Any) -> None:
         raise TypeError(f"runnable name must be a non-empty string, got {name!r}")
     if not callable(handler):
         raise TypeError(f"handler must be callable, got {type(handler).__name__}: {handler!r}")
-
-_log = logging.getLogger("meerkat_meta")
 
 
 @dataclass

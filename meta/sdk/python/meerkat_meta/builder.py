@@ -598,8 +598,10 @@ class MetaBuilder:
         that is due when the gateway starts finds it. A handler registered on
         the runtime (:meth:`MetaRuntime.on_schedule_fire`) is there only once
         ``build()`` has returned, and the gateway can fire such a schedule
-        before that. A later call for one name replaces the earlier, and a
-        registration on the runtime still replaces or adds afterwards.
+        before that. The handler can therefore run before ``build()`` returns:
+        it must not need the runtime object. A later call for one name
+        replaces the earlier, and a registration on the runtime still replaces
+        or adds afterwards.
 
         ``name`` must be one :meth:`host_runnables` declares, in either order
         of the two calls: :meth:`build` refuses a handler for an undeclared

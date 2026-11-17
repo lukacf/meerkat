@@ -1160,9 +1160,11 @@ class MetaRuntime:
         # Schedule-fire handlers the builder was given, in place before any
         # connect: a schedule that is due when the gateway starts fires while
         # the first init is still settling. ``on_schedule_fire`` on this
-        # runtime replaces or adds afterwards.
+        # runtime replaces or adds afterwards. Any mapping is taken; a config
+        # that carries none, or something else under that name, registers
+        # nothing.
         builder_handlers = getattr(config, "schedule_fire_handlers", None)
-        if isinstance(builder_handlers, dict):
+        if isinstance(builder_handlers, Mapping):
             for name, handler in builder_handlers.items():
                 self._dispatcher.register_schedule_fire_handler(name, handler)
         self._rust_http_base: str | None = None

@@ -787,9 +787,11 @@ State `[confinement]` in the user document or select it with the flags:
 | The user document, `~/.rkat/config.toml` | Every start of every realm of this user. `[confinement.all]` covers every launch kind |
 | The `--confinement` flags ([operator flags](#operator-flags)) | The one process that carries them, for every launch kind |
 
-On Linux a start that confines every launch kind with the `workspace` preset
-also needs `--state-root <dir>` outside every confinement write grant, and is
-refused without it; see [the host's own inputs](#the-host%E2%80%99s-own-inputs).
+On Linux a start that confines every launch kind is refused when its realm
+state lies inside a confinement write grant, as `rkat`'s default state root
+`<project>/.rkat/realms` does for a command started in the project's root
+directory: start it with `--state-root <dir>` outside every confinement write
+grant. See [the host's own inputs](#the-host%E2%80%99s-own-inputs).
 
 The other document a host reads the section from is the realm's own,
 `<state-root>/<realm>/config.toml` (`rkat doctor` prints its path on the

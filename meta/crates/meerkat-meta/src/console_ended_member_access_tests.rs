@@ -2585,7 +2585,7 @@ async fn a_caller_no_deny_applies_to_reads_an_unknown_name_as_before_this_change
         (
             "meta/schedule/list",
             json!({ "identity": NOBODY }),
-            r#"{"id":"test","jsonrpc":"2.0","result":{"identity":"never-recorded","schedules":[]}}"#,
+            r#"{"id":"test","jsonrpc":"2.0","result":{"identity":"never-recorded","other_schedules":[],"schedules":[]}}"#,
         ),
     ] {
         let answer = console_rpc_as(&app, Some(&alice), method, params)

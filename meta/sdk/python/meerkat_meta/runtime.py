@@ -1350,14 +1350,14 @@ class MetaRuntime:
         attempt in the durable schedule store.
 
         A persistent store can already hold a schedule for the name that is
-        due: the gateway then fires it during the start, before
+        due: the gateway can then fire it during the start, before
         :meth:`connect` returns. A handler registered on this runtime before
-        ``connect()`` is in place for that fire; one registered after it is
-        not. A runtime that ``MetaBuilder.build()`` returns is already
-        connected, so a program that uses ``build()`` gives such a handler to
-        the builder (``MetaBuilder.on_schedule_fire``), which installs it
-        before the first connect. A fire that finds no handler fails that
-        occurrence.
+        ``connect()`` is in place for that fire; one registered after it can
+        come too late. A runtime that ``MetaBuilder.build()`` returns is
+        already connected, so a program that uses ``build()`` gives such a
+        handler to the builder (``MetaBuilder.on_schedule_fire``), which
+        installs it before the first connect. A fire that finds no handler
+        fails that occurrence.
         """
         self._dispatcher.register_schedule_fire_handler(name, handler)
 

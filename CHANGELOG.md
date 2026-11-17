@@ -55,6 +55,9 @@ them.
 
 - `meerkat-core` (Rust): `local_realms_candidates`, `RealmConfig::resolve_locator_among_roots` and its `_with` form, `RealmRootResolution` (non-exhaustive) and `StorageLayout::unreadable_realm_roots`, for a host that resolves a realm among several state roots.
 
+- `meerkat-mob-pack`: new module `content_warnings`, the rules behind the
+  `rkat mob pack` report. Its six public items are named under Changed.
+
 ### Changed
 
 - `meerkat-mob`: the error of a member left Broken by a resume that could not
@@ -65,6 +68,54 @@ them.
   nothing, keep a copy of the state directory, and see Known limitations in
   the release notes. For any other cause the repair stays retire or respawn.
   Before, the message named retire or respawn as the repair of every cause.
+
+- `rkat`: `rkat mob pack` now reports on standard error how many files it
+  packed (`packed<TAB><n> files`) and warns about packed files that look
+  like secrets, repository metadata, local state or an earlier pack: one
+  `warning<TAB><path> is in the pack: <why>` line for each, then one `note`
+  line that points at `rkat mob inspect <pack>`. `rkat mob web build`
+  repeats the warnings for the pack it copies into the bundle, which serves
+  the whole pack to everyone who can load the page. The pack's contents and
+  digest are unchanged, and so are the standard output of both commands
+  (the digest alone for `mob pack`) and their exit status, also when
+  standard error cannot be written to; nothing is refused. The one thing a
+  script can notice is new lines on standard error. A warning names a path
+  and never prints a byte of a file. In the path, these characters are
+  printed as escapes: the control characters, the line and paragraph
+  separators (U+2028, U+2029), and the invisible characters U+00AD,
+  U+061C, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064,
+  U+2066 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+E0001 and U+E0020 to
+  U+E007F; every other character is printed as it is. The files are
+  flagged by name, and for one form by content (a file whose text,
+  trimmed, is exactly 64 hex digits). What is flagged:
+  - a file that `--sign` would accept as a key: its text, with the white
+    space around it trimmed, is exactly 64 hex digits. It is flagged
+    whatever it is called, unless it lies under one of the directories
+    below, whose own line then stands for it. Any file that is only a
+    64-digit hex value is flagged, a key or not: this command's own digest
+    saved to a file, for example;
+  - env files: `.env`, `.env.<name>` and `<name>.env`. The three template
+    names `.env.example`, `.env.sample` and `.env.template` get the line of
+    a hidden file instead;
+  - key-like names: `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.pem`,
+    `*.key`, `*.p12`, `*.pfx`, and a name that is `key` or ends in `-key`,
+    `_key` or `.key` before its extension (`key.hex`). A `.pub` file is not
+    flagged;
+  - `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.htpasswd`;
+  - `*.mobpack` and `mobpack.bin`;
+  - the directories `.git/`, `.rkat/`, `.ssh/`, `.aws/` and `.gnupg/`, in
+    any case and at any depth, one line each with the number of files
+    under it, and a `.git` file;
+  - every other hidden file, and every other hidden directory (the
+    top-most one, one line with the number of files under it).
+
+  The list is a heuristic and misses much: `credentials.json`,
+  `terraform.tfstate`, `secrets.yaml`, `*.jks` and `*.ppk`, for example,
+  get no warning. No warning does not mean the pack is clean:
+  `rkat mob inspect <pack>` lists every file in it and is the check. New in
+  `meerkat-mob-pack` for the same rules, in `content_warnings`:
+  `pack_content_warnings`, `classify_packed_file`, `classify_packed_path`,
+  `has_signing_key_form`, `PackContentWarning` and `PackedPathConcern`.
 
 ### Fixed
 
@@ -164,6 +215,20 @@ them.
 ### Upgrade notes
 
 - Before you upgrade, find realms that exist twice. The same realm id with a manifest under two state roots on one path is refused at the first start from the nested directory after the upgrade (see Breaking). Such a pair exists where a `.rkat` appeared in a directory after work there under a parent directory (the next command wrote a second realm of the same id under the nearer root); where the same `--realm` name was used from two nested project roots (the home directory counts as one for anyone with `~/.rkat`); after `rkat realm create` from a nested root, which on this release too creates the realm under its own state root without looking under the others; and for a server started with `--realm X --context-root C` where C has its own `.rkat` and X lies under an ancestor's root. To find them on 0.9.16: `rkat storage doctor --root <dir>/.rkat/realms`, with one `--root` for each directory on the path that has a `.rkat` and one for the user-global realms root (`$XDG_DATA_HOME/meerkat/realms`, else `~/.local/share/meerkat/realms`, on Linux; `~/Library/Application Support/meerkat/realms` on macOS; `%APPDATA%\meerkat\realms` on Windows); it reports each such id as `split-brain-realm` with both directories. On this release `rkat storage doctor` without a root reads them all. To go on with one copy, add `--state-root '<root>'` to the command. To keep one copy and archive the other: `rkat --realm <id> storage migrate --root '<A>' --root '<B>' --apply --adopt-root <root to keep>`: the adopted realm stays untouched where it lies and the other copy is renamed to `<root>/<id>.pre-<version>-<timestamp>.split-brain` and kept read-only until `rkat storage prune --apply` removes it, by default once it is 30 days old. Look at both copies first: a copy you did not create should not be adopted. The doctor may also list a realm directory under a project that a confined start left there before it was refused with the advice to pass `--state-root`: it holds no session and is safe to leave; it can be deleted, or archived with the adopt command (read from the source, not run). (The finding command by a row on the 0.9.16 code, the adopt command by rows on the 0.9.16 code and on this release.)
+
+### Known limitations
+
+- `rkat mob pack` still packs every regular file under the mob directory,
+  hidden files included, except the key the pack is signed with and its own
+  output file. Env files and other secrets, key files the pack is not
+  signed with, `.git/`, and `.rkat/` with its stored conversations and
+  configuration all go into the pack when they are in the directory, and a
+  web bundle serves the pack whole. `rkat mob pack` now warns about a
+  short list of names and one content form (see Changed): key-like names,
+  a file that has the form of a signing key and `.mobpack` files among
+  them. The list misses much, and a warning removes nothing. Keep such
+  files out of the mob directory, and read `rkat mob inspect <pack>`
+  before a pack leaves your machine.
 
 ## [0.9.16] - 2026-11-16
 

@@ -714,6 +714,31 @@ impl Host {
         (identity.model, identity.auth_binding)
     }
 
+    /// The host's status read of the sign-in: the call a status surface makes
+    /// for a store-backed credential with no live lease. Returns what it
+    /// answered, without the record.
+    async fn status_read(&self) -> String {
+        match meerkat_core::observe_marked_tokens_for_status_for_identity(
+            self.store.as_ref(),
+            &self.owner,
+            &self.credential,
+            PersistedAuthMode::ChatgptOauth,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(meerkat_core::CredentialStatusRead::Answered(Some(_))) => {
+                "answered with the stored record".to_string()
+            }
+            Ok(meerkat_core::CredentialStatusRead::Answered(None)) => {
+                "answered with no record".to_string()
+            }
+            Ok(meerkat_core::CredentialStatusRead::OwnerBusy) => "owner busy".to_string(),
+            Ok(_) => "unanswered".to_string(),
+            Err(error) => format!("refused: {error}"),
+        }
+    }
+
     fn record_lease(&self, moment: &str) {
         let snapshot = self.owner.snapshot(&self.lease_key());
         eprintln!(
@@ -1181,16 +1206,15 @@ async fn a_sign_out_after_another_sessions_fallback_withdraws_the_sign_in_from_e
     );
 }
 
-/// A removed credential is withdrawn from every session: the session that
-/// runs on it as its fallback loses its next turn, and the session that has
-/// it as its fallback does not fall back to it.
+/// A removed credential is withdrawn from the session that runs on it as its
+/// fallback: its next turn is held, with the text a caller reads for a
+/// session whose fallback's credential is unavailable.
 #[tokio::test]
-async fn a_removed_credential_is_withdrawn_from_every_session_that_falls_back_to_it() {
-    let stage = Stage::new("removed_credential").await;
+async fn a_removed_credential_is_withdrawn_from_a_session_that_runs_on_it_as_its_fallback() {
+    let stage = Stage::new("removed_under_fallback").await;
     let host = stage.host();
     host.sign_in(FIRST_SIGN_IN).await;
     let x = host.create_session(true).await.expect("session X starts");
-    let z = host.create_session(true).await.expect("session Z starts");
     let (fell_back, events) = host.rate_limited_turn(&x, "X").await;
     assert_eq!(
         fell_back,
@@ -1206,18 +1230,149 @@ async fn a_removed_credential_is_withdrawn_from_every_session_that_falls_back_to
     let turn = host.turn(&x, "X's turn after the removal").await;
     eprintln!("LN-RECORD: X's turn after its fallback's credential was removed returned: {turn:?}");
     assert!(
-        matches!(turn, Turn::Failed(_)),
+        matches!(
+            &turn,
+            Turn::Failed(text)
+                if text.contains("fallback-origin session requires explicit model reconfiguration")
+                    && text.contains("AuthUnavailable")
+        ),
         "X must not be served by a removed credential: {turn:?}"
     );
+}
+
+/// A removed credential is withdrawn from the session that has it as its
+/// fallback: when its own model fails, the removed credential is skipped as
+/// unavailable and the turn fails on its own model.
+#[tokio::test]
+async fn a_removed_credential_is_not_fallen_back_to() {
+    let stage = Stage::new("removed_fallback_target").await;
+    let host = stage.host();
+    host.sign_in(FIRST_SIGN_IN).await;
+    let z = host.create_session(true).await.expect("session Z starts");
+    assert_eq!(
+        host.turn(&z, "Z's first turn").await,
+        answered(LOGIN_ANSWER),
+        "control: Z answers on the sign-in"
+    );
+
+    host.withdraw(&host.backup_credential)
+        .await
+        .expect("the removal succeeds");
+    host.record_backup_lease("after the removal");
     let (turn, events) = host.rate_limited_turn(&z, "Z").await;
     eprintln!(
         "LN-RECORD: Z's rate-limited turn after its fallback's credential was removed returned: {turn:?}"
     );
     assert!(
-        matches!(turn, Turn::Failed(_)),
-        "Z must not fall back to a removed credential: {turn:?}; \
-         its model fallback events: {events:?}"
+        matches!(&turn, Turn::Failed(text) if text.contains("Rate limited")),
+        "Z's turn fails on its own model: {turn:?}"
     );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.starts_with("ModelFallbackSkipped")
+                && event.contains("AuthUnavailable")),
+        "Z's fallback to the removed credential is skipped as unavailable: {events:?}"
+    );
+}
+
+/// A sign-out clears a sign-in that no session uses any more: its only
+/// session left it for another credential before.
+#[tokio::test]
+async fn a_sign_out_clears_a_sign_in_no_session_uses_any_more() {
+    let stage = Stage::new("sign_out_unused").await;
+    let host = stage.host();
+    host.sign_in(FIRST_SIGN_IN).await;
+    let a = host.create_session(false).await.expect("session A starts");
+    assert_eq!(
+        host.turn(&a, "A's first turn").await,
+        answered(LOGIN_ANSWER),
+        "control: A answers on the sign-in"
+    );
+    host.switch(&a, BACKUP_MODEL, Provider::Anthropic, BACKUP_BINDING)
+        .await
+        .expect("control: A switches to the backup model and binding");
+    assert_eq!(
+        host.turn(&a, "A's first turn after the switch").await,
+        answered(BACKUP_ANSWER),
+        "control: A answers on the backup after the switch"
+    );
+    host.record_lease("after its only session left");
+
+    let signed_out = host.withdraw(&host.credential).await;
+    eprintln!("LN-RECORD: the sign-out of the unused sign-in: {signed_out:?}");
+    signed_out.expect("the sign-out succeeds");
+    host.record_lease("after the sign-out");
+    assert_eq!(host.stored_access_token().await, None);
+    assert!(
+        !host.owner.snapshot(&host.lease_key()).credential_present,
+        "the signed-out credential's lease is withdrawn"
+    );
+    let created = host.create_session(false).await;
+    eprintln!("LN-RECORD: a new session after the sign-out: {created:?}");
+    assert!(
+        created.is_err(),
+        "a signed-out credential serves no new session"
+    );
+}
+
+/// A status read of the sign-in, B's next turn and a new session of the
+/// sign-in, after the sign-in's lease came to read absent while its record
+/// stayed stored.
+async fn a_status_read_then_the_sign_ins_sessions(host: &Host, b: &SessionId) {
+    assert_eq!(
+        host.stored_access_token().await.as_deref(),
+        Some(FIRST_SIGN_IN),
+        "control: the sign-in's record is stored"
+    );
+    host.record_lease("before the status read");
+    let read = host.status_read().await;
+    eprintln!("LN-RECORD: the status read of the sign-in: {read}");
+    host.record_lease("after the status read");
+
+    let turn = host.turn(b, "B's turn after the status read").await;
+    eprintln!("LN-RECORD: B's turn after the status read returned: {turn:?}");
+    let created = host.create_session(false).await;
+    eprintln!("LN-RECORD: a new session of the sign-in after the status read: {created:?}");
+    assert_eq!(
+        turn,
+        answered(LOGIN_ANSWER),
+        "the status read restores the stored sign-in for a running session"
+    );
+    created.expect("the status read restores the stored sign-in for a new session");
+}
+
+/// After session A left the sign-in by its fallback, the host reads the
+/// sign-in's status; B then takes its next turn and a new session starts.
+#[tokio::test]
+async fn a_status_read_after_another_sessions_fallback_serves_the_sign_ins_sessions() {
+    let (_stage, host, b) = neighbours_after_a_left("status_read_later", Departure::Fallback).await;
+    a_status_read_then_the_sign_ins_sessions(&host, &b).await;
+}
+
+/// A status read restores a sign-in whose lease is released while its record
+/// stays stored (the state a credential is left in when its release was not
+/// followed by the removal of its record): B then takes its next turn and a
+/// new session starts.
+#[tokio::test]
+async fn a_status_read_restores_a_released_sign_in_whose_record_is_stored() {
+    let stage = Stage::new("status_read").await;
+    let host = stage.host();
+    host.sign_in(FIRST_SIGN_IN).await;
+    let b = host.create_session(false).await.expect("session B starts");
+    assert_eq!(
+        host.turn(&b, "B's first turn").await,
+        answered(LOGIN_ANSWER),
+        "control: B answers on the sign-in"
+    );
+    meerkat_core::publish_token_lifecycle_released_for_identity(&host.owner, &host.credential)
+        .expect("release the sign-in's lease, leaving its record stored");
+    let turn = host.turn(&b, "B's turn after the release").await;
+    assert!(
+        matches!(&turn, Turn::Failed(text) if text.contains("auth lease absent")),
+        "control: a released lease serves no turn: {turn:?}"
+    );
+    a_status_read_then_the_sign_ins_sessions(&host, &b).await;
 }
 
 /// A session is switched live away from the sign-in while another task of

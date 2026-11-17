@@ -4266,6 +4266,10 @@ mod console_kept_apart_tests;
 mod console_ended_member_access_tests;
 
 #[cfg(test)]
+#[path = "console_recorded_field_refusal_tests.rs"]
+mod console_recorded_field_refusal_tests;
+
+#[cfg(test)]
 #[path = "console_stored_session_seat_tests.rs"]
 mod console_stored_session_seat_tests;
 

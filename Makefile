@@ -971,14 +971,8 @@ stack-budget-release:
 	$(CARGO) nextest run --release -p meerkat-rpc --all-features --no-run
 	@# RUST_MIN_STACK sizes every spawned thread of every process it reaches,
 	@# rustc's included (it segfaults at 1 MiB), so build first and only run
-	@# the test binaries under the budget. The router::tests::server_gate_rpc
-	@# rows spawn the MCP test server and fail, never skip, without it; a
-	@# release test binary looks for it under target/release, where nothing
-	@# builds it. The script builds it in the dev profile, before the budget
-	@# is in the environment, and the rows take its path from the variable.
-	MEERKAT_MCP_TEST_SERVER="$$(scripts/mcp-test-server-fixture)" && \
-		export MEERKAT_MCP_TEST_SERVER && \
-		RUST_MIN_STACK=1048576 $(CARGO) nextest run --release -p meerkat-rpc --all-features --no-fail-fast -E 'test(/router::tests::/)'
+	@# the test binaries under the budget.
+	RUST_MIN_STACK=1048576 $(CARGO) nextest run --release -p meerkat-rpc --all-features --no-fail-fast -E 'test(/router::tests::/)'
 
 semver-breaks-selftest:
 	@echo "$(GREEN)Self-testing the semver-breaks gates...$(NC)"

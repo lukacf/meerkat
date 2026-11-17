@@ -160,6 +160,9 @@ impl AttemptState {
 struct RetainedStdioFailure {
     failure: meerkat_core::mcp_attachment::McpStdioSetupFailure,
     record: Arc<crate::stdio_diagnostics::StdioAttemptRecord>,
+    /// Whether the host already claimed this failure for its operator's
+    /// report (see `McpRouter::claim_stdio_failures`).
+    claimed: std::sync::atomic::AtomicBool,
 }
 
 pub(crate) type AttemptSender = tokio::sync::watch::Sender<AttemptState>;
@@ -3300,16 +3303,16 @@ impl McpRouter {
                     .notify_lifecycle_failed(&server_name, &err.to_string())
                     .err();
 
-                let (snapshot_alignment, operation) = match self.surface_owner.apply(
-                    ExternalToolSurfaceInput::PendingFailed {
+                let (snapshot_alignment, operation, stdio_failure_text) = match self
+                    .surface_owner
+                    .apply(ExternalToolSurfaceInput::PendingFailed {
                         surface_id: SurfaceId(obligation.surface_id.clone()),
                         operation: local_surface_operation(obligation.operation),
                         pending_task_sequence: obligation.pending_task_sequence,
                         staged_intent_sequence: obligation.staged_intent_sequence,
                         applied_at_turn: TurnNumber(obligation.applied_at_turn),
                         cause: ExternalToolSurfaceFailureCause::PendingFailed,
-                    },
-                ) {
+                    }) {
                     Ok(transition) => {
                         self.pending_obligations.remove(&server_name);
                         let stdio_failure = attempt_diagnostics.and_then(|record| {
@@ -3323,8 +3326,15 @@ impl McpRouter {
                                     record.captured(),
                                 ),
                                 record,
+                                claimed: std::sync::atomic::AtomicBool::new(false),
                             })
                         });
+                        // What the transport established, in fixed words
+                        // and numbers (never server output), for the Failed
+                        // action's detail.
+                        let stdio_failure_text = stdio_failure
+                            .as_ref()
+                            .map(|retained| retained.failure.to_string());
                         resolve_attempt(
                             attempt.as_ref(),
                             AttemptState::Failed {
@@ -3355,7 +3365,11 @@ impl McpRouter {
                             );
                             return None;
                         };
-                        (latest_snapshot_alignment(&transition.effects), operation)
+                        (
+                            latest_snapshot_alignment(&transition.effects),
+                            operation,
+                            stdio_failure_text,
+                        )
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -3395,12 +3409,15 @@ impl McpRouter {
                     "MCP server background connection failed"
                 );
 
-                let detail = match mirror_fault {
-                    None => err.to_string(),
-                    Some(mirror_fault) => {
-                        format!("{err}; {mirror_fault}")
-                    }
-                };
+                // The transport's own error text first; then, for a
+                // classified stdio setup failure, its phase, class and the
+                // server's own exit status; then a rejected mirror apply.
+                let mut detail = err.to_string();
+                let mirror_fault = mirror_fault.map(|fault| fault.to_string());
+                for part in [stdio_failure_text, mirror_fault].into_iter().flatten() {
+                    detail.push_str("; ");
+                    detail.push_str(&part);
+                }
                 self.completed_updates.push_back(CompletedLifecycleUpdate {
                     action: McpLifecycleAction::new(
                         server_name,
@@ -3454,6 +3471,47 @@ impl McpRouter {
             return None;
         }
         retained.record.stderr_tail()
+    }
+
+    /// Every retained failed stdio attempt not claimed yet, by server name:
+    /// the host's report to its operator. A retained failure is returned by
+    /// one call only; the claim releases nothing.
+    pub(crate) fn claim_stdio_failures(
+        &self,
+    ) -> Vec<meerkat_core::mcp_attachment::McpStdioSetupFailure> {
+        let mut claimed: Vec<_> = self
+            .failed_stdio_attempts
+            .values()
+            .filter(|retained| {
+                !retained
+                    .claimed
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+            })
+            .map(|retained| retained.failure.clone())
+            .collect();
+        claimed.sort_by(|left, right| left.server.cmp(&right.server));
+        claimed
+    }
+
+    /// The redacted stderr tail of `server`'s retained exact failed
+    /// `attempt`, and whether its capture has ended (nothing more will be
+    /// added to it). `(None, true)` once that attempt is no longer retained
+    /// or captured nothing. SENSITIVE: host and operator only.
+    pub(crate) fn stdio_stderr_tail_and_capture_end(
+        &self,
+        server: &str,
+        attempt: u64,
+    ) -> (
+        Option<meerkat_core::mcp_attachment::McpStdioStderrTail>,
+        bool,
+    ) {
+        match self.failed_stdio_attempts.get(server) {
+            Some(retained) if retained.failure.attempt == attempt => (
+                retained.record.stderr_tail(),
+                retained.record.stderr_capture_ended(),
+            ),
+            _ => (None, true),
+        }
     }
 
     /// Whether the router still retains the stderr tail of `server`'s exact

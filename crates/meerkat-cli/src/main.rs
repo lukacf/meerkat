@@ -13226,6 +13226,9 @@ async fn create_mcp_tools(
                 );
             }
         }
+        // The operator also gets what a failed stdio server wrote to
+        // stderr: on this terminal only.
+        mcp_stdio_report::print(&adapter).await;
     }
 
     // Refresh cached tools to include any that connected immediately
@@ -13508,6 +13511,10 @@ fn with_governed_mcp_auth(
 async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     #[cfg(feature = "mcp")]
     if let Some(adapter) = _adapter {
+        // A stdio server that failed in the background, during the run, is
+        // reported to the operator here, before the shutdown releases what
+        // the router retains of it; one already reported is not repeated.
+        mcp_stdio_report::print(adapter).await;
         adapter.shutdown().await;
     }
 }

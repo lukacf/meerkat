@@ -20,16 +20,77 @@ const NAME_PRINT_MAX_CHARS: usize = 64;
 
 /// One failed server's report: its name, the failure in fixed words, and the
 /// end of its stderr tail, marked when earlier output is not shown.
-pub(crate) fn render(
-    _failure: &McpStdioSetupFailure,
-    _tail: Option<&McpStdioStderrTail>,
-) -> String {
-    String::new()
+pub(crate) fn render(failure: &McpStdioSetupFailure, tail: Option<&McpStdioStderrTail>) -> String {
+    // The name comes from configuration: it is shown escaped and bounded,
+    // never as terminal input.
+    let name: String = failure.server.chars().take(NAME_PRINT_MAX_CHARS).collect();
+    let mut report = format!("MCP server '{}': {failure}", name.escape_debug());
+    // No tail: the process never started, or its capture is gone.
+    let Some(tail) = tail else {
+        return report;
+    };
+    let (lines, left_out) = last_lines(&tail.text);
+    if lines.is_empty() {
+        report.push_str(if tail.total_bytes == 0 {
+            "\n  it wrote nothing to stderr"
+        } else {
+            "\n  its stderr output holds no whole line to show"
+        });
+        return report;
+    }
+    report.push_str(if tail.truncated || left_out {
+        "\n  its last stderr output (earlier output cut):"
+    } else {
+        "\n  its last stderr output:"
+    });
+    for line in lines {
+        report.push_str(if line.is_empty() { "\n  |" } else { "\n  | " });
+        report.push_str(line);
+    }
+    report
+}
+
+/// The end of `text`: whole lines, at most [`TAIL_PRINT_MAX_LINES`] of them
+/// and [`TAIL_PRINT_MAX_BYTES`] bytes (each line counted with its line
+/// break). A last line longer than the byte bound keeps its end, cut on a
+/// character boundary. The flag says whether earlier output is left out.
+fn last_lines(text: &str) -> (Vec<&str>, bool) {
+    let total = text.lines().count();
+    let mut shown = Vec::new();
+    let mut bytes = 0_usize;
+    let mut line_cut = false;
+    for line in text.lines().rev() {
+        if shown.len() == TAIL_PRINT_MAX_LINES {
+            break;
+        }
+        let cost = line.len() + 1;
+        if bytes + cost > TAIL_PRINT_MAX_BYTES {
+            if shown.is_empty() {
+                let mut start = line.len().saturating_sub(TAIL_PRINT_MAX_BYTES);
+                while !line.is_char_boundary(start) {
+                    start += 1;
+                }
+                line_cut = start > 0;
+                shown.push(&line[start..]);
+            }
+            break;
+        }
+        bytes += cost;
+        shown.push(line);
+    }
+    let left_out = line_cut || shown.len() < total;
+    shown.reverse();
+    (shown, left_out)
 }
 
 /// The reports of every failed stdio server of `adapter` not reported yet.
-pub(crate) async fn collect(_adapter: &meerkat_mcp::McpRouterAdapter) -> Vec<String> {
-    Vec::new()
+pub(crate) async fn collect(adapter: &meerkat_mcp::McpRouterAdapter) -> Vec<String> {
+    adapter
+        .claim_stdio_failure_reports()
+        .await
+        .iter()
+        .map(|(failure, tail)| render(failure, tail.as_ref()))
+        .collect()
 }
 
 /// Tell the operator, on stderr, about every failed stdio server of

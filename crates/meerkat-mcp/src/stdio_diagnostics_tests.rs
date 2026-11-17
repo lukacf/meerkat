@@ -1,9 +1,11 @@
 //! Stdio setup diagnostics (#230): the typed failure class and the bounded,
 //! redacted stderr tail of a failed stdio server attempt, read by the host
-//! through the adapter (latest retained failure per server) or the exact
-//! attempt's observer, and never reaching the model: not in the setup
-//! failure notice, the lifecycle detail, the host event payload or the
-//! attempt's readiness detail, on any path.
+//! through the adapter (latest retained failure per server, or each retained
+//! failure once for the operator's report) or the exact attempt's observer.
+//! The tail never reaches the model: not in the setup failure notice, the
+//! lifecycle detail, the host event payload or the attempt's readiness
+//! detail, on any path. The class, phase and exit status are named in the
+//! lifecycle detail, in fixed words, and never in the model's notice.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;

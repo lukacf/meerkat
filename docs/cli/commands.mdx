@@ -492,6 +492,8 @@ rkat config patch [<FILE>] [--json <JSON>] [--expected-generation <N>]
 
 The positional argument is always a file path; inline payloads use `--json` (or `--toml` for `set`).
 
+`rkat config get` shows `<redacted>` in place of each stored secret value, in every format; the realm's document file holds the values. A document written back with `<redacted>` in a place keeps the value stored there (see [Secret values in config answers](/concepts/configuration#secret-values-in-config-answers)).
+
 Examples:
 
 ```bash

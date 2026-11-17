@@ -4440,7 +4440,7 @@ impl McpOAuthAuthority {
     /// are the resource's.
     ///
     /// A server that publishes no resource metadata (its challenge names
-    /// none and no well-known document answers; MCP authorization
+    /// none and every well-known URL answers `404` or `410`; MCP authorization
     /// 2025-03-26) has one possible authorization server, its own origin:
     /// the resource is then the configured server URL, and that origin's
     /// metadata must pass the same authorization-server stage. A
@@ -4600,7 +4600,7 @@ impl McpOAuthAuthority {
     /// The protected resource's metadata URL (from the challenge, or the
     /// first well-known candidate that answers) and its document. `None`
     /// when the server publishes none: its challenge names no document and
-    /// no well-known candidate answers. A document the challenge names, or
+    /// every well-known candidate answers `404` or `410`. A document the challenge names, or
     /// one that answers, is the server's word: any defect of it is an error.
     async fn fetch_protected_resource_metadata(
         &self,
@@ -4802,11 +4802,15 @@ impl McpOAuthAuthority {
     }
 
     /// The first protected-resource well-known URL of the server that
-    /// answers, or `None` when none does.
+    /// answers. `None` when every candidate answers `404` or `410`: the server
+    /// publishes none. With any other answer of a candidate and no later
+    /// candidate answering, the server may publish a document that could not
+    /// be read, which is the refusal it has always been.
     async fn discover_resource_metadata_url_by_well_known(
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
+        let mut every_candidate_absent = true;
         for candidate in protected_resource_well_known_candidates(target.server_url())? {
             let response = self
                 .http_for(target, &candidate)?
@@ -4815,6 +4819,13 @@ impl McpOAuthAuthority {
                 .await;
             match response {
                 Ok(response) if response.status().is_success() => return Ok(Some(candidate)),
+                // Only an absent document says the server publishes none at
+                // this URL (the authorization-server stage's own rule).
+                Ok(response)
+                    if matches!(
+                        response.status(),
+                        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+                    ) => {}
                 // The egress profile's own resolver refusal is typed, and so is
                 // a probe that passed its client's bound; neither is ever taken
                 // as an absent document.
@@ -4832,10 +4843,21 @@ impl McpOAuthAuthority {
                         },
                     ));
                 }
-                _ => {}
+                // Any other answer (a server error, a redirect, a demand for
+                // authorization) and any other failed request: a later
+                // candidate may still answer, but the server may publish a
+                // document here, so it is never said to publish none.
+                _ => every_candidate_absent = false,
             }
         }
-        Ok(None)
+        if every_candidate_absent {
+            Ok(None)
+        } else {
+            Err(McpOAuthError::DiscoveryFailed {
+                server_name: target.server_name().to_string(),
+                reason: NO_RESOURCE_METADATA.to_string(),
+            })
+        }
     }
 
     async fn register_client(

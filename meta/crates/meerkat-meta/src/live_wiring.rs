@@ -1026,6 +1026,94 @@ where
     (output, delivery)
 }
 
+/// The response delivery slot of the request the current task serves,
+/// carried into work the request runs on another task.
+/// [`capture_live_rpc_response_delivery`] keeps the slot in a task-local,
+/// which a spawned task does not inherit, so a live handler run on a spawned
+/// task under [`Self::scope`] hands its response's custody to the same outer
+/// writer as one run in the request's own task.
+#[cfg(feature = "openai-live")]
+pub(crate) struct CarriedLiveRpcResponseDelivery(
+    Option<Arc<StdMutex<Option<LiveRpcResponseDeliveryCustody>>>>,
+);
+
+#[cfg(feature = "openai-live")]
+impl CarriedLiveRpcResponseDelivery {
+    /// The current request's slot; none outside a delivery-aware dispatch.
+    pub(crate) fn current() -> Self {
+        Self(LIVE_RPC_RESPONSE_DELIVERY.try_with(Arc::clone).ok())
+    }
+
+    /// Run `future` with the carried slot as its request's slot. With none
+    /// carried, `future` runs as it is.
+    ///
+    /// The request holds the slot until its writer has settled it. If only
+    /// this carry holds the slot when `future` returns, the request was
+    /// dropped while `future` ran (a gateway that shuts down aborts its
+    /// request tasks) and no writer will settle what `future` handed over:
+    /// that custody is rejected here, on the task that made it, before this
+    /// returns.
+    pub(crate) async fn scope<F>(self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let Some(slot) = self.0 else {
+            return future.await;
+        };
+        let output = LIVE_RPC_RESPONSE_DELIVERY
+            .scope(Arc::clone(&slot), future)
+            .await;
+        if Arc::strong_count(&slot) == 1 {
+            let abandoned = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(custody) = abandoned
+                && let Err(error) = custody.rejected().await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "a live response custody left by a dropped request could not be rejected"
+                );
+            }
+        }
+        output
+    }
+}
+
+/// A live handler's error answer publishes nothing. Reject the custody the
+/// handler left in the current request's slot before it answered the error:
+/// the outer writer settles a written answer as delivered, whatever the
+/// answer says. The Console's door does the same at its own capture.
+#[cfg(feature = "openai-live")]
+pub(crate) async fn reject_live_rpc_response_delivery_of_error(
+    response: JsonRpcResponse,
+) -> JsonRpcResponse {
+    if response.error.is_some() {
+        let left = LIVE_RPC_RESPONSE_DELIVERY
+            .try_with(|slot| {
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+            })
+            .ok()
+            .flatten();
+        if let Some(custody) = left
+            && let Err(error) = custody.rejected().await
+        {
+            // Not a fault by itself: an open superseded after it opened has
+            // closed its own channel before it answers the error, so this
+            // second attempt finds the channel closed. A failed first close
+            // is logged at warn where it happens.
+            tracing::debug!(
+                error = %error,
+                "the custody of a live response that answered an error could not be rejected"
+            );
+        }
+    }
+    response
+}
+
 #[cfg(feature = "openai-live")]
 fn retain_live_webrtc_answer_delivery(
     custody: meerkat::surface::LiveWebrtcAnswerDeliveryCustody,
@@ -6999,6 +7087,461 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A live handler over `dispatch` alone: no capability, no channel
+    /// custody.
+    #[cfg(feature = "openai-live")]
+    fn scripted_live_rpc_handler(dispatch: LiveRpcDispatch) -> LiveRpcHandler {
+        let custody_read: LiveCustodyRead = Arc::new(
+            |_channel: LiveChannelId,
+             _receipt: String|
+             -> futures::future::BoxFuture<
+                'static,
+                Result<meerkat::surface::ExperimentalLiveChannelCustodyStatus, String>,
+            > {
+                Box::pin(async { Err("a scripted handler holds no channel custody".to_string()) })
+            },
+        );
+        LiveRpcHandler {
+            dispatch,
+            capability_provider: LiveCapabilityProvider::disabled(),
+            custody_read,
+        }
+    }
+
+    /// A live handler whose every method ends as the strict open handler
+    /// ends: it hands the outer RPC writer the custody of the response's
+    /// publication and answers `{"published": true}`, or it answers the
+    /// refusal of a dispatch that has no such writer.
+    #[cfg(feature = "openai-live")]
+    fn open_publication_handler(cleanup_calls: Arc<AtomicUsize>) -> LiveRpcHandler {
+        let dispatch: LiveRpcDispatch = Arc::new(
+            move |_authority: LiveSurfaceAuthority,
+                  _resolved_session: Option<SessionId>,
+                  _canonical_target_identity: Option<String>,
+                  _method: String,
+                  _params: Value,
+                  rpc_id: Value|
+                  -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = JsonRpcResponse> + Send>,
+            > {
+                let cleanup: Arc<dyn LiveOpenPublicationCleanup> =
+                    Arc::new(CountingOpenPublicationCleanup {
+                        calls: Arc::clone(&cleanup_calls),
+                    });
+                Box::pin(async move {
+                    let custody = LiveOpenResponseDeliveryCustody::new(cleanup);
+                    if let Err(error) = retain_live_open_response_delivery(custody).await {
+                        live_error(rpc_id, INTERNAL_ERROR_CODE, error)
+                    } else {
+                        live_success(rpc_id, serde_json::json!({ "published": true }))
+                    }
+                })
+            },
+        );
+        scripted_live_rpc_handler(dispatch)
+    }
+
+    /// One request through the stdio gateway's delivery-aware dispatch, as
+    /// its loop makes it: the answer, printed under `row`, and the delivery
+    /// the loop settles after its write.
+    #[cfg(feature = "openai-live")]
+    async fn stdio_live_request(
+        member: &crate::rpc::IdentityFirstLiveMember,
+        handler: &LiveRpcHandler,
+        row: &str,
+        method: &str,
+        params: Value,
+    ) -> (Value, crate::rpc::SerializedRpcResponseDelivery) {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        })
+        .to_string();
+        let delivery = crate::rpc::handle_unified_rpc_json_with_live_arc_delivery(
+            &member.runtime,
+            &request,
+            std::time::Duration::from_secs(5),
+            None,
+            Some(&member.identity_ctx),
+            Some(handler),
+        )
+        .await;
+        println!("{row}: {}", delivery.response);
+        let answer = serde_json::from_str(&delivery.response).expect("a JSON-RPC answer");
+        (answer, delivery)
+    }
+
+    /// A stdio live `method` whose handler hands the gateway's writer the
+    /// custody of its response's publication: the request is answered with
+    /// the handler's result, and once the writer has written it the
+    /// publication stands (its cleanup never runs). `names_the_member`
+    /// sends the request for an identity-first member, by its `identity`.
+    #[cfg(feature = "openai-live")]
+    async fn stdio_publication_row(row: &str, method: &str, names_the_member: bool) {
+        let member = crate::rpc::identity_first_live_member_for_test(row)
+            .await
+            .expect("an identity-first member");
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let handler = open_publication_handler(Arc::clone(&cleanup_calls));
+        let params = if names_the_member {
+            serde_json::json!({ "identity": member.identity })
+        } else {
+            serde_json::json!({})
+        };
+        let (answer, mut delivery) =
+            stdio_live_request(&member, &handler, row, method, params).await;
+        let settled = delivery.settle_delivery(true).await;
+        let cleanups = cleanup_calls.load(Ordering::SeqCst);
+        let _ = member.runtime.mob_handle().stop().await;
+        assert_eq!(
+            (answer, settled, cleanups),
+            (
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"published": true}}),
+                Ok(()),
+                0
+            ),
+            "{row}: the gateway's writer must hold the publication custody of a stdio {method}"
+        );
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_open_naming_no_member_keeps_its_publication_custody() {
+        stdio_publication_row("stdio-live-open-no-member", "meta/live/open", false).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_open_for_an_identity_first_member_keeps_its_publication_custody() {
+        stdio_publication_row("stdio-live-open-identity-member", "meta/live/open", true).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_webrtc_answer_naming_no_member_keeps_its_publication_custody() {
+        stdio_publication_row("stdio-live-answer-no-member", "live/webrtc/answer", false).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_webrtc_answer_for_an_identity_first_member_keeps_its_publication_custody()
+    {
+        stdio_publication_row(
+            "stdio-live-answer-identity-member",
+            "live/webrtc/answer",
+            true,
+        )
+        .await;
+    }
+
+    /// A live handler that hands the outer RPC writer the custody of a
+    /// publication and then answers an error, as an open does that was
+    /// superseded after it opened.
+    #[cfg(feature = "openai-live")]
+    fn error_after_hand_off_handler(cleanup_calls: Arc<AtomicUsize>) -> LiveRpcHandler {
+        let dispatch: LiveRpcDispatch = Arc::new(
+            move |_authority: LiveSurfaceAuthority,
+                  _resolved_session: Option<SessionId>,
+                  _canonical_target_identity: Option<String>,
+                  _method: String,
+                  _params: Value,
+                  rpc_id: Value|
+                  -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = JsonRpcResponse> + Send>,
+            > {
+                let cleanup: Arc<dyn LiveOpenPublicationCleanup> =
+                    Arc::new(CountingOpenPublicationCleanup {
+                        calls: Arc::clone(&cleanup_calls),
+                    });
+                Box::pin(async move {
+                    let custody = LiveOpenResponseDeliveryCustody::new(cleanup);
+                    match retain_live_open_response_delivery(custody).await {
+                        Ok(()) => live_error(
+                            rpc_id,
+                            INTERNAL_ERROR_CODE,
+                            "live open was superseded before it activated",
+                        ),
+                        Err(error) => live_error(rpc_id, INTERNAL_ERROR_CODE, error),
+                    }
+                })
+            },
+        );
+        scripted_live_rpc_handler(dispatch)
+    }
+
+    /// A stdio live open whose handler handed the gateway's writer a
+    /// publication custody and then answered an error publishes nothing:
+    /// the host gets the error, and the publication is undone once,
+    /// although the writer wrote the answer.
+    #[cfg(feature = "openai-live")]
+    async fn stdio_error_after_hand_off_row(row: &str, names_the_member: bool) {
+        let member = crate::rpc::identity_first_live_member_for_test(row)
+            .await
+            .expect("an identity-first member");
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let handler = error_after_hand_off_handler(Arc::clone(&cleanup_calls));
+        let params = if names_the_member {
+            serde_json::json!({ "identity": member.identity })
+        } else {
+            serde_json::json!({})
+        };
+        let (answer, mut delivery) =
+            stdio_live_request(&member, &handler, row, "meta/live/open", params).await;
+        let settled = delivery.settle_delivery(true).await;
+        let cleanups = cleanup_calls.load(Ordering::SeqCst);
+        let _ = member.runtime.mob_handle().stop().await;
+        assert_eq!(
+            (answer["error"]["message"].clone(), settled, cleanups),
+            (
+                serde_json::json!("live open was superseded before it activated"),
+                Ok(()),
+                1
+            ),
+            "{row}: an error answer must undo the publication its handler handed over: {answer}"
+        );
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_open_that_answers_an_error_after_its_hand_off_is_undone() {
+        stdio_error_after_hand_off_row("stdio-live-open-error-no-member", false).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_stdio_live_open_for_an_identity_first_member_that_answers_an_error_is_undone() {
+        stdio_error_after_hand_off_row("stdio-live-open-error-identity-member", true).await;
+    }
+
+    /// The cleanup of an open's publication that says when it has started
+    /// and then waits to be released.
+    #[cfg(feature = "openai-live")]
+    struct GatedOpenPublicationCleanup {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        finished: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[async_trait]
+    impl LiveOpenPublicationCleanup for GatedOpenPublicationCleanup {
+        async fn cleanup(&self) -> Result<(), String> {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A stdio live open for an identity-first member whose request is
+    /// dropped while its handler runs, as a gateway that shuts down drops
+    /// it: the publication the handler then makes is undone inside the
+    /// member's tracked operation, which the identity runtime's shutdown
+    /// joins, not on a task nothing waits for. While the undo is held the
+    /// tracked operation has not ended.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn a_dropped_stdio_live_open_undoes_its_publication_inside_the_tracked_operation() {
+        let row = "stdio-live-open-dropped-request";
+        let member = crate::rpc::identity_first_live_member_for_test(row)
+            .await
+            .expect("an identity-first member");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release_handler = Arc::new(tokio::sync::Notify::new());
+        let undo_started = Arc::new(tokio::sync::Notify::new());
+        let release_undo = Arc::new(tokio::sync::Notify::new());
+        let undone = Arc::new(AtomicUsize::new(0));
+        let cleanup: Arc<dyn LiveOpenPublicationCleanup> = Arc::new(GatedOpenPublicationCleanup {
+            started: Arc::clone(&undo_started),
+            release: Arc::clone(&release_undo),
+            finished: Arc::clone(&undone),
+        });
+        let handler_entered = Arc::clone(&entered);
+        let handler_release = Arc::clone(&release_handler);
+        let dispatch: LiveRpcDispatch = Arc::new(
+            move |_authority: LiveSurfaceAuthority,
+                  _resolved_session: Option<SessionId>,
+                  _canonical_target_identity: Option<String>,
+                  _method: String,
+                  _params: Value,
+                  rpc_id: Value|
+                  -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = JsonRpcResponse> + Send>,
+            > {
+                let entered = Arc::clone(&handler_entered);
+                let release = Arc::clone(&handler_release);
+                let cleanup = Arc::clone(&cleanup);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    let custody = LiveOpenResponseDeliveryCustody::new(cleanup);
+                    if let Err(error) = retain_live_open_response_delivery(custody).await {
+                        live_error(rpc_id, INTERNAL_ERROR_CODE, error)
+                    } else {
+                        live_success(rpc_id, serde_json::json!({ "published": true }))
+                    }
+                })
+            },
+        );
+        let handler = scripted_live_rpc_handler(dispatch);
+        {
+            let request = stdio_live_request(
+                &member,
+                &handler,
+                row,
+                "meta/live/open",
+                serde_json::json!({ "identity": member.identity }),
+            );
+            tokio::pin!(request);
+            tokio::select! {
+                _ = &mut request => panic!("the request must still wait on its handler"),
+                () = entered.notified() => {}
+            }
+            // The request is dropped here, with its handler still running.
+        }
+        release_handler.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), undo_started.notified())
+            .await
+            .expect("the publication's undo starts");
+        let identity_runtime = Arc::clone(member.identity_ctx.runtime.runtime());
+        let ended_while_the_undo_was_held = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            identity_runtime.join_foreground_operations(),
+        )
+        .await
+        .is_ok();
+        release_undo.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            identity_runtime.join_foreground_operations(),
+        )
+        .await
+        .expect("the tracked operation ends once the undo has run");
+        let undone = undone.load(Ordering::SeqCst);
+        let _ = member.runtime.mob_handle().stop().await;
+        assert!(
+            !ended_while_the_undo_was_held && undone == 1,
+            "the undo must run inside the tracked operation: \
+             ended_while_the_undo_was_held={ended_while_the_undo_was_held} undone={undone}"
+        );
+    }
+
+    /// A live handler that ends as the WebRTC answer handler ends, over an
+    /// answer already coordinated with the provider: it hands the outer RPC
+    /// writer the answer's delivery custody and answers its SDP, or it
+    /// answers the refusal of a dispatch that has no such writer.
+    #[cfg(feature = "openai-live-test")]
+    fn answer_delivery_handler(
+        answer: meerkat::surface::CoordinatedLiveWebrtcAnswer,
+    ) -> LiveRpcHandler {
+        let answer = Arc::new(StdMutex::new(Some(answer)));
+        let dispatch: LiveRpcDispatch = Arc::new(
+            move |_authority: LiveSurfaceAuthority,
+                  _resolved_session: Option<SessionId>,
+                  _canonical_target_identity: Option<String>,
+                  _method: String,
+                  _params: Value,
+                  rpc_id: Value|
+                  -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = JsonRpcResponse> + Send>,
+            > {
+                let answer = answer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                Box::pin(async move {
+                    let Some(answer) = answer else {
+                        return live_error(
+                            rpc_id,
+                            INTERNAL_ERROR_CODE,
+                            "the scripted answer was already given",
+                        );
+                    };
+                    let value = serde_json::json!({ "answer_sdp": answer.answer_sdp });
+                    match retain_live_webrtc_answer_delivery(answer.delivery_custody).await {
+                        Ok(()) => live_success(rpc_id, value),
+                        Err(error) => live_error(rpc_id, INTERNAL_ERROR_CODE, error),
+                    }
+                })
+            },
+        );
+        scripted_live_rpc_handler(dispatch)
+    }
+
+    /// A stdio `live/webrtc/answer` over an answer the receipt answer
+    /// transport gave: the request is answered with the SDP, and once the
+    /// gateway's writer has written it the transport's answer is accepted,
+    /// never rejected. `names_the_member` sends the request as the strict
+    /// SDK call does, for an identity-first member and under its receipts.
+    #[cfg(feature = "openai-live-test")]
+    async fn stdio_receipt_answer_row(row: &str, names_the_member: bool) {
+        let member = crate::rpc::identity_first_live_member_for_test(row)
+            .await
+            .expect("an identity-first member");
+        let (
+            answer,
+            transport,
+            _activator,
+            _committed,
+            _rolled_back,
+            _machine,
+            _session_id,
+            channel_id,
+            readiness,
+        ) = coordinated_receipt_answer_fixture(row).await;
+        let handler = answer_delivery_handler(answer);
+        let params = if names_the_member {
+            serde_json::json!({
+                "identity": member.identity,
+                "channel_id": channel_id.as_str(),
+                "pending_receipt": readiness.pending_receipt(),
+                "readiness_receipt": readiness.readiness_id(),
+                "token": row,
+                "offer_sdp": "receipt-offer",
+            })
+        } else {
+            serde_json::json!({
+                "channel_id": channel_id.as_str(),
+                "token": row,
+                "offer_sdp": "receipt-offer",
+            })
+        };
+        let (answer, mut delivery) =
+            stdio_live_request(&member, &handler, row, "live/webrtc/answer", params).await;
+        let settled = delivery.settle_delivery(true).await;
+        let accepted = transport.accepted.load(Ordering::SeqCst);
+        let rejected = transport.rejected.load(Ordering::SeqCst);
+        let _ = member.runtime.mob_handle().stop().await;
+        assert_eq!(
+            (answer, settled, accepted, rejected),
+            (
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"answer_sdp": "receipt-answer"},
+                }),
+                Ok(()),
+                1,
+                0
+            ),
+            "{row}: the gateway's writer must hold the delivery custody of a stdio WebRTC answer"
+        );
+    }
+
+    #[cfg(feature = "openai-live-test")]
+    #[tokio::test]
+    async fn a_stdio_receipt_answer_naming_no_member_is_accepted_after_the_write() {
+        stdio_receipt_answer_row("stdio-receipt-answer-no-member", false).await;
+    }
+
+    #[cfg(feature = "openai-live-test")]
+    #[tokio::test]
+    async fn a_stdio_receipt_answer_for_an_identity_first_member_is_accepted_after_the_write() {
+        stdio_receipt_answer_row("stdio-receipt-answer-identity-member", true).await;
     }
 
     #[cfg(feature = "openai-live")]

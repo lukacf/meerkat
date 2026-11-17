@@ -90,7 +90,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-5-5").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -186,7 +186,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let hook_engine: Arc<dyn meerkat::HookEngine> = Arc::new(engine);
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .system_prompt(
             "You are a helpful weather assistant. Use the get_weather tool \
              to answer questions about the weather.",

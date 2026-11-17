@@ -152,6 +152,38 @@ async fn new_consult_applies_provider_params_before_first_request() {
 }
 
 #[tokio::test]
+async fn reasoning_effort_is_one_named_level_and_is_never_sent_unchecked() {
+    let dir = fixture();
+    let client = Arc::new(CaptureClient::default());
+    let state = ForceState::with_test_client(dir.path(), client.clone());
+
+    // A level outside the seven names is refused as invalid params.
+    let error = consult::handle(
+        &state,
+        &json!({"question":"synthetic", "model":"gemini-3.5-flash", "provider_params":{"reasoning_effort":"extreme"}}),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("provider_params"));
+
+    // A named level is accepted as params. The capture client states no
+    // levels for its route, so the session refuses the turn instead of
+    // sending a level nobody checked.
+    let error = consult::handle(
+        &state,
+        &json!({"question":"synthetic", "model":"gemini-3.5-flash", "provider_params":{"reasoning_effort":"high"}}),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_ne!(error.code, -32602);
+    assert!(error.message.contains("reasoning effort"));
+    assert!(client.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn consult_preserves_creation_params_and_publishes_continuable_session() {
     let dir = fixture();
     let client = Arc::new(CaptureClient::default());

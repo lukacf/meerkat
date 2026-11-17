@@ -8,7 +8,8 @@ as the conversation progresses.
 ## What This Shows
 
 - OpenAI live audio transport through the Meerkat Python SDK
-- `LiveChannel.session(...)` lifecycle wrapper
+- A live channel on a mob member, opened, committed and closed through its mob
+  (`mob.member_live_open(...)`, `member_live_control`, `member_live_close`)
 - Inline Meerkat mob skills
 - Python callback tools invoked from a live turn
 - Helper sub-agents spawned through a Meerkat mob
@@ -55,8 +56,9 @@ Say:
 - "What notes have you saved?"
 
 The first prompt should trigger the `voice_session_note` callback tool. The
-second should trigger `delegate_to_mob`, which spawns a helper member in the
-same mob and prints the helper's final output when it is available.
+second should trigger `delegate_to_mob`, which runs a helper member in the
+same mob (`mob.spawn_helper(...)`) and prints the helper's output when it
+returns.
 
 ## Options
 
@@ -64,15 +66,17 @@ same mob and prints the helper's final output when it is available.
 python3 examples/036-realtime-audio-py/main.py --help
 python3 examples/036-realtime-audio-py/main.py --text-probe
 python3 examples/036-realtime-audio-py/main.py --input-device 1 --output-device 2
-python3 examples/036-realtime-audio-py/main.py --helper-model gpt-5.5
+python3 examples/036-realtime-audio-py/main.py --helper-model gpt-6-astra
 python3 examples/036-realtime-audio-py/main.py --realm live-demo
 ```
 
 `--text-probe` keeps the live WebSocket path but sends one text chunk
-instead of opening local audio devices. It waits for a tool request or turn
-completion event, and fails at once if the provider fails the response
-(`turn_failed`), so it is useful for checking runtime plumbing on machines
-without a microphone.
+instead of opening local audio devices. It asks the model to call the note
+tool and waits until that callback has run (or, when the model answers without
+the tool, until the turn completes). It fails at once if the provider fails the
+response (`turn_failed`) or the channel closes first, and exits with status 130
+when it is stopped from outside, so it is useful for checking runtime plumbing
+on machines without a microphone.
 
 ## Troubleshooting
 

@@ -1070,6 +1070,7 @@ rt = await (
 | `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `meta/on_error` notification; sync or async, fire-and-forget. Without a callback the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered` and `mob_announcement_escalation_resolved`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/guides/unified-runtime#error-hook-and-logging)). `ErrorEvent.is_resolution` is true for those two, a failure ending rather than starting |
 | `.identity_bootstrap_mode(mode)` | The roster pass's mode: every mode seats each roster identity without materializing it, and `lazy_with_background_warm` also materializes them in a bounded background task; requires `.roster(...)` |
 | `.member_restore(restore)` | How the mob materializes its seated members at start: `"on_demand"` (default; only the members that must be live, such as those that hold work: the full set is under `member_restore` in [Configuration](/reference/configuration#sdk-and-gateway-runtime-options)), `"on_demand_verified"` (plus a read-only check of the others before ready) or `"eager"` (all); sent as `runtime_options.member_restore` |
+| `.max_sessions(n)` | The gateway's session limit, sent as `runtime_options.max_sessions`: a positive integer, 16 by default when unset. Zero, a negative number, a `bool` or a non-integer raises `ValueError`. Keep it at or above the number of agent sessions (members, helpers and scheduled runs included) that can be awake on the host at once; see `max_sessions` in [Configuration](/reference/configuration#sdk-and-gateway-runtime-options). New in the next release. TypeScript twin `maxSessions(n)` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder)` | Session agent builder |
 | `.gating(path)` | Gating config path (`config/gating.toml` is discovered when present). An empty path raises `ValueError`: it no longer switches gating off. To keep gating off, do not call it and keep nothing at `config/gating.toml` under the working directory |
@@ -1204,16 +1205,28 @@ the persistent mob storage was created. Its `kind` names the refusal
 `"candidate_divergent"` from gateways launched as a candidate) and `fields`
 lists the diverged definition fields as dotted paths, so a host can show what
 changed without parsing the message. Revert the edit, or move the stored
-definition with `declare_spec_update(expected_revision=...)`:
+definition with `declare_spec_update(expected_revision=...)`.
+
+In 0.9.15, with a gateway the SDK starts itself, `builder.build()` does not
+raise the exception of a refusal of the start itself, when the gateway
+refuses after it has accepted the init request; this refusal is one such. It
+raises `GatewayStartupCleanupError`, a `TransportError`, and the refusal is
+its `startup_error` (also its `__cause__`): `except
+CompositionProvenanceError` and `except RpcError` do not match it (see Known
+limitations in the Meta changelog). Catch both and read the refusal, so the
+code keeps working when the refusal is raised unwrapped (as it is where a
+host's own `gateway_transport()` stops cleanly; read from the source, not
+run), and do not retry a start whose `startup_error` is a typed refusal:
 
 ```python
-from meerkat_meta import CompositionProvenanceError
+from meerkat_meta import CompositionProvenanceError, GatewayStartupCleanupError
 
 try:
     runtime = await builder.build()
-except CompositionProvenanceError as err:
-    if err.kind == "divergent":
-        print("mob.toml differs from the stored definition in", err.fields)
+except (CompositionProvenanceError, GatewayStartupCleanupError) as err:
+    refusal = err.startup_error if isinstance(err, GatewayStartupCleanupError) else err
+    if isinstance(refusal, CompositionProvenanceError) and refusal.kind == "divergent":
+        print("mob.toml differs from the stored definition in", refusal.fields)
     raise
 ```
 
@@ -1924,10 +1937,23 @@ and `decisions_decide(decision_id, approve=, presented_digest=, reason=None,
 attestation=None)`. Each answers the gateway's result as a `dict`.
 
 ```python
+import time
+
 from meerkat_meta import DecisionAttestation
 
 runtime.on_decision_notice(lambda notice: print(notice["event"], notice["decision_id"]))
 page = await mob.decisions_list(phase="open")  # notices are written before the answer
+decision = page["decisions"][0]
+decision_id = decision["decision_id"]
+subject_digest = decision["subject_digest"]
+
+# Show the person the whole text of the rendering.
+rendering = await mob.decisions_rendering(decision_id)
+# ... post rendering["rendering"] to the chat ...
+shown_at_ms = int(time.time() * 1000)  # once the post has succeeded
+# ... wait for the answer ...
+observed_at_ms = int(time.time() * 1000)  # the time of the answer's event
+
 await mob.decisions_decide(
     decision_id,
     approve=True,
@@ -1938,9 +1964,28 @@ await mob.decisions_decide(
         scope="chat-session-1",
         event_ref="chat:event-1",
         observed_at_ms=observed_at_ms,
+        presentation={
+            "audience": {"kind": "approver", "approver_id": decision["approver_id"]},
+            "subject_digest": subject_digest,
+            "parts_shown": rendering["parts"],
+            "channel_ref": "chat:owners",
+            "message_ref": "chat:message-1",
+            "at_ms": shown_at_ms,
+        },
     ),
 )
 ```
+
+The `chat` ingress is declared at launch with `.decision_ingresses(...)`,
+and the approver map lists `U123` on it for the decision's approver id. An
+attested decide is accepted only for a decision that was presented to its
+approver: by the `presentation` the attestation carries, as here; by one
+recorded before with `decisions_present(decision_id, presentation)`, which
+takes the same mapping; or by the gateway's own showing to the stdio
+operator (its `presented` notice), where the approver map lists the operator
+for that approver id. With none of these, the decide is refused
+`presentation_incomplete`. The fields of a presentation are listed under
+[`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`.
 The gateway writes the notices before a list answers; the SDK runs each

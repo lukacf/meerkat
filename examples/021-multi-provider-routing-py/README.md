@@ -1,24 +1,33 @@
 # 021 — Multi-Provider Routing (Python SDK)
 
 Route to different LLM providers per-session. Compare Anthropic, OpenAI,
-and Gemini responses. Use provider-specific parameters.
+and Gemini responses. Set one reasoning-effort level for all of them.
 
 ## Concepts
 - Provider auto-detection from model name
-- Provider-specific parameters (thinking, reasoning effort)
+- One provider-neutral `reasoning_effort` level, sent to every configured
+  provider, with the report of what each request carried
+- What a refusal looks like: a level a model does not accept is refused,
+  never lowered, and the refusal names the levels the model accepts when a
+  source states them
+- A provider-specific parameter under the typed `provider_tag`: Anthropic
+  adaptive thinking, as a request of its own
 - Per-session model routing across configured providers
-- Typed Anthropic and OpenAI provider parameters
 
-The runnable calls compare configured providers and demonstrate typed provider
-parameters. The final printed routing guide discusses cost and fallback
-patterns; it does not execute an automatic fallback chain.
+The runnable calls compare configured providers, set the level and use one
+typed provider parameter. The final printed routing guide discusses cost and
+fallback patterns; it does not execute an automatic fallback chain.
+
+The reasoning-effort part needs Meerkat 0.9.15 or later, in the SDK and in
+the runtime it talks to: an older runtime makes the SDK raise
+`CapabilityUnavailableError` before it sends anything.
 
 ## Supported Providers
 | Provider | Models | Env Var |
 |----------|--------|---------|
-| Anthropic | `claude-opus-4-8`, `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
-| OpenAI | `gpt-5.5` | `OPENAI_API_KEY` |
-| Gemini | `gemini-3.5-flash`, `gemini-3.1-pro-preview` | `GEMINI_API_KEY` |
+| Anthropic | `claude-opus-5-5`, `claude-sonnet-5-5` | `ANTHROPIC_API_KEY` |
+| OpenAI | `gpt-6-astra` | `OPENAI_API_KEY` |
+| Gemini | `gemini-4-hydrogen`, `gemini-4-argon` | `GEMINI_API_KEY` |
 
 ## Run
 

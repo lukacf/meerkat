@@ -69,3 +69,5 @@ pub use types::{BackgroundJob, JobId, JobStatus, JobSummary, JobSummaryStatus};
 
 #[cfg(all(test, unix))]
 mod confinement_tests;
+#[cfg(all(test, unix))]
+mod own_jobs_tests;

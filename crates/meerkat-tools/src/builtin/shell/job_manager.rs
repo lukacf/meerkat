@@ -56,6 +56,10 @@ const ATTEMPT_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_millis(16);
 const PROCESS_CONTAINMENT_MAX_BACKOFF: Duration = Duration::from_secs(1);
 const SHELL_RUNNER_MEDIA_TYPE: &str = "application/vnd.meerkat.shell-runner+json";
 const SHELL_RESULT_MEDIA_TYPE: &str = "application/vnd.meerkat.shell-result+json";
+/// The runner of a background shell command this manager starts.
+const SHELL_RUNNER_NAME: &str = "meerkat.shell";
+/// The runner of a script monitor this manager starts.
+const MONITOR_RUNNER_NAME: &str = "meerkat.monitor_script";
 
 #[async_trait]
 pub trait ShellJobDeliveryProjector: Send + Sync {
@@ -990,12 +994,12 @@ impl JobManager {
                     monitor_starter.map_or("v1", MonitorStarter::recorded_version),
                 )
                 .map_err(shell_job_error)?,
-                RunnerIdentity::new("meerkat.monitor_script", "v1").map_err(shell_job_error)?,
+                RunnerIdentity::new(MONITOR_RUNNER_NAME, "v1").map_err(shell_job_error)?,
             )
         } else {
             (
                 ToolIdentity::new("shell", "v1").map_err(shell_job_error)?,
-                RunnerIdentity::new("meerkat.shell", "v1").map_err(shell_job_error)?,
+                RunnerIdentity::new(SHELL_RUNNER_NAME, "v1").map_err(shell_job_error)?,
             )
         };
         // Reviewed entry boundary for a detached call: before its first
@@ -1415,6 +1419,10 @@ impl JobManager {
         Ok(())
     }
 
+    /// The job with this id, when it is this manager's session's own: one it
+    /// holds in memory, or a shell job its session submitted under its realm
+    /// tag. Any other id, a job of another session, realm tag or kind
+    /// included, is `None`.
     pub async fn get_status(&self, job_id: &JobId) -> Result<Option<BackgroundJob>, ShellError> {
         self.ensure_recovered().await?;
         if let Some(projection) = self.projections.lock().await.get(job_id).cloned() {
@@ -1425,12 +1433,7 @@ impl JobManager {
             None => return Ok(None),
         };
         let domain_id = meerkat_jobs::JobId::new(job_id.to_string()).map_err(shell_job_error)?;
-        let Some(stored) = durable
-            .job_store
-            .get(&domain_id)
-            .await
-            .map_err(shell_job_error)?
-        else {
+        let Some(stored) = own_stored_job(durable, &domain_id).await? else {
             return Ok(None);
         };
         Ok(Some(hydrate_job(durable, stored).await?))
@@ -1483,6 +1486,10 @@ impl JobManager {
     /// validation, immediately before the first cancellation effect: the
     /// durable `request_cancel` (or, without durable storage, the synthetic
     /// projection change). A refusal requests nothing and signals nothing.
+    ///
+    /// The lookup finds only this manager's session's own shell jobs: a job
+    /// of another session, realm tag or kind is [`ShellError::JobNotFound`],
+    /// as an id that was never submitted, and nothing is requested for it.
     pub(crate) async fn cancel_job_entering(
         &self,
         job_id: &JobId,
@@ -1504,13 +1511,10 @@ impl JobManager {
         }
         let durable = self.durable()?;
         let domain_id = meerkat_jobs::JobId::new(job_id.to_string()).map_err(shell_job_error)?;
-        let snapshot = durable
-            .service()
-            .get(&domain_id)
-            .await
-            .map_err(shell_job_error)?
+        let own = own_stored_job(durable, &domain_id)
+            .await?
             .ok_or_else(|| ShellError::JobNotFound(job_id.to_string()))?;
-        if snapshot.terminal_result.is_some() {
+        if own.terminal_result.is_some() {
             return Err(ShellError::JobNotRunning);
         }
         super::custody_spawn::enter_physical(entry)?;
@@ -2953,6 +2957,36 @@ async fn persist_result(
         .await
         .map_err(|error| shell_io(format!("cannot persist shell result: {error}")))?;
     JobResultRef::new(blob.blob_id.to_string()).map_err(shell_job_error)
+}
+
+/// The stored shell job with this id that the runtime's own session
+/// submitted under its own realm tag.
+///
+/// The store holds the jobs of every session and realm tag of its host, of
+/// every kind, and a job id reaches this module from the model. A job under
+/// another realm tag, from another origin session, or with a runner this
+/// manager does not start (a host's own durable job) is no shell job of this
+/// session: it is absent here exactly as an id that was never submitted, so
+/// callers answer both alike. Realm tag and origin session are the predicate
+/// of [`DetachedJobService::get_authorized_for_session`] and the scope of
+/// `list_for_origin`.
+async fn own_stored_job(
+    durable: &DurableShellJobRuntime,
+    job_id: &meerkat_jobs::JobId,
+) -> Result<Option<meerkat_jobs::StoredJob>, ShellError> {
+    Ok(durable
+        .job_store
+        .get(job_id)
+        .await
+        .map_err(shell_job_error)?
+        .filter(|job| {
+            job.spec.realm_id == durable.realm_id
+                && job.spec.origin_session_id == durable.origin_session_id
+                && matches!(
+                    job.spec.runner.name(),
+                    SHELL_RUNNER_NAME | MONITOR_RUNNER_NAME
+                )
+        }))
 }
 
 async fn hydrate_job(

@@ -385,16 +385,20 @@ async function main() {
     !process.env.GOOGLE_API_KEY
   ) {
     throw new Error(
-      "Example 003 requires a real Gemini provider for gemini-3.1-flash-lite-preview. Set GEMINI_API_KEY or GOOGLE_API_KEY, or pass --demo-llm only for an explicitly shape-only smoke.",
+      "Example 003 requires a real Gemini provider for gemini-3.5-flash-lite. Set GEMINI_API_KEY or GOOGLE_API_KEY, or pass --demo-llm only for an explicitly shape-only smoke.",
     );
   }
-  const stateDir = join(here, ".state");
+  // The gateway roots the file tools of the agents at the parent of its state
+  // directory. One level down keeps what they write inside `.state/` instead
+  // of beside the files of this pack.
+  const stateRoot = join(here, ".state");
+  const stateDir = join(stateRoot, "gateway");
   const keepState = Boolean(process.env.META_KEEP_EXAMPLE_STATE);
   const hadPersistentState =
     existsSync(join(stateDir, "runtime.sqlite")) ||
     existsSync(join(stateDir, "meta_console.sqlite"));
   if (!process.env.META_KEEP_EXAMPLE_STATE) {
-    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(stateRoot, { recursive: true, force: true });
   }
   mkdirSync(stateDir, { recursive: true });
   const restoreBurst =

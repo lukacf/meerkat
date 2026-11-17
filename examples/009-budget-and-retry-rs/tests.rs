@@ -51,7 +51,7 @@ impl AgentLlmClient for ScriptedClient {
         Provider::Anthropic
     }
     fn model(&self) -> &str {
-        "claude-sonnet-4-6"
+        "claude-sonnet-5-5"
     }
 }
 
@@ -60,7 +60,7 @@ async fn run_script(limits: BudgetLimits, fail: bool) -> Result<RunResult, Agent
     let store = Arc::new(JsonlStore::new(root.path().join("sessions")));
     store.init().await.unwrap();
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .budget(limits)
         .build(
             Arc::new(ScriptedClient { fail }),
@@ -149,7 +149,7 @@ async fn guarded_stores_are_cleaned_up_on_success_and_error() {
                 let store = Arc::new(JsonlStore::new(path));
                 store.init().await.unwrap();
                 let mut agent = AgentBuilder::new()
-                    .model("claude-sonnet-4-6")
+                    .model("claude-sonnet-5-5")
                     .build(
                         Arc::new(ScriptedClient { fail }),
                         Arc::new(EmptyToolDispatcher),

@@ -7606,6 +7606,27 @@ impl EphemeralRuntimeDriver {
                 // history, so it ends consumed, never as never executed.
                 self.consume_applied_contributors_of_run(run_id, contributing_input_ids)
             }
+            FailedRunContributorDisposition::Refused => {
+                // The executor refused the request with nothing applied, so
+                // the contributors never executed either, and they end the
+                // same way: inside this realization, with the stored reason
+                // `NeverExecuted`. Unlike the class above nothing is in
+                // flight and nothing went wrong in the runtime: the refusal
+                // is the request's answer, and a replay would only have it
+                // refused again up to the retry cap.
+                tracing::debug!(
+                    run_id = ?run_id,
+                    contributors = contributing_input_ids.len(),
+                    "runtime ended the contributors of a run whose request was refused"
+                );
+                self.abandon_staged_inputs(
+                    contributing_input_ids,
+                    InputAbandonReason::NeverExecuted,
+                )?;
+                // As above: a contributor a committed round of the run
+                // already applied did execute, and ends consumed.
+                self.consume_applied_contributors_of_run(run_id, contributing_input_ids)
+            }
             FailedRunContributorDisposition::Replayed => {
                 tracing::debug!(
                     run_id = ?run_id,

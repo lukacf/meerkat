@@ -81,7 +81,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-5-5").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -102,7 +102,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_max_duration(Duration::from_mins(1)); // Agent-lifetime wall-clock budget
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .system_prompt("You are a concise assistant. Keep responses under 100 words.")
         .max_tokens_per_turn(512)
         .budget(budget)
@@ -148,14 +148,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let factory2 = AgentFactory::new(store2_dir.clone());
     let client2 = Arc::new(AnthropicClient::new(std::env::var("ANTHROPIC_API_KEY")?)?);
     let llm2 = factory2
-        .build_llm_adapter(client2, "claude-sonnet-4-6")
+        .build_llm_adapter(client2, "claude-sonnet-5-5")
         .await;
     let store2 = Arc::new(JsonlStore::new(store2_dir));
     store2.init().await?;
     let store2 = Arc::new(StoreAdapter::new(store2));
 
     let mut agent2 = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .max_tokens_per_turn(50)
         .budget(tight_budget)
         .retry_policy(retry)

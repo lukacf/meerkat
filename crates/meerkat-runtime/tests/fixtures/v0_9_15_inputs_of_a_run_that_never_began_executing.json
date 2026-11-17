@@ -1,0 +1,209 @@
+[
+  {
+    "admission_sequence": 1000000000,
+    "attempt_count": 1,
+    "created_at": "2026-11-16T08:30:43.099867590Z",
+    "current_state": "consumed",
+    "durability": "durable",
+    "history": [
+      {
+        "from": "accepted",
+        "reason": "QueueAccepted",
+        "timestamp": "2026-11-16T08:30:43.100022622Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "StageForRun(01a1e37a-df9d-744a-be56-06ef63f5bde8)",
+        "timestamp": "2026-11-16T08:30:43.102008732Z",
+        "to": "staged"
+      },
+      {
+        "from": "staged",
+        "reason": "MarkApplied(01a1e37a-df9d-744a-be56-06ef63f5bde8)",
+        "timestamp": "2026-11-16T08:30:43.102155512Z",
+        "to": "applied"
+      },
+      {
+        "from": "applied",
+        "reason": "MarkAppliedPendingConsumption(boundary_sequence=1)",
+        "timestamp": "2026-11-16T08:30:43.102155512Z",
+        "to": "applied_pending_consumption"
+      },
+      {
+        "from": "applied_pending_consumption",
+        "reason": "Consume",
+        "timestamp": "2026-11-16T08:30:43.103145567Z",
+        "to": "consumed"
+      }
+    ],
+    "input_id": "01a1e37a-df9a-72d2-b85a-7321e2d4c323",
+    "last_boundary_sequence": 0,
+    "last_run_id": "01a1e37a-df9d-744a-be56-06ef63f5bde8",
+    "persisted_input": {
+      "content": "the resumed run's input 0",
+      "header": {
+        "durability": "durable",
+        "id": "01a1e37a-df9a-72d2-b85a-7321e2d4c323",
+        "source": {
+          "type": "operator"
+        },
+        "timestamp": "2026-11-16T08:30:43.098558456Z",
+        "visibility": {
+          "operator_eligible": true,
+          "transcript_eligible": true
+        }
+      },
+      "input_type": "prompt"
+    },
+    "policy": {
+      "decision": {
+        "apply_mode": "stage_run_start",
+        "consume_point": "on_run_complete",
+        "drain_policy": "queue_next_turn",
+        "emit_operator_content": true,
+        "policy_version": 1,
+        "queue_mode": "fifo",
+        "record_transcript": true,
+        "routing_disposition": "queue",
+        "wake_mode": "wake_if_idle"
+      },
+      "version": 1
+    },
+    "recovery_count": 0,
+    "runtime_semantics": {
+      "boundary": "run_start",
+      "execution_handling_mode": null,
+      "execution_kind": "content_turn",
+      "live_interrupt_required": false,
+      "peer_response_terminal_apply_intent": null
+    },
+    "scoped_destination": {
+      "kind": "never_scoped"
+    },
+    "stored_input_state_version": 7,
+    "terminal_completion": {
+      "batch_key": {
+        "run_id": "01a1e37a-df9d-744a-be56-06ef63f5bde8",
+        "scope": "run"
+      },
+      "batch_ordinal": 0,
+      "candidate": {
+        "candidate_type": "machine_terminal_failure",
+        "error": {
+          "detail": "executor is stopped",
+          "kind": "runtime_apply_failure",
+          "outcome": "failed",
+          "terminal": true
+        }
+      },
+      "candidate_digest": "2f1f8b91ae64874fcecdf290677694767b43692d30098a4294fd36f7262bdf17",
+      "completion_input_ids": [
+        "01a1e37a-df9a-72d2-b85a-7321e2d4c323",
+        "01a1e37a-df9c-7203-9aab-c2abd6385967"
+      ],
+      "completion_input_ids_digest": "b4adf07538b810ce6d35bac01e56af9b3c47123d721f42ed9b294a7c0eb3eaa9",
+      "input_id": "01a1e37a-df9a-72d2-b85a-7321e2d4c323",
+      "owner_input_id": "01a1e37a-df9a-72d2-b85a-7321e2d4c323",
+      "phase": {
+        "phase": "pending"
+      },
+      "requires_session_checkpoint": false
+    },
+    "terminal_outcome": {
+      "outcome_type": "consumed"
+    },
+    "updated_at": "2026-11-16T08:30:43.103145567Z"
+  },
+  {
+    "admission_sequence": 1000000001,
+    "attempt_count": 1,
+    "created_at": "2026-11-16T08:30:43.101399177Z",
+    "current_state": "abandoned",
+    "durability": "durable",
+    "history": [
+      {
+        "from": "accepted",
+        "reason": "QueueAccepted",
+        "timestamp": "2026-11-16T08:30:43.101510665Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "StageForRun(01a1e37a-df9d-744a-be56-06ef63f5bde8)",
+        "timestamp": "2026-11-16T08:30:43.102053128Z",
+        "to": "staged"
+      },
+      {
+        "from": "staged",
+        "reason": "Abandon",
+        "timestamp": "2026-11-16T08:30:43.103088201Z",
+        "to": "abandoned"
+      }
+    ],
+    "input_id": "01a1e37a-df9c-7203-9aab-c2abd6385967",
+    "last_run_id": "01a1e37a-df9d-744a-be56-06ef63f5bde8",
+    "persisted_input": {
+      "content": "the resumed run's input 1",
+      "header": {
+        "durability": "durable",
+        "id": "01a1e37a-df9c-7203-9aab-c2abd6385967",
+        "source": {
+          "type": "operator"
+        },
+        "timestamp": "2026-11-16T08:30:43.100489833Z",
+        "visibility": {
+          "operator_eligible": true,
+          "transcript_eligible": true
+        }
+      },
+      "input_type": "prompt"
+    },
+    "policy": {
+      "decision": {
+        "apply_mode": "stage_run_start",
+        "consume_point": "on_run_complete",
+        "drain_policy": "queue_next_turn",
+        "emit_operator_content": true,
+        "policy_version": 1,
+        "queue_mode": "fifo",
+        "record_transcript": true,
+        "routing_disposition": "queue",
+        "wake_mode": "wake_if_idle"
+      },
+      "version": 1
+    },
+    "recovery_count": 0,
+    "runtime_semantics": {
+      "boundary": "run_start",
+      "execution_handling_mode": null,
+      "execution_kind": "content_turn",
+      "live_interrupt_required": false,
+      "peer_response_terminal_apply_intent": null
+    },
+    "scoped_destination": {
+      "kind": "never_scoped"
+    },
+    "stored_input_state_version": 7,
+    "terminal_completion": {
+      "batch_key": {
+        "run_id": "01a1e37a-df9d-744a-be56-06ef63f5bde8",
+        "scope": "run"
+      },
+      "batch_ordinal": 1,
+      "candidate_digest": "2f1f8b91ae64874fcecdf290677694767b43692d30098a4294fd36f7262bdf17",
+      "completion_input_ids_digest": "b4adf07538b810ce6d35bac01e56af9b3c47123d721f42ed9b294a7c0eb3eaa9",
+      "input_id": "01a1e37a-df9c-7203-9aab-c2abd6385967",
+      "owner_input_id": "01a1e37a-df9a-72d2-b85a-7321e2d4c323",
+      "phase": {
+        "phase": "pending"
+      },
+      "requires_session_checkpoint": false
+    },
+    "terminal_outcome": {
+      "outcome_type": "abandoned",
+      "reason": "never_executed"
+    },
+    "updated_at": "2026-11-16T08:30:43.103088201Z"
+  }
+]

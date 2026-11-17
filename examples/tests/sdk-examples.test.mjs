@@ -198,11 +198,18 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
       if (example.startsWith("021")) {
         const creates = result.requests.filter((r) => r.method === "session/create");
         assert.deepEqual(creates.map((r) => r.params.model),
-          ["claude-sonnet-4-6", "gpt-5.5", "gemini-3.5-flash", "claude-sonnet-4-6", "gpt-5.5"]);
-        assert.deepEqual(creates[3].params.provider_params, { thinking_budget_tokens: 5000 });
-        assert.deepEqual(creates[4].params.provider_params, {
-          provider_tag: { provider: "open_ai", reasoning_effort: "high" },
-        });
+          ["claude-sonnet-5-5", "gpt-6-astra", "gemini-4-hydrogen",
+            "claude-sonnet-5-5", "gpt-6-astra", "gemini-4-hydrogen", "claude-sonnet-5-5"]);
+        // One provider-neutral level for all three; no provider-specific effort.
+        for (const create of creates.slice(3, 6)) {
+          assert.equal(create.params.reasoning_effort, "high");
+          assert.equal(create.params.provider_params, undefined);
+        }
+        // The provider-specific setting is its own request and carries no level.
+        assert.deepEqual(creates[6].params.provider_params,
+          { provider_tag: { provider: "anthropic", thinking: { type: "adaptive" } } });
+        assert.equal(creates[6].params.reasoning_effort, undefined);
+        assert.equal(result.stdout.match(/Sent to synthetic as high/g)?.length, 3);
         assert.match(result.stdout, /Comparison \(3 providers\)/);
       }
       if (example.startsWith("026")) checkSkill(result);
@@ -217,6 +224,47 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
     successful(result);
     assert.equal(result.stdout.match(/Error: .*Synthetic session refusal/g)?.length, 3);
     assert.match(result.stdout, /Routing Strategies/);
+  });
+  it("021 reports a refused reasoning effort level per provider and carries on", async () => {
+    const result = await runExample("021-multi-provider-routing-py", "effort-refusal", {
+      ANTHROPIC_API_KEY: "synthetic-not-a-key",
+      OPENAI_API_KEY: "synthetic-not-a-key",
+      GEMINI_API_KEY: "synthetic-not-a-key",
+    });
+    successful(result);
+    assert.equal(
+      result.stdout.match(/Refused: unsupported_level; this model accepts: low, medium/g)?.length, 3);
+    assert.match(result.stdout, /Anthropic with adaptive thinking/);
+    assert.match(result.stdout, /Routing Strategies/);
+  });
+  for (const [mode, line] of [
+    ["effort-refusal-no-level", /Refused: unsupported_level; this model takes no reasoning-effort level/g],
+    ["effort-refusal-unknown", /Refused: supported_levels_unknown; the levels this model accepts are not known$/gm],
+    ["effort-refusal-unavailable", /Refused: supported_levels_unavailable; the levels this model accepts are not known; try again later/g],
+  ]) {
+    it(`021 tells an empty list of levels from an unknown one (${mode})`, async () => {
+      const result = await runExample("021-multi-provider-routing-py", mode, {
+        ANTHROPIC_API_KEY: "synthetic-not-a-key",
+        OPENAI_API_KEY: "synthetic-not-a-key",
+        GEMINI_API_KEY: "synthetic-not-a-key",
+      });
+      successful(result);
+      assert.equal(result.stdout.match(line)?.length, 3);
+      assert.doesNotMatch(result.stdout, /this model accepts:/);
+      assert.match(result.stdout, /Routing Strategies/);
+    });
+  }
+  it("021 reports an error that is not a refusal as an error and carries on", async () => {
+    const result = await runExample("021-multi-provider-routing-py", "effort-error", {
+      ANTHROPIC_API_KEY: "synthetic-not-a-key",
+      OPENAI_API_KEY: "synthetic-not-a-key",
+      GEMINI_API_KEY: "synthetic-not-a-key",
+    });
+    successful(result);
+    assert.equal(
+      result.stdout.match(/Error \(MeerkatError, code -32000\): Synthetic provider failure/g)?.length, 3);
+    assert.doesNotMatch(result.stdout, /Refused:/);
+    assert.match(result.stdout, /Anthropic with adaptive thinking/);
   });
   it("021 with no provider keys prints setup guidance without creating sessions", async () => {
     const result = await runExample("021-multi-provider-routing-py");

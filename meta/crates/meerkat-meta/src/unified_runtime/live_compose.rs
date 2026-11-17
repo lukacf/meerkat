@@ -569,6 +569,117 @@ comms = true
         runtime.mob_handle().stop().await.expect("stop");
     }
 
+    /// An ordinary `meta/live/open` (no `execution_identity`, the WebSocket
+    /// bootstrap) that names `member`, sent through the stdio gateway's
+    /// delivery-aware dispatch as the SDKs' plain open sends it: the answer,
+    /// how many channels the realtime lane opened, and whether the request
+    /// ran under the member's identity authority. With `identity_first` an
+    /// identity runtime holds the member; without it the member is whatever
+    /// the built runtime's own spawn makes it.
+    async fn stdio_ordinary_open(
+        id: &str,
+        member: &str,
+        identity_first: bool,
+    ) -> (Value, usize, bool) {
+        let _guard = SHARED_HOST_TEST_LOCK.lock().await;
+        let built = build_embedder_runtime(id, true).await;
+        let runtime = &built.runtime;
+        runtime
+            .compose_live()
+            .await
+            .expect("live composes")
+            .expect("a live door was registered");
+        runtime
+            .spawn(meerkat_mob::SpawnMemberSpec::from_wire(
+                "agent".to_string(),
+                member.to_string(),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("member");
+        let session = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&meerkat_mob::AgentIdentity::from(member))
+            .await
+            .expect("the member's session");
+        let (identity_ctx, under_identity_authority) = if identity_first {
+            let context = crate::rpc::identity_first_context_holding_for_test(
+                runtime, id, member, "agent", session,
+            )
+            .await
+            .expect("an identity runtime that holds the member");
+            (Some(context), true)
+        } else {
+            let held = match runtime.identity_runtime_ref() {
+                Some(identity_runtime) => identity_runtime
+                    .member_alias_lifecycle_target(member)
+                    .await
+                    .expect("the member's identity authority reads")
+                    .is_some(),
+                None => false,
+            };
+            (None, held)
+        };
+        let external = runtime.live_rpc_handler().expect("external handler");
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "meta/live/open",
+            "params": {"identity": member, "model": "gpt-realtime-2"},
+        })
+        .to_string();
+        let mut delivery = crate::rpc::handle_unified_rpc_json_with_live_arc_delivery(
+            runtime,
+            &request,
+            Duration::from_secs(30),
+            None,
+            identity_ctx.as_ref(),
+            Some(&external),
+        )
+        .await;
+        println!(
+            "{id} (under identity authority: {under_identity_authority}): {}",
+            delivery.response
+        );
+        let answer: Value = serde_json::from_str(&delivery.response).expect("a JSON-RPC answer");
+        delivery
+            .settle_delivery(true)
+            .await
+            .expect("the writer settles");
+        let opens = built.realtime.open_count();
+        runtime.mob_handle().stop().await.expect("stop");
+        (answer, opens, under_identity_authority)
+    }
+
+    /// The SDKs' plain open for an identity-first member over the stdio
+    /// gateway opens its channel: the ordinary open hands the gateway's
+    /// writer no custody, so it needs none on the task the request runs on.
+    #[tokio::test]
+    async fn a_stdio_ordinary_live_open_for_an_identity_first_member_opens_its_channel() {
+        let (answer, opens, under_identity_authority) =
+            stdio_ordinary_open("builder-stdio-open-identity", "agent-b", true).await;
+        assert!(
+            under_identity_authority
+                && answer["error"].is_null()
+                && answer["result"]["channel_id"].is_string()
+                && opens == 1,
+            "the ordinary open must open one channel: {answer} opens={opens}"
+        );
+    }
+
+    /// The same plain open for a member no identity runtime was given for.
+    #[tokio::test]
+    async fn a_stdio_ordinary_live_open_for_a_spawned_member_opens_its_channel() {
+        let (answer, opens, _under_identity_authority) =
+            stdio_ordinary_open("builder-stdio-open-spawned", "agent-a", false).await;
+        assert!(
+            answer["error"].is_null() && answer["result"]["channel_id"].is_string() && opens == 1,
+            "the ordinary open must open one channel: {answer} opens={opens}"
+        );
+    }
+
     #[tokio::test]
     async fn live_without_a_public_base_url_fails_the_build_closed() {
         let _guard = SHARED_HOST_TEST_LOCK.lock().await;

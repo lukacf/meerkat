@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [d1ec9a391602](https://github.com/lukacf/meerkat/commit/d1ec9a391602d0e5045996fce2f2f9b3abeaab4a) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -3003,6 +3003,31 @@ With `attestation`, the person a declared ingress authenticated decides:
 | `event_ref` | The ingress's reference of the decide event. An event decides one decision: an event already used for another decision is refused, and the same decision may repeat its own event |
 | `observed_at_ms` | When the ingress observed the event; at most the ingress's `max_clock_skew_ms` ahead of the gateway's clock |
 | `presentation` | What the ingress showed the person, in the `meta/decisions/present` shape, when it showed the decision itself |
+
+An attested decide is accepted only for a decision that was presented to its
+approver: by the `presentation` the attestation carries; by one recorded
+before with `meta/decisions/present` (`{decision_id, presentation}`); or by
+the gateway's own showing to the stdio operator (the `presented` notice of
+`meta/decisions/list`), where the approver map lists the operator for that
+approver id. With none of these, the decide is refused
+`presentation_incomplete`. No decision kind and no ingress is exempt. A
+presentation is:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `audience` | yes | Who was shown the decision: `{"kind": "approver", "approver_id": "<the decision's approver_id>"}`. A presentation to another approver id does not count. A reviewer audience (`{"kind": "reviewer", "reviewer": ...}`) is for a decision's review stage and never counts for an attested decide |
+| `subject_digest` | yes | The digest of the rendering that was shown (the decision's `subject_digest`) |
+| `parts_shown` | yes | The parts of the rendering that were shown, each `{index, count, part_digest}`: exactly the `parts` that `meta/decisions/rendering` answers for the same `max_part_bytes`, all of them, in that order. The call answers the rendering's text (`rendering`) and its `parts`; a host that showed the whole text passes `parts` as they are |
+| `channel_ref` | yes | Where it was shown, in the ingress's own terms |
+| `message_ref` | yes | The message that showed it |
+| `at_ms` | yes | When it was shown, by the host's clock, in UNIX milliseconds. `0` is refused. The attestation's `observed_at_ms` must not be earlier: a decide observed before the presentation is refused `decided_before_presentation` and the decision stays open |
+| `max_part_bytes` | no | The part size given to the `meta/decisions/rendering` call whose parts were shown; left out when that call named none. Parts read with one size and presented under another do not count. `0` is refused invalid params |
+| `link` | no | For a summary shown on a surface with a size limit: `{reference, served_digest}`, the link the summary carried to the full presentation and the digest of the rendering that link served. It counts, in place of the parts, when `served_digest` is the decision's `subject_digest` |
+
+A presentation with a required field missing is refused invalid params
+(`-32602`); one that does not count (another audience, another
+`subject_digest`, parts that are not exactly the rendering's, a link that
+served another digest, `at_ms` of `0`) is refused `presentation_incomplete`.
 
 The approver map must list that person for the decision's approver id, read
 again when the decision commits. An attestation the launch does not accept (an

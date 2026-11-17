@@ -4,7 +4,7 @@ description: "Let an agent create, change, archive and remove long-term agents u
 icon: "user-plus"
 ---
 
-*Mirrored from Meerkat Meta main at [d1ec9a391602](https://github.com/lukacf/meerkat/commit/d1ec9a391602d0e5045996fce2f2f9b3abeaab4a) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 Available from Meerkat Meta 0.9.15.
 
@@ -182,7 +182,12 @@ Every change answers one typed outcome, the same on every surface:
 | `pending_preparation` | The create committed, and at least one agent (its `state` is `pending_preparation`) waits for the host to prepare it: it has no member, takes no message and runs nothing until the host settles it, and its first message runs once then. | Nothing: no tool settles it. `identity_list` and `identity_get` read it as `readiness: "preparation_pending"`, and the identical call with the same `request_id` returns where it stands. |
 | `refused` | Nothing was written. `kind` is one of a closed vocabulary, `field` names the argument, `detail` says what to send instead, `retryable` says whether the same call may succeed later. | Fix what `detail` names, or retry later when `retryable` is true. |
 
-A person cannot approve a request they made themselves.
+A person cannot approve a request they made themselves. Who may approve is
+set outside the policy, in the approver map of the launch's access file:
+unless that map binds the rule's approver id to the stdio operator or to a
+person a declared ingress attests, a held change can only be withdrawn or
+lapse at its deadline (see
+[Approval rules](/meta/reference/identity-policy#approval-rules)).
 
 A tool's answer is this outcome without its `operation_id`. An operation id
 is the host's handle on a change (`meta/identity/operation` reads by it): an

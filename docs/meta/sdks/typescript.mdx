@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [d1ec9a391602](https://github.com/lukacf/meerkat/commit/d1ec9a391602d0e5045996fce2f2f9b3abeaab4a) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -181,15 +181,32 @@ and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
 attestation})`. Each resolves to the gateway's result object.
 
 ```typescript
+import { Meta } from "@rkat/meta-sdk";
+
 const rt = await Meta.builder()
   .mob("config/mob.toml")
   .persistentState("./state")
   .accessControl("config/access.toml")
   .decisionIngresses([{ ingress: "chat", attests: "person", maxClockSkewMs: 5000 }])
   .build();
+const mob = rt.mobHandle();
+
+// The methods answer the gateway's result object, untyped.
+type OpenDecision = { decision_id: string; subject_digest: string; approver_id: string };
 
 rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
 const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
+const decision = (page.decisions as OpenDecision[])[0];
+const decisionId = decision.decision_id;
+const subjectDigest = decision.subject_digest;
+
+// Show the person the whole text of the rendering.
+const rendering = await mob.decisionsRendering(decisionId);
+// ... post rendering.rendering to the chat ...
+const shownAtMs = Date.now(); // once the post has succeeded
+// ... wait for the answer ...
+const observedAtMs = Date.now(); // the time of the answer's event
+
 await mob.decisionsDecide(decisionId, {
   approve: true,
   presentedDigest: subjectDigest,
@@ -198,10 +215,29 @@ await mob.decisionsDecide(decisionId, {
     subject: "U123",
     scope: "chat-session-1",
     eventRef: "chat:event-1",
-    observedAtMs: Date.now(),
+    observedAtMs,
+    presentation: {
+      audience: { kind: "approver", approver_id: decision.approver_id },
+      subject_digest: subjectDigest,
+      parts_shown: rendering.parts,
+      channel_ref: "chat:owners",
+      message_ref: "chat:message-1",
+      at_ms: shownAtMs,
+    },
   },
 });
 ```
+
+The approver map of `config/access.toml` lists `U123` on the `chat` ingress
+for the decision's approver id. An attested decide is accepted only for a
+decision that was presented to its approver: by the `presentation` the
+attestation carries, as here; by one recorded before with
+`decisionsPresent(decisionId, presentation)`, which takes the same object;
+or by the gateway's own showing to the stdio operator (its `presented`
+notice), where the approver map lists the operator for that approver id.
+With none of these, the decide is refused `presentation_incomplete`. The
+keys of a presentation are the gateway's own (snake_case) and are listed
+under [`meta/decisions/decide`](/meta/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
 `MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.
@@ -1033,16 +1069,28 @@ the persistent mob storage was created. Its `kind` names the refusal
 (`"divergent"`, `"created_by_rehearsal"`, the manifest kinds, and
 `"candidate_divergent"` from gateways launched as a candidate) and `fields`
 lists the diverged definition fields as dotted paths, so a host can show what
-changed without parsing the message:
+changed without parsing the message.
+
+In 0.9.15, with a gateway the SDK starts itself, `builder.build()` does not
+reject with the error of a refusal of the start itself, when the gateway
+refuses after it has accepted the init request; this refusal is one such. It
+rejects with `GatewayStartupCleanupError`, a `TransportError`, and the
+refusal is its `startupError` (also its `cause`): `instanceof
+CompositionProvenanceError` and `instanceof RpcError` are false for it (see
+Known limitations in the Meta changelog). Test for both, so the code keeps
+working when the refusal is thrown unwrapped (as it is where a host's own
+`gatewayTransport()` stops cleanly; read from the source, not run), and do
+not retry a start whose `startupError` is a typed refusal:
 
 ```typescript
-import { CompositionProvenanceError } from "@rkat/meta-sdk";
+import { CompositionProvenanceError, GatewayStartupCleanupError } from "@rkat/meta-sdk";
 
 try {
   const runtime = await builder.build();
 } catch (err) {
-  if (err instanceof CompositionProvenanceError && err.kind === "divergent") {
-    console.error("mob.toml differs from the stored definition in", err.fields);
+  const refusal = err instanceof GatewayStartupCleanupError ? err.startupError : err;
+  if (refusal instanceof CompositionProvenanceError && refusal.kind === "divergent") {
+    console.error("mob.toml differs from the stored definition in", refusal.fields);
   }
   throw err;
 }

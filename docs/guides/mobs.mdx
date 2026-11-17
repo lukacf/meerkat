@@ -434,7 +434,8 @@ only an inline profile of a child mob, a mob a member creates with
 `ChildToolBundleAvailability::ChildOffered`. Any other name is refused with
 `ToolBundleNotOffered`, which lists the bundles the host offers; an empty or
 repeated name is an argument error. Realm profile writes and spawn-time
-profiles given as public profile input (the agent mob tools) cannot opt in. The
+profiles given as public profile input (the agent mob tools and the MCP
+profile tools) cannot opt in. The
 offer is the host's, the same for every child mob, whatever tools the creating
 member itself mounts. A bundle the host registered as `ChildAvailable` still
 reaches every inline child profile without an opt-in.

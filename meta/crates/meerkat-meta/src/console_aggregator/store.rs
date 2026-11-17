@@ -121,7 +121,10 @@ impl LaunchMobFrames {
     /// Read from the log's own ledger row, with the connection held, by each
     /// operation of the store before its statements: the answer is the
     /// log's, whichever release moved it. An operation whose read fails
-    /// fails; it never runs a statement on a guess.
+    /// fails; it never runs a statement on a guess. A log that was moved
+    /// past the newest version this release reads, while this release holds
+    /// it open, is refused as an open of it is: the operation runs no
+    /// statement.
     fn of(conn: &Connection) -> ConsoleLogResult<Self> {
         let version: i64 = conn
             .prepare_cached("SELECT version FROM meerkat_schema WHERE domain = ?1")
@@ -129,6 +132,16 @@ impl LaunchMobFrames {
                 stamp.query_row(params![META_CONSOLE_DOMAIN.name], |row| row.get(0))
             })
             .map_err(into_boxed)?;
+        let supported = META_CONSOLE_DOMAIN.supported_version();
+        if version > supported {
+            return Err(into_boxed(
+                meerkat_sqlite::SqliteStoreError::SchemaFromTheFuture {
+                    domain: META_CONSOLE_DOMAIN.name.to_string(),
+                    found: version,
+                    supported,
+                },
+            ));
+        }
         Ok(Self {
             moved: version > META_CONSOLE_UNKEYED_DOMAIN.supported_version(),
         })
@@ -1954,6 +1967,9 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
             .conn
             .lock()
             .map_err(|_| boxed_error("console log lock poisoned"))?;
+        // The watermarks name no frame and no mob; the look only refuses a
+        // log that was moved past the versions this release reads.
+        LaunchMobFrames::of(&conn)?;
         conn.execute(
             "INSERT INTO console_source_watermarks (
                 runtime_key, source_kind, source_cursor, last_ingested_at_ms

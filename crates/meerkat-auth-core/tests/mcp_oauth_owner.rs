@@ -373,6 +373,9 @@ struct TestState {
     /// The `401` of the location under the endpoint path carries a
     /// challenge that names resource metadata.
     endpoint_path_challenge_names_resource_metadata: AtomicBool,
+    /// The `401` of the location under the endpoint path carries exactly
+    /// this challenge.
+    endpoint_path_challenge: Mutex<Option<&'static str>>,
     /// The origin-root location without the server's path serves a
     /// protected resource metadata document that names this authorization
     /// server.
@@ -710,6 +713,16 @@ fn documentless_answer(status: Option<StatusCode>) -> axum::response::Response {
 
 async fn endpoint_path_resource(State(state): State<Arc<TestState>>) -> axum::response::Response {
     let answer = *state.endpoint_path_resource_answer.lock();
+    if answer == Some(StatusCode::UNAUTHORIZED)
+        && let Some(challenge) = *state.endpoint_path_challenge.lock()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", challenge)],
+            "",
+        )
+            .into_response();
+    }
     if answer == Some(StatusCode::UNAUTHORIZED)
         && state
             .endpoint_path_challenge_names_resource_metadata
@@ -12057,4 +12070,43 @@ async fn the_earlier_of_two_locations_that_serve_a_document_is_followed() {
     assert!(!asked_for(&resource_state, ORIGIN_ROOT_RESOURCE_METADATA));
     assert!(other_state.registration_requests.lock().is_empty());
     assert!(other_state.request_paths.lock().is_empty());
+}
+
+/// Any mention of resource metadata in the challenge of a `401` under the
+/// endpoint path counts as naming a document, whatever the letter case of
+/// the parameter's name and however its value is written: the login is
+/// refused and the server's own origin metadata is not read.
+#[tokio::test]
+async fn an_endpoint_path_401_that_mentions_resource_metadata_in_any_form_is_not_absent() {
+    for challenge in [
+        r#"Bearer error="invalid_token", Resource_Metadata="/guarded/resource-metadata""#,
+        r#"Bearer RESOURCE_METADATA="/guarded/resource-metadata""#,
+        r#"Bearer error="invalid_token", resource_metadata="/guarded/resource-metadata"#,
+        "Bearer resource_metadata=/guarded/resource-metadata",
+    ] {
+        let (base, state) = spawn_oauth_fixture().await;
+        state
+            .protected_resource_absent
+            .store(true, Ordering::SeqCst);
+        *state.endpoint_path_resource_answer.lock() = Some(StatusCode::UNAUTHORIZED);
+        *state.endpoint_path_challenge.lock() = Some(challenge);
+        let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+        let target = split_target(&base, "guarded-document-form");
+
+        let refused = authority.login_start(&target, SPLIT_REDIRECT, None).await;
+
+        let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+            panic!("expected the resource metadata refusal for {challenge:?}, got {refused:?}");
+        };
+        assert_eq!(
+            reason, "no oauth-protected-resource metadata found",
+            "{challenge:?}"
+        );
+        assert!(asked_for(&state, ENDPOINT_PATH_RESOURCE_METADATA));
+        assert!(
+            !asked_for(&state, "/.well-known/oauth-authorization-server"),
+            "{challenge:?}"
+        );
+        assert!(state.registration_requests.lock().is_empty());
+    }
 }

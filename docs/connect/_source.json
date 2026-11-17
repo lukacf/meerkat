@@ -5,9 +5,9 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "1540a78e353167412c5231c2bb0c9f6616e2d9f7",
+  "source_docs_tree": "1d8caeb5943ce9b0a6d84fefc3221d9c204e3604",
   "connect_source_state": "monorepo_sync",
-  "connect_source_version": "0.9.15",
+  "connect_source_version": "0.9.16",
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
@@ -34,8 +34,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "bf4c20c121d5011cf005ae05200df0f704667ff40e9abbca448a358f9fdb77fb",
-      "rendered_sha256": "4a8a15172ebe22bfd27c7312a16838353958381e86e76a7834ea8292f4080139"
+      "source_sha256": "4cf33049ff1063bc7dda09cf993c051703824ba34cf99dd63d285420f3e11b75",
+      "rendered_sha256": "475a8d045418f6f02d6bbbc3bed570a0cc4d725e0ec3d0b1272f7eae834cba54"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -144,8 +144,8 @@
     },
     {
       "path": "library/adoption.mdx",
-      "source_sha256": "c9681e3ed6b0283aa90f248816a8e468f950c71aeaf4bd0118ae3792f468083b",
-      "rendered_sha256": "1af07a94fa371e9ba57e0165d7ed247a30f722410a1efd4dab575212dd05f723"
+      "source_sha256": "b83cbbbf7908069ed0ab3d69fad2314a4af9916b6fec95ec99e5846f17c3e0e9",
+      "rendered_sha256": "37278b825c63f7a17a687e4c41325b8de57f815f492e49c64b435412a82d0de0"
     },
     {
       "path": "library/candidates.mdx",
@@ -164,8 +164,8 @@
     },
     {
       "path": "library/playwright.mdx",
-      "source_sha256": "63dbfef8c80aff7c28d4fa6ad0db1c58dc504ffbca5fe797046e099d7ebb0811",
-      "rendered_sha256": "cc0313bb442743cce0dd62b0f28a28a967d5a2af9e701d79a1ef73667510d5b1"
+      "source_sha256": "acef65f377d93a22486747a3f367311584bb9fae7e436f061aa9a3fb5d89e096",
+      "rendered_sha256": "cd5aacf4d0611bb7fbabd19e016ca20c8e1ac2e51b51a8243a73215036e0cda6"
     },
     {
       "path": "library/slack-gmail.mdx",
@@ -184,8 +184,8 @@
     },
     {
       "path": "quickstart.mdx",
-      "source_sha256": "360217e502bc85072f35c7e3e4b71d881656719d6852f721d10e508fb0109106",
-      "rendered_sha256": "efd8e32f4ac973eb6bb4e117a669f546645f8431419a60d29a9aaa91281d0e4f"
+      "source_sha256": "e15ec9c1f9febd0aed4669d4b90b19ead0d9c87f5a9d8b29d7e6cfaf26aa7ab2",
+      "rendered_sha256": "1c0a94f79bcc0d45fee4c727b73205094a6351ac4cc75ff2b2040e28f1728447"
     },
     {
       "path": "reference/access-control.mdx",
@@ -249,13 +249,13 @@
     },
     {
       "path": "sdks/python.mdx",
-      "source_sha256": "1c820dbee4dfc46cdb04237d90b993b6046e54dc2ede1c26ff3cbd9499a26820",
-      "rendered_sha256": "d08b52e7f395ccaf40ae23e4cf610601d7ddb86b1ce3206c3454307b5844e54b"
+      "source_sha256": "b1e9bdf04b4eb6ecf5dd746fe656d2a84341e8e7b983921163f795679b5c65df",
+      "rendered_sha256": "be445aa227e2443e77f3f89dee0867f34c34567674ffcf5f88e7b8270eb3ea98"
     },
     {
       "path": "sdks/rust.mdx",
-      "source_sha256": "106043afcaf74195e607345787c8f42009588ce4f68913d8e279e24e2097c4e8",
-      "rendered_sha256": "2d8c83a4c697577d4b3d8e4c164c45d64b5bc13ccc1ee0f8d7e72c1450c8b78e"
+      "source_sha256": "e6c4a76dacd45a2bd2e29c76aa0d111d45e179435df521cb9baeb21134a26c11",
+      "rendered_sha256": "c1c4affea5af1e0ff5ca7e90ad884214d92bd8d26554f7c2fea70a588132653b"
     },
     {
       "path": "sdks/service-profiles.mdx",
@@ -269,8 +269,8 @@
     },
     {
       "path": "sdks/typescript.mdx",
-      "source_sha256": "2fffc180b78f1ffbd41c9912ecdae2615b4a407f109d0ff9a357a8d2366cdcf4",
-      "rendered_sha256": "c50cc087e2413ff3d576a173744ca5f4eff3eefed4c344ba6b97691811f1879e"
+      "source_sha256": "c1b27def6617f58ea79ee9e59b0e5d6f8f63c952647c24ad7b78c9fb22e5a678",
+      "rendered_sha256": "ddddc8e49a3b8530f7831b4e466c4e464c3b6a62592ba15c8d2b2fd7ba7085eb"
     },
     {
       "path": "sdks/ui.mdx",

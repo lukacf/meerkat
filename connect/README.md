@@ -6,25 +6,25 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.15 is released for Linux x86_64 with glibc 2.39: its two programs
+Connect 0.9.16 is released for Linux x86_64 with glibc 2.39: its two programs
 need glibc 2.39 symbols (read from the released binaries, not run on other
 hosts), and it was built and checked on a glibc 2.39 host. No macOS arm64
 products are part of this release.
-Install [Meerkat Core 0.9.15](https://github.com/lukacf/meerkat/releases/tag/v0.9.15),
-the Core release Connect 0.9.15 was built and released with,
+Install [Meerkat Core 0.9.16](https://github.com/lukacf/meerkat/releases/tag/v0.9.16),
+the Core release Connect 0.9.16 was built and released with,
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
-Connect 0.9.15 was built and released with Core 0.9.15 and Meta 0.9.15, all
+Connect 0.9.16 was built and released with Core 0.9.16 and Meta 0.9.16, all
 three from one source commit. The `native-host` extra of its `meerkat-toolkit`
-wheel requires `meerkat-meta==0.9.15`.
+wheel requires `meerkat-meta==0.9.16`.
 
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=linux-x86_64 # 0.9.15 has no macos-arm64 archive.
-archive="meerkat-connect-0.9.15-$platform.tar.gz"
-release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
+platform=linux-x86_64 # 0.9.16 has no macos-arm64 archive.
+archive="meerkat-connect-0.9.16-$platform.tar.gz"
+release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.16
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
 sha256sum -c "$archive.sha256"
@@ -64,12 +64,12 @@ the original task in the same conversation. The application supplies login and
 a persistent host. The gateway archive and Rust, JSON-RPC, Python and TypeScript
 interfaces support this composition; the gateway alone does not install an app.
 
-The [0.9.15 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15)
+The [0.9.16 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.16)
 carries the complete CLI archive and the gateway archive, for ordinary CLI and
-Console setup. Connect 0.9.15 does not support
+Console setup. Connect 0.9.16 does not support
 in-place updates that change an application's tool policy, definition,
 instructions or runtime; Forge's Stage refuses them, so keep the existing
-installation and state. This limit is read from the 0.9.15 source, where the
+installation and state. This limit is read from the 0.9.16 source, where the
 refusal and its tests are unchanged since 0.9.14; it was not run against the
 released archives. Shared multi-caller setup is an unqualified opt-in,
 available only when an application starts the gateway with
@@ -100,7 +100,7 @@ qualify the published release or a deployed provider flow.
 - REST and an outer MCP Connect entry point are deferred. MCP servers used as
   integrations are included.
 
-See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15) for platform assets and compatibility,
+See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.16) for platform assets and compatibility,
 [BUILDING.md](BUILDING.md) to build from source, and
 [source provenance](SOURCE-PROVENANCE.md) for upstream attribution and catalog
 identity. The [documentation source](docs/site) contains the full contracts.

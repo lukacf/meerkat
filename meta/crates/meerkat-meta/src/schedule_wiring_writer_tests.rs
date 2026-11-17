@@ -37,11 +37,15 @@ async fn launch() -> Launch {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let state = temp_dir.path().join("state");
     std::fs::create_dir_all(&state).expect("state dir");
+    let layout = crate::storage_layout::MetaStorageLayout::with_injected_roots(state.clone(), None);
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(
-        meerkat_store::SqliteSessionStore::open(state.join("sessions.db")).expect("session store"),
+        meerkat_store::SqliteSessionStore::open(
+            layout.session_db().expect("the sessions database").path,
+        )
+        .expect("session store"),
     );
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-        meerkat_runtime::store::SqliteRuntimeStore::new(state.join("runtime.sqlite"))
+        meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db())
             .expect("runtime store"),
     );
     let blob_store: Arc<dyn meerkat_core::BlobStore> =

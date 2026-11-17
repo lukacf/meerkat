@@ -11,19 +11,23 @@ callback; a real collector would read its provider and commit a step with
 `announcementSourceAdvance`. A handler's return value is acknowledged but
 is not persisted as a schedule result.
 
-A host that registers runnables: every member that holds the schedule tools,
-and is not private to a person, can create a schedule that fires any of them,
-with parameters of its choosing; the fire does not tell the handler who
-wrote the schedule. Register only runnables that any such member may fire,
-and check their parameters in the handler. This example accepts only its
+Every member that holds the schedule tools and is not private to a person
+can create a schedule that fires any runnable the host registers, with
+parameters of its choosing (the handler reads them as the occurrence's
+`payload`). The fire does not tell the handler who wrote the schedule.
+Register only runnables that any such member may fire, and check the payload
+in the handler. This example accepts only its
 fixed mob and source IDs, with no extra payload fields, before collecting.
+
+The example does not send messages to the reader, so its profile omits
+`comms`. If you extend it to message that member, add
+`[profiles.reader.tools]` with `comms = true` to the mob definition; without
+it, the gateway refuses the messaging wiring.
 
 ## Run
 
-Use the SDK from this checkout and either build its gateway or use the
-published Meta 0.9.15 Linux x86_64 gateway, against which this example has
-also been run successfully. Older gateways have not been checked. To build
-from the repository root:
+Use the SDK from this checkout and either build its gateway or use a
+published Meta gateway, 0.9.15 or 0.9.16. To build from the repository root:
 
 ```bash
 ./scripts/repo-cargo build --locked -p meerkat-meta --bin rpc_gateway

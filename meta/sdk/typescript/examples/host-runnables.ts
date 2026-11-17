@@ -38,6 +38,8 @@ const state = await mkdtemp(join(tmpdir(), "meta-host-runnables-"));
 let runtime: MetaRuntime | undefined;
 try {
   const mob = join(state, "mob.toml");
+  // This example sends no messages. Before messaging the reader, add
+  // [profiles.reader.tools] with comms = true to enable its messaging wiring.
   await writeFile(mob, `
 [mob]
 id = "host-runnables"

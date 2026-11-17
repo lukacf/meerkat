@@ -147,11 +147,12 @@ registration also covers schedules that fire during startup. These use the
 existing `runtime_options.host_runnables` and `callback/schedule_fire`
 gateway contract. Handler functions stay in the host process.
 
-A host that registers runnables: every member that holds the schedule tools,
-and is not private to a person, can create a schedule that fires any of them,
-with parameters of its choosing; the fire does not tell the handler who
-wrote the schedule. Register only runnables that any such member may fire,
-and check their parameters in the handler.
+Every member that holds the schedule tools and is not private to a person
+can create a schedule that fires any runnable the host registers, with
+parameters of its choosing (the handler reads them as the occurrence's
+`payload`). The fire does not tell the handler who wrote the schedule.
+Register only runnables that any such member may fire, and check the payload
+in the handler.
 
 Install handlers before `build()` connects, on every boot:
 
@@ -191,11 +192,11 @@ without a provider key or an LLM turn.
 
 `build()` returns a connected runtime: a stored schedule may fire before
 that promise resolves. Each runtime copies the builder's handlers before
-connecting. Later builder changes do not affect it. Calling
+connecting. Later handler registrations on the builder do not affect it. Calling
 `runtime.onScheduleFire` replaces that runtime's handler, and the replacement
 survives `shutdown()` followed by `connect()` on the same object; reconnect
 does not reinstall builder defaults. A fresh process must register on its
-builder again. Declaration and handler registration are separate requirements:
+builder again. Declaration and handler registration are separate requirements.
 
 Builder registration and declaration can appear in either order, but
 `build()` refuses a builder handler whose exact name is absent from
@@ -209,20 +210,17 @@ it does not add a gateway target.
 | Name declared, no handler registered | Returns `no schedule-fire handler registered for runnable: <name>` through the callback bridge | `delivery_failed`, with failure class `runtime_rejected` |
 | Name undeclared, even if registered through `runtime.onScheduleFire` | Receives no callback | `misfired`, with failure class `target_missing`, under the source runner's default `mark_misfired` policy |
 
-These outcomes were verified against the published Meta 0.9.15 Linux x86_64
-gateway, including the stored occurrence and receipt after shutdown. Each
-occurrence was terminal after one attempt, with no next retry action; it
-is not delivered later when a handler is registered. The interval schedule
-remained active with later occurrences pending.
+Such an occurrence ends after its one attempt: it is not delivered later
+when a handler is registered. The interval schedule stays active and its
+later occurrences stay pending.
 
 ### Upgrading a host
 
-Use an SDK version that provides these methods. The runnable example also
-passed against the published Meta 0.9.15 Linux x86_64 gateway; older gateways
-have not been checked. A fresh-process restart on that gateway was also
-verified: an existing occurrence became due while the gateway was stopped,
-and builder registration handled the same stored occurrence on restart,
-with one callback and one completed attempt. This exposes an existing gateway
+These TypeScript methods are unreleased; use the SDK from this checkout.
+They work with Meta gateways 0.9.15 and 0.9.16; compatibility with earlier
+gateway versions is not established. An occurrence that came due while the
+gateway was stopped is delivered once to the handler the builder registered
+at the next start. This exposes an existing gateway
 contract: existing callers, stored schedules and wire schemas do not need
 migration. Omitting `hostRunnables`, or passing an empty list, sends no
 declaration and changes no default. The gateway continues to validate

@@ -1,0 +1,14 @@
+- `meerkat-copilot`, `meerkat-openai`: a connection that the peer resets
+  after it was established (a reset, an aborted connection, a broken pipe,
+  or a stream cut off below HTTP) is now classed as a connection failure by
+  the GitHub Copilot token exchange and by the OpenAI and OpenAI-compatible
+  clients when they send a request. The turn's error reads
+  `llm_provider_error` with `provider_error_kind` `connection_reset` where
+  it read `unknown`, and a session with a model fallback can fall back on
+  it, as it can on a refused connection. Retries are unchanged. A peer that
+  closes the connection cleanly before it answers still reads `unknown`. A
+  host that matched on `unknown` for these errors sees `connection_reset`,
+  and the OpenAI clients' error no longer carries the transport's own text.
+  Affects the Copilot token exchange since 0.9.9, the OpenAI client since
+  0.3.4 and the OpenAI-compatible client since 0.5.2. No run against a
+  live GitHub Copilot account was made for this release.

@@ -51,8 +51,9 @@ them.
   that names it (affected: 0.8.42 to 0.9.16, where it failed every server).
   Each server resolves alone, and that server is reported by name with the
   field and the variable, never a value. `rkat mcp list` and `rkat mcp get`
-  show it as written, marked unresolved (`--json`: an `unresolved` object
-  with `field` and `variable`); `rkat mcp login` and the RPC and REST auth
+  show it with nothing expanded, marked unresolved (`--json`: the entry as
+  written, with an `unresolved` object holding `field` and `variable`);
+  `rkat mcp login` and the RPC and REST auth
   methods work for the other servers; a run starts with that server reported
   as a failed MCP server and a warning on stderr; a resumed `rkat-rpc`
   session restores the other servers' attachments and reports only that

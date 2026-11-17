@@ -791,9 +791,9 @@ rkat mcp get filesystem --scope project
 
 Omit `--scope` on `list` or `get` to search all configured scopes, the realm
 included. An `mcp.toml` server that names an environment variable that is not
-set is listed as written and marked unresolved with the field and the
-variable's name (`--json`: an `unresolved` object with `field` and
-`variable`); the other servers are unaffected.
+set is listed with nothing expanded and marked unresolved with the field and
+the variable's name (`--json`: the entry as written, with an `unresolved`
+object holding `field` and `variable`); the other servers are unaffected.
 
 The text forms of `list` and `get` mask every env and header value and show a
 URL without its userinfo and query. `--json` prints the values as the server

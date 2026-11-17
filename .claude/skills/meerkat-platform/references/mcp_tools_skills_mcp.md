@@ -49,9 +49,9 @@ Rust-embedder-only APIs. Built-in tools, tool policy and callback tools are in
   <scope> mcp.toml; remove or rename one of them`.
 - `mcp.toml` expands `${VAR}` in `command`, `args`, `env` values, `url` and
   `headers` values from the host environment. A variable that is not set fails
-  only the server that names it: `rkat mcp list` and `get` show that server as
-  written, marked unresolved with the field and the variable's name, the other
-  servers load, and a run starts with that server reported failed (`rkat mcp
+  only the server that names it: `rkat mcp list` and `get` show that server
+  with nothing expanded (`--json` as written), marked unresolved with the field
+  and the variable's name, the other servers load, and a run starts with that server reported failed (`rkat mcp
   login` for it, and a run in a governed realm, are refused by name).
   Realm servers are literal: a config write that adds `${` to a realm server is
   refused (invalid params on RPC and `rkat-mcp`, HTTP 400 on REST).

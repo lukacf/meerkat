@@ -455,9 +455,10 @@ and a realm config that already holds one fails when its MCP servers are
 resolved. Put env-derived values in an `mcp.toml` server.
 
 A variable that is not set fails only the `mcp.toml` server that names it.
-`rkat mcp list` and `rkat mcp get` show that server as written, marked
-unresolved with the field and the variable's name, and the commands for the
-other servers work. A run starts without it: the server is reported as failed,
+`rkat mcp list` and `rkat mcp get` show that server with nothing expanded
+(`--json` prints it as written; the text forms mask its env and header values
+as for any server), marked unresolved with the field and the variable's name,
+and the commands for the other servers work. A run starts without it: the server is reported as failed,
 with a warning naming the server, the field and the variable. `rkat mcp login`
 for that server, and a run in a governed realm, are refused with the same
 message until the variable is set.

@@ -171,6 +171,37 @@ An agent's own records are identity-scoped rather than session-scoped. A session
 
 **What an agent reads.** A record lives in one scope: an agent's own (identity scope), a mob's, a person's (operator memory, below) or the realm's. An agent is given the text of records in its own identity scope only: the ones recall selects when it is built and on each turn, and the ones its `memory` tool's `recall` returns. When it is built it is also given an index over its identity scope, the scope of every mob it is bound to and the realm scope: a row for a record, with its id, kind, age, title and description, and never its text, as many rows as the index's size limit holds. `rpc_gateway` binds every identity it hosts to its one mob, so the title and description of a mob-scoped record are given to every agent of that gateway as far as that limit holds them, and its text to none. A record reaches mob scope only where the memory steward is enabled (`agent_memory.steward`; it is off unless configured), or through an embedding host's own code. The steward accepts an agent's `propose_to_mob`, creates records there itself when it consolidates, and copies there what it keeps from a retired identity; an operator's decision is awaited only for a quarantined record or a proposal that the steward's verdict sends to the promotion gate, and for a proposal that was tainted when it was made. The steward can also create a record in any agent's identity scope, and no setting limits the scopes it writes to. Nothing in the gateways as shipped writes a realm-scoped record. So agent memory separates the agents of one `rpc_gateway` in the text of their records, but not in the titles and descriptions of mob-scoped records: keep what must stay with one agent out of the title and description of anything proposed to a mob; and where a memory steward runs, it writes records of its own making into the mob's scope and into any agent's. An application that must keep tenants apart therefore runs one gateway for each tenant, each with its own state directory; on a gateway that tenants share, the texts of their agents' records stay apart only while the memory steward is off.
 
+### Reading agent memory
+
+`meta/agent_memory/recall` (`recall_agent_memory`, `recallAgentMemory`) is a
+selection, not a listing. It returns at most `max_entries` records (8 by
+default, 64 at most) and takes no cursor, so repeated recalls do not page
+through a store. It reads the named identity's own records, and only the
+active ones: a record that an update replaced, a forgotten record and a
+quarantined record are not returned. With the bundled store the two modes
+select as follows:
+
+| `selection` | What it returns |
+| --- | --- |
+| `contextual` (default) | The records that match a word of the query in their tags, title or body, best match first. The words of the query are those of `query_text` and `query_terms` without common stopwords and without words shorter than three characters. A word is a run of ASCII letters, digits, `-` and `_`, so a query wholly in a non-Latin script leaves no word and returns nothing. A word of five characters or more also matches inside a longer word of the title or body, which counts for less: one such match alone does not select a record. A record that matches no word is left out, however few records there are, and a recall whose query leaves no word (no query, or only stopwords and short words such as `AI`) returns nothing. |
+| `always` | The most recently updated records, newest first, whatever the query. Over more than `max_entries` records it returns the newest `max_entries`, not all of them. |
+
+To enumerate an identity's memory, read its manifest.
+`meta/agent_memory/manifest` (`manifest_agent_memory`,
+`manifestAgentMemory`) with the tier `full` returns every active record of
+the identity in one answer, as metadata only (`id`, `kind`, `title`,
+`description`, `age_days` and, for a ranked record, `rank`) and never a
+body. The default tier, `working_set`, is bounded: the ranked records up to
+`k` (32 by default, 512 at most) and the recent records that are not ranked
+or were changed since they were ranked, at most twice `k` together. None of
+the `meta/agent_memory/*` methods reads one record by its id: a host reads a
+body with a recall.
+
+`meta/agent_memory/update` (`update_agent_memory`, `updateAgentMemory`)
+replaces an active record: the new title, body and tags become a new active
+record with its own id, and the replaced one is no longer recalled or
+listed.
+
 ### Operator memory
 
 With `agent_memory.operator_scope: "provisional"` (SQLite store), each person who signs in to the console has an operator scope: memory about that person that follows them from agent to agent. Its key is the person's caller scope, the opaque `caller_scope` that `meta/console/whoami` reports to them, so a person is the same key across their logins and the key carries no personal data.

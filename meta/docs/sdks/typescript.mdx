@@ -650,6 +650,33 @@ draft.registerTool("read_mail", async (args, requester) => {
 
 For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and delete them with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context.
 
+`recallAgentMemory` selects records and does not list them: `"contextual"`
+(the default) returns the active records that match the query, `"always"`
+the most recently updated ones, and either returns at most `maxEntries`
+(8 by default, 64 at most) with no cursor (see
+[Reading agent memory](/concepts/memory#reading-agent-memory)). To see
+everything an identity holds, read its manifest with the full tier.
+`handle.manifestAgentMemory(identity, { tier, k, realm })` returns metadata
+and never bodies; `handle.updateAgentMemory(identity, memoryId, { title,
+body, tags, realm })` replaces an active record and returns the new
+record's `memoryId` and the id it `supersedes`.
+
+```typescript
+const handle = runtime.mobHandle();
+
+// Every active record of the identity: metadata only, no bodies.
+const all = await handle.manifestAgentMemory("scout", { tier: "full" });
+for (const meta of all) {
+  console.log(meta.id, meta.title, meta.ageDays);
+}
+
+// The most recently updated records with their bodies: at most 64 a call.
+const newest = await handle.recallAgentMemory("scout", {
+  selection: "always",
+  maxEntries: 64,
+});
+```
+
 ## Type definitions
 
 The SDK exports camelCase result types. Its wire parsers translate snake_case

@@ -17,7 +17,7 @@ The page it follows: [Mob announcements](../../docs/concepts/mob-announcements.m
 | 1 | `Meta.builder()...mob_announcements(config)` | Announcements are off unless the host enables them, and they need a state directory and a roster. The example sets the batch delay to one second; the default collects for up to a minute. |
 | 2 | `announcement_subscription_put` | The host subscribes the agent `ops` to the topic `deploys`. The operation id names the change: sent again, it is answered from the record. |
 | 3 | `announce` | `captured` is the number of subscriptions an announcement was recorded for: 1 on the topic `ops` listens to, 0 on another. The same key with the same content replays the first announcement; with other content it is refused (`announcement_conflict`). |
-| 4 | `announcement_delivery_list` | What a subscriber is owed comes as a batch, one agent turn for all of it. `state` is about the delivery (`sealed`, then `delivered`), `handling` about the turn it started. |
+| 4 | `announcement_delivery_list` | What a subscriber is owed comes as a batch, one agent turn for all of it; announcements that arrive within the batch delay of each other share a batch, so count announcements, not batches. `state` is about the delivery (`sealed`, then `delivered`), `handling` about the turn it started. |
 | 5 | the agent tools `mob_subscription` and `mob_announce` | An agent subscribes and announces for itself when its profile lists the `mob_announcements` bundle. `ops` announces on a topic and does not know that `support` listens. |
 | 6 | `announcement_subscription_cancel` | A change names the revision it expects. After the cancel the next announcement on the topic is captured for nobody. |
 
@@ -72,7 +72,7 @@ With a key the first run prints:
 [4] ops knows the version: 4.2
 [5] support subscribed itself: active, topics incidents
 [5] incident-7 by the host: captured for 1
-[5] support was delivered 2 batches, announced by: the host, the member ops
+[5] support was delivered 2 announcements, announced by: the host, the member ops
 [5] support knows the card processor is back: yes
 [6] ops-deploys: cancelled, revision 2
 [6] deploy-42 on deploys: captured for 0

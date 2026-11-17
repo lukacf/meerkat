@@ -69,16 +69,18 @@ def keys(batch) -> str:
     return ", ".join(item.source_key for item in batch.items)
 
 
-async def batches_of(handle, member, count: int, settled: bool, timeout: float = 90.0):
-    """The batches of a member, once there are `count` of them.
+async def batches_of(handle, member, items: int, settled: bool, timeout: float = 90.0):
+    """The batches of a member, once they hold `items` announcements.
 
-    With `settled`, also wait until the turn of each has ended: `handling`
-    is None until a batch is admitted, and `pending` while its turn runs.
+    Count announcements, not batches: two announcements that arrive within
+    the batch delay come as one batch. With `settled`, also wait until the
+    turn of each batch has ended: `handling` is None until a batch is
+    admitted, and `pending` while its turn runs.
     """
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         batches = await handle.announcement_delivery_list(member=member)
-        ready = len(batches) >= count and (
+        ready = sum(len(b.items) for b in batches) >= items and (
             not settled
             or all(b.handling is not None and b.handling.state != "pending" for b in batches)
         )
@@ -162,11 +164,12 @@ async def agents_announce(runtime, handle) -> None:
     else:
         say("5", "support subscribed itself in an earlier run: " + ", ".join(f"{s.state}, topics {', '.join(s.topics)}" for s in mine))
     batches = await batches_of(handle, SUPPORT, 2, settled=True)
-    announcers = sorted(
-        ("the host" if 'by the host' in b.body else "the member ops" if 'by member "ops"' in b.body else "another")
-        for b in batches
-    )
-    say("5", f"support was delivered {len(batches)} batches, announced by: {', '.join(announcers)}")
+    # One batch or two: that depends on whether the second announcement came
+    # within the batch delay of the first. Each body names its announcers.
+    bodies = " ".join(b.body for b in batches)
+    announcers = [name for name, mark in (("the host", "by the host"), ("the member ops", 'by member "ops"')) if mark in bodies]
+    delivered = sum(len(b.items) for b in batches)
+    say("5", f"support was delivered {delivered} announcements, announced by: {', '.join(announcers)}")
     heard = await runtime.agent("support").send_and_wait(
         "Is the card processor back, by the announcements you received? Reply yes or no only."
     )

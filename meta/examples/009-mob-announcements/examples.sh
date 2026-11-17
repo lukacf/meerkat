@@ -71,7 +71,7 @@ check_with_key() {
     common "$label, with a key" "$log"
     expect "$label, with a key" "$log" "^\[4\] the batch is delivered, its turn handled$"
     expect "$label, with a key" "$log" "^\[4\] ops knows the version: 4\.2\.\?$"
-    expect "$label, with a key" "$log" "^\[5\] support was delivered 2 batches, announced by: the host, the member ops$"
+    expect "$label, with a key" "$log" "^\[5\] support was delivered 2 announcements, announced by: the host, the member ops$"
     expect "$label, with a key" "$log" "^\[5\] support knows the card processor is back: [Yy]es\.\?$"
     expect "$label, with a key" "$log" "^\[end\] batches for ops: 1, delivered$"
     expect "$label, with a key" "$log" "^\[end\] subscriptions: .*support on incidents (active)"
@@ -79,7 +79,7 @@ check_with_key() {
   expect "$label, with a key, first run" "$first" "^\[5\] support subscribed itself: active, topics incidents$"
   expect "$label, with a key, first run" "$first" "^\[5\] incident-7 by the host: captured for 1$"
   # Nothing is delivered twice: the second run finds the subscription of
-  # the first and the same two batches.
+  # the first and the same two announcements.
   expect "$label, with a key, second run" "$second" "^\[5\] support subscribed itself in an earlier run: active, topics incidents$"
   echo "[mob-announcements] $label, with a provider key: ok"
 }

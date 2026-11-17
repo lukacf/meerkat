@@ -74,14 +74,16 @@ function keys(batch: AnnouncementBatch): string {
 }
 
 /**
- * The batches of a member, once there are `count` of them. With `settled`,
- * also wait until the turn of each has ended: `handling` is null until a
- * batch is admitted, and `pending` while its turn runs.
+ * The batches of a member, once they hold `items` announcements. Count
+ * announcements, not batches: two announcements that arrive within the batch
+ * delay come as one batch. With `settled`, also wait until the turn of each
+ * batch has ended: `handling` is null until a batch is admitted, and
+ * `pending` while its turn runs.
  */
 async function batchesOf(
   handle: MobHandle,
   member: { mob_id: string; identity: string },
-  count: number,
+  items: number,
   settled: boolean,
   timeoutMs = 90_000,
 ): Promise<AnnouncementBatch[]> {
@@ -89,7 +91,7 @@ async function batchesOf(
   for (;;) {
     const batches = await handle.announcementDeliveryList({ member });
     const ready =
-      batches.length >= count &&
+      batches.reduce((sum, b) => sum + b.items.length, 0) >= items &&
       (!settled || batches.every((b) => b.handling !== null && b.handling.state !== "pending"));
     if (ready || Date.now() > deadline) return batches;
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -180,12 +182,17 @@ async function agentsAnnounce(runtime: MetaRuntime, handle: MobHandle): Promise<
     say("5", `support subscribed itself in an earlier run: ${describe(mine)}`);
   }
   const batches = await batchesOf(handle, SUPPORT, 2, true);
-  const announcers = batches
-    .map((b) =>
-      b.body.includes("by the host") ? "the host" : b.body.includes('by member "ops"') ? "the member ops" : "another",
-    )
-    .sort();
-  say("5", `support was delivered ${batches.length} batches, announced by: ${announcers.join(", ")}`);
+  // One batch or two: that depends on whether the second announcement came
+  // within the batch delay of the first. Each body names its announcers.
+  const bodies = batches.map((b) => b.body).join(" ");
+  const announcers = [
+    ["the host", "by the host"],
+    ["the member ops", 'by member "ops"'],
+  ]
+    .filter(([, mark]) => bodies.includes(mark))
+    .map(([name]) => name);
+  const delivered = batches.reduce((sum, b) => sum + b.items.length, 0);
+  say("5", `support was delivered ${delivered} announcements, announced by: ${announcers.join(", ")}`);
   const heard = await runtime.sendAndWait(
     "support",
     "Is the card processor back, by the announcements you received? Reply yes or no only.",

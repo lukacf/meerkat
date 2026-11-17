@@ -2283,7 +2283,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.15",
+        "CARGO_PKG_VERSION": "0.9.16",
         "CARGO_BIN_NAME": "realm_create_then_govern",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-cli",
     },
@@ -5313,7 +5313,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.15",
+        "CARGO_PKG_VERSION": "0.9.16",
         "CARGO_BIN_NAME": "system_cli_realm_mcp",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-cli",
     },

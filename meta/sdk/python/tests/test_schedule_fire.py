@@ -223,7 +223,11 @@ class TestBuilderSeam:
 class TestFireDuringTheFirstInit:
     """A stand-in gateway fires a declared runnable after it accepted the
     init and before it settles it: the fire of a schedule that is due when
-    the gateway starts. The stand-in records the SDK's answer to it."""
+    the gateway starts. The stand-in records the SDK's answer to it.
+
+    The case that registers on the runtime after ``build()`` documents the
+    window that remains for a handler registered there: that fire is
+    answered before the runtime exists for the program."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("registered", ["on the builder", "on the runtime after build"])

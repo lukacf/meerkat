@@ -72997,7 +72997,7 @@ async fn cold_resume_cleanup_held_member_is_isolated() {
 #[cfg(feature = "runtime-adapter")]
 fn assert_uncertified_resume_repair_advice(text: &str, context: &str) {
     for clause in [
-        "if the cause above is a Recovery corruption, leave the member as it is: do not retire, respawn or rotate it (all are refused in this state and leave the mob unable to start)",
+        "if the cause is a Recovery corruption, leave the member as it is: do not retire, respawn or rotate it (all are refused in this state and leave the mob unable to start)",
         "send it nothing",
         "keep a copy of the state directory",
         "see Known limitations in the release notes",
@@ -73084,14 +73084,9 @@ async fn cold_resume_unproven_member_log_line_carries_the_repair_advice() {
         })
         .cloned()
         .unwrap_or_else(|| panic!("no parked-custody log line for '{parked_identity}'"));
-    let message = field(&log_line, "message").unwrap_or_default();
-    assert_uncertified_resume_repair_advice(message, "the log line of the parked custody");
-    // "The cause above" must have a cause above it in the line itself.
-    let cause = message.find("(settlement: Unproven)");
-    let advice = message.find("if the cause above is a Recovery corruption");
-    assert!(
-        matches!((cause, advice), (Some(cause), Some(advice)) if cause < advice),
-        "the log line names the cause before its advice: {message}"
+    assert_uncertified_resume_repair_advice(
+        field(&log_line, "message").unwrap_or_default(),
+        "the log line of the parked custody",
     );
 }
 

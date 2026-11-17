@@ -917,6 +917,71 @@ pub struct EffectiveMcpServers {
     pub refused: Vec<RefusedMcpServer>,
 }
 
+/// An `mcp.toml` server that names an environment variable that is not set.
+///
+/// Each server of an `mcp.toml` the host trusts resolves alone
+/// ([`McpConfig::resolve_with_scopes_from_roots`],
+/// [`McpConfig::resolve_effective_servers_from_roots_trusting`]): a variable
+/// that is not set fails only the server that names it, and the other
+/// servers load. The message names the server, the field and the variable,
+/// never a value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "MCP server '{}' in the {scope} mcp.toml is not resolved: environment variable \
+     '{variable}' referenced in {field} is not set",
+    .server.name
+)]
+pub struct UnresolvedMcpServer {
+    /// The definition exactly as written, never expanded.
+    pub server: McpServerConfig,
+    /// The file scope that states it.
+    pub scope: McpScope,
+    /// The field that names the variable: `command`, `args[<index>]`,
+    /// `env.<KEY>`, `url` or `headers.<NAME>`.
+    pub field: String,
+    /// The variable's name, never a value.
+    pub variable: String,
+}
+
+impl UnresolvedMcpServer {
+    /// The whole-load error of a caller that needs every server resolved:
+    /// [`McpConfigError::MissingEnvVar`] whose field names this server.
+    #[must_use]
+    pub fn missing_env_var(&self) -> McpConfigError {
+        McpConfigError::MissingEnvVar {
+            field: server_field(&self.server.name, &self.field),
+            var: self.variable.clone(),
+        }
+    }
+}
+
+/// `field` of the server `server`, as an expansion error names it.
+fn server_field(server: &str, field: &str) -> String {
+    format!("server '{server}' {field}")
+}
+
+/// The servers of the `mcp.toml` files, each resolved alone: the ones whose
+/// variables are all set, expanded, and the ones that name a variable that
+/// is not set, as written ([`McpConfig::resolve_with_scopes_from_roots`]).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ResolvedMcpFileServers {
+    pub servers: Vec<McpServerWithScope>,
+    pub unresolved: Vec<UnresolvedMcpServer>,
+}
+
+/// [`EffectiveMcpServers`] with each `mcp.toml` server resolved alone: the
+/// servers the host runs, the file servers it refuses, and the file servers
+/// that name a variable that is not set
+/// ([`McpConfig::resolve_effective_servers_from_roots_trusting`]).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ResolvedEffectiveMcpServers {
+    pub admitted: Vec<McpServerWithSource>,
+    pub refused: Vec<RefusedMcpServer>,
+    pub unresolved: Vec<UnresolvedMcpServer>,
+}
+
 /// The realm config and an `mcp.toml` scope define one server name
 /// differently. Neither definition may shadow the other.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1368,6 +1433,38 @@ impl McpConfig {
         user_config_root: Option<&Path>,
         untrusted: &(dyn Fn(&Path) -> bool + Send + Sync),
     ) -> Result<EffectiveMcpServers, EffectiveMcpServersError> {
+        let resolved = Self::resolve_effective_servers_from_roots_trusting(
+            realm_servers,
+            context_root,
+            user_config_root,
+            untrusted,
+        )
+        .await?;
+        // This set needs every server resolved.
+        if let Some(unresolved) = resolved.unresolved.first() {
+            return Err(unresolved.missing_env_var().into());
+        }
+        Ok(EffectiveMcpServers {
+            admitted: resolved.admitted,
+            refused: resolved.refused,
+        })
+    }
+
+    /// [`Self::effective_servers_from_roots_trusting`] with each trusted
+    /// `mcp.toml` server resolved alone: one that names an environment
+    /// variable that is not set is returned as written
+    /// ([`UnresolvedMcpServer`]) and the other servers are admitted. A
+    /// caller reports it by name, and fails only what needs that server.
+    ///
+    /// One case still fails the set: an unresolved file server whose name a
+    /// realm server uses, since the two definitions are compared as
+    /// expanded ([`compose_effective_mcp_servers`]).
+    pub async fn resolve_effective_servers_from_roots_trusting(
+        realm_servers: &[McpServerConfig],
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+        untrusted: &(dyn Fn(&Path) -> bool + Send + Sync),
+    ) -> Result<ResolvedEffectiveMcpServers, EffectiveMcpServersError> {
         effective_servers_trusting_with_env(
             realm_servers,
             context_root.map(project_mcp_path_in).as_deref(),
@@ -1376,6 +1473,51 @@ impl McpConfig {
             &|key| std::env::var(key).ok(),
         )
         .await
+    }
+
+    /// The servers of the project and user `mcp.toml` files at the
+    /// convention roots, project winning over user by name, each resolved
+    /// alone: a server that names an environment variable that is not set
+    /// is returned as written ([`UnresolvedMcpServer`]) and does not fail
+    /// the load. A user server the project shadows is never expanded.
+    pub async fn resolve_with_scopes_from_roots(
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<ResolvedMcpFileServers, McpConfigError> {
+        resolve_file_servers_with_env(
+            context_root.map(project_mcp_path_in).as_deref(),
+            user_config_root.map(user_mcp_path_in).as_deref(),
+            &|key| std::env::var(key).ok(),
+        )
+        .await
+    }
+
+    /// [`Self::resolve_with_scopes_from_roots`] without the files
+    /// `untrusted` names, as [`Self::load_with_scopes_from_roots_trusting`]
+    /// leaves them out: such a file is never read or expanded.
+    pub async fn resolve_with_scopes_from_roots_trusting(
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+        untrusted: &(dyn Fn(&Path) -> bool + Send + Sync),
+    ) -> Result<ResolvedMcpFileServers, McpConfigError> {
+        Self::resolve_with_scopes_from_roots(
+            context_root.filter(|root| !untrusted(&project_mcp_path_in(root))),
+            user_config_root.filter(|root| !untrusted(&user_mcp_path_in(root))),
+        )
+        .await
+    }
+
+    /// [`Self::resolve_with_scopes_from_roots`] for one scope's file only.
+    pub async fn resolve_scope_from_roots(
+        scope: McpScope,
+        context_root: Option<&Path>,
+        user_config_root: Option<&Path>,
+    ) -> Result<ResolvedMcpFileServers, McpConfigError> {
+        let (context_root, user_config_root) = match scope {
+            McpScope::Project => (context_root, None),
+            McpScope::User => (None, user_config_root),
+        };
+        Self::resolve_with_scopes_from_roots(context_root, user_config_root).await
     }
 
     /// Load from a specific scope only
@@ -1710,7 +1852,7 @@ async fn effective_servers_trusting_with_env<F>(
     user_path: Option<&Path>,
     untrusted: &(dyn Fn(&Path) -> bool + Send + Sync),
     env: &F,
-) -> Result<EffectiveMcpServers, EffectiveMcpServersError>
+) -> Result<ResolvedEffectiveMcpServers, EffectiveMcpServersError>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -1731,6 +1873,17 @@ where
     let mut seen: HashSet<String> = HashSet::new();
     let mut file_servers: Vec<McpServerWithScope> = Vec::new();
     let mut refused: Vec<RefusedMcpServer> = Vec::new();
+    let mut unresolved: Vec<UnresolvedMcpServer> = Vec::new();
+    // A trusted server resolves alone: one naming a variable that is not
+    // set is kept as written and does not fail the others.
+    let mut resolve = |server: &McpServerConfig, scope: McpScope| {
+        resolve_env_in_server_with(server.clone(), scope, env).map(|resolution| match resolution {
+            EnvResolution::Resolved(server) => {
+                file_servers.push(McpServerWithScope { server, scope });
+            }
+            EnvResolution::Unresolved(server) => unresolved.push(server),
+        })
+    };
     for (scope, file, file_untrusted) in [
         (McpScope::Project, &project, project_untrusted),
         (McpScope::User, &user, user_untrusted),
@@ -1741,10 +1894,7 @@ where
                 continue;
             }
             if !file_untrusted {
-                file_servers.push(McpServerWithScope {
-                    server: expand_env_in_server_with(server.clone(), env)?,
-                    scope,
-                });
+                resolve(server, scope)?;
                 continue;
             }
             // The realm states its own servers; composition keeps them.
@@ -1755,16 +1905,22 @@ where
                 .iter()
                 .find(|(trusted_scope, trusted)| *trusted_scope != scope && *trusted == server)
             {
-                Some((trusted_scope, trusted)) => file_servers.push(McpServerWithScope {
-                    server: expand_env_in_server_with((*trusted).clone(), env)?,
-                    scope: *trusted_scope,
-                }),
+                Some((trusted_scope, trusted)) => resolve(*trusted, *trusted_scope)?,
                 None => refused.push(RefusedMcpServer {
                     server: server.clone(),
                     scope,
                 }),
             }
         }
+    }
+    // A file server under a realm server's name must be defined as the
+    // realm defines it, compared as expanded: unresolved, it cannot be.
+    if let Some(unresolved) = unresolved.iter().find(|unresolved| {
+        realm_servers
+            .iter()
+            .any(|realm| realm.name == unresolved.server.name)
+    }) {
+        return Err(unresolved.missing_env_var().into());
     }
     let admitted = compose_effective_mcp_servers(realm_servers, file_servers)?;
     // A refused definition never shadows a server the host runs.
@@ -1773,7 +1929,44 @@ where
             .iter()
             .any(|server| server.server.name == refusal.server.name)
     });
-    Ok(EffectiveMcpServers { admitted, refused })
+    Ok(ResolvedEffectiveMcpServers {
+        admitted,
+        refused,
+        unresolved,
+    })
+}
+
+/// The servers of the two `mcp.toml` files, project winning over user by
+/// name, each resolved alone ([`McpConfig::resolve_with_scopes_from_roots`]).
+#[cfg(not(target_arch = "wasm32"))]
+async fn resolve_file_servers_with_env<F>(
+    project_path: Option<&Path>,
+    user_path: Option<&Path>,
+    env: &F,
+) -> Result<ResolvedMcpFileServers, McpConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let project = read_mcp_file_raw(project_path).await?;
+    let user = read_mcp_file_raw(user_path).await?;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut resolved = ResolvedMcpFileServers::default();
+    for (scope, file) in [(McpScope::Project, project), (McpScope::User, user)] {
+        for server in file.servers {
+            // Project first: it shadows the user's server of the same name,
+            // which is then never expanded.
+            if !seen.insert(server.name.clone()) {
+                continue;
+            }
+            match resolve_env_in_server_with(server, scope, env)? {
+                EnvResolution::Resolved(server) => {
+                    resolved.servers.push(McpServerWithScope { server, scope });
+                }
+                EnvResolution::Unresolved(server) => resolved.unresolved.push(server),
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2124,9 +2317,65 @@ where
 {
     let mut servers = Vec::with_capacity(config.servers.len());
     for server in config.servers {
-        servers.push(expand_env_in_server_with(server, env)?);
+        let name = server.name.clone();
+        servers.push(
+            expand_env_in_server_with(server, env)
+                .map_err(|error| name_server_in_env_error(error, &name))?,
+        );
     }
     Ok(McpConfig { servers })
+}
+
+/// One trusted `mcp.toml` server, resolved alone.
+#[cfg(not(target_arch = "wasm32"))]
+enum EnvResolution {
+    /// Every variable it names is set: the server, expanded.
+    Resolved(McpServerConfig),
+    /// It names a variable that is not set: the server, as written.
+    Unresolved(UnresolvedMcpServer),
+}
+
+/// Resolve `server` alone. A variable that is not set leaves it unresolved;
+/// any other expansion error fails the load, naming the server.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_env_in_server_with<F>(
+    server: McpServerConfig,
+    scope: McpScope,
+    env: &F,
+) -> Result<EnvResolution, McpConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match expand_env_in_server_with(server.clone(), env) {
+        Ok(server) => Ok(EnvResolution::Resolved(server)),
+        Err(McpConfigError::MissingEnvVar { field, var }) => {
+            Ok(EnvResolution::Unresolved(UnresolvedMcpServer {
+                server,
+                scope,
+                field,
+                variable: var,
+            }))
+        }
+        Err(error) => Err(name_server_in_env_error(error, &server.name)),
+    }
+}
+
+/// An expansion error of the server `server`, its field naming that server.
+#[cfg(not(target_arch = "wasm32"))]
+fn name_server_in_env_error(error: McpConfigError, server: &str) -> McpConfigError {
+    match error {
+        McpConfigError::MissingEnvVar { field, var } => McpConfigError::MissingEnvVar {
+            field: server_field(server, &field),
+            var,
+        },
+        McpConfigError::InvalidEnvVarSyntax { field, value } => {
+            McpConfigError::InvalidEnvVarSyntax {
+                field: server_field(server, &field),
+                value,
+            }
+        }
+        other => other,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2139,13 +2388,14 @@ where
 {
     let transport = match server.transport {
         McpTransportConfig::Stdio(stdio) => {
-            let command = expand_env_in_string_with(&stdio.command, "servers[].command", env)?;
+            let command = expand_env_in_string_with(&stdio.command, "command", env)?;
             let args = stdio
                 .args
                 .into_iter()
-                .map(|arg| expand_env_in_string_with(&arg, "servers[].args", env))
+                .enumerate()
+                .map(|(index, arg)| expand_env_in_string_with(&arg, &format!("args[{index}]"), env))
                 .collect::<Result<Vec<_>, _>>()?;
-            let env = expand_env_in_map_with(stdio.env, "servers[].env", env)?;
+            let env = expand_env_in_map_with(stdio.env, "env", env)?;
             // Secret names are never expanded: their values are not
             // configuration. Nor is the working directory: it is used
             // exactly as written.
@@ -2158,8 +2408,8 @@ where
             })
         }
         McpTransportConfig::Http(http) => {
-            let url = expand_env_in_string_with(&http.url, "servers[].url", env)?;
-            let headers = expand_env_in_map_with(http.headers, "servers[].headers", env)?;
+            let url = expand_env_in_string_with(&http.url, "url", env)?;
+            let headers = expand_env_in_map_with(http.headers, "headers", env)?;
             McpTransportConfig::Http(McpHttpConfig {
                 url,
                 headers,
@@ -2190,8 +2440,12 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let mut expanded = HashMap::with_capacity(map.len());
-    for (key, value) in map {
-        let value = expand_env_in_string_with(&value, field, env)?;
+    // In key order, so the entry an error names does not depend on the
+    // map's iteration order.
+    let mut entries: Vec<(String, String)> = map.into_iter().collect();
+    entries.sort();
+    for (key, value) in entries {
+        let value = expand_env_in_string_with(&value, &format!("{field}.{key}"), env)?;
         expanded.insert(key, value);
     }
     Ok(expanded)
@@ -2974,6 +3228,122 @@ headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
         };
         assert_eq!(beta.command, "/opt/beta/bin/beta");
         assert_eq!(beta.env.get("BETA_MODE").map(String::as_str), Some("fast"));
+
+        // The server that names the unset variable is kept as written, with
+        // the field and the variable it waits for; the text names both and
+        // the server, never a value.
+        let as_written: McpConfig = toml::from_str(ONE_UNSET_VARIABLE).unwrap();
+        assert_eq!(
+            effective.unresolved,
+            [UnresolvedMcpServer {
+                server: as_written.servers[0].clone(),
+                scope: McpScope::User,
+                field: "headers.Authorization".to_owned(),
+                variable: "ALPHA_TOKEN".to_owned(),
+            }]
+        );
+        assert_eq!(
+            effective.unresolved[0].to_string(),
+            "MCP server 'alpha' in the user mcp.toml is not resolved: environment variable \
+             'ALPHA_TOKEN' referenced in headers.Authorization is not set"
+        );
+        assert!(effective.refused.is_empty());
+    }
+
+    /// The file loads resolve each server alone too: the project's server
+    /// shadows the user's of the same name before anything is expanded, and
+    /// every field that takes a variable is named by its own path.
+    #[tokio::test]
+    async fn file_servers_resolve_alone_and_name_the_field_of_an_unset_variable() {
+        let temp = TempDir::new().unwrap();
+        let user = write_user_mcp(
+            &temp,
+            "[[servers]]\nname = \"shadowed\"\ncommand = \"${USER_ONLY}/bin/tool\"\n\n\
+             [[servers]]\nname = \"by-arg\"\ncommand = \"tool\"\nargs = [\"--plain\", \"--token=${ARG_TOKEN}\"]\n\n\
+             [[servers]]\nname = \"by-env\"\ncommand = \"tool\"\nenv = { B_KEY = \"${ENV_TOKEN}\", A_KEY = \"${SET}\" }\n\n\
+             [[servers]]\nname = \"by-url\"\nurl = \"https://${URL_HOST}/mcp\"\n\n\
+             [[servers]]\nname = \"by-command\"\ncommand = \"${COMMAND_HOME}/bin/tool\"\n\n\
+             [[servers]]\nname = \"plain\"\ncommand = \"${SET}/bin/tool\"\n",
+        )
+        .await;
+        let project = temp.path().join("project").join(".rkat").join("mcp.toml");
+        tokio::fs::create_dir_all(project.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &project,
+            "[[servers]]\nname = \"shadowed\"\ncommand = \"project-tool\"\n",
+        )
+        .await
+        .unwrap();
+        let env = |key: &str| (key == "SET").then(|| "/opt/set".to_owned());
+
+        let resolved = resolve_file_servers_with_env(Some(&project), Some(&user), &env)
+            .await
+            .expect("unset variables do not fail the load");
+        let servers: Vec<(&str, McpScope)> = resolved
+            .servers
+            .iter()
+            .map(|file| (file.server.name.as_str(), file.scope))
+            .collect();
+        assert_eq!(
+            servers,
+            [("shadowed", McpScope::Project), ("plain", McpScope::User)]
+        );
+        let unresolved: Vec<(&str, &str, &str)> = resolved
+            .unresolved
+            .iter()
+            .map(|unresolved| {
+                assert_eq!(unresolved.scope, McpScope::User);
+                (
+                    unresolved.server.name.as_str(),
+                    unresolved.field.as_str(),
+                    unresolved.variable.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            unresolved,
+            [
+                ("by-arg", "args[1]", "ARG_TOKEN"),
+                ("by-env", "env.B_KEY", "ENV_TOKEN"),
+                ("by-url", "url", "URL_HOST"),
+                ("by-command", "command", "COMMAND_HOME"),
+            ]
+        );
+    }
+
+    /// A caller that needs every server resolved still gets the whole-load
+    /// error, which now names the server: the loads that return one list,
+    /// and a file server under a realm server's name, whose definition is
+    /// compared as expanded.
+    #[tokio::test]
+    async fn a_whole_load_error_for_an_unset_variable_names_its_server() {
+        let parsed: McpConfig = toml::from_str(ONE_UNSET_VARIABLE).unwrap();
+        let whole = expand_env_in_config_with(parsed, &|_| None).unwrap_err();
+        assert_eq!(
+            whole.to_string(),
+            "Missing environment variable 'ALPHA_TOKEN' referenced in server 'alpha' \
+             headers.Authorization"
+        );
+
+        let temp = TempDir::new().unwrap();
+        let user = write_user_mcp(&temp, ONE_UNSET_VARIABLE).await;
+        let realm = McpServerConfig::streamable_http(
+            "alpha",
+            "https://alpha.example/mcp",
+            HashMap::from([("Authorization".to_owned(), "Bearer literal".to_owned())]),
+        );
+        let env = |key: &str| key.starts_with("BETA_").then(|| "set".to_owned());
+        match effective_servers_trusting_with_env(&[realm], None, Some(&user), &|_| false, &env)
+            .await
+        {
+            Err(EffectiveMcpServersError::Config(McpConfigError::MissingEnvVar { field, var })) => {
+                assert_eq!(field, "server 'alpha' headers.Authorization");
+                assert_eq!(var, "ALPHA_TOKEN");
+            }
+            other => unreachable!("expected the whole-load error, got {other:?}"),
+        }
     }
 
     /// Adding and removing a server writes every other entry back as it was

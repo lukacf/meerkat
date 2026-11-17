@@ -241,7 +241,9 @@ Project config wins on name collisions.
 
 <Note>
 Supported transports: **stdio**, **streamable HTTP** (default for URLs), and **SSE**.
-Environment variables in config use `${VAR_NAME}` syntax.
+Environment variables in config use `${VAR_NAME}` syntax. A variable that is
+not set fails only the server that names it: the other servers load, and that
+server is reported unresolved with the field and the variable's name.
 </Note>
 
 <Note>

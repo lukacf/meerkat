@@ -790,7 +790,10 @@ rkat mcp get filesystem --scope project
 ```
 
 Omit `--scope` on `list` or `get` to search all configured scopes, the realm
-included.
+included. An `mcp.toml` server that names an environment variable that is not
+set is listed as written and marked unresolved with the field and the
+variable's name (`--json`: an `unresolved` object with `field` and
+`variable`); the other servers are unaffected.
 
 HTTP OAuth is discovered when connecting, not stored in `.rkat/mcp.toml`.
 Interactive login requires an account selection on the server entry: its

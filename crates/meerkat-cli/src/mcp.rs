@@ -5,7 +5,7 @@
 use meerkat_core::mcp_config::{
     McpConfig, McpConfigMutationAuthority, McpOAuthAccountSelection, McpRealmPersistTarget,
     McpScope, McpServerConfig, McpServerSource, McpServerWithSource, McpTransportConfig,
-    McpTransportKind, compose_effective_mcp_servers,
+    McpTransportKind, UnresolvedMcpServer, compose_effective_mcp_servers,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -388,47 +388,99 @@ pub async fn remove_realm_server(
     Ok(())
 }
 
+/// What a `list` or `get` reports: every configured server of the selected
+/// sources and, for each `mcp.toml` server that names an environment
+/// variable that is not set, what it waits for. Such a server is among
+/// `servers` as written, never expanded.
+struct ListedServers {
+    servers: Vec<McpServerWithSource>,
+    unresolved: Vec<UnresolvedMcpServer>,
+}
+
+impl ListedServers {
+    /// What `listed` waits for, when it is an unresolved `mcp.toml` server.
+    fn unresolved(&self, listed: &McpServerWithSource) -> Option<&UnresolvedMcpServer> {
+        self.unresolved.iter().find(|unresolved| {
+            McpServerSource::File(unresolved.scope) == listed.source
+                && unresolved.server.name == listed.server.name
+        })
+    }
+}
+
+/// `json`, a listed server, marked with what it waits for when unresolved.
+fn mark_unresolved(
+    mut json: serde_json::Value,
+    unresolved: Option<&UnresolvedMcpServer>,
+) -> serde_json::Value {
+    if let (Some(unresolved), Some(object)) = (unresolved, json.as_object_mut()) {
+        object.insert(
+            "unresolved".to_string(),
+            serde_json::json!({
+                "field": unresolved.field,
+                "variable": unresolved.variable,
+            }),
+        );
+    }
+    json
+}
+
 /// The configured servers a `list` or `get` reports: the selected source,
 /// or every source when `selection` is `None`. `realm_servers` is the
-/// realm's composed list.
+/// realm's composed list. Each `mcp.toml` server resolves alone: one that
+/// names a variable that is not set is listed as written.
 async fn listed_servers(
     selection: Option<McpServerSource>,
     realm_servers: &[McpServerConfig],
     context_root: Option<&Path>,
     user_config_root: Option<&Path>,
-) -> anyhow::Result<Vec<McpServerWithSource>> {
+) -> anyhow::Result<ListedServers> {
     let realm = || {
         realm_servers.iter().map(|server| McpServerWithSource {
             server: server.clone(),
             source: McpServerSource::Realm,
         })
     };
-    Ok(match selection {
-        Some(McpServerSource::Realm) => realm().collect(),
+    let files = match selection {
+        Some(McpServerSource::Realm) => {
+            return Ok(ListedServers {
+                servers: realm().collect(),
+                unresolved: Vec::new(),
+            });
+        }
         Some(McpServerSource::File(scope)) => {
-            McpConfig::load_scope_from_roots(scope, context_root, user_config_root)
-                .await?
-                .servers
-                .into_iter()
-                .map(|server| McpServerWithSource {
-                    server,
-                    source: McpServerSource::File(scope),
-                })
-                .collect()
+            McpConfig::resolve_scope_from_roots(scope, context_root, user_config_root).await?
         }
         None => {
             let files =
-                McpConfig::load_with_scopes_from_roots(context_root, user_config_root).await?;
-            if let Err(error) = compose_effective_mcp_servers(realm_servers, files.clone()) {
+                McpConfig::resolve_with_scopes_from_roots(context_root, user_config_root).await?;
+            if let Err(error) = compose_effective_mcp_servers(realm_servers, files.servers.clone())
+            {
                 eprintln!("warning: {error}; sessions in this realm refuse to start until then");
             }
-            realm()
-                .chain(files.into_iter().map(|file| McpServerWithSource {
-                    server: file.server,
-                    source: McpServerSource::File(file.scope),
-                }))
-                .collect()
+            files
         }
+    };
+    let realm_listed: Vec<McpServerWithSource> = match selection {
+        None => realm().collect(),
+        Some(_) => Vec::new(),
+    };
+    let as_written = files
+        .unresolved
+        .iter()
+        .map(|unresolved| McpServerWithSource {
+            server: unresolved.server.clone(),
+            source: McpServerSource::File(unresolved.scope),
+        });
+    Ok(ListedServers {
+        servers: realm_listed
+            .into_iter()
+            .chain(files.servers.into_iter().map(|file| McpServerWithSource {
+                server: file.server,
+                source: McpServerSource::File(file.scope),
+            }))
+            .chain(as_written)
+            .collect(),
+        unresolved: files.unresolved,
     })
 }
 
@@ -440,32 +492,36 @@ pub async fn list_servers(
     context_root: Option<&Path>,
     user_config_root: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let servers = listed_servers(selection, realm_servers, context_root, user_config_root).await?;
+    let listed = listed_servers(selection, realm_servers, context_root, user_config_root).await?;
+    let servers = &listed.servers;
 
     if json_output {
         let json: Vec<serde_json::Value> = servers
             .iter()
-            .map(|s| match &s.server.transport {
-                McpTransportConfig::Stdio(stdio) => serde_json::json!({
-                    "name": s.server.name,
-                    "transport": "stdio",
-                    "command": stdio.command,
-                    "args": stdio.args,
-                    "env": stdio.env,
-                    "scope": s.source.to_string(),
-                }),
-                McpTransportConfig::Http(http) => serde_json::json!({
-                    "name": s.server.name,
-                    "transport": match s.server.transport_kind() {
-                        McpTransportKind::Sse => "sse",
-                        _ => "streamable-http",
-                    },
-                    "url": http.url,
-                    "headers": http.headers,
-                    "oauth_account": http.oauth_account,
-                    "oauth_account_selection": http.oauth_account_selection,
-                    "scope": s.source.to_string(),
-                }),
+            .map(|s| {
+                let json = match &s.server.transport {
+                    McpTransportConfig::Stdio(stdio) => serde_json::json!({
+                        "name": s.server.name,
+                        "transport": "stdio",
+                        "command": stdio.command,
+                        "args": stdio.args,
+                        "env": stdio.env,
+                        "scope": s.source.to_string(),
+                    }),
+                    McpTransportConfig::Http(http) => serde_json::json!({
+                        "name": s.server.name,
+                        "transport": match s.server.transport_kind() {
+                            McpTransportKind::Sse => "sse",
+                            _ => "streamable-http",
+                        },
+                        "url": http.url,
+                        "headers": http.headers,
+                        "oauth_account": http.oauth_account,
+                        "oauth_account_selection": http.oauth_account_selection,
+                        "scope": s.source.to_string(),
+                    }),
+                };
+                mark_unresolved(json, listed.unresolved(s))
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&json)?);
@@ -480,10 +536,17 @@ pub async fn list_servers(
 
         println!("{:<20} {:<10} {:<16} TARGET", "NAME", "SCOPE", "TRANSPORT");
         println!("{}", "-".repeat(60));
-        for s in &servers {
+        for s in servers {
             let (kind, target) = format_server_target(&s.server);
-            // Truncate command if too long (Unicode-safe)
-            let cmd_display = truncate_str(&target, 40);
+            let cmd_display = match listed.unresolved(s) {
+                // What the server waits for, in full.
+                Some(unresolved) => format!(
+                    "unresolved: ${{{}}} is not set ({})",
+                    unresolved.variable, unresolved.field
+                ),
+                // Truncate command if too long (Unicode-safe)
+                None => truncate_str(&target, 40),
+            };
             println!(
                 "{:<20} {:<10} {:<16} {}",
                 s.server.name,
@@ -506,18 +569,11 @@ pub async fn get_server(
     context_root: Option<&Path>,
     user_config_root: Option<&Path>,
 ) -> anyhow::Result<()> {
-    let servers: Vec<McpServerWithSource> =
-        listed_servers(selection, realm_servers, context_root, user_config_root)
-            .await?
-            .into_iter()
-            .filter(|s| s.server.name == name)
-            .collect();
-
-    if servers.is_empty() {
+    let listed = listed_servers(selection, realm_servers, context_root, user_config_root).await?;
+    let Some(server) = listed.servers.iter().find(|s| s.server.name == name) else {
         anyhow::bail!("MCP server '{name}' not found");
-    }
-
-    let server = &servers[0];
+    };
+    let unresolved = listed.unresolved(server);
 
     if json_output {
         let json = match &server.server.transport {
@@ -542,10 +598,17 @@ pub async fn get_server(
                 "scope": server.source.to_string(),
             }),
         };
+        let json = mark_unresolved(json, unresolved);
         println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
         println!("Name:    {}", server.server.name);
         println!("Scope:   {}", server.source);
+        if let Some(unresolved) = unresolved {
+            println!(
+                "Unresolved: environment variable '{}' referenced in {} is not set (shown as written)",
+                unresolved.variable, unresolved.field
+            );
+        }
         match &server.server.transport {
             McpTransportConfig::Stdio(stdio) => {
                 println!("Transport: stdio");

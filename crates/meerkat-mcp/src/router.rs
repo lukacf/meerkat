@@ -185,6 +185,27 @@ pub(crate) enum InstalledOperation {
     Replaced,
 }
 
+/// Why a staged add fails at its boundary, before anything about it is
+/// resolved, authorized, connected or spawned.
+#[derive(Debug, Clone)]
+enum StagedAddFailure {
+    /// The host refused the definition ([`McpRouter::stage_add_refused`]).
+    Refused(meerkat_core::confinement::ConfinementRefusal),
+    /// The definition names an environment variable that is not set
+    /// ([`McpRouter::stage_add_unresolved`]); the text names the server,
+    /// the field and the variable, never a value.
+    Unresolved(String),
+}
+
+impl StagedAddFailure {
+    fn into_error(self) -> McpError {
+        match self {
+            Self::Refused(refusal) => McpError::Confinement(refusal),
+            Self::Unresolved(reason) => McpError::ConnectionFailed { reason },
+        }
+    }
+}
+
 struct PendingResult {
     obligation: SurfaceCompletionObligation,
     /// The exact config this attempt connected with.
@@ -1588,7 +1609,7 @@ pub struct McpRouter {
     /// The typed refusal staged with each refused add's payload
     /// ([`Self::stage_add_refused`]); it moves with the payload to the
     /// boundary, where the add fails before anything about it is resolved.
-    refused_payloads: HashMap<String, meerkat_core::confinement::ConfinementRefusal>,
+    refused_payloads: HashMap<String, StagedAddFailure>,
     /// Servers attached under a governed control, and governed adds a
     /// staged removal withdrew. Their descriptor never changes or reconnects
     /// without a new control (no reload) until the removal's actual
@@ -2516,7 +2537,28 @@ impl McpRouter {
         // one that would not validate is reported refused like any other,
         // and never fails the rest of the session's setup.
         self.stage_payload(config)?;
-        self.refused_payloads.insert(name, refusal);
+        self.refused_payloads
+            .insert(name, StagedAddFailure::Refused(refusal));
+        Ok(())
+    }
+
+    /// Stage the add of an `mcp.toml` server that names an environment
+    /// variable that is not set. It follows an ordinary add's lifecycle and
+    /// fails at its boundary at once, as a server that does not connect
+    /// does, with a detail naming the server, the field and the variable;
+    /// the definition is staged as written, and nothing in it is expanded,
+    /// authorized, connected or spawned.
+    pub fn stage_add_unresolved(
+        &mut self,
+        unresolved: meerkat_core::mcp_config::UnresolvedMcpServer,
+    ) -> Result<(), McpError> {
+        self.refuse_ungoverned_change(&unresolved.server.name)?;
+        let name = unresolved.server.name.clone();
+        let reason = unresolved.to_string();
+        // Never connected, so not validated: see `stage_add_refused`.
+        self.stage_payload(unresolved.server)?;
+        self.refused_payloads
+            .insert(name, StagedAddFailure::Unresolved(reason));
         Ok(())
     }
 
@@ -2930,8 +2972,8 @@ impl McpRouter {
         }
         self.pending_obligations
             .insert(server_name, obligation.clone());
-        if let Some(refusal) = refused {
-            self.spawn_refused(config, obligation, refusal);
+        if let Some(failure) = refused {
+            self.spawn_refused(config, obligation, failure);
             return;
         }
 
@@ -3038,13 +3080,14 @@ impl McpRouter {
         });
     }
 
-    /// Complete a refused add's attempt at once with its typed refusal: no
-    /// custody is admitted and nothing is authorized, connected or spawned.
+    /// Complete a refused or unresolved add's attempt at once with its
+    /// failure: no custody is admitted and nothing is authorized, connected
+    /// or spawned.
     fn spawn_refused(
         &mut self,
         config: McpServerConfig,
         obligation: SurfaceCompletionObligation,
-        refusal: meerkat_core::confinement::ConfinementRefusal,
+        failure: StagedAddFailure,
     ) {
         let tx = self.pending_tx.clone();
         let progress = Arc::clone(&self.progress);
@@ -3058,7 +3101,7 @@ impl McpRouter {
                 .send(PendingResult {
                     obligation,
                     config,
-                    result: Err(McpError::Confinement(refusal)),
+                    result: Err(failure.into_error()),
                     guard: None,
                 })
                 .await;

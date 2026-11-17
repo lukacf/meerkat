@@ -406,7 +406,9 @@ pub async fn resolve_configured_mcp_target_in_realm_trusting(
         EffectiveMcpServersError, McpConfig, McpTransportConfig, McpTransportKind,
     };
     let server_name = || target.server_name.clone();
-    let servers = McpConfig::effective_servers_from_roots_trusting(
+    // Each `mcp.toml` server resolves alone: a variable that is not set
+    // fails only the server that names it.
+    let servers = McpConfig::resolve_effective_servers_from_roots_trusting(
         realm_servers,
         context_root,
         user_config_root,
@@ -433,6 +435,23 @@ pub async fn resolve_configured_mcp_target_in_realm_trusting(
             refusal: meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource,
         }
         .into());
+    }
+    if let Some(unresolved) = servers
+        .unresolved
+        .iter()
+        .find(|unresolved| unresolved.server.name == target.server_name)
+    {
+        // The public text does not echo the host's configuration: the
+        // field and the variable's name go to the host's log.
+        tracing::warn!(
+            target: "meerkat::auth",
+            server = %unresolved.server.name,
+            scope = %unresolved.scope,
+            field = %unresolved.field,
+            variable = %unresolved.variable,
+            "MCP auth target names an environment variable that is not set"
+        );
+        return Err(HostMcpTargetRefusal::ConfigUnavailable(unresolved.missing_env_var()).into());
     }
     let server = servers
         .admitted

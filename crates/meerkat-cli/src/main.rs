@@ -24205,11 +24205,16 @@ async fn execute_mob_run_pack(
     let params = parse_mob_run_params(invocation.raw_params, invocation.prompt)?;
     validate_mobpack_input_params(&archive, &params)?;
     let mut effective_config = load_deploy_realm_config(scope).await?;
+    // A pack run has no deploy flags of its own; the process's
+    // `--confinement*` selection applies to it as to a deploy.
     let layers = DeployConfigLayers::resolve(
         &archive.manifest,
         &archive.deploy_policy,
         DeploySurfaceArg::Cli,
-        CliOverrides::default(),
+        CliOverrides {
+            confinement: scope.confinement.clone(),
+            ..CliOverrides::default()
+        },
     )?;
     meerkat::HostConfigLayer::apply(&layers, &mut effective_config);
     if let Some(observer) = invocation.config_observer.as_ref() {

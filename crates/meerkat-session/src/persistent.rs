@@ -25307,6 +25307,157 @@ mod tests {
         assert_teardown_required_projection_authority(error, "differs from the live actor base");
     }
 
+    /// A run's closing save that the runtime alone promotes to the committed
+    /// document (its settle of a cancelled run) moves the store's WholeBlob
+    /// authority while the live actor's checkpoint base stays at the former
+    /// one. The promoted transcript is the live actor's own, so the turn
+    /// entry's transcript verdict reads live-authoritative. The turn entry
+    /// under the held boundary still rebases the actor's base to the store's
+    /// authority, so the next run's first checkpoint is accepted. RED before:
+    /// the base stayed behind and that checkpoint was refused with "differs
+    /// from the live actor base", which abandoned the first turn after a
+    /// cancel on a WholeBlob store.
+    #[tokio::test]
+    async fn a_runtime_promoted_closing_save_is_rebased_at_the_next_turn_entry_whole_blob() {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create the WholeBlob live actor");
+        let session_id = created.session_id;
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id);
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let base_before =
+            RuntimeStore::load_whole_blob_store_authority(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read the committed authority")
+                .expect("the created session has a committed authority");
+
+        // The run: its closing save through the actor's checkpointer, and the
+        // same rows on the live actor.
+        let run_id = RunId::new();
+        let mut closing = service
+            .inner
+            .export_session(&session_id)
+            .await
+            .expect("the created actor exports its session");
+        closing.push(Message::User(UserMessage::text(
+            "the run's prompt".to_string(),
+        )));
+        closing.push(run_stamped_assistant(
+            &run_id,
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "the run's answer".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ));
+        checkpointer
+            .checkpoint_run(&mut closing, &run_id, None)
+            .await
+            .expect("the closing save checkpoints")
+            .expect("a durable session writes a provisional candidate");
+        service
+            .inner
+            .sync_session_from_durable_snapshot(&session_id, closing.clone())
+            .await
+            .expect("the live actor holds the rows its run saved");
+
+        // The runtime's settle of the cancelled run, on the store alone.
+        let settled = meerkat_runtime::recovery::recover_durable_tail_for_run(
+            runtime_store.as_ref(),
+            &session_id,
+            &run_id,
+        )
+        .await
+        .expect("the settle runs");
+        assert!(
+            matches!(
+                settled,
+                Some(meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed { .. })
+            ),
+            "the settle commits the run's candidate: {settled:?}"
+        );
+        let promoted =
+            RuntimeStore::load_whole_blob_store_authority(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read the promoted authority")
+                .expect("the promoted authority");
+        assert_ne!(
+            promoted, base_before,
+            "the settle moved the store's committed authority"
+        );
+        let committed =
+            RuntimeStore::load_committed_whole_blob_snapshot(runtime_store.as_ref(), &runtime_id)
+                .await
+                .expect("read the committed document")
+                .expect("the committed document");
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(committed.session().messages()).unwrap(),
+            meerkat_core::transcript_messages_digest(closing.messages()).unwrap(),
+            "the candidate is promoted as it is: the committed transcript is the live actor's"
+        );
+        assert!(
+            matches!(
+                service
+                    .live_session_authority(&session_id)
+                    .await
+                    .expect("the turn entry's verdict"),
+                LiveSessionAuthority::LiveAuthoritative { .. }
+            ),
+            "equal transcripts read live-authoritative: the verdict alone asks for no rebase"
+        );
+
+        // The next turn's entry, under the held turn boundary.
+        let discarded = service
+            .synchronize_live_session_for_runtime_turn(&session_id)
+            .await
+            .expect("the turn entry synchronizes");
+        assert!(
+            !discarded,
+            "the actor is synchronized in place, not discarded"
+        );
+        assert_eq!(
+            checkpointer
+                .whole_blob_base_authority
+                .lock()
+                .expect("actor base authority lock")
+                .as_ref(),
+            Some(&promoted),
+            "the turn entry rebases the live actor's base to the store's committed authority"
+        );
+        let mut next = service
+            .inner
+            .export_session(&session_id)
+            .await
+            .expect("the synchronized actor exports its session");
+        next.push(Message::User(UserMessage::text(
+            "the next run's prompt".to_string(),
+        )));
+        checkpointer
+            .checkpoint_run(&mut next, &RunId::new(), None)
+            .await
+            .expect("the next run's first checkpoint is accepted")
+            .expect("a durable session writes a provisional candidate");
+    }
+
     #[tokio::test]
     async fn whole_blob_control_commit_acknowledgement_rebinds_only_exact_store_authority() {
         let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());

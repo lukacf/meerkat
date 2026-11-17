@@ -592,6 +592,8 @@ fn model_tables(mob_id: &str, model_url: &str, responses: bool) -> String {
              auth_profile = \"loop\"\ndefault_model = \"{MODEL}\"\nprovider_default = true\n"
         ));
     }
+    // The host lets a schedule an agent stores create a session on demand.
+    tables.push_str("\n[tools]\nagent_schedules_may_create_sessions = true\n");
     tables
 }
 

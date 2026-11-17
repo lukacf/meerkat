@@ -389,3 +389,55 @@ fn adding_and_removing_an_mcp_server_keeps_variable_references_as_written() {
     }
     assert!(!removed.contains("/opt/row-present"), "{removed}");
 }
+
+/// The text forms of `list` and `get` show no expanded credential: every env
+/// and header value is masked, and a URL is shown without its userinfo and
+/// its query. The `--json` forms are unchanged: scripts read them.
+#[test]
+fn mcp_text_listings_mask_env_header_and_url_credentials() {
+    const VARIABLE: &str = "RKAT_ROW_MCP_MASK_VALUE";
+    const VALUE: &str = "row-marker-0123456789";
+    let roots = Roots::new(&format!(
+        "[[servers]]\nname = \"remote\"\n\
+         url = \"https://user:${{{VARIABLE}}}@remote.example/mcp?key=${{{VARIABLE}}}\"\n\
+         headers = {{ X-Row-Header = \"${{{VARIABLE}}}\" }}\n\n\
+         [[servers]]\nname = \"local\"\ncommand = \"tool\"\n\
+         env = {{ ROW_SETTING = \"${{{VARIABLE}}}\" }}\n"
+    ));
+    let rkat = |args: &[&str]| roots.rkat(&[(VARIABLE, VALUE)], &[], args);
+
+    for args in [
+        &["mcp", "list"][..],
+        &["mcp", "get", "remote"][..],
+        &["mcp", "get", "local"][..],
+    ] {
+        let output = rkat(args);
+        assert_success(&output);
+        let text = format!("{}{}", stdout_of(&output), stderr_of(&output));
+        assert!(
+            !text.contains(VALUE),
+            "`rkat {}` shows no expanded credential: {text}",
+            args.join(" ")
+        );
+        assert!(text.contains("remote") || text.contains("local"), "{text}");
+    }
+    let shown = stdout_of(&rkat(&["mcp", "get", "remote"]));
+    assert!(
+        shown.contains("remote.example/mcp") && shown.contains("X-Row-Header"),
+        "the host, the path and the header's name stay readable: {shown}"
+    );
+
+    for args in [
+        &["mcp", "list", "--json"][..],
+        &["mcp", "get", "remote", "--json"][..],
+        &["mcp", "get", "local", "--json"][..],
+    ] {
+        let output = rkat(args);
+        assert_success(&output);
+        assert!(
+            stdout_of(&output).contains(VALUE),
+            "`rkat {}` is unchanged",
+            args.join(" ")
+        );
+    }
+}

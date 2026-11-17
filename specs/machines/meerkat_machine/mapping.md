@@ -2387,6 +2387,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

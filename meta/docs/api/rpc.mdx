@@ -3594,10 +3594,14 @@ current binding in `registered_runtime_member_id` and
 `registered_session_id`; the member methods and the console's identity
 routes, `meta/console/inspect_identity` included, answer the same. A
 runtime id of an identity the runtime does not know answers `-32602`
-`invalid identity: runtime identity not found: <id>`, and a stale runtime
-id of an identity this surface hides (an implicit delegate member) answers
-`-32602` `invalid identity: identity hidden by policy: <id>` and names no
-binding. A runtime id whose identity's binding cannot be read right now is
+`invalid identity: runtime identity not found: <id>`. The stale-binding
+refusal is the answer for every identity the runtime knows, whatever profile
+and labels it declares: a declaration does not say which mob an identity is
+of, so a declared `source_mob_id` label hides no identity on this surface. A
+live implicit delegate member (a member of role `delegate` whose roster row
+names its mob) is still hidden, and its runtime id answers `-32602`
+`invalid identity: identity hidden by policy: <id>`. A runtime id whose
+identity's binding cannot be read right now is
 never passed as the current binding, nor refused as a stale or unknown id.
 The member methods and the role targets of `meta/run_flow` refuse it with
 `-32052` (`identity_history_unavailable`, retryable), and so do these methods

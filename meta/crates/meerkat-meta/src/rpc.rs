@@ -7103,6 +7103,22 @@ fn rpc_live_identity_alias_visible(
         && !is_implicit_delegate_member(projected_role, labels)
 }
 
+/// Whether the stdio surface shows an identity, judged by its status: the
+/// rule its live aliases follow, asked with the identity's profile and its
+/// declared labels. A declaration does not say which mob an identity is of,
+/// so a declared `source_mob_id` label is left out, as the console's records
+/// of a status leave it out.
+fn rpc_identity_status_visible(status: &crate::identity_first::IdentityStatus) -> bool {
+    let profile = status
+        .profile
+        .as_ref()
+        .map(meerkat_mob::ProfileName::as_str)
+        .unwrap_or_default();
+    let mut labels = status.labels.clone();
+    labels.remove("source_mob_id");
+    rpc_live_identity_alias_visible(profile, &labels)
+}
+
 impl TryFrom<crate::identity_control_target::LiveIdentityMember> for RpcLiveIdentityAlias {
     type Error = String;
 
@@ -7222,12 +7238,7 @@ async fn rpc_stale_generated_alias_error(
     };
     // A stale id names the registered binding only of an identity the
     // stdio surface shows, by the rule its live aliases follow.
-    let profile = status
-        .profile
-        .as_ref()
-        .map(meerkat_mob::ProfileName::as_str)
-        .unwrap_or_default();
-    if !rpc_live_identity_alias_visible(profile, &status.labels) {
+    if !rpc_identity_status_visible(&status) {
         return Some(RpcIdentityTargetError::Invalid(format!(
             "identity hidden by policy: {alias}"
         )));
@@ -8544,9 +8555,9 @@ mod tests {
         CONSOLE_READ_BUDGET, CONSOLE_READ_TIMEOUT_CODE, IdentityMemberReadiness, error_response,
         experimental_live_target_preflight, handle_unified_rpc_json, identity_error_response,
         live_open_execution_identity_preflight, parse_console_read_budget, resolve_live_target,
-        resolve_rpc_identity_control_target, rpc_live_identity_alias_visible,
-        rpc_member_id_matches_durable_identity, rpc_runtime_alias_generation,
-        wait_identity_startup_ready, with_read_deadline,
+        resolve_rpc_identity_control_target, rpc_identity_status_visible,
+        rpc_live_identity_alias_visible, rpc_member_id_matches_durable_identity,
+        rpc_runtime_alias_generation, wait_identity_startup_ready, with_read_deadline,
     };
     use crate::identity_first::contracts::RosterProvider;
     use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live, register_live};
@@ -13328,6 +13339,31 @@ shell = true
         assert!(!rpc_live_identity_alias_visible("delegate", &labels));
     }
 
+    /// A declaration says nothing of the mob an identity is of: an identity
+    /// whose status declares a `source_mob_id` label is judged like one that
+    /// does not, whatever profile or role it declares.
+    #[test]
+    fn an_identity_status_is_shown_without_a_declared_mob() {
+        let status = |labels: Value| -> crate::identity_first::IdentityStatus {
+            serde_json::from_value(json!({
+                "identity": "review:declared",
+                "state": "dormant",
+                "addressability": "addressable",
+                "profile": "delegate",
+                "labels": labels,
+            }))
+            .expect("identity status")
+        };
+        let plain = status(json!({ "team": "review" }));
+        let declared = status(json!({ "team": "review", "source_mob_id": "another-mob" }));
+        assert!(rpc_identity_status_visible(&plain));
+        assert_eq!(
+            rpc_identity_status_visible(&declared),
+            rpc_identity_status_visible(&plain),
+            "the same answer with and without the declared label"
+        );
+    }
+
     #[test]
     fn ambiguous_live_alias_errors_include_structured_data() -> Result<(), serde_json::Error> {
         let response: Value = serde_json::from_str(&error_response(
@@ -13564,11 +13600,6 @@ shell = true
         // transcript service before they resolve; the operator verb harness
         // covers them (operator_verbs_with_preconditions_refuse_a_stale_runtime_id).
         // meta/set_instruction's member target is checked after the loop.
-        let operator_methods = [
-            "meta/member_instruction_activations",
-            "meta/compact_member",
-            "meta/instruction_status",
-        ];
         for method in [
             "meta/status_identity",
             "meta/inspect_identity",
@@ -13622,27 +13653,25 @@ shell = true
                 "{method}: {unknown:#?}"
             );
 
-            // A stale runtime id of an identity the stdio surface hides
-            // answers hidden by policy and names no binding.
-            let hidden = Box::pin(call(method, "rt:review:delegate:0")).await?;
+            // A declaration says nothing of the mob an identity is of: the
+            // stale runtime id of an identity declared with the `delegate`
+            // profile and a `source_mob_id` label answers the typed refusal
+            // of any other identity, not "hidden by policy".
+            let declared = Box::pin(call(method, "rt:review:delegate:0")).await?;
             assert_eq!(
-                (&hidden["error"]["code"], &hidden["error"]["message"]),
                 (
-                    &json!(-32602),
-                    &json!("invalid identity: identity hidden by policy: rt:review:delegate:0")
+                    &declared["error"]["code"],
+                    &declared["error"]["data"]["kind"],
+                    &declared["error"]["data"]["identity"],
+                    &declared["error"]["data"]["registered_runtime_member_id"],
                 ),
-                "{method}: {hidden:#?}"
-            );
-            if !operator_methods.contains(&method) {
-                assert_eq!(
-                    hidden["error"]["data"],
-                    json!({"kind": "identity_hidden_by_policy", "identity": "rt:review:delegate:0"}),
-                    "{method}: {hidden:#?}"
-                );
-            }
-            assert!(
-                !hidden.to_string().contains("rt:review:delegate:1"),
-                "{method} names no binding of a hidden identity: {hidden}"
+                (
+                    &json!(-32000),
+                    &json!("stale_identity_runtime_binding"),
+                    &json!("review:delegate"),
+                    &json!("rt:review:delegate:1"),
+                ),
+                "{method}: {declared:#?}"
             );
         }
 

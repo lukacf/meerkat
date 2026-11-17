@@ -356,6 +356,7 @@ pub(super) async fn capture_member_lineage_in(
         record,
         namespace,
         resolved.member.role.as_str(),
+        resolved.member.labels.get("role").map(String::as_str),
     )];
     let mut visited = BTreeSet::from([record.identity.clone()]);
     let mut child_labels = record.labels.clone();
@@ -396,14 +397,20 @@ pub(super) async fn capture_member_lineage_in(
                     confirmed = Some((
                         candidate_record.clone(),
                         candidate.resolved.member.role.to_string(),
+                        candidate.resolved.member.labels.get("role").cloned(),
                     ));
                     break;
                 }
             }
         }
         match confirmed {
-            Some((parent_record, role)) => {
-                lineage.push(lineage_link_for_record(&parent_record, namespace, &role));
+            Some((parent_record, role, own_role_label)) => {
+                lineage.push(lineage_link_for_record(
+                    &parent_record,
+                    namespace,
+                    &role,
+                    own_role_label.as_deref(),
+                ));
                 child_labels = parent_record.labels;
             }
             None => {

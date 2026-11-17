@@ -275,18 +275,15 @@ async fn authorize_session_in_namespace(
             if let Some(access) = state.access.as_ref().filter(|access| access.enabled()) {
                 // A live member's value was recorded above, as every route
                 // records it; recording the identity again from its status
-                // would give it a second value.
+                // would give it a second value. An agent with no live
+                // member is recorded from its own record alone, as the
+                // priming above records it: what the spawn registry holds
+                // under its name is of a spawn a tool made, which need not
+                // be this agent, and decides nothing of it.
                 if !live_members.contains(&namespace_console_identity(&request.identity, namespace))
                 {
                     let mut labels = status.labels.clone();
                     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-                    if let Some(registered) = runtime
-                        .console_identity_labels()
-                        .await
-                        .get(identity.as_str())
-                    {
-                        crate::console_spawn::merge_registered_labels(&mut labels, registered);
-                    }
                     access.record_agent_attributes(namespace_console_attributes(
                         AgentResourceAttributes {
                             identity: request.identity.clone(),
@@ -1316,6 +1313,192 @@ mcp_apps_sandbox_url = " "
         assert!(
             quiet.check_current().is_ok(),
             "repeated app authorizations of a live member publish no access change"
+        );
+        Ok(())
+    }
+
+    /// A runtime with agent mob tools, so with the console's spawn registry,
+    /// that holds an earlier tool spawn under `name`: the label
+    /// `tier = vault`, made by the agent `planner`. Its roster is empty.
+    async fn runtime_with_an_earlier_spawn_of(
+        name: &str,
+    ) -> Result<(tempfile::TempDir, MobRuntime), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({
+            "id": "mcp-app-registry",
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.5",
+                    "runtime_mode": "turn_driven",
+                    "tools": { "comms": true }
+                }
+            }
+        }))?;
+        let runtime = MobRuntime::bootstrap(
+            crate::MobBootstrapSpec::ephemeral(
+                definition,
+                meerkat_mob::MobStorage::in_memory(),
+                directory.path().to_path_buf(),
+                16,
+                None,
+            )
+            .expect("the fixture spec builds")
+            .with_options(crate::MobBootstrapOptions {
+                allow_ephemeral_sessions: true,
+                notify_orchestrator_on_resume: true,
+                default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
+            }),
+        )
+        .await?;
+        let sink = crate::console_spawn::ConsoleSpawnSink::new(ConsoleEventStore::new());
+        runtime.install_console_spawn_sink(sink.clone());
+        sink.project_spawned_member(&crate::console_spawn::ConsoleSpawnSeed {
+            mob_id: Some(runtime.handle().mob_id().to_string()),
+            member_id: name.to_string(),
+            identity: name.to_string(),
+            initial_message: None,
+            labels: std::collections::BTreeMap::from([("tier".to_string(), "vault".to_string())]),
+            spawned_by: Some("planner".to_string()),
+            spawned_by_session: None,
+            session_id: None,
+            via_tool: "mob_spawn_member".to_string(),
+        })
+        .await;
+        assert_eq!(
+            runtime
+                .console_identity_labels()
+                .await
+                .labels_of_row(runtime.handle().mob_id().as_str(), name)
+                .and_then(|labels| labels.get("tier"))
+                .map(String::as_str),
+            Some("vault"),
+            "the spawn registry holds the earlier spawn's label under the name"
+        );
+        Ok((directory, runtime))
+    }
+
+    /// Who may view `review:apps` once an app session of it was authorized
+    /// on `session`: a person granted the label only the earlier spawn
+    /// carried, a person granted the agent that made that spawn, and a
+    /// person granted the agent's own profile.
+    async fn views_after_an_app_authorization(
+        owner: Arc<crate::identity_first::IdentityRuntime>,
+        runtime: MobRuntime,
+        session: &meerkat_core::SessionId,
+    ) -> Result<[bool; 3], Box<dyn std::error::Error + Send + Sync>> {
+        const GRACE: &str = "grace@example.test";
+        const DAVE: &str = "dave@example.test";
+        const HEIDI: &str = "heidi@example.test";
+        let mut state = state(Some(runtime.clone()));
+        state.identity_runtime = Some(crate::identity_first::PublicIdentityRuntime::new(
+            owner, runtime,
+        ));
+        let rule = |id: &str, subject: &str| crate::access::AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: vec![ACTION_AGENT_VIEW.to_string()],
+            ..Default::default()
+        };
+        let controller = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["admin@example.test".into()],
+            rules: vec![
+                crate::access::AccessRule {
+                    match_labels: std::collections::BTreeMap::from([(
+                        "tier".to_string(),
+                        "vault".to_string(),
+                    )]),
+                    ..rule("grace-is-granted-the-vault", GRACE)
+                },
+                crate::access::AccessRule {
+                    agents: vec!["planner".to_string()],
+                    ..rule("dave-is-granted-the-planners-members", DAVE)
+                },
+                crate::access::AccessRule {
+                    roles: vec!["worker".to_string()],
+                    ..rule("heidi-is-granted-the-workers", HEIDI)
+                },
+            ],
+            ..Default::default()
+        })?;
+        state.access = Some(controller.clone());
+        // Whatever the authorization answers for the session, it has
+        // recorded the agent for the access rules by then.
+        let _answer = authorize_session(&state, &request(session), Operation::Resolve).await;
+        Ok([GRACE, DAVE, HEIDI].map(|subject| {
+            controller
+                .view_for_subject(Some(subject))
+                .can_view_agent("review:apps")
+        }))
+    }
+
+    /// A registered agent the console's roster holds no row of is recorded
+    /// from its own record alone: its profile as its role and the record's
+    /// labels. What the console's spawn registry holds under its name is of
+    /// a spawn a tool once made under that name, which need not be this
+    /// agent: an allow by a label only that spawn carried does not reach
+    /// the agent, nor does an allow on the agent that made that spawn. An
+    /// allow by the agent's own profile does. Here Core holds the agent's
+    /// member, and the roster the console reads does not.
+    #[tokio::test]
+    async fn a_registered_agent_with_no_roster_row_is_not_decided_by_a_spawn_of_its_name()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use super::super::tests::{
+            empty_identity_control_test_runtime, register_identity_control_test_binding,
+        };
+        let (_directory, runtime) = runtime_with_an_earlier_spawn_of("review:apps").await?;
+        let owner = empty_identity_control_test_runtime("mcp-app-registry")?;
+        let session = meerkat_core::SessionId::new();
+        register_identity_control_test_binding(
+            &owner,
+            "review:apps",
+            "rt:review:apps:0",
+            session.clone(),
+        )
+        .await?;
+        assert_eq!(
+            views_after_an_app_authorization(Arc::clone(&owner), runtime, &session).await?,
+            [false, false, true],
+            "granted by a label of the earlier spawn, on the agent that made it, by the \
+             agent's own profile"
+        );
+        Ok(())
+    }
+
+    /// The same for a registered agent that has no member anywhere.
+    #[tokio::test]
+    async fn a_registered_agent_with_no_member_is_not_decided_by_a_spawn_of_its_name()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use super::super::tests::empty_identity_control_test_runtime;
+        let (_directory, runtime) = runtime_with_an_earlier_spawn_of("review:apps").await?;
+        let owner = empty_identity_control_test_runtime("mcp-app-registry-dormant")?;
+        owner
+            .register(crate::identity_first::DurableAgentSpec {
+                identity: crate::identity_first::AgentIdentity::parse("review:apps")?,
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: std::collections::BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .await
+            .map_err(|error| format!("the identity registers: {error}"))?;
+        assert_eq!(
+            views_after_an_app_authorization(
+                Arc::clone(&owner),
+                runtime,
+                &meerkat_core::SessionId::new()
+            )
+            .await?,
+            [false, false, true],
+            "granted by a label of the earlier spawn, on the agent that made it, by the \
+             agent's own profile"
         );
         Ok(())
     }

@@ -78,8 +78,8 @@ use crate::runtime::MetaRuntimeHandle;
 use crate::runtime::{
     ConsoleAgentLiveSnapshot, ConsoleLiveSnapshot, ConsoleMember, ConsoleModelCapabilities,
     ConsoleRestJsonRequest, DeliveryHistoryRequest, GatingDecideRequest, GatingDecision,
-    RuntimeDecisionState, authorize_console_rest_json_route, extract_bearer_token_from_header,
-    render_console_rest_json_route,
+    RuntimeDecisionState, SnapshotRows, authorize_console_rest_json_route,
+    extract_bearer_token_from_header, render_console_rest_json_route,
 };
 use crate::runtime::{RuntimeMetadataTable, labels_to_json_value};
 use crate::unified_runtime::console_events::{
@@ -1387,6 +1387,24 @@ pub async fn console_json_handler(
                 .iter()
                 .any(|runtime| runtime.runtime.workgraph_service().is_some())
         });
+    // A console with no runtime of its own built its rows from identity
+    // records, whoever asks. They are no access attributes: the caller's
+    // cache is primed from the runtimes, as on every other route of such
+    // a console, and the experience records nothing of its rows. With no
+    // caller resolved nothing is primed and no member row is shown.
+    let snapshot_rows = match (state.runtime.as_ref(), state.console_aggregator.as_ref()) {
+        (None, Some(aggregator)) => {
+            if let Some(caller) = caller.as_ref() {
+                Box::pin(prime_access_cache_from_aggregator(
+                    aggregator,
+                    &caller.audience.controller(),
+                ))
+                .await;
+            }
+            SnapshotRows::OfIdentityRecords
+        }
+        _ => SnapshotRows::OfRosters,
+    };
     let mut response = match authorized {
         Ok(resolved_auth) => render_console_rest_json_route(
             &state.decisions,
@@ -1394,6 +1412,7 @@ pub async fn console_json_handler(
             &request,
             resolved_auth.as_ref(),
             live_snapshot.as_ref(),
+            snapshot_rows,
             state.access.as_ref(),
             caller.as_ref().map(|caller| &caller.audience),
             memory_available,
@@ -4206,12 +4225,20 @@ mod console_malformed_params_tests;
 mod console_frame_witness_tests;
 
 #[cfg(test)]
+#[path = "console_role_label_list_tests.rs"]
+mod console_role_label_list_tests;
+
+#[cfg(test)]
 #[path = "console_kept_apart_tests.rs"]
 mod console_kept_apart_tests;
 
 #[cfg(test)]
 #[path = "console_access_save_refusal_tests.rs"]
 mod console_access_save_refusal_tests;
+
+#[cfg(test)]
+#[path = "console_ended_member_access_tests.rs"]
+mod console_ended_member_access_tests;
 
 #[cfg(test)]
 #[path = "console_stored_session_seat_tests.rs"]
@@ -6029,8 +6056,20 @@ fn timeline_event_visible_to(view: &AccessView, event: &ConsoleTimelineEvent) ->
 /// it. The lineage names each parent in `namespace`, the row's runtime
 /// namespace, as the row's own identity and the access attribute cache name
 /// it.
+///
+/// No list shows a caller what the caller's view refuses: a row whose
+/// identity the access attribute cache knows is listed only if `agent.view`
+/// on that identity, decided on the cache's entry as every agent-scoped
+/// check decides it, allows the caller too. A row carries what a list
+/// serializes of a member (an identity record carries the member's role
+/// under its `role` key, where a label of that name would sit), so a rule
+/// can read a row otherwise than it reads the member; the cache's entry
+/// holds the member's role and its own labels apart. `held` is the
+/// caller's view over the cache taken once for the whole list: each row
+/// costs one decision on its own attributes and, when that allows and the
+/// cache knows the identity, one more on the cache's entry.
 fn listed_member_visible(
-    view: &AccessView,
+    held: &crate::access::HeldAccessView<'_>,
     resource: &AccessResource<'_>,
     registered: Option<&BTreeMap<String, String>>,
     side_chat: Option<&crate::side_chat::SideChatLineage>,
@@ -6038,7 +6077,7 @@ fn listed_member_visible(
 ) -> bool {
     let Some(identity) = resource.identity else {
         // A row that names no agent has no lineage to follow.
-        return view.decide(ACTION_AGENT_VIEW, resource).is_allow();
+        return held.view().decide(ACTION_AGENT_VIEW, resource).is_allow();
     };
     let mut labels = resource.labels.cloned().unwrap_or_default();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
@@ -6051,7 +6090,7 @@ fn listed_member_visible(
             *parent = namespace_console_identity(parent, namespace);
         }
     }
-    view.decide_agent_with_attributes(
+    held.decide_agent_with_attributes(
         ACTION_AGENT_VIEW,
         &AgentResourceAttributes {
             identity: identity.to_string(),
@@ -6061,6 +6100,7 @@ fn listed_member_visible(
         },
     )
     .is_allow()
+        && !held.refuses_view_of_known_agent(identity)
 }
 
 /// The verified side chat lineage of each of `entries`, members of
@@ -6114,7 +6154,8 @@ async fn listed_side_chat_lineages(
 /// the roster rows the rows were serialized from
 /// ([`listed_side_chat_lineages`]). Field names cover both the meerkat
 /// roster entry shape and the console projection shape. A view that
-/// enforces nothing still hides the agents private to another person.
+/// enforces nothing still hides the agents private to another person, and
+/// no row is kept that the caller's view of its agent refuses.
 async fn retain_visible_member_rows(
     rows: &mut Vec<Value>,
     runtime: &MobRuntime,
@@ -6130,6 +6171,8 @@ async fn retain_visible_member_rows(
     let side_chats = listed_side_chat_lineages(runtime, entries).await;
     let handle = runtime.handle();
     let no_labels = std::collections::BTreeMap::new();
+    // The cache is taken once for the whole list; nothing below awaits.
+    let held = view.over_held_attributes();
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -6158,14 +6201,15 @@ async fn retain_visible_member_rows(
             side_chats.get(&*alias)
         });
         listed_member_visible(
-            view,
+            &held,
             &AccessResource {
                 identity,
                 agent_id,
                 role,
                 labels: labels.as_ref(),
             },
-            identity.and_then(|identity| registered.get(identity)),
+            identity
+                .and_then(|identity| registered.labels_of_row(handle.mob_id().as_str(), identity)),
             side_chat,
             "",
         )
@@ -6186,7 +6230,9 @@ fn console_identity_record_role(labels: &BTreeMap<String, String>) -> &str {
 /// [`listed_member_visible`] with the record's role, the spawn registry of
 /// the record's own runtime and the side chat lineage its roster's fork
 /// facts verify. A view that enforces nothing still hides the agents
-/// private to another person.
+/// private to another person. A record's `role` is its member's role in
+/// its mob and its labels are what the list serializes, so no record is
+/// listed that the caller's view of its agent refuses.
 async fn visible_identity_records(
     aggregator: &MetaConsoleAggregator,
     view: Option<&AccessView>,
@@ -6205,11 +6251,13 @@ async fn visible_identity_records(
     // In record order: `retain` visits each record once, in order.
     let mut registered = registered.into_iter();
     let mut side_chats = side_chats.into_iter();
+    // The cache is taken once for the whole list; nothing below awaits.
+    let held = view.over_held_attributes();
     identities.retain(|record| {
         let registry_labels = registered.next().flatten();
         let side_chat = side_chats.next().flatten();
         listed_member_visible(
-            view,
+            &held,
             &AccessResource {
                 identity: Some(record.identity.as_str()),
                 agent_id: Some(record.runtime_member_id.as_str()),
@@ -6223,6 +6271,7 @@ async fn visible_identity_records(
                 .map_or("", String::as_str),
         )
     });
+    drop(held);
     Ok(identities)
 }
 
@@ -10819,7 +10868,13 @@ impl ConsoleViewerResolver {
         .map(|context| ConsoleViewerContext {
             principal: context.principal,
             service_identity: context.service_identity,
-            access_view: context.access_view,
+            // This resolver primes nothing: its caller's request read no
+            // roster, so an agent that exists may be unrecorded. The view
+            // it hands out judges an agent the records do not know by its
+            // bare name; one they know is decided by its entry.
+            access_view: context
+                .access_view
+                .map(AccessView::judging_unknown_agents_by_name),
             human: context.human,
         })
     }
@@ -12251,10 +12306,24 @@ pub(crate) async fn sse_member_authorization_projection(
     // restore `spawned_by` and related inheritance metadata, and only
     // Meerkat's fork record a side chat's source.
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-    if let Some(runtime) = runtime {
-        let registered = runtime.console_identity_labels().await;
-        if let Some(spawn_labels) = registered.get(&alias.identity) {
-            crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
+    if let Some(sink) = runtime.and_then(MobRuntime::console_spawn_sink) {
+        // The binding is in hand: what a spawn registered is this
+        // incarnation's, or cannot be told, and then the event's authority
+        // cannot be proven.
+        match sink
+            .labels_of_seated_row(
+                handle,
+                &alias.identity,
+                expected_runtime_id.identity.as_str(),
+                Some(expected_runtime_id.generation.get()),
+            )
+            .await
+        {
+            Ok(Some(spawn_labels)) => {
+                crate::console_spawn::merge_registered_labels(&mut labels, &spawn_labels);
+            }
+            Ok(None) => {}
+            Err(crate::console_spawn::SpawnEntryNotTold) => return None,
         }
     }
     // A side chat's source, as the roster's fork facts verify it: kept per
@@ -12281,6 +12350,13 @@ pub(crate) async fn sse_member_authorization_projection(
         }
     };
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
+    // Where the member sits, as the member rows say it: a member of the
+    // runtime's own mob names no mob and no host, a member of another mob
+    // names that mob. (Its host and the delegates' group are the member
+    // walk's to know; the stream names neither.)
+    let own_mob = runtime.is_none_or(|runtime| runtime.handle().mob_id() == handle.mob_id());
+    let source_mob_id = (!own_mob).then(|| handle.mob_id().to_string());
+    write_where_the_member_sits(&mut labels, None, source_mob_id.as_deref());
     let visible = runtime_alias_visible_to_console(handle, visibility_policy, &alias);
     Some(SseMemberAuthorizationProjection {
         identity: alias.identity.clone(),
@@ -12650,6 +12726,10 @@ fn console_identity_record_from_identity_status(
     status: &crate::identity_first::IdentityStatus,
 ) -> ConsoleIdentityRecord {
     let mut labels = status.labels.clone();
+    // A declaration does not say which mob the record is of: the record of
+    // an identity's status names none, as the aggregator's does
+    // (`identity_record_for_status`).
+    labels.remove("source_mob_id");
     if let Some(profile) = status.profile.as_ref() {
         labels
             .entry("role".to_string())
@@ -12803,6 +12883,10 @@ fn console_member_from_runtime_alias(
     handle: &MobHandle,
     alias: &ConsoleRuntimeIdentityAlias,
 ) -> ConsoleMember {
+    // An alias is read from a mob's own roster: its labels name no mob and
+    // no host, whatever the roster row holds.
+    let mut labels = alias.member.labels.clone();
+    write_where_the_member_sits(&mut labels, None, None);
     ConsoleMember {
         agent_identity: alias.runtime_member_id.clone(),
         role: alias.member.role.to_string(),
@@ -12816,7 +12900,7 @@ fn console_member_from_runtime_alias(
             .iter()
             .map(|peer| crate::member_comms_id::runtime_alias_str(peer.as_str()).into_owned())
             .collect(),
-        labels: alias.member.labels.clone(),
+        labels,
         progress: None,
     }
 }
@@ -12870,7 +12954,15 @@ fn console_identity_record_from_runtime_alias(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        labels: alias.member.labels.clone(),
+        labels: {
+            // Read from a mob's own roster, as the alias's member is.
+            let mut labels = record_labels_with_the_members_role(
+                &alias.member.labels,
+                alias.member.role.as_str(),
+            );
+            write_where_the_member_sits(&mut labels, None, None);
+            labels
+        },
     }
 }
 
@@ -19516,6 +19608,7 @@ async fn walk_console_snapshot_read_model(
     state.primary_members = primary_members;
 
     let Some(mcp_state) = runtime.agent_mob_mcp_state() else {
+        withhold_spawn_labels_not_told(runtime, &registered_labels, &mut state).await;
         return state;
     };
     let primary_mob_id = handle.mob_id().to_string();
@@ -19559,6 +19652,7 @@ async fn walk_console_snapshot_read_model(
         }
     }
     state.delegate_member_groups = delegate_groups;
+    withhold_spawn_labels_not_told(runtime, &registered_labels, &mut state).await;
     state
 }
 
@@ -20474,8 +20568,20 @@ fn console_identity_record_from_console_member(member: &ConsoleMember) -> Consol
         addressable,
         health: member.state.clone(),
         topology_peers: member.wired_to.clone(),
-        labels: member.labels.clone(),
+        labels: record_labels_with_the_members_role(&member.labels, &member.role),
     }
+}
+
+/// The labels of the record the visibility policy is asked with for a
+/// member: the member's labels, with its role as the member itself says it.
+/// A `role` label on the row is a label, never the member's role.
+fn record_labels_with_the_members_role(
+    labels: &BTreeMap<String, String>,
+    role: &str,
+) -> BTreeMap<String, String> {
+    let mut labels = labels.clone();
+    labels.insert("role".to_string(), role.to_string());
+    labels
 }
 
 fn baseline_spec_visible_to_console(
@@ -20582,7 +20688,7 @@ pub(crate) async fn prime_current_runtime_aliases(
 }
 
 pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &AccessController) {
-    let registered = BTreeMap::new();
+    let registered = crate::console_spawn::SpawnRegistry::default();
     let mut roster_identities = BTreeSet::new();
     let members = live_member_access_attributes(
         handle,
@@ -20600,6 +20706,8 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         access,
         members,
         &registered,
+        // No spawn registry is read here: every entry it holds is told.
+        &BTreeSet::new(),
         &roster_identities,
         &BTreeMap::new(),
         "",
@@ -20860,10 +20968,16 @@ async fn prime_access_cache_from_runtime_in_namespace(
     .await;
     #[cfg(test)]
     unseated_read_hold::wait(runtime.handle().mob_id().as_str()).await;
+    // The registry was taken before the rosters were read. It is settled
+    // once more now that they are: a name seated anew by no rotation in
+    // between has no entry any more, and what was read of it may be
+    // either member's.
+    let not_told = runtime.spawn_entries_not_told(&registered).await;
     let mut recorded = record_live_and_registered_attributes(
         access,
         members,
         &registered,
+        &not_told,
         &roster_identities,
         &known_members,
         namespace,
@@ -20933,7 +21047,7 @@ async fn live_member_access_attributes(
     handle: &MobHandle,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
-    registered: &BTreeMap<String, BTreeMap<String, String>>,
+    registered: &crate::console_spawn::SpawnRegistry,
     roster_identities: &mut BTreeSet<String>,
     lineage_cache: Option<&crate::side_chat::SideChatLineageCache>,
 ) -> Vec<AgentResourceAttributes> {
@@ -21017,54 +21131,118 @@ async fn live_member_access_attributes(
 
 /// Record `members` (primary members first) one final value per console
 /// identity, folded as the console experience folds them
-/// ([`crate::runtime::fold_console_member_attributes`]), then the spawn
-/// registry's attributes for each registered identity that neither a member
-/// nor a roster row in `roster_identities` names. Returns the recorded member
-/// identities, namespaced.
+/// ([`crate::runtime::fold_console_member_attributes`]), then, as an ended
+/// member, each identity the spawn registry or the record of who each member
+/// is private to names that neither a member nor a roster row in
+/// `roster_identities` names. Returns the recorded member identities,
+/// namespaced.
 fn record_live_and_registered_attributes(
     access: &AccessController,
     members: Vec<AgentResourceAttributes>,
-    registered: &BTreeMap<String, BTreeMap<String, String>>,
+    registered: &crate::console_spawn::SpawnRegistry,
+    not_told: &BTreeSet<String>,
     roster_identities: &BTreeSet<String>,
     known_members: &BTreeMap<String, Option<String>>,
     namespace: &str,
 ) -> BTreeSet<String> {
     let final_by_identity = crate::runtime::fold_console_member_attributes(members);
-    // An identity no live member names keeps what the spawn registry
-    // recorded for it and, for a member private to a person whose rows have
-    // ended (a closed side chat, a retired helper of one), its private owner
+    // An identity no live member names is known by its name and, for a
+    // member private to a person whose rows have ended (a closed side
+    // chat, a retired helper of one), its private owner
     // ([`crate::private_owners::PrivateOwners`]): it stays private after it
     // left the roster, after a restart too. An ended member the record knows
-    // as shared is recorded too, so the console knows it.
-    let ended: BTreeSet<&String> = registered
-        .keys()
-        .chain(known_members.keys())
+    // as shared is recorded too, so the console knows it. A member seated in
+    // a mob the console does not list (a temporary council's seat, a mob
+    // the host created beside the console's own) is among these identities
+    // too: no roster the console reads names it, so it is recorded like an
+    // ended member, with what is not known of it.
+    let ended: BTreeSet<String> = registered
+        .identities()
+        .map(str::to_string)
+        .chain(known_members.keys().cloned())
         .filter(|identity| {
-            !final_by_identity.contains_key(*identity) && !roster_identities.contains(*identity)
+            !final_by_identity.contains_key(identity) && !roster_identities.contains(identity)
         })
         .collect();
     for identity in ended {
-        let mut labels = registered.get(identity).cloned().unwrap_or_default();
-        if let Some(Some(owner)) = known_members.get(identity) {
+        // What cannot be of another member of the name. The spawn registry
+        // holds what the last spawn a tool made under the name carried (its
+        // labels, who made it), which need not be the member that ended:
+        // none of it decides an ended member. Who it was private to is the
+        // owner record's answer, which every spawn writes and which only
+        // ever hides.
+        let mut labels = BTreeMap::new();
+        if let Some(Some(owner)) = known_members.get(&identity) {
             labels.insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner.clone());
         }
-        access.record_agent_attributes(namespace_console_attributes(
+        // Its role, every other label and who spawned it are not known,
+        // the same before a restart and after one: a rule on any of them
+        // is decided closed for it. A label named `role` is a label its
+        // spawn chose, never its role.
+        access.record_ended_agent_attributes(namespace_console_attributes(
             AgentResourceAttributes {
-                identity: identity.clone(),
+                identity,
                 agent_id: None,
-                role: labels.get("role").cloned(),
+                role: None,
                 labels,
             },
             namespace,
         ));
     }
     let mut recorded = BTreeSet::new();
-    for attributes in final_by_identity.into_values() {
+    for mut attributes in final_by_identity.into_values() {
+        // What a spawn registered of this member cannot be told for this
+        // request (`not_told`): the member is recorded with its own row's
+        // role and labels, and nothing a registry entry of its name holds.
+        let told = !not_told.contains(&attributes.identity);
+        if !told {
+            for key in registered.label_keys_of(&attributes.identity) {
+                attributes.labels.remove(&key);
+            }
+            for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+                attributes.labels.remove(key);
+            }
+        }
         let attributes = namespace_console_attributes(attributes, namespace);
         recorded.insert(attributes.identity.clone());
-        access.record_agent_attributes(attributes);
+        if told {
+            access.record_agent_attributes(attributes);
+        } else {
+            access.record_agent_spawn_facts_not_known(attributes);
+        }
     }
     recorded
+}
+
+/// The snapshot walk took the spawn registry before it read the rosters. Now
+/// that they are read the registry is settled once more: a name seated anew
+/// by no rotation in between has no entry any more, and the row the walk
+/// read of it may be either member's. Such a row keeps its own roster labels
+/// and loses what an entry of its name holds, and its lineage.
+async fn withhold_spawn_labels_not_told(
+    runtime: &MobRuntime,
+    registered: &crate::console_spawn::SpawnRegistry,
+    state: &mut ConsoleSnapshotReadModelState,
+) {
+    #[cfg(test)]
+    unseated_read_hold::wait(&format!("walk:{}", runtime.handle().mob_id())).await;
+    let not_told = runtime.spawn_entries_not_told(registered).await;
+    if not_told.is_empty() {
+        return;
+    }
+    for member in state
+        .primary_members
+        .iter_mut()
+        .chain(state.delegate_member_groups.iter_mut().flatten())
+        .filter(|member| not_told.contains(&member.agent_identity))
+    {
+        for key in registered.label_keys_of(&member.agent_identity) {
+            member.labels.remove(&key);
+        }
+        for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+            member.labels.remove(key);
+        }
+    }
 }
 
 /// The agent-created sub-mobs the console shows as delegate groups, each
@@ -21113,10 +21291,13 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 /// the roster labels without unverified lineage, gaps filled from the spawn
 /// registry (looked up under the member's console identity), a side chat's
 /// verified source (`side_chat`, from the roster's fork record:
-/// [`crate::side_chat::project_side_chat_lineage`]), and, for a member of an
-/// agent-created sub-mob, its delegate host and source mob. Roster labels
-/// win, except lineage, which only the spawn registry and Meerkat's fork
-/// record may assert. The console's member rows and every route's access
+/// [`crate::side_chat::project_side_chat_lineage`]), and where the member
+/// sits: for a member of an agent-created sub-mob its delegate host, the
+/// delegates' group and its source mob, and for a member of the runtime's
+/// own mob neither host nor mob. Roster labels win, except lineage, which
+/// only the spawn registry and Meerkat's fork record may assert, and where
+/// the member sits, which the console writes from where it read the member.
+/// The console's member rows and every route's access
 /// priming use this projection, so all of them record one value per
 /// identity.
 fn projected_console_member_labels(
@@ -21125,7 +21306,7 @@ fn projected_console_member_labels(
     alias: &str,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
-    registered_labels: &BTreeMap<String, BTreeMap<String, String>>,
+    registered_labels: &crate::console_spawn::SpawnRegistry,
     side_chat: Option<&crate::side_chat::SideChatLineage>,
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
@@ -21136,24 +21317,50 @@ fn projected_console_member_labels(
         roster_labels,
     );
     let console_identity_key = console_identity.as_deref().unwrap_or(alias);
-    if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
+    // The registry's entry of this row: the one of the row's own mob.
+    if let Some(spawn_labels) =
+        registered_labels.labels_of_row(handle.mob_id().as_str(), console_identity_key)
+    {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
-    if let Some(host_identity) = host_identity {
-        labels
-            .entry("delegate_host_identity".to_string())
-            .or_insert_with(|| host_identity.to_string());
-        labels
-            .entry("group".to_string())
-            .or_insert_with(|| "Coordinators".to_string());
-    }
-    if let Some(source_mob_id) = source_mob_id {
-        labels
-            .entry("source_mob_id".to_string())
-            .or_insert_with(|| source_mob_id.to_string());
-    }
+    write_where_the_member_sits(&mut labels, host_identity, source_mob_id);
     labels
+}
+
+/// Write where a member sits onto its labels. That is the console's own
+/// fact, whatever the labels held: a member read for a delegate host names
+/// that host and the delegates' group, a member read from another mob names
+/// that mob, and a member read from a mob's own roster names neither host
+/// nor mob. Access rules, the visibility policy and the member controls
+/// read these keys, so every reader that hands a member's labels to one of
+/// them writes them here: the row builder, the record and the member of a
+/// runtime alias, and the event stream's projection.
+fn write_where_the_member_sits(
+    labels: &mut BTreeMap<String, String>,
+    host_identity: Option<&str>,
+    source_mob_id: Option<&str>,
+) {
+    match host_identity {
+        Some(host_identity) => {
+            labels.insert(
+                "delegate_host_identity".to_string(),
+                host_identity.to_string(),
+            );
+            labels.insert("group".to_string(), "Coordinators".to_string());
+        }
+        None => {
+            labels.remove("delegate_host_identity");
+        }
+    }
+    match source_mob_id {
+        Some(source_mob_id) => {
+            labels.insert("source_mob_id".to_string(), source_mob_id.to_string());
+        }
+        None => {
+            labels.remove("source_mob_id");
+        }
+    }
 }
 
 async fn project_console_members_from_handle(
@@ -21163,7 +21370,7 @@ async fn project_console_members_from_handle(
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
     read_model: &ConsoleSnapshotReadModelState,
-    registered_labels: &BTreeMap<String, BTreeMap<String, String>>,
+    registered_labels: &crate::console_spawn::SpawnRegistry,
 ) -> (Vec<ConsoleMember>, BTreeMap<String, String>) {
     // Meerkat 0.7: lifecycle status is machine-projected onto
     // `MobMemberListEntry`; the structural `list_all_members` roster no longer
@@ -29591,6 +29798,118 @@ message = "review"
         Ok(())
     }
 
+    /// The per-agent event stream answers an agent private to another
+    /// person exactly as it answers a name no member holds, status and
+    /// body: for a caller a deny by label applies to (the name alone cannot
+    /// rule the deny out, so both are refused) and for a caller no deny
+    /// applies to (both are a member the console does not hold).
+    #[tokio::test]
+    async fn agent_events_stream_answers_a_hidden_agent_as_a_name_no_member_holds()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        const PRIVATE: &str = "review:stream-private";
+        const FREE: &str = "review:stream-nobody";
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("agent-events-stream-hidden").await?;
+        runtime
+            .handle()
+            .spawn_spec(
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    crate::member_comms_id::mob_member_id_str(PRIVATE).into_owned(),
+                    None,
+                    None,
+                    None,
+                )
+                .with_labels(BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:aa".to_string(),
+                )])),
+            )
+            .await?;
+        let view_all = crate::access::AccessRule {
+            id: "view-all".to_string(),
+            actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+            agents: vec!["*".to_string()],
+            ..crate::access::AccessRule::default()
+        };
+        let deny_by_label = crate::access::AccessRule {
+            id: "deny-restricted".to_string(),
+            effect: crate::access::AccessEffect::Deny,
+            actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+            match_labels: BTreeMap::from([("org".to_string(), "restricted".to_string())]),
+            ..crate::access::AccessRule::default()
+        };
+        // The stream of a name no member holds does not open.
+        let subscribe: crate::http_sse::AgentEventReplaySubscribeFn =
+            Arc::new(move |agent_id, _cursor| {
+                Box::pin(async move {
+                    Err::<crate::http_sse::AgentEventReplay, _>(
+                        crate::mob_handle_runtime::MobRuntimeError::Mob(
+                            meerkat_mob::MobError::MemberNotFound(
+                                meerkat_mob::AgentIdentity::from(agent_id.as_str()),
+                            ),
+                        ),
+                    )
+                })
+            });
+        let mut answers = Vec::new();
+        for rules in [vec![view_all.clone(), deny_by_label], vec![view_all]] {
+            let controller =
+                crate::access::AccessController::new(crate::access::AccessControlConfig {
+                    enabled: true,
+                    admins: vec!["root@example.test".to_string()],
+                    rules,
+                    ..crate::access::AccessControlConfig::default()
+                })?;
+            let app = crate::http_sse::agent_events_sse_router_with_access_and_priming(
+                Arc::clone(&subscribe),
+                None,
+                Some(controller),
+                Some(runtime.clone()),
+                None,
+                Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
+                crate::auth::session_fence::ConsoleSessionFences::detached(),
+            );
+            let mut pair = Vec::new();
+            for agent_id in [PRIVATE, FREE] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/agents/{agent_id}/events"))
+                            .body(Body::empty())?,
+                    )
+                    .await?;
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+                pair.push((status, String::from_utf8(body.to_vec())?));
+            }
+            answers.push(pair);
+        }
+        for (caller, pair) in [
+            "a caller a deny by label applies to",
+            "a caller no deny applies to",
+        ]
+        .into_iter()
+        .zip(&answers)
+        {
+            assert_eq!(
+                pair[0], pair[1],
+                "{caller}: the hidden agent and the name no member holds"
+            );
+        }
+        assert_eq!(
+            answers.iter().map(|pair| pair[1].0).collect::<Vec<_>>(),
+            vec![StatusCode::FORBIDDEN, StatusCode::NOT_FOUND],
+            "the name no member holds, for each caller"
+        );
+        Ok(())
+    }
+
     /// The console access rules judge a member named by its runtime alias as
     /// the member it names, with that member's labels, as they judge its
     /// durable identity: a label-scoped deny holds for a member read and for a
@@ -32487,7 +32806,7 @@ comms = true
             None,
             None,
             &empty_read_model,
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
 
@@ -32506,7 +32825,7 @@ comms = true
             None,
             None,
             &refreshed_read_model,
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         assert_eq!(
@@ -33682,7 +34001,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         for member in &mut members {
@@ -33761,7 +34080,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         let entries = handle.list_members_including_retiring().await;
@@ -33843,7 +34162,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         let progress = console_progress_of(&members, "solo").expect("solo has progress");
@@ -33942,7 +34261,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         let awake = console_progress_of(&members, "awake").expect("awake has progress");
@@ -34234,6 +34553,65 @@ mod console_viewer_resolver_tests {
         format!("/host/status?auth_token={}", token(subject))
             .parse()
             .unwrap()
+    }
+
+    /// The view the public resolver hands out reads no roster on its
+    /// request. An agent the access records do not know is judged there
+    /// by its bare name, so a deny by role refuses no agent the records
+    /// merely have not read yet; an agent they know as ended is decided
+    /// closed there as on every door. A view of the console's own routes
+    /// refuses the unknown name to the same caller.
+    #[test]
+    fn the_resolvers_view_judges_an_agent_the_records_do_not_know_by_its_name() {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "bob-drives-every-agent".to_string(),
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "bob-is-denied-the-workers".to_string(),
+                    effect: crate::access::AccessEffect::Deny,
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    roles: vec!["worker".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("access controller");
+        let resolver = ConsoleViewerResolver::new(decisions(true), Some(controller.clone()));
+        let uri: Uri = "/host/status".parse().unwrap();
+        let resolved = resolver
+            .resolve(&bearer(BOB), &uri)
+            .expect("the resolver resolves the signed-in person")
+            .access_view
+            .expect("an access view");
+        let on_a_route = controller.view_for_subject(Some(BOB));
+        assert!(
+            resolved.can_view_agent("never-recorded"),
+            "the resolver's view judges a name the records do not know by the name"
+        );
+        assert!(
+            !on_a_route.can_view_agent("never-recorded"),
+            "a view of the console's own routes refuses it under the deny by role"
+        );
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "ended-worker".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        assert!(
+            !resolved.can_view_agent("ended-worker") && !on_a_route.can_view_agent("ended-worker"),
+            "an agent the records know as ended is decided closed on both"
+        );
     }
 
     fn access(rule_subjects: &[&str]) -> AccessControlConfig {
@@ -35632,6 +36010,83 @@ mod console_identity_row_keys_tests {
             },
             None,
         ));
+    }
+
+    /// A declaration says nothing of the mob an identity's record is of: the
+    /// record the visibility policy is asked with keeps every declared label
+    /// except `source_mob_id`, and an identity that declares that label is
+    /// judged like one that does not, whatever role it declares.
+    #[test]
+    fn an_identity_status_is_judged_without_a_declared_mob() {
+        let status = |labels: Value| -> crate::identity_first::IdentityStatus {
+            serde_json::from_value(json!({
+                "identity": "console:declared",
+                "state": "dormant",
+                "addressability": "addressable",
+                "labels": labels,
+            }))
+            .expect("identity status")
+        };
+        let declared = status(json!({
+            "role": "delegate",
+            "team": "review",
+            "source_mob_id": "another-mob",
+        }));
+        let plain = status(json!({ "role": "delegate", "team": "review" }));
+        assert_eq!(
+            console_identity_record_from_identity_status(&declared).labels,
+            console_identity_record_from_identity_status(&plain).labels,
+            "the record names no declared mob and keeps the other labels"
+        );
+        let policy = HideImplicitDelegateMembersConsoleVisibilityPolicy;
+        assert_eq!(
+            identity_status_visible_to_console(&policy, &declared),
+            identity_status_visible_to_console(&policy, &plain),
+            "the same answer with and without the declared label"
+        );
+        assert!(identity_status_visible_to_console(&policy, &declared));
+    }
+
+    /// The record the visibility policy is asked with for a member's row
+    /// says the member's own role, whatever a `role` label on the row says:
+    /// a member that is no implicit delegate is shown, and one that is stays
+    /// left out.
+    #[test]
+    fn a_member_rows_record_takes_its_role_from_the_member() {
+        let member = |role: &str, labels: &[(&str, &str)]| ConsoleMember {
+            agent_identity: "alpha".to_string(),
+            role: role.to_string(),
+            state: MEMBER_STATE_ACTIVE.to_string(),
+            model_capabilities: Default::default(),
+            runtime_mode: None,
+            session_id: None,
+            wired_to: Vec::new(),
+            labels: labels
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+            progress: None,
+        };
+        let policy = HideImplicitDelegateMembersConsoleVisibilityPolicy;
+        let labelled = member(
+            "worker",
+            &[("role", "delegate"), ("source_mob_id", "a-child-mob")],
+        );
+        let record = console_identity_record_from_console_member(&labelled);
+        assert_eq!(
+            record.labels.get("role").map(String::as_str),
+            Some("worker"),
+            "the record says the member's role"
+        );
+        assert!(
+            policy.identity_visible(&record),
+            "a worker is shown whatever its role label says"
+        );
+        let delegate = member("delegate", &[("source_mob_id", "a-child-mob")]);
+        assert!(
+            !policy.identity_visible(&console_identity_record_from_console_member(&delegate)),
+            "an implicit delegate stays left out"
+        );
     }
 
     /// The marks of an identity's status that are written only when true:
@@ -38387,10 +38842,11 @@ mod console_access_priming_tests {
     }
 
     /// An identity known only to the spawn registry, with no live member on
-    /// any mob, keeps the registry's value on every route: no agent id, the
-    /// registered role and the registered labels.
+    /// any mob, has one value on every route: its name, with no agent id, no
+    /// role and nothing its spawn recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_registered_identity_without_a_live_member_keeps_the_registry_value() -> TestResult {
+    async fn a_registered_identity_without_a_live_member_has_one_value_on_every_route() -> TestResult
+    {
         let root = tempfile::tempdir()?;
         let runtime = runtime("access-priming-registry-only", root.path()).await?;
         turn_driven_member(&runtime, "lead", None).await?;
@@ -38411,32 +38867,32 @@ mod console_access_priming_tests {
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
-        let registered = runtime
-            .console_identity_labels()
-            .await
-            .get("departed")
-            .cloned()
-            .ok_or("the spawn registry knows the departed identity")?;
+        assert!(
+            runtime
+                .console_identity_labels()
+                .await
+                .holds_identity("departed"),
+            "the spawn registry knows the departed identity"
+        );
         let (controller, publication) = joined_controller()?;
         prime_access_cache_from_runtime(&runtime, &controller).await;
         let quiet = publication
             .observe(|| ())
             .map_err(|_| "a quiet publication")?
             .1;
-        // Recording the exact registry value changes nothing: the cache
-        // holds it.
-        controller.record_agent_attributes(AgentResourceAttributes {
+        // Recording that value again changes nothing: the cache holds it.
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
             identity: "departed".to_string(),
             agent_id: None,
-            role: Some("worker".to_string()),
-            labels: registered,
+            role: None,
+            labels: BTreeMap::new(),
         });
         prime_access_cache_from_runtime(&runtime, &controller).await;
         console_experience(&runtime, &controller).await;
         prime_access_cache_from_runtime(&runtime, &controller).await;
         assert!(
             quiet.check_current().is_ok(),
-            "the registry value stays the identity's one value on every route"
+            "the identity keeps one value on every route"
         );
         Ok(())
     }

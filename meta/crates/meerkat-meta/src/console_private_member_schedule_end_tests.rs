@@ -74,6 +74,17 @@ const REAIMED: &str = "REAIMED-6R-by-an-update";
 /// A turn whose prompt holds this word and `child=<name>` calls the member
 /// tool `spawn_member` for a member of that name.
 const SPAWN_A_CHILD: &str = "SPAWN-A-CHILD-6R";
+/// A turn whose prompt holds this word and `mob=<id>` calls `mob_create`
+/// for a mob of that id with one turn-driven `worker` profile.
+const CREATE_A_MOB: &str = "CREATE-A-MOB-6R";
+/// The call id of a scripted `mob_create`.
+const CREATE_MOB_CALL: &str = "create-a-mob";
+/// A turn whose prompt holds this word, `mob=<id>` and `child=<name>` calls
+/// `mob_spawn_member` for a `worker` member of that name in that mob.
+const SPAWN_INTO_A_MOB: &str = "SPAWN-INTO-A-MOB-6R";
+/// The call id of a scripted `mob_spawn_member` into a named mob.
+const SPAWN_INTO_MOB_CALL: &str = "spawn-into-a-mob";
+const MOB_CREATE: &str = "mob_create";
 const MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
 const SPAWN_MEMBER: &str = "spawn_member";
 const FORK_OFF: &str = "fork_off";
@@ -220,6 +231,30 @@ impl LlmClient for ScriptedClient {
                 _ => json!({ "schedule_id": schedule_id }),
             };
             call(READ_CALL, &tool, args)
+        } else if first && last.contains(CREATE_A_MOB) && holds(MOB_CREATE) {
+            call(
+                CREATE_MOB_CALL,
+                MOB_CREATE,
+                json!({ "definition": {
+                    "id": word(&last, "mob="),
+                    "profiles": { "worker": {
+                        "model": WORKER_MODEL,
+                        "runtime_mode": "turn_driven",
+                        "tools": { "comms": true }
+                    } }
+                } }),
+            )
+        } else if first && last.contains(SPAWN_INTO_A_MOB) && holds(MOB_SPAWN_MEMBER) {
+            let mut args = json!({
+                "mob_id": word(&last, "mob="),
+                "profile": "worker",
+                "member_id": word(&last, "child=")
+            });
+            // `tier=` gives the spawn one label of its own.
+            if last.contains("tier=") {
+                args["labels"] = json!({ "tier": word(&last, "tier=") });
+            }
+            call(SPAWN_INTO_MOB_CALL, MOB_SPAWN_MEMBER, args)
         } else if first && last.contains(SPAWN_A_CHILD) && holds(SPAWN_MEMBER) {
             call(
                 "spawn-a-child",
@@ -2715,4 +2750,1733 @@ async fn an_end_a_launch_only_held_is_shown_to_the_launch_that_speaks_for_the_co
     speaks.abort();
     let _ = speaks.await;
     launch.finish().await;
+}
+
+/// A member's name is its mob's own. An agent that seats a member in a mob
+/// of its own under the name of a member of the launch's mob changes nothing
+/// of what the Console holds of the launch's member: what its doors and the
+/// access view answer a signed-in caller about that member is the same
+/// before and after. Each row prints what it read (`ROW ...`).
+mod spawned_member_names_across_mobs {
+    use super::super::console_private_side_chat_tests::{
+        ALICE, ROOT, bob_claims, row, send_on_console, sidebar,
+    };
+    use super::*;
+
+    /// A shared agent whose turns make the mob tool calls.
+    const CALLER: &str = "alpha";
+    /// A shared member of the launch's mob that the host seated.
+    const NAMED: &str = "beta";
+
+    fn clip(text: &str) -> String {
+        text.chars().take(600).collect()
+    }
+
+    /// The answer of the scripted call `call_id` made since request `since`,
+    /// as its model saw it: it sees it only after the call returned.
+    async fn answer_since(launch: &Launch, since: usize, call_id: &str) -> String {
+        for _ in 0..100 {
+            if let Some(request) = launch
+                .seen
+                .all()
+                .into_iter()
+                .skip(since)
+                .find(|request| request.tool_results.contains(call_id))
+            {
+                return request.tool_results;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        String::new()
+    }
+
+    /// `agent`'s own turns create the mob `mob` and seat a member `name` in
+    /// it with `mob_spawn_member`. Whether that mob then holds the member.
+    async fn seats_in_its_own_mob(launch: &Launch, agent: &str, mob: &str, name: &str) -> bool {
+        let since = launch.seen.all().len();
+        launch
+            .turn(agent, &format!("{CREATE_A_MOB} mob={mob} please"))
+            .await;
+        let created = answer_since(launch, since, CREATE_MOB_CALL).await;
+        println!("ROW: {agent}'s mob_create answered {}", clip(&created));
+        let since = launch.seen.all().len();
+        launch
+            .turn(
+                agent,
+                &format!("{SPAWN_INTO_A_MOB} mob={mob} child={name} please"),
+            )
+            .await;
+        let spawned = answer_since(launch, since, SPAWN_INTO_MOB_CALL).await;
+        println!(
+            "ROW: {agent}'s mob_spawn_member answered {}",
+            clip(&spawned)
+        );
+        let mut holds = false;
+        if let Some(mob_tools) = launch.mob().agent_mob_mcp_state() {
+            for (mob_id, handle) in Box::pin(mob_tools.mob_handles_snapshot())
+                .await
+                .unwrap_or_default()
+            {
+                if mob_id.as_str() == mob {
+                    holds = handle
+                        .get_member(&AgentIdentity::from(name))
+                        .await
+                        .expect("roster read")
+                        .is_some();
+                }
+            }
+        }
+        println!("ROW: {agent}'s own mob {mob} holds a member {name}: {holds}");
+        holds
+    }
+
+    /// What the Console's doors answer one caller about one agent.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Doors {
+        /// The caller's sidebar lists the agent.
+        listed: bool,
+        /// `meta/get_member` answers the agent.
+        read: bool,
+        /// `POST /console/send` passed the send gate: this Console serves no
+        /// aggregator, so a send its gate admits answers `unavailable`.
+        send_admitted: bool,
+        verbatim: String,
+    }
+
+    impl Doors {
+        fn answers(&self) -> (bool, bool, bool) {
+            (self.listed, self.read, self.send_admitted)
+        }
+    }
+
+    async fn doors(app: &Router, bearer: &str, agent: &str) -> Doors {
+        let listed = row(&sidebar(app, Some(bearer)).await, agent).is_some();
+        let got = console_rpc_as(
+            app,
+            Some(bearer),
+            "meta/get_member",
+            json!({ "member_id": agent }),
+        )
+        .await;
+        let read = got["error"].is_null();
+        let (status, sent) = send_on_console(app, bearer, agent).await;
+        let send_admitted = sent["error"] == json!("unavailable");
+        let verbatim = format!(
+            "sidebar={listed} get_member={} send={} {}",
+            if read {
+                "ok".to_string()
+            } else {
+                clip(&format!(
+                    "{} {}",
+                    got["error"]["code"], got["error"]["message"]
+                ))
+            },
+            status.as_u16(),
+            sent["error"]
+        );
+        Doors {
+            listed,
+            read,
+            send_admitted,
+            verbatim,
+        }
+    }
+
+    /// The access view's own answers for `subject` on `agent` after a
+    /// priming from the runtime: `agent.view`, `agent.send`, and the view
+    /// decision.
+    async fn gate(
+        launch: &Launch,
+        access: &AccessController,
+        subject: &str,
+        agent: &str,
+    ) -> (bool, bool, String) {
+        prime_access_cache_from_runtime(launch.mob(), access).await;
+        let view = access.view_for_subject(Some(subject));
+        (
+            view.can_view_agent(agent),
+            view.allows_agent(ACTION_AGENT_SEND, agent),
+            format!("{:?}", view.decide_agent(ACTION_AGENT_VIEW, agent)),
+        )
+    }
+
+    /// Rules under which the first person may view and send to `agent`
+    /// only, plus `more`; `root` is the one admin.
+    fn first_person_on(agent: &str, more: Vec<AccessRule>) -> AccessController {
+        let mut rules = vec![AccessRule {
+            id: "first-person-on-one-agent".to_string(),
+            subjects: vec![ALICE.to_string()],
+            actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+            agents: vec![agent.to_string()],
+            ..AccessRule::default()
+        }];
+        rules.extend(more);
+        AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules,
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller")
+    }
+
+    /// A deny of every agent action for the first person on `agent`.
+    fn first_person_off(agent: &str) -> AccessRule {
+        AccessRule {
+            id: "first-person-off-one-agent".to_string(),
+            effect: crate::access::AccessEffect::Deny,
+            subjects: vec![ALICE.to_string()],
+            actions: vec!["agent.*".to_string()],
+            agents: vec![agent.to_string()],
+            ..AccessRule::default()
+        }
+    }
+
+    /// The rules allow the first person the calling agent only. The calling
+    /// agent seats a member under the launch member's name in a mob of its
+    /// own: the doors and the access view refuse her the launch's member
+    /// before, and after.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_seated_in_an_agents_own_mob_leaves_the_launch_members_doors() {
+        let launch = boot("own-mob").await;
+        launch.shared("planner", CALLER).await;
+        launch.shared("worker", NAMED).await;
+        let access = first_person_on(CALLER, Vec::new());
+        let app =
+            console_json_router_with_state(enforced_console(launch.mob(), Some(access.clone())));
+        let alice = bearer(alice_claims());
+
+        let on_caller = doors(&app, &alice, CALLER).await;
+        let before = doors(&app, &alice, NAMED).await;
+        let gate_before = gate(&launch, &access, ALICE, NAMED).await;
+        println!("ROW 1: on the calling agent: {}", on_caller.verbatim);
+        println!("ROW 1: before, on {NAMED}: {}", before.verbatim);
+        println!("ROW 1: before, the access view on {NAMED}: {gate_before:?}");
+        launch.expect(
+            on_caller.listed && on_caller.send_admitted,
+            format!(
+                "the first person is shown the calling agent and her send to it passes the gate \
+                 ({})",
+                on_caller.verbatim
+            ),
+        );
+        launch.expect(
+            before.answers() == (false, false, false) && !gate_before.0 && !gate_before.1,
+            "before, the doors and the access view refuse the first person the launch's member",
+        );
+
+        let own_mob = format!("{}-own", launch.mob_id);
+        let seated = seats_in_its_own_mob(&launch, CALLER, &own_mob, NAMED).await;
+        launch.expect(
+            seated,
+            "the calling agent's own mob holds the member it seated there",
+        );
+
+        let after = doors(&app, &alice, NAMED).await;
+        let gate_after = gate(&launch, &access, ALICE, NAMED).await;
+        println!("ROW 1: after, on {NAMED}: {}", after.verbatim);
+        println!("ROW 1: after, the access view on {NAMED}: {gate_after:?}");
+        launch.expect(
+            after.answers() == (false, false, false) && !gate_after.0 && !gate_after.1,
+            format!(
+                "after, the doors and the access view still refuse the first person the \
+                 launch's member ({}; {gate_after:?})",
+                after.verbatim
+            ),
+        );
+        launch.finish().await;
+    }
+
+    /// The other order: the calling agent seats the name in a mob of its own
+    /// first, and the host seats a member of that name in the launch's mob
+    /// afterwards. The doors and the access view refuse the first person
+    /// the launch's member.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_seated_after_its_name_was_used_in_an_agents_own_mob_keeps_its_doors() {
+        const LATER: &str = "zeta";
+        let launch = boot("later").await;
+        launch.shared("planner", CALLER).await;
+        let access = first_person_on(CALLER, Vec::new());
+        let app =
+            console_json_router_with_state(enforced_console(launch.mob(), Some(access.clone())));
+        let alice = bearer(alice_claims());
+
+        let own_mob = format!("{}-own", launch.mob_id);
+        let seated = seats_in_its_own_mob(&launch, CALLER, &own_mob, LATER).await;
+        launch.expect(
+            seated,
+            "the calling agent's own mob holds the member it seated there",
+        );
+        launch.shared("worker", LATER).await;
+
+        let after = doors(&app, &alice, LATER).await;
+        let gate_after = gate(&launch, &access, ALICE, LATER).await;
+        println!(
+            "ROW 2: on the later launch member {LATER}: {}",
+            after.verbatim
+        );
+        println!("ROW 2: the access view on {LATER}: {gate_after:?}");
+        launch.expect(
+            after.answers() == (false, false, false) && !gate_after.0 && !gate_after.1,
+            format!(
+                "the doors and the access view refuse the first person the launch's member \
+                 seated later ({}; {gate_after:?})",
+                after.verbatim
+            ),
+        );
+        launch.finish().await;
+    }
+
+    /// The calling agent is the first person's private side chat. It seats a
+    /// member under the shared launch member's name in a mob of its own: the
+    /// doors answer a second person the shared member before, and after.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_seated_in_a_private_members_own_mob_leaves_the_launch_member_shared() {
+        let launch = boot("private").await;
+        launch.shared("worker", NAMED).await;
+        let (app, _alice) = private_side_chat(&launch).await;
+        let bob = bearer(bob_claims());
+
+        let before = doors(&app, &bob, NAMED).await;
+        println!(
+            "ROW 3: before, the second person on {NAMED}: {}",
+            before.verbatim
+        );
+        launch.expect(
+            before.answers() == (true, true, true),
+            format!(
+                "before, the doors answer the second person the shared launch member ({})",
+                before.verbatim
+            ),
+        );
+
+        let own_mob = format!("{}-side", launch.mob_id);
+        let seated = seats_in_its_own_mob(&launch, SIDE_NAME, &own_mob, NAMED).await;
+        launch.expect(
+            seated,
+            "the private side chat's own mob holds the member it seated there",
+        );
+
+        let after = doors(&app, &bob, NAMED).await;
+        println!(
+            "ROW 3: after, the second person on {NAMED}: {}",
+            after.verbatim
+        );
+        launch.expect(
+            after.answers() == (true, true, true),
+            format!(
+                "after, the doors still answer the second person the shared launch member ({})",
+                after.verbatim
+            ),
+        );
+        launch.finish().await;
+    }
+
+    /// A launch member that one agent spawned is refused to the first person
+    /// by a deny on that agent. A second agent, which the rules allow her,
+    /// seats a member of the same name in a mob of its own: the deny still
+    /// refuses her the launch's member.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deny_through_a_members_spawner_holds_after_its_name_is_seated_in_another_mob() {
+        const SPAWNER: &str = "alpha";
+        const OTHER: &str = "omega";
+        const SPAWNED: &str = "gamma";
+        let launch = boot("spawner").await;
+        launch.shared("planner", SPAWNER).await;
+        launch.shared("planner", OTHER).await;
+        let access = first_person_on(OTHER, vec![first_person_off(SPAWNER)]);
+        let app =
+            console_json_router_with_state(enforced_console(launch.mob(), Some(access.clone())));
+        let alice = bearer(alice_claims());
+
+        // The spawner seats its member in the launch's mob.
+        let since = launch.seen.all().len();
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        let spawned = answer_since(&launch, since, SPAWN_INTO_MOB_CALL).await;
+        println!(
+            "ROW 4: the spawner's mob_spawn_member answered {}",
+            clip(&spawned)
+        );
+        launch.expect(
+            launch.entry(SPAWNED).await.is_some(),
+            "the launch's mob holds the member its agent spawned",
+        );
+
+        let before = doors(&app, &alice, SPAWNED).await;
+        let gate_before = gate(&launch, &access, ALICE, SPAWNED).await;
+        println!("ROW 4: before, on {SPAWNED}: {}", before.verbatim);
+        println!("ROW 4: before, the access view on {SPAWNED}: {gate_before:?}");
+        launch.expect(
+            before.answers() == (false, false, false)
+                && gate_before.2.contains("first-person-off-one-agent"),
+            format!(
+                "before, the deny on its spawner refuses the first person the spawned member \
+                 ({}; {gate_before:?})",
+                before.verbatim
+            ),
+        );
+
+        let own_mob = format!("{}-own", launch.mob_id);
+        let seated = seats_in_its_own_mob(&launch, OTHER, &own_mob, SPAWNED).await;
+        launch.expect(
+            seated,
+            "the second agent's own mob holds the member it seated there",
+        );
+
+        let after = doors(&app, &alice, SPAWNED).await;
+        let gate_after = gate(&launch, &access, ALICE, SPAWNED).await;
+        println!("ROW 4: after, on {SPAWNED}: {}", after.verbatim);
+        println!("ROW 4: after, the access view on {SPAWNED}: {gate_after:?}");
+        launch.expect(
+            after.answers() == (false, false, false)
+                && gate_after.2.contains("first-person-off-one-agent"),
+            format!(
+                "after, the deny on its spawner still refuses the first person the spawned \
+                 member ({}; {gate_after:?})",
+                after.verbatim
+            ),
+        );
+        launch.finish().await;
+    }
+
+    /// A deny that names the launch's member refuses the first person
+    /// before the calling agent seats the name in a mob of its own, and
+    /// after.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deny_on_a_launch_member_holds_after_its_name_is_seated_in_another_mob() {
+        let launch = boot("named-deny").await;
+        launch.shared("planner", CALLER).await;
+        launch.shared("worker", NAMED).await;
+        let access = first_person_on(CALLER, vec![first_person_off(NAMED)]);
+        let app =
+            console_json_router_with_state(enforced_console(launch.mob(), Some(access.clone())));
+        let alice = bearer(alice_claims());
+
+        let before = doors(&app, &alice, NAMED).await;
+        let gate_before = gate(&launch, &access, ALICE, NAMED).await;
+        println!("ROW 5: before, on {NAMED}: {}", before.verbatim);
+        println!("ROW 5: before, the access view on {NAMED}: {gate_before:?}");
+
+        let own_mob = format!("{}-own", launch.mob_id);
+        let seated = seats_in_its_own_mob(&launch, CALLER, &own_mob, NAMED).await;
+        launch.expect(
+            seated,
+            "the calling agent's own mob holds the member it seated there",
+        );
+
+        let after = doors(&app, &alice, NAMED).await;
+        let gate_after = gate(&launch, &access, ALICE, NAMED).await;
+        println!("ROW 5: after, on {NAMED}: {}", after.verbatim);
+        println!("ROW 5: after, the access view on {NAMED}: {gate_after:?}");
+        for (when, doors, gate) in [
+            ("before", &before, &gate_before),
+            ("after", &after, &gate_after),
+        ] {
+            launch.expect(
+                doors.answers() == (false, false, false)
+                    && gate.2.contains("first-person-off-one-agent"),
+                format!(
+                    "{when}, the deny that names the launch's member refuses the first person \
+                     ({}; {gate:?})",
+                    doors.verbatim
+                ),
+            );
+        }
+        launch.finish().await;
+    }
+}
+
+/// What a tool spawn registered is of the one member it seated. A member
+/// seated later under that member's name, in the same mob, is another
+/// member: nothing the earlier spawn carried decides it. The member the
+/// spawn seated keeps what its spawn carried when it is respawned or
+/// rebuilt under its name. Each row prints what it read (`ROW ...`).
+mod spawned_member_names_within_a_mob {
+    use super::super::console_private_side_chat_tests::{ALICE, ROOT};
+    use super::*;
+
+    /// A shared agent whose turns make the mob tool calls.
+    const SPAWNER: &str = "alpha";
+    /// The name its spawn seats in the launch's mob.
+    const SPAWNED: &str = "gamma";
+
+    /// The answer of the scripted spawn made since request `since`, as its
+    /// model saw it: it sees it only after the call returned.
+    async fn spawn_answer_since(launch: &Launch, since: usize) -> String {
+        for _ in 0..100 {
+            if let Some(request) = launch
+                .seen
+                .all()
+                .into_iter()
+                .skip(since)
+                .find(|request| request.tool_results.contains(SPAWN_INTO_MOB_CALL))
+            {
+                return request.tool_results.chars().take(600).collect();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        String::new()
+    }
+
+    /// [`SPAWNER`]'s own turn seats [`SPAWNED`] in the launch's mob with
+    /// `mob_spawn_member`, with the label `tier` when one is given. Whether
+    /// the launch's mob then holds the member.
+    async fn spawner_seats(launch: &Launch, tier: Option<&str>) -> bool {
+        let since = launch.seen.all().len();
+        let tier = tier.map(|tier| format!(" tier={tier}")).unwrap_or_default();
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED}{tier} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        println!(
+            "ROW: the spawner's mob_spawn_member answered {}",
+            spawn_answer_since(launch, since).await
+        );
+        launch.entry(SPAWNED).await.is_some()
+    }
+
+    /// The host ends [`SPAWNED`]. Whether the launch's mob stops holding it.
+    async fn host_retires(launch: &Launch) -> bool {
+        let retired = launch
+            .mob()
+            .handle()
+            .retire(AgentIdentity::from(SPAWNED))
+            .await;
+        println!("ROW: the host's retire of {SPAWNED} answered {retired:?}");
+        launch.gone_within(SPAWNED, 20).await
+    }
+
+    /// The access view's own answers for the first person on [`SPAWNED`]
+    /// after a priming from the runtime: `agent.view`, `agent.send`, and the
+    /// view decision.
+    async fn first_person_view(launch: &Launch, access: &AccessController) -> (bool, bool, String) {
+        prime_access_cache_from_runtime(launch.mob(), access).await;
+        let view = access.view_for_subject(Some(ALICE));
+        (
+            view.can_view_agent(SPAWNED),
+            view.allows_agent(ACTION_AGENT_SEND, SPAWNED),
+            format!("{:?}", view.decide_agent(ACTION_AGENT_VIEW, SPAWNED)),
+        )
+    }
+
+    fn enforced(rules: Vec<AccessRule>) -> AccessController {
+        AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules,
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller")
+    }
+
+    /// The first person may view and send where the rule's selector matches.
+    fn first_person_may(id: &str, rule: AccessRule) -> AccessRule {
+        AccessRule {
+            id: id.to_string(),
+            subjects: vec![ALICE.to_string()],
+            actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+            ..rule
+        }
+    }
+
+    /// The rules allow the first person the spawning agent only, which
+    /// reaches the member it spawned. That member ends, and the host seats a
+    /// member of its own under the name: the allow on the earlier member's
+    /// spawner does not reach it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_the_host_seats_under_an_ended_spawned_members_name_is_its_own() {
+        let launch = boot("seated-anew").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = enforced(vec![first_person_may(
+            "first-person-on-the-spawner",
+            AccessRule {
+                agents: vec![SPAWNER.to_string()],
+                ..AccessRule::default()
+            },
+        )]);
+
+        launch.expect(
+            spawner_seats(&launch, None).await,
+            "the launch's mob holds the member its agent spawned",
+        );
+        let before = first_person_view(&launch, &access).await;
+        println!("ROW 1: the access view on the spawned {SPAWNED}: {before:?}");
+        launch.expect(
+            before.0 && before.1,
+            format!("the allow on its spawner reaches the member the agent spawned ({before:?})"),
+        );
+
+        launch.expect(
+            host_retires(&launch).await,
+            "the spawned member leaves the roster",
+        );
+        launch.shared("worker", SPAWNED).await;
+        let after = first_person_view(&launch, &access).await;
+        println!("ROW 1: the access view on the host's {SPAWNED}: {after:?}");
+        launch.expect(
+            !after.0 && !after.1,
+            format!(
+                "the allow on the earlier member's spawner does not reach the member the host \
+                 seated under its name ({after:?})"
+            ),
+        );
+        launch.finish().await;
+    }
+
+    /// The rules allow the first person an agent that carries one label.
+    /// A spawn seats a member with it; the member ends; a second spawn seats
+    /// a member under the name without it: the second member does not carry
+    /// the first spawn's label.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_spawn_under_an_ended_members_name_carries_its_own_labels_only() {
+        let launch = boot("spawned-twice").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = enforced(vec![first_person_may(
+            "first-person-on-one-label",
+            AccessRule {
+                match_labels: [("tier".to_string(), "vault".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..AccessRule::default()
+            },
+        )]);
+
+        launch.expect(
+            spawner_seats(&launch, Some("vault")).await,
+            "the launch's mob holds the member the first spawn seated",
+        );
+        let before = first_person_view(&launch, &access).await;
+        println!("ROW 2: the access view on the first {SPAWNED}: {before:?}");
+        launch.expect(
+            before.0 && before.1,
+            format!("the allow on the label reaches the member that carries it ({before:?})"),
+        );
+
+        launch.expect(
+            host_retires(&launch).await,
+            "the first member leaves the roster",
+        );
+        launch.expect(
+            spawner_seats(&launch, None).await,
+            "the launch's mob holds the member the second spawn seated",
+        );
+        let after = first_person_view(&launch, &access).await;
+        println!("ROW 2: the access view on the second {SPAWNED}: {after:?}");
+        launch.expect(
+            !after.0 && !after.1,
+            format!(
+                "the allow on the first spawn's label does not reach the member the second \
+                 spawn seated without it ({after:?})"
+            ),
+        );
+        launch.finish().await;
+    }
+
+    /// A step that seats the same member again under its name.
+    #[derive(Debug, Clone, Copy)]
+    enum Again {
+        /// A respawn: the member's next incarnation in a step of its own.
+        Respawn,
+        /// A rotation onto a fresh session: a reset.
+        Reset,
+    }
+
+    /// The rules allow the first person the spawned member by its name and
+    /// deny her its spawner, which refuses her the member it spawned. The
+    /// member is seated again by `again`: the deny on its spawner still
+    /// refuses her the member.
+    async fn a_deny_on_its_spawner_still_refuses_a_spawned_member_after(again: Again) {
+        let launch = boot("seated-again").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = enforced(vec![
+            first_person_may(
+                "first-person-on-the-spawned-name",
+                AccessRule {
+                    agents: vec![SPAWNED.to_string()],
+                    ..AccessRule::default()
+                },
+            ),
+            AccessRule {
+                id: "first-person-off-the-spawner".to_string(),
+                effect: crate::access::AccessEffect::Deny,
+                subjects: vec![ALICE.to_string()],
+                actions: vec!["agent.*".to_string()],
+                agents: vec![SPAWNER.to_string()],
+                ..AccessRule::default()
+            },
+        ]);
+
+        launch.expect(
+            spawner_seats(&launch, None).await,
+            "the launch's mob holds the member its agent spawned",
+        );
+        let before = first_person_view(&launch, &access).await;
+        println!("ROW {again:?}: before, the access view on {SPAWNED}: {before:?}");
+        launch.expect(
+            !before.0 && before.2.contains("first-person-off-the-spawner"),
+            format!("before, the deny on its spawner refuses the spawned member ({before:?})"),
+        );
+
+        let handle = launch.mob().handle();
+        let seated_again = match again {
+            Again::Respawn => handle
+                .respawn(AgentIdentity::from(SPAWNED), None)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}")),
+            Again::Reset => handle
+                .rotate_member(meerkat_mob::SpawnMemberSpec::new(
+                    "worker",
+                    AgentIdentity::from(SPAWNED),
+                ))
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}")),
+        };
+        println!("ROW {again:?}: the step answered {seated_again:?}");
+        launch.expect(
+            seated_again.is_ok() && launch.entry(SPAWNED).await.is_some(),
+            format!("{again:?}: the member is seated again under its name ({seated_again:?})"),
+        );
+
+        let after = first_person_view(&launch, &access).await;
+        println!("ROW {again:?}: after, the access view on {SPAWNED}: {after:?}");
+        launch.expect(
+            !after.0 && after.2.contains("first-person-off-the-spawner"),
+            format!(
+                "{again:?}: the deny on its spawner still refuses the member seated again \
+                 ({after:?})"
+            ),
+        );
+        launch.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deny_on_its_spawner_still_refuses_a_spawned_member_after_a_respawn() {
+        a_deny_on_its_spawner_still_refuses_a_spawned_member_after(Again::Respawn).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deny_on_its_spawner_still_refuses_a_spawned_member_after_a_reset() {
+        a_deny_on_its_spawner_still_refuses_a_spawned_member_after(Again::Reset).await;
+    }
+}
+
+/// The same order (a spawn seats a member, the member ends, the host seats a
+/// member of its own under the name) read at the Console's other readers of
+/// what a spawn registered: the member list, the aggregator's identity
+/// record and identity list. One more row reads a member an agent forked.
+mod spawned_member_names_within_a_mob_at_other_readers {
+    use super::super::console_private_side_chat_tests::{ALICE, ROOT};
+    use super::*;
+
+    /// A shared agent whose turns make the mob tool calls.
+    const SPAWNER: &str = "alpha";
+    /// The name its spawn seats in the launch's mob.
+    const SPAWNED: &str = "gamma";
+
+    /// The rules allow the first person the spawning agent only; `root` is
+    /// the one admin.
+    fn first_person_on_the_spawner() -> AccessController {
+        AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![AccessRule {
+                id: "first-person-on-the-spawner".to_string(),
+                subjects: vec![ALICE.to_string()],
+                actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+                agents: vec![SPAWNER.to_string()],
+                ..AccessRule::default()
+            }],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller")
+    }
+
+    /// [`SPAWNER`]'s own turn seats [`SPAWNED`] in the launch's mob with
+    /// `mob_spawn_member`. Whether the launch's mob then holds the member.
+    async fn spawner_seats(launch: &Launch) -> bool {
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        for _ in 0..100 {
+            if launch.entry(SPAWNED).await.is_some() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// The spawned member ends and the host seats a member of its own under
+    /// the name.
+    async fn the_host_seats_the_name_anew(launch: &Launch) {
+        let retired = launch
+            .mob()
+            .handle()
+            .retire(AgentIdentity::from(SPAWNED))
+            .await;
+        println!("ROW: the host's retire of {SPAWNED} answered {retired:?}");
+        launch.expect(
+            launch.gone_within(SPAWNED, 20).await,
+            "the spawned member leaves the roster",
+        );
+        launch.shared("worker", SPAWNED).await;
+    }
+
+    /// Whether `meta/list_members` shows the first person [`SPAWNED`].
+    async fn listed_to_the_first_person(app: &Router, bearer: &str) -> bool {
+        let listed = console_rpc_as(app, Some(bearer), "meta/list_members", json!({})).await;
+        let names = |key: &str| {
+            listed["result"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row[key] == json!(SPAWNED)))
+        };
+        let shown = names("member_id") || names("agent_identity") || names("identity");
+        println!(
+            "ROW: meta/list_members shows the first person {SPAWNED}: {shown} (error {})",
+            listed["error"]
+        );
+        shown
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_member_list_shows_a_member_the_host_seats_under_an_ended_spawned_members_name_as_its_own()
+     {
+        let launch = boot("list-anew").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = first_person_on_the_spawner();
+        let app =
+            console_json_router_with_state(enforced_console(launch.mob(), Some(access.clone())));
+        let alice = bearer(alice_claims());
+
+        launch.expect(
+            spawner_seats(&launch).await,
+            "the launch's mob holds the member its agent spawned",
+        );
+        launch.expect(
+            listed_to_the_first_person(&app, &alice).await,
+            "the member list shows the first person the member the agent she is allowed spawned",
+        );
+        the_host_seats_the_name_anew(&launch).await;
+        launch.expect(
+            !listed_to_the_first_person(&app, &alice).await,
+            "the member list does not show the first person the member the host seated under \
+             the ended member's name",
+        );
+        launch.finish().await;
+    }
+
+    /// An aggregator over the launch's runtime alone, under no namespace,
+    /// reading the runtime's own Console event store.
+    fn aggregator_over(launch: &Launch) -> crate::console_aggregator::MetaConsoleAggregator {
+        let aggregator = crate::console_aggregator::MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "default",
+            "",
+            launch.mob().clone(),
+            None,
+            launch.runtime.console_events(),
+            Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
+        );
+        aggregator
+    }
+
+    /// What a fresh aggregator over the launch reads of [`SPAWNED`]: the
+    /// spawner its identity record names, and whether the identity list
+    /// shows the member to the first person.
+    async fn aggregator_reads(
+        launch: &Launch,
+        access: &AccessController,
+    ) -> (Option<String>, bool) {
+        let aggregator = aggregator_over(launch);
+        let spawner = aggregator
+            .list_identities_fresh()
+            .await
+            .expect("the aggregator's identity records")
+            .into_iter()
+            .find(|record| record.identity == SPAWNED)
+            .and_then(|record| {
+                record
+                    .labels
+                    .get(crate::console_spawn::SPAWNED_BY_LABEL)
+                    .cloned()
+            });
+        prime_access_cache_from_runtime(launch.mob(), access).await;
+        let view = access.view_for_subject(Some(ALICE));
+        let listed = Box::pin(visible_identity_records(&aggregator, Some(&view)))
+            .await
+            .expect("the identity list")
+            .iter()
+            .any(|record| record.identity == SPAWNED);
+        println!(
+            "ROW: the aggregator's record of {SPAWNED} names the spawner {spawner:?}; the \
+             identity list shows it to the first person: {listed}"
+        );
+        (spawner, listed)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_aggregators_record_of_a_member_the_host_seats_under_an_ended_spawned_members_name_names_no_spawner()
+     {
+        let launch = boot("record-anew").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = first_person_on_the_spawner();
+        launch.expect(
+            spawner_seats(&launch).await,
+            "the launch's mob holds the member its agent spawned",
+        );
+        let before = aggregator_reads(&launch, &access).await;
+        launch.expect(
+            before.0.as_deref() == Some(SPAWNER),
+            format!(
+                "the record of the spawned member names the agent that spawned it ({:?})",
+                before.0
+            ),
+        );
+        the_host_seats_the_name_anew(&launch).await;
+        let after = aggregator_reads(&launch, &access).await;
+        launch.expect(
+            after.0.is_none(),
+            format!(
+                "the record of the member the host seated names no spawner ({:?})",
+                after.0
+            ),
+        );
+        launch.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_identity_list_shows_a_member_the_host_seats_under_an_ended_spawned_members_name_as_its_own()
+     {
+        let launch = boot("identities-anew").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = first_person_on_the_spawner();
+        launch.expect(
+            spawner_seats(&launch).await,
+            "the launch's mob holds the member its agent spawned",
+        );
+        let before = aggregator_reads(&launch, &access).await;
+        launch.expect(
+            before.1,
+            "the identity list shows the first person the member the agent she is allowed \
+             spawned",
+        );
+        the_host_seats_the_name_anew(&launch).await;
+        let after = aggregator_reads(&launch, &access).await;
+        launch.expect(
+            !after.1,
+            "the identity list does not show the first person the member the host seated under \
+             the ended member's name",
+        );
+        launch.finish().await;
+    }
+
+    /// A member an agent forked is reached through that agent, as a member
+    /// it spawned is: the rules allow the first person the forked member by
+    /// its name and deny her the agent that forked it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deny_on_the_agent_that_forked_it_refuses_a_forked_member() {
+        const FORKED: &str = "delta";
+        let launch = boot("forked").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "first-person-on-the-forked-name".to_string(),
+                    subjects: vec![ALICE.to_string()],
+                    actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+                    agents: vec![FORKED.to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "first-person-off-the-forking-agent".to_string(),
+                    effect: crate::access::AccessEffect::Deny,
+                    subjects: vec![ALICE.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec![SPAWNER.to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller");
+
+        launch
+            .turn(
+                SPAWNER,
+                &format!("{FORK_A_CHILD} child={FORKED} make=no please"),
+            )
+            .await;
+        launch.expect(
+            launch.entry(FORKED).await.is_some(),
+            "the launch's mob holds the member its agent forked",
+        );
+        prime_access_cache_from_runtime(launch.mob(), &access).await;
+        let view = access.view_for_subject(Some(ALICE));
+        let decision = format!("{:?}", view.decide_agent(ACTION_AGENT_VIEW, FORKED));
+        println!("ROW: the access view on the forked {FORKED}: {decision}");
+        launch.expect(
+            !view.can_view_agent(FORKED) && decision.contains("first-person-off-the-forking-agent"),
+            format!(
+                "the deny on the agent that forked it refuses the first person the forked \
+                 member ({decision})"
+            ),
+        );
+        launch.finish().await;
+    }
+}
+
+/// One request's read of the roster and its record of what it read are two
+/// steps. A spawned member that ends, and whose name the host seats anew,
+/// between them is not recorded with what the earlier spawn carried.
+mod spawned_member_names_within_a_mob_between_two_reads {
+    use super::super::console_private_side_chat_tests::{ALICE, ROOT};
+    use super::*;
+
+    /// A shared agent whose turns make the mob tool calls.
+    const SPAWNER: &str = "alpha";
+    /// The name its spawn seats in the launch's mob.
+    const SPAWNED: &str = "gamma";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_seated_anew_while_a_request_holds_its_roster_read_is_not_recorded_with_the_earlier_spawn()
+     {
+        let launch = boot("between-reads").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![AccessRule {
+                id: "first-person-on-the-spawner".to_string(),
+                subjects: vec![ALICE.to_string()],
+                actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+                agents: vec![SPAWNER.to_string()],
+                ..AccessRule::default()
+            }],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller");
+
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        launch.expect(
+            launch.entry(SPAWNED).await.is_some(),
+            "the launch's mob holds the member its agent spawned",
+        );
+        prime_access_cache_from_runtime(launch.mob(), &access).await;
+        let before = access.view_for_subject(Some(ALICE)).can_view_agent(SPAWNED);
+        println!("ROW: before, the first person may view the spawned {SPAWNED}: {before}");
+        launch.expect(
+            before,
+            "the allow on its spawner reaches the member the agent spawned",
+        );
+
+        // A priming reads the roster and waits before it records.
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let reached = super::super::unseated_read_hold::hold(&launch.mob_id, gate);
+        let priming = tokio::spawn({
+            let runtime = launch.mob().clone();
+            let access = access.clone();
+            async move { prime_access_cache_from_runtime(&runtime, &access).await }
+        });
+        for _ in 0..200 {
+            if reached.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        launch.expect(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the priming waits after its roster read",
+        );
+
+        // Between its two steps the spawned member ends and the host seats
+        // a member of its own under the name.
+        let retired = launch
+            .mob()
+            .handle()
+            .retire(AgentIdentity::from(SPAWNED))
+            .await;
+        println!("ROW: the host's retire of {SPAWNED} answered {retired:?}");
+        launch.expect(
+            launch.gone_within(SPAWNED, 20).await,
+            "the spawned member leaves the roster",
+        );
+        launch.shared("worker", SPAWNED).await;
+
+        let _ = open.send(true);
+        priming.await.expect("the held priming ends");
+        let view = access.view_for_subject(Some(ALICE));
+        let after = view.can_view_agent(SPAWNED);
+        println!(
+            "ROW: after the held priming recorded, the first person may view {SPAWNED}: {after} \
+             ({:?})",
+            view.decide_agent(ACTION_AGENT_VIEW, SPAWNED)
+        );
+        launch.expect(
+            !after,
+            "the held priming does not record the name with the earlier spawn's spawner",
+        );
+        launch.finish().await;
+    }
+}
+
+/// The settle of the spawn registry against a mob's own member lifecycle
+/// journal, read on a launch: what each kind of seat means for an entry, how
+/// a reader with a member in hand is answered, and how many journal reads a
+/// request makes. Each row prints what it read (`ROW ...`).
+mod spawn_registry_settle {
+    use super::*;
+    use crate::console_spawn::{SeatFact, SpawnEntryNotTold, seat_fact};
+
+    /// A shared agent whose turns make the mob tool calls.
+    const SPAWNER: &str = "alpha";
+    /// The name its spawn seats in the launch's mob.
+    const SPAWNED: &str = "gamma";
+
+    /// Every fact of the launch's member lifecycle journal, classified.
+    async fn seat_facts(launch: &Launch) -> Vec<SeatFact> {
+        let handle = launch.mob().handle();
+        let mut cursor = meerkat_mob::MobJournalCursor::START;
+        let mut facts = Vec::new();
+        loop {
+            let page = handle
+                .member_lifecycle_events(cursor, 256)
+                .await
+                .expect("the member lifecycle journal");
+            facts.extend(page.records.iter().map(|record| seat_fact(&record.event)));
+            if page.next.get() == cursor.get() {
+                return facts;
+            }
+            cursor = page.next;
+        }
+    }
+
+    /// The generation the roster holds `name` at.
+    async fn generation_of(launch: &Launch, name: &str) -> u64 {
+        launch
+            .mob()
+            .handle()
+            .get_member(&AgentIdentity::from(name))
+            .await
+            .expect("roster read")
+            .expect("the member is seated")
+            .generation
+            .get()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_kind_of_seat_is_read_from_the_mobs_own_journal() {
+        const NAME: &str = "delta";
+        let launch = boot("seat-facts").await;
+        let handle = launch.mob().handle();
+        launch.shared("worker", NAME).await;
+        let respawned = handle.respawn(AgentIdentity::from(NAME), None).await;
+        let rotated = handle
+            .rotate_member(meerkat_mob::SpawnMemberSpec::new(
+                "worker",
+                AgentIdentity::from(NAME),
+            ))
+            .await;
+        println!(
+            "ROW: the respawn answered ok={}, the rotation answered ok={}",
+            respawned.is_ok(),
+            rotated.is_ok()
+        );
+        launch.expect(
+            respawned.is_ok() && rotated.is_ok(),
+            "the member is respawned and rotated",
+        );
+        let facts = seat_facts(&launch).await;
+        let seats: Vec<bool> = facts
+            .iter()
+            .filter_map(|fact| match fact {
+                SeatFact::Seat {
+                    member_id, fresh, ..
+                } if member_id == NAME => Some(*fresh),
+                _ => None,
+            })
+            .collect();
+        println!("ROW: the seats of {NAME}, each as made by no rotation: {seats:?}");
+        launch.expect(
+            seats.first() == Some(&true),
+            format!("the host's seat is a new member's ({seats:?})"),
+        );
+        launch.expect(
+            seats.len() >= 3 && seats.iter().skip(1).all(|fresh| !fresh),
+            format!("a respawn's and a rotation's seat are the same member's ({seats:?})"),
+        );
+        launch.expect(
+            !facts.contains(&SeatFact::Unclassified),
+            "the journal holds no fact the reading does not know",
+        );
+
+        let retired = handle.retire(AgentIdentity::from(NAME)).await;
+        println!("ROW: the retire answered ok={}", retired.is_ok());
+        launch.expect(
+            launch.gone_within(NAME, 20).await,
+            "the member leaves the roster",
+        );
+        launch.shared("worker", NAME).await;
+        let seats_after: Vec<bool> = seat_facts(&launch)
+            .await
+            .iter()
+            .filter_map(|fact| match fact {
+                SeatFact::Seat {
+                    member_id, fresh, ..
+                } if member_id == NAME => Some(*fresh),
+                _ => None,
+            })
+            .collect();
+        println!("ROW: after an end and a new seat: {seats_after:?}");
+        launch.expect(
+            seats_after.last() == Some(&true),
+            format!("a seat after the member's end is a new member's ({seats_after:?})"),
+        );
+
+        let reset = handle.reset().await;
+        launch.expect(
+            reset.is_ok(),
+            format!("the mob is reset: {:?}", reset.as_ref().err()),
+        );
+        let facts = seat_facts(&launch).await;
+        println!(
+            "ROW: after the mob's reset the journal holds a mob reset fact: {}",
+            facts.contains(&SeatFact::MobReset)
+        );
+        launch.expect(
+            facts.contains(&SeatFact::MobReset) && !facts.contains(&SeatFact::Unclassified),
+            "the mob's reset is read as one, and no fact is unknown",
+        );
+        launch.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reader_with_a_member_in_hand_is_answered_for_that_incarnation_and_reads_the_journal_once_per_seat()
+     {
+        let launch = boot("in-hand").await;
+        launch.shared("planner", SPAWNER).await;
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        launch.expect(
+            launch.entry(SPAWNED).await.is_some(),
+            "the launch's mob holds the member its agent spawned",
+        );
+        let handle = launch.mob().handle();
+        let store = launch.runtime.console_events();
+        let sink = launch.mob().console_spawn_sink().expect("the spawn sink");
+        let spawner_of = |answer: &Result<
+            Option<std::collections::BTreeMap<String, String>>,
+            SpawnEntryNotTold,
+        >| {
+            answer.clone().map(|labels| {
+                labels
+                    .and_then(|labels| labels.get(crate::console_spawn::SPAWNED_BY_LABEL).cloned())
+            })
+        };
+
+        // The spawned member, as seated: its own entry, with no journal read
+        // for a seat already read.
+        let first = generation_of(&launch, SPAWNED).await;
+        let reads = store.spawn_journal_reads().await;
+        let own = sink
+            .labels_of_seated_row(&handle, SPAWNED, SPAWNED, Some(first))
+            .await;
+        let again = sink
+            .labels_of_seated_row(&handle, SPAWNED, SPAWNED, Some(first))
+            .await;
+        let reads_for_a_read_seat = store.spawn_journal_reads().await - reads;
+        println!(
+            "ROW: the spawned member at generation {first}: {:?}; journal reads for two asks: \
+             {reads_for_a_read_seat}",
+            spawner_of(&own)
+        );
+        launch.expect(
+            spawner_of(&own) == Ok(Some(SPAWNER.to_string())) && own == again,
+            "the spawned member's row takes its own entry",
+        );
+        launch.expect(
+            reads_for_a_read_seat == 0,
+            format!("a seat already read costs no journal read ({reads_for_a_read_seat})"),
+        );
+
+        // One request's priming: how many journal reads it makes.
+        let access = AccessController::new(crate::access::AccessControlConfig::default())
+            .expect("access controller");
+        let reads = store.spawn_journal_reads().await;
+        prime_access_cache_from_runtime(launch.mob(), &access).await;
+        let reads_per_priming = store.spawn_journal_reads().await - reads;
+        println!(
+            "ROW: journal reads of one priming with one mob that holds an entry: \
+             {reads_per_priming}"
+        );
+        launch.expect(
+            reads_per_priming == 2,
+            format!(
+                "a priming reads the journal once before its roster read and once after \
+                 ({reads_per_priming})"
+            ),
+        );
+
+        // The same member, respawned: its entry stays, one settle reads the
+        // new seat.
+        let respawned = handle.respawn(AgentIdentity::from(SPAWNED), None).await;
+        launch.expect(respawned.is_ok(), "the spawned member is respawned");
+        let second = generation_of(&launch, SPAWNED).await;
+        let after_respawn = sink
+            .labels_of_seated_row(&handle, SPAWNED, SPAWNED, Some(second))
+            .await;
+        println!(
+            "ROW: the respawned member at generation {second}: {:?}",
+            spawner_of(&after_respawn)
+        );
+        launch.expect(
+            second > first && spawner_of(&after_respawn) == Ok(Some(SPAWNER.to_string())),
+            "the respawned member's row takes the entry its spawn registered",
+        );
+
+        // The member ends and the host seats a member of its own under the
+        // name. A row of the ended member that a reader still has in hand
+        // takes the ended member's entry until the new seat is read; the new
+        // member's row takes none; after that the ended member's row cannot
+        // be told.
+        let retired = handle.retire(AgentIdentity::from(SPAWNED)).await;
+        println!("ROW: the retire answered ok={}", retired.is_ok());
+        launch.expect(
+            launch.gone_within(SPAWNED, 20).await,
+            "the spawned member leaves the roster",
+        );
+        launch.shared("worker", SPAWNED).await;
+        let third = generation_of(&launch, SPAWNED).await;
+        let ended_before = sink
+            .labels_of_seated_row(&handle, SPAWNED, SPAWNED, Some(second))
+            .await;
+        let new_member = sink
+            .labels_of_seated_row(&handle, SPAWNED, SPAWNED, Some(third))
+            .await;
+        let ended_after = sink
+            .labels_of_seated_row(&handle, SPAWNED, SPAWNED, Some(second))
+            .await;
+        println!(
+            "ROW: the ended member's row before the new seat is read: {:?}; the new member at \
+             generation {third}: {:?}; the ended member's row after: {:?}",
+            spawner_of(&ended_before),
+            spawner_of(&new_member),
+            spawner_of(&ended_after)
+        );
+        launch.expect(
+            third > second && spawner_of(&ended_before) == Ok(Some(SPAWNER.to_string())),
+            "the ended member's row takes its own entry while the entry stands",
+        );
+        launch.expect(
+            new_member == Ok(None),
+            "the member the host seated under the name takes no entry",
+        );
+        launch.expect(
+            ended_after == Err(SpawnEntryNotTold),
+            "the ended member's row cannot be told once its entry is gone",
+        );
+        launch.finish().await;
+    }
+}
+
+/// A mob whose member lifecycle journal the spawn registry's settle could not
+/// stand behind is a mob whose entries cannot be told: no reader takes an
+/// entry of it for a row. And the snapshot walk, which takes the registry
+/// before it reads the rosters, does not show a name seated anew in between
+/// with the earlier member's spawner. Each row prints what it read
+/// (`ROW ...`).
+mod spawn_registry_entries_not_told {
+    use super::super::console_private_side_chat_tests::{ALICE, ROOT};
+    use super::*;
+
+    /// A shared agent whose turns make the mob tool calls.
+    const SPAWNER: &str = "alpha";
+    /// The name its spawn seats in the launch's mob.
+    const SPAWNED: &str = "gamma";
+
+    /// A launch whose shared agent has spawned [`SPAWNED`] into its mob.
+    async fn launch_with_a_spawned_member(label: &str) -> Launch {
+        let launch = boot(label).await;
+        launch.shared("planner", SPAWNER).await;
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        launch.expect(
+            launch.entry(SPAWNED).await.is_some(),
+            "the launch's mob holds the member its agent spawned",
+        );
+        launch
+    }
+
+    /// The mob's entries cannot be told from now on.
+    async fn mark_not_told(launch: &Launch) {
+        launch
+            .runtime
+            .console_events()
+            .mark_spawn_journal_untold(&launch.mob_id)
+            .await;
+    }
+
+    /// The spawner the snapshot walk's row of [`SPAWNED`] names.
+    fn walked_spawner(state: &ConsoleSnapshotReadModelState) -> Option<String> {
+        state
+            .primary_members
+            .iter()
+            .find(|member| member.agent_identity == SPAWNED)
+            .and_then(|member| {
+                member
+                    .labels
+                    .get(crate::console_spawn::SPAWNED_BY_LABEL)
+                    .cloned()
+            })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_member_list_takes_no_entry_of_a_mob_that_cannot_be_told() {
+        let launch = boot("list-not-told").await;
+        launch.shared("planner", SPAWNER).await;
+        // The first person may view and send to the spawning agent only. The
+        // access records hold the spawning agent and not the member it spawns
+        // afterwards, so the list's own reading of the row decides alone.
+        let access = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![AccessRule {
+                id: "first-person-on-the-spawner".to_string(),
+                subjects: vec![ALICE.to_string()],
+                actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+                agents: vec![SPAWNER.to_string()],
+                ..AccessRule::default()
+            }],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller");
+        prime_access_cache_from_runtime(launch.mob(), &access).await;
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        launch.expect(
+            launch.entry(SPAWNED).await.is_some(),
+            "the launch's mob holds the member its agent spawned",
+        );
+
+        let mut shown = Vec::new();
+        for told in [true, false] {
+            if !told {
+                mark_not_told(&launch).await;
+            }
+            let entries = launch
+                .mob()
+                .handle()
+                .list_members_including_retiring()
+                .await;
+            let mut rows: Vec<Value> = entries
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "agent_identity": entry.agent_identity.as_str(),
+                        "role": entry.role.to_string(),
+                        "labels": entry.labels,
+                    })
+                })
+                .collect();
+            let view = access.view_for_subject(Some(ALICE));
+            retain_visible_member_rows(&mut rows, launch.mob(), &entries, Some(&view)).await;
+            shown.push(
+                rows.iter()
+                    .any(|row| row["agent_identity"] == json!(SPAWNED)),
+            );
+        }
+        println!(
+            "ROW: the member list's reader keeps the spawned member's row, told then not told: \
+             {shown:?}"
+        );
+        launch.expect(
+            shown[0],
+            "with its entry told, the allow on its spawner keeps the spawned member's row",
+        );
+        launch.expect(
+            !shown[1],
+            "with the mob not told, the list's reader takes no entry and the row is not kept",
+        );
+        launch.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_aggregators_label_read_takes_no_entry_of_a_mob_that_cannot_be_told() {
+        let launch = launch_with_a_spawned_member("labels-not-told").await;
+        let aggregator = crate::console_aggregator::MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "default",
+            "",
+            launch.mob().clone(),
+            None,
+            launch.runtime.console_events(),
+            Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
+        );
+        let records: Vec<_> = aggregator
+            .list_identities_fresh()
+            .await
+            .expect("the aggregator's identity records")
+            .into_iter()
+            .filter(|record| record.identity == SPAWNED)
+            .collect();
+        launch.expect(
+            records.len() == 1,
+            "the aggregator holds a record of the spawned member",
+        );
+        let mut read = Vec::new();
+        for told in [true, false] {
+            if !told {
+                mark_not_told(&launch).await;
+            }
+            let labels = aggregator
+                .spawn_registry_labels_for_identities(&records)
+                .await
+                .expect("the label read");
+            read.push(labels.first().is_some_and(Option::is_some));
+        }
+        println!(
+            "ROW: the aggregator's label read gives the record an entry, told then not told: \
+             {read:?}"
+        );
+        launch.expect(read[0], "with its entry told, the record takes it");
+        launch.expect(
+            !read[1],
+            "with the mob not told, the label read gives the record no entry",
+        );
+        launch.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_snapshot_walk_takes_no_entry_of_a_mob_that_cannot_be_told() {
+        let launch = launch_with_a_spawned_member("walk-not-told").await;
+        let told = walked_spawner(&walk_console_snapshot_read_model(launch.mob(), None).await);
+        mark_not_told(&launch).await;
+        let not_told = walked_spawner(&walk_console_snapshot_read_model(launch.mob(), None).await);
+        println!(
+            "ROW: the snapshot walk's row names the spawner, told then not told: {told:?}, \
+             {not_told:?}"
+        );
+        launch.expect(
+            told.as_deref() == Some(SPAWNER),
+            "with its entry told, the walk's row names the agent that spawned the member",
+        );
+        launch.expect(
+            not_told.is_none(),
+            "with the mob not told, the walk's row names no spawner",
+        );
+        launch.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_snapshot_walk_does_not_show_a_name_seated_anew_between_its_reads_with_the_earlier_spawner()
+     {
+        let launch = launch_with_a_spawned_member("walk-between").await;
+        // A walk reads the rosters and waits before it settles again.
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let reached =
+            super::super::unseated_read_hold::hold(&format!("walk:{}", launch.mob_id), gate);
+        let walk = tokio::spawn({
+            let runtime = launch.mob().clone();
+            async move { walk_console_snapshot_read_model(&runtime, None).await }
+        });
+        for _ in 0..200 {
+            if reached.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        launch.expect(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the walk waits after its roster reads",
+        );
+        let retired = launch
+            .mob()
+            .handle()
+            .retire(AgentIdentity::from(SPAWNED))
+            .await;
+        println!("ROW: the host's retire of {SPAWNED} answered {retired:?}");
+        launch.expect(
+            launch.gone_within(SPAWNED, 20).await,
+            "the spawned member leaves the roster",
+        );
+        launch.shared("worker", SPAWNED).await;
+        let _ = open.send(true);
+        let walked = walked_spawner(&walk.await.expect("the held walk ends"));
+        println!("ROW: the held walk's row of {SPAWNED} names the spawner {walked:?}");
+        launch.expect(
+            walked.is_none(),
+            "the held walk does not show the name with the earlier member's spawner",
+        );
+        launch.finish().await;
+    }
+}
+
+/// A spawned member adopted as an identity keeps what its spawn registered:
+/// the adoption seats it on by a rotation, which is the same member.
+mod spawned_member_adopted_as_an_identity {
+    use super::super::console_private_side_chat_tests::{ALICE, ROOT, open_console};
+    use super::*;
+
+    /// A shared agent whose turns make the mob tool calls.
+    const SPAWNER: &str = "alpha";
+    /// The name its spawn seats in the launch's mob.
+    const SPAWNED: &str = "gamma";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deny_on_its_spawner_still_refuses_a_spawned_member_adopted_as_an_identity() {
+        let launch = boot("adopted").await;
+        launch.shared("planner", SPAWNER).await;
+        let access = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "first-person-on-the-spawned-name".to_string(),
+                    subjects: vec![ALICE.to_string()],
+                    actions: vec![ACTION_AGENT_VIEW.to_string(), ACTION_AGENT_SEND.to_string()],
+                    agents: vec![SPAWNED.to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "first-person-off-the-spawner".to_string(),
+                    effect: crate::access::AccessEffect::Deny,
+                    subjects: vec![ALICE.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec![SPAWNER.to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller");
+        launch
+            .turn(
+                SPAWNER,
+                &format!(
+                    "{SPAWN_INTO_A_MOB} mob={} child={SPAWNED} please",
+                    launch.mob_id
+                ),
+            )
+            .await;
+        let session = launch
+            .entry(SPAWNED)
+            .await
+            .and_then(|seat| seat.session)
+            .map(|session| session.to_string());
+        launch.expect(
+            session.is_some(),
+            "the launch's mob holds the member its agent spawned, on a session",
+        );
+        let session = session.unwrap_or_default();
+
+        let mut refused = Vec::new();
+        for adopted in [false, true] {
+            if adopted {
+                let app = console_json_router_with_state(open_console(launch.mob()));
+                let answer = console_rpc_as(
+                    &app,
+                    None,
+                    crate::rpc::mob_methods::ADOPT_MEMBER_IDENTITY_DECLARATION,
+                    json!({
+                        "mob_id": launch.mob_id,
+                        "agent_identity": SPAWNED,
+                        "request_id": "adopt-a-spawned-member",
+                        "precondition": "expected_absent",
+                        "declaration_scope": "spawned-adoption",
+                        "declaration_revision": 1,
+                        "session": {
+                            "session_id": session,
+                            "lineage_id": format!("session:{session}"),
+                            "lineage_generation": 0,
+                            "authority_policy": "require_existing"
+                        },
+                        "member": {
+                            "profile_name": "worker",
+                            "runtime_mode": "turn_driven",
+                            "execution": { "execution": "controlling_session" }
+                        },
+                        "owned_wiring": [],
+                        "convergence": { "kind": "drain", "max_wait_ms": 5000 }
+                    }),
+                )
+                .await;
+                println!(
+                    "ROW: the adoption answered error={} outcome={}",
+                    answer["error"], answer["result"]["adoption"]["outcome"]
+                );
+                launch.expect(
+                    answer["result"]["adoption"]["outcome"] == json!("adopted"),
+                    format!("the spawned member is adopted ({})", answer["error"]),
+                );
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            prime_access_cache_from_runtime(launch.mob(), &access).await;
+            let view = access.view_for_subject(Some(ALICE));
+            let decision = format!("{:?}", view.decide_agent(ACTION_AGENT_VIEW, SPAWNED));
+            println!("ROW: adopted={adopted}: the access view on {SPAWNED}: {decision}");
+            refused.push(
+                !view.can_view_agent(SPAWNED) && decision.contains("first-person-off-the-spawner"),
+            );
+        }
+        launch.expect(
+            refused[0],
+            "before the adoption, the deny on its spawner refuses the spawned member",
+        );
+        launch.expect(
+            refused[1],
+            "after the adoption, the deny on its spawner still refuses the member",
+        );
+        launch.finish().await;
+    }
 }

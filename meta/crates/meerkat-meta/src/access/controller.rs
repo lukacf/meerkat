@@ -9,8 +9,8 @@ use rand_core::RngCore;
 use tokio::sync::watch;
 
 use super::engine::{
-    AccessDecision, AccessPrincipal, AccessResource, evaluate_access, groups_for_subject,
-    principal_may_perform,
+    AccessDecision, AccessPrincipal, AccessResource, AttributeKnowledge, KnownResource,
+    evaluate_access, groups_for_subject, principal_may_perform,
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
@@ -32,6 +32,60 @@ pub struct AgentResourceAttributes {
     pub role: Option<String>,
     pub labels: BTreeMap<String, String>,
 }
+
+/// One agent as the attribute cache holds it: its attributes, and which of
+/// them are known. The two are one value, written and read together, so no
+/// reader meets attributes without what is known of them.
+///
+/// An agent recorded from a roster row, or from its own record, is known
+/// whole. An agent that has ended is recorded from what outlives it, and a
+/// field nothing holds any more is NOT KNOWN, which is not the same as "has
+/// none": a rule keyed on it is decided closed
+/// ([`super::engine::evaluate_access_lineage`]). So is an agent that is
+/// seated in a mob the console does not list (a temporary council's seat,
+/// a member of a mob whose creation record names no member and no host):
+/// the console reads no roster row of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedAgent {
+    attributes: AgentResourceAttributes,
+    knowledge: AttributeKnowledge,
+}
+
+impl CachedAgent {
+    /// An agent whose every attribute is known as given.
+    fn whole(attributes: AgentResourceAttributes) -> Self {
+        Self {
+            attributes,
+            knowledge: AttributeKnowledge::WHOLE,
+        }
+    }
+
+    /// This agent as one link of a lineage a rule is matched against, with
+    /// what is known of it. `fallback_agent_id` stands in for a runtime id
+    /// the attributes do not carry.
+    fn resource<'a>(&'a self, fallback_agent_id: Option<&'a str>) -> KnownResource<'a> {
+        KnownResource {
+            resource: AccessResource {
+                identity: Some(self.attributes.identity.as_str()),
+                agent_id: self.attributes.agent_id.as_deref().or(fallback_agent_id),
+                role: self.attributes.role.as_deref(),
+                labels: Some(&self.attributes.labels),
+            },
+            knowledge: self.knowledge,
+        }
+    }
+}
+
+impl std::ops::Deref for CachedAgent {
+    type Target = AgentResourceAttributes;
+
+    fn deref(&self) -> &AgentResourceAttributes {
+        &self.attributes
+    }
+}
+
+/// The attribute cache: one value per agent, keyed by console identity.
+type AttributeCache = BTreeMap<String, Arc<CachedAgent>>;
 
 /// Administrative edit precondition, never an authorization grant.
 pub(crate) struct AccessEditPrecondition {
@@ -197,7 +251,7 @@ struct AccessControllerInner {
     checked_probe: Mutex<Option<Arc<CheckedMutationProbe>>>,
     state: RwLock<AccessState>,
     persist_path: RwLock<Option<PathBuf>>,
-    attributes: RwLock<BTreeMap<String, Arc<AgentResourceAttributes>>>,
+    attributes: RwLock<AttributeCache>,
     /// The runtimes that still owe the first read of who their members are
     /// private to, each by its record, as the last priming of each found it
     /// ([`AccessController::record_private_owner_record`]), with the
@@ -717,6 +771,14 @@ impl AccessController {
     /// Only the console's own request authentication, which knows whether
     /// its console can identify a person, takes the view of the one operator
     /// of a console that identifies nobody.
+    ///
+    /// The view decides an agent by the entry this controller's attribute
+    /// cache holds of it ([`Self::record_agent_attributes`]). An agent the
+    /// cache does not know is refused, for every action but a spawn, while
+    /// a deny its bare name cannot decide (one scoped by a role, by a label,
+    /// or naming another agent) applies to the subject
+    /// ([`AccessView::decide_agent`]). A host that takes a view itself
+    /// records its agents first, as the console's routes do on each request.
     pub fn view_for_subject(&self, subject: Option<&str>) -> AccessView {
         self.view_and_revision(subject).0
     }
@@ -766,6 +828,9 @@ impl AccessController {
             // console's request authentication states that its console
             // identifies nobody ([`AccessView::on_console`]).
             console_identifies_people: true,
+            // Closed for an agent the cache does not know: the
+            // console's routes prime the cache on their own request.
+            unknown_agents: UnknownAgent::Closed,
             principal,
             is_admin,
             private_owner_key: private_owner_key
@@ -775,9 +840,88 @@ impl AccessController {
         }
     }
 
-    /// Refresh the cached resource attributes for one agent.
+    /// Refresh the cached resource attributes for one agent. The record is
+    /// of the whole agent: its role, its labels and its spawner are known
+    /// as given, and an earlier record of the agent with a field that was
+    /// not known ([`Self::record_ended_agent_attributes`]) ends with it.
     pub fn record_agent_attributes(&self, attributes: AgentResourceAttributes) {
-        if attributes.identity.is_empty() || self.records_attributes(&attributes) {
+        self.record_agent(CachedAgent::whole(attributes));
+    }
+
+    /// Record an agent that has ended and that nothing describes any more
+    /// but what outlives it: `attributes` holds its identity and the labels
+    /// that are held (who it was private to).
+    /// Its role, its other labels and its spawn ancestors are not known,
+    /// and the agent is recorded as such: the private-owner rule and the
+    /// question whether the console knows the agent read the entry as any
+    /// other, and a rule keyed on a role, a label that is not held or
+    /// another agent is decided closed for it ([`AccessView::decide_agent`]).
+    /// Nothing the console's spawn registry holds under the name is among
+    /// them: it is of the last spawn a tool made under the name, which need
+    /// not be the agent that ended. The same record is made of a member
+    /// seated in a mob the console does not list: the console reads no
+    /// roster row of it.
+    pub(crate) fn record_ended_agent_attributes(&self, attributes: AgentResourceAttributes) {
+        self.record_agent(CachedAgent {
+            attributes,
+            knowledge: AttributeKnowledge::IDENTITY_AND_HELD_LABELS,
+        });
+    }
+
+    /// Record a live agent of which what a spawn registered cannot be told
+    /// for this request: `attributes` holds its identity, its role and the
+    /// labels its own roster row carries. Its other labels and its spawn
+    /// ancestors are not known, and the agent is recorded as such: a rule
+    /// keyed on a label that is not held or on another agent is decided
+    /// closed for it ([`AccessView::decide_agent`]). The next request that
+    /// can tell records the agent whole
+    /// ([`Self::record_agent_attributes`]).
+    pub(crate) fn record_agent_spawn_facts_not_known(&self, attributes: AgentResourceAttributes) {
+        self.record_agent(CachedAgent {
+            attributes,
+            knowledge: AttributeKnowledge {
+                role: super::engine::Knowledge::Known,
+                ..AttributeKnowledge::IDENTITY_AND_HELD_LABELS
+            },
+        });
+    }
+
+    /// Record an agent from a row of a walk that was made earlier and kept
+    /// (the console experience's snapshot of its own runtime). The row is of
+    /// the whole agent as the walk saw it, and it may be older than the
+    /// agent's end: it never takes the place of an entry recorded as ended
+    /// ([`Self::record_ended_agent_attributes`]), which stays until a
+    /// priming that reads the roster records the agent whole
+    /// ([`Self::record_agent_attributes`]). Any other entry it replaces, and
+    /// an agent the cache does not know it records.
+    pub(crate) fn record_snapshot_agent_attributes(&self, attributes: AgentResourceAttributes) {
+        self.record_agent_unless(CachedAgent::whole(attributes), |recorded| {
+            recorded.knowledge != AttributeKnowledge::WHOLE
+        });
+    }
+
+    /// Put `agent` in the cache under its identity: its attributes and what
+    /// is known of them in one write.
+    fn record_agent(&self, agent: CachedAgent) {
+        self.record_agent_unless(agent, |_| false);
+    }
+
+    /// Put `agent` in the cache under its identity unless the entry held
+    /// under it is one that `stays`. The entry is read again under the
+    /// write, so a record that stays is never replaced by a writer that
+    /// read the cache before it was made.
+    fn record_agent_unless(&self, agent: CachedAgent, stays: fn(&CachedAgent) -> bool) {
+        if agent.attributes.identity.is_empty() {
+            return;
+        }
+        let settled = self
+            .inner
+            .attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&agent.attributes.identity)
+            .is_some_and(|recorded| **recorded == agent || stays(recorded));
+        if settled {
             return;
         }
         let _published = self.publish_owner_change();
@@ -786,7 +930,13 @@ impl AccessController {
             .attributes
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.insert(attributes.identity.clone(), Arc::new(attributes));
+        if cache
+            .get(&agent.attributes.identity)
+            .is_some_and(|recorded| stays(recorded))
+        {
+            return;
+        }
+        cache.insert(agent.attributes.identity.clone(), Arc::new(agent));
     }
 
     /// Whether a priming of this controller has recorded the runtime whose
@@ -954,17 +1104,6 @@ impl AccessController {
         }
     }
 
-    /// Whether the cache already holds exactly these attributes, so that
-    /// recording them again changes no fact and publishes nothing.
-    fn records_attributes(&self, attributes: &AgentResourceAttributes) -> bool {
-        self.inner
-            .attributes
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&attributes.identity)
-            .is_some_and(|recorded| recorded.as_ref() == attributes)
-    }
-
     /// Replace the entire attribute cache from a fresh roster projection.
     ///
     /// Used by the per-request priming at the SSE/RPC/timeline seams: it
@@ -977,10 +1116,11 @@ impl AccessController {
         &self,
         attributes: impl IntoIterator<Item = AgentResourceAttributes>,
     ) {
-        let next: BTreeMap<String, Arc<AgentResourceAttributes>> = attributes
+        // Every entry is a roster row's: each agent is known whole.
+        let next: AttributeCache = attributes
             .into_iter()
             .filter(|entry| !entry.identity.is_empty())
-            .map(|entry| (entry.identity.clone(), Arc::new(entry)))
+            .map(|entry| (entry.identity.clone(), Arc::new(CachedAgent::whole(entry))))
             .collect();
         if next.is_empty()
             || *self
@@ -1040,7 +1180,7 @@ fn persist_config(path: &Path, config: &AccessControlConfig) -> Result<(), Acces
 /// `side_chat_of` label).
 struct LineageLink {
     identity: String,
-    attributes: Option<Arc<AgentResourceAttributes>>,
+    attributes: Option<Arc<CachedAgent>>,
 }
 
 /// One link of a member's spawn lineage as the console owner captured it
@@ -1057,7 +1197,7 @@ pub(crate) struct CapturedLineageLink {
 /// attributes held read-locked (see [`AccessController::decision_fence`]).
 pub(crate) struct AccessDecisionFence<'a> {
     view: AccessView,
-    attributes: RwLockReadGuard<'a, BTreeMap<String, Arc<AgentResourceAttributes>>>,
+    attributes: RwLockReadGuard<'a, AttributeCache>,
     _state: RwLockReadGuard<'a, AccessState>,
 }
 
@@ -1094,7 +1234,7 @@ impl AccessDecisionFence<'_> {
                     &self.view.config,
                     &self.view.principal,
                     ACTION_AGENT_VIEW,
-                    &AccessResource::for_identity(identity),
+                    &KnownResource::whole(AccessResource::for_identity(identity)),
                 )
                 .is_some()
                 {
@@ -1107,7 +1247,7 @@ impl AccessDecisionFence<'_> {
         if lineage.is_empty() {
             return self
                 .view
-                .decide(ACTION_AGENT_VIEW, &AccessResource::for_identity(identity))
+                .decide_unrecorded_agent(ACTION_AGENT_VIEW, identity, self.view.unknown_agents)
                 .is_allow();
         }
         self.view
@@ -1132,6 +1272,71 @@ impl AccessDecisionFence<'_> {
         let alias = self.view.runtime_alias_member(identity);
         self.view.kept_apart_from_other_people()
             && !AccessView::known_in(&self.attributes, alias.member_key(identity))
+    }
+}
+
+/// How a decision judges an agent the attribute cache does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnknownAgent {
+    /// Refused under a deny its bare name cannot decide
+    /// ([`AccessView::decide_unknown_agent`]): the rule of every door
+    /// that names an agent of this console.
+    Closed,
+    /// By the bare name: for a name that need not be an agent of this
+    /// console ([`AccessView::allows_name`]).
+    ByName,
+}
+
+/// One caller's agent decisions over the attribute cache held read-locked
+/// for a read that decides many rows (a list): the cache is taken once and
+/// every row is decided on that one value, so a list of N rows costs one
+/// take of the lock and no row is decided on a cache another row did not
+/// see. Never await while holding it, and decide nothing through the view's
+/// own methods that take the cache meanwhile: this value's methods read the
+/// held cache.
+pub(crate) struct HeldAccessView<'a> {
+    view: &'a AccessView,
+    attributes: RwLockReadGuard<'a, AttributeCache>,
+}
+
+impl HeldAccessView<'_> {
+    /// The view these decisions are of.
+    pub(crate) fn view(&self) -> &AccessView {
+        self.view
+    }
+
+    /// [`AccessView::decide_agent_with_attributes`] on the held cache.
+    pub(crate) fn decide_agent_with_attributes(
+        &self,
+        action: &str,
+        attributes: &AgentResourceAttributes,
+    ) -> AccessDecision {
+        let lineage = AccessView::lineage_of_attributes_in(&self.attributes, attributes);
+        self.view.decide_attributes_on(action, attributes, &lineage)
+    }
+
+    /// Whether the caller's view refuses an agent the held cache knows:
+    /// `agent.view` on `identity`, decided as [`AccessView::decide_agent`]
+    /// decides it, on the entry the cache holds (the agent's role in its
+    /// mob and its own labels). `false` for an identity the cache does not
+    /// know: nothing but the row decides that one.
+    pub(crate) fn refuses_view_of_known_agent(&self, identity: &str) -> bool {
+        let alias = self.view.runtime_alias_member(identity);
+        let member_key = alias.member_key(identity);
+        if !AccessView::known_in(&self.attributes, member_key) {
+            return false;
+        }
+        let lineage = AccessView::lineage_in(&self.attributes, member_key);
+        !self
+            .view
+            .decide_agent_on(
+                ACTION_AGENT_VIEW,
+                identity,
+                &alias,
+                &lineage,
+                self.view.unknown_agents,
+            )
+            .is_allow()
     }
 }
 
@@ -1212,9 +1417,27 @@ pub struct AccessView {
     /// The private-owner key this caller owns private agents under
     /// ([`super::PRIVATE_TO_LABEL`]); `None` for a caller who owns none.
     private_owner_key: Option<String>,
+    /// How this view judges an agent the attribute cache does not know:
+    /// closed, unless the view was handed to a reader whose request
+    /// primed nothing ([`Self::judging_unknown_agents_by_name`]).
+    unknown_agents: UnknownAgent,
 }
 
 impl AccessView {
+    /// This view for a reader whose request did not prime the attribute
+    /// cache (the console's public viewer resolver, which a host calls
+    /// on its own routes): an agent the cache does not know is judged
+    /// by its bare name, as before the rule of
+    /// [`Self::decide_unknown_agent`]. On such a request an agent that
+    /// exists may be unrecorded (nothing read a roster since the process
+    /// started), and refusing it would refuse an existing agent to every
+    /// caller a deny by role or label applies to, whatever the agent is.
+    /// An agent the cache knows is decided by its entry, as everywhere.
+    pub(crate) fn judging_unknown_agents_by_name(mut self) -> Self {
+        self.unknown_agents = UnknownAgent::ByName;
+        self
+    }
+
     /// This view, taken for a caller of a console that can identify a
     /// person (`identifies_people`) or cannot. A console can when it
     /// requires sign-in, or resolves the token a caller volunteers: a member
@@ -1359,12 +1582,63 @@ impl AccessView {
     /// and seven ancestors) is refused: a deny on an ancestor past the bound
     /// would not be seen.
     ///
+    /// Each link is matched with what the cache knows of it. An agent that
+    /// has ended is held with fields that are not known (its role, every
+    /// label the console did not write itself, and who spawned it), and a
+    /// rule keyed on such a
+    /// field is decided closed for that link, the agent's own or an
+    /// ancestor's: a deny applies, an allow grants nothing
+    /// ([`AccessController::record_ended_agent_attributes`]).
+    ///
+    /// An agent the attribute cache does not know ([`Self::knows_agent`])
+    /// has no entry to match a rule against. It is refused, for every
+    /// action but `agent.spawn`, while a deny its bare name cannot decide
+    /// (one scoped by a role, by a label, or naming another agent, which
+    /// may be its spawn ancestor) applies to this caller for the action;
+    /// with no such deny it is decided by its bare name. A spawn names an
+    /// agent that does not exist yet and is decided by the name.
+    ///
     /// Before all of this, with the configuration enabled or not, an agent
     /// this caller may not know of ([`Self::hides_agent`]) is denied.
     pub fn decide_agent(&self, action: &str, identity: &str) -> AccessDecision {
         let alias = self.runtime_alias_member(identity);
         let lineage = self.lineage_for(alias.member_key(identity));
-        if self.private_owner_hides(&lineage) {
+        self.decide_agent_on(action, identity, &alias, &lineage, self.unknown_agents)
+    }
+
+    /// [`Self::allows_agent`] for a name that need not be an agent of this
+    /// console: a topology endpoint (one of another authority is no agent
+    /// the access records hold), a configured module's row, or a reserved
+    /// name of the console's own records (a runtime-plane frame). A name the
+    /// attribute cache knows is decided by its entry, as everywhere. One
+    /// it does not know is judged by the bare name: no priming could ever
+    /// record it, so the rule for an agent the records do not know
+    /// ([`Self::decide_unknown_agent`]) would refuse it to every caller a
+    /// deny by role or label applies to, whatever the name is.
+    pub(crate) fn allows_name(&self, action: &str, identity: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        let lineage = self.lineage_for(alias.member_key(identity));
+        self.decide_agent_on(action, identity, &alias, &lineage, UnknownAgent::ByName)
+            .is_allow()
+    }
+
+    /// [`Self::allows_name`] for `agent.view`.
+    pub(crate) fn can_view_name(&self, identity: &str) -> bool {
+        self.allows_name(ACTION_AGENT_VIEW, identity)
+    }
+
+    /// [`Self::decide_agent`] for an agent whose spelling is classified as
+    /// `alias` and whose lineage, read from the attribute cache, is
+    /// `lineage`. Takes no lock on the cache.
+    fn decide_agent_on(
+        &self,
+        action: &str,
+        identity: &str,
+        alias: &RuntimeAliasMember,
+        lineage: &[LineageLink],
+        unknown: UnknownAgent,
+    ) -> AccessDecision {
+        if self.private_owner_hides(lineage) {
             return private_owner_denial(identity);
         }
         if !self.config.enabled {
@@ -1375,7 +1649,7 @@ impl AccessView {
         // incarnation; a stale or unknown generation is refused rather than
         // judged as a name no rule describes. An admin passes, as for any
         // resource.
-        let identity = match &alias {
+        let identity = match alias {
             RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
@@ -1383,7 +1657,7 @@ impl AccessView {
                     &self.config,
                     &self.principal,
                     action,
-                    &AccessResource::for_identity(identity),
+                    &KnownResource::whole(AccessResource::for_identity(identity)),
                 ) {
                     return AccessDecision::Deny {
                         reason: format!("denied by rule {rule}"),
@@ -1401,9 +1675,50 @@ impl AccessView {
             }
         };
         if lineage.is_empty() {
-            return self.decide(action, &AccessResource::for_identity(identity));
+            return self.decide_unrecorded_agent(action, identity, unknown);
         }
-        self.decide_agent_lineage(action, identity, &lineage)
+        self.decide_agent_lineage(action, identity, lineage)
+    }
+
+    /// The decision on an agent the attribute cache does not know. It is
+    /// judged by its bare name, which a deny scoped by a role, a label or
+    /// another agent (one that may be its spawn ancestor) cannot match.
+    /// While such a deny applies to this caller for `action`, it cannot be
+    /// ruled out for the agent, and the agent is refused: every door and
+    /// every row filter that asks the view reads the same answer. A spawn
+    /// names an agent that does not exist yet, of which no rule could have
+    /// read anything: it is judged by the name. An admin, and a caller no
+    /// such deny applies to, are decided by the name as before.
+    fn decide_unrecorded_agent(
+        &self,
+        action: &str,
+        identity: &str,
+        unknown: UnknownAgent,
+    ) -> AccessDecision {
+        match unknown {
+            UnknownAgent::Closed => self.decide_unknown_agent(action, identity),
+            UnknownAgent::ByName => self.decide(action, &AccessResource::for_identity(identity)),
+        }
+    }
+
+    /// [`Self::decide_unrecorded_agent`] closed: the rule itself.
+    fn decide_unknown_agent(&self, action: &str, identity: &str) -> AccessDecision {
+        if action != super::ACTION_AGENT_SPAWN
+            && let Some(rule) = super::engine::deny_undecidable_by_identity(
+                &self.config,
+                &self.principal,
+                action,
+                identity,
+            )
+        {
+            return AccessDecision::Deny {
+                reason: format!(
+                    "denied by rule {rule}: {identity} is not known, and the rule cannot be \
+                     ruled out for it"
+                ),
+            };
+        }
+        self.decide(action, &AccessResource::for_identity(identity))
     }
 
     /// Full decision for an action against an exact, caller-supplied agent
@@ -1423,13 +1738,38 @@ impl AccessView {
         attributes: &AgentResourceAttributes,
     ) -> AccessDecision {
         let lineage = self.lineage_for_attributes(attributes);
-        if self.private_owner_hides(&lineage) {
+        self.decide_attributes_on(action, attributes, &lineage)
+    }
+
+    /// [`Self::decide_agent_with_attributes`] for a snapshot whose lineage,
+    /// its ancestors read from the attribute cache, is `lineage`. Takes no
+    /// lock on the cache.
+    fn decide_attributes_on(
+        &self,
+        action: &str,
+        attributes: &AgentResourceAttributes,
+        lineage: &[LineageLink],
+    ) -> AccessDecision {
+        if self.private_owner_hides(lineage) {
             return private_owner_denial(&attributes.identity);
         }
         if !self.config.enabled {
             return AccessDecision::Allow;
         }
-        self.decide_agent_lineage(action, attributes.identity.as_str(), &lineage)
+        self.decide_agent_lineage(action, attributes.identity.as_str(), lineage)
+    }
+
+    /// This view's decisions over the attribute cache taken once, for a
+    /// read that decides many rows ([`HeldAccessView`]).
+    pub(crate) fn over_held_attributes(&self) -> HeldAccessView<'_> {
+        HeldAccessView {
+            view: self,
+            attributes: self
+                .inner
+                .attributes
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
     }
 
     fn decide_agent_lineage(
@@ -1458,16 +1798,14 @@ impl AccessView {
             .iter()
             .enumerate()
             .map(|(index, link)| match link.attributes.as_deref() {
-                Some(attributes) => AccessResource {
-                    identity: Some(attributes.identity.as_str()),
-                    agent_id: attributes
-                        .agent_id
-                        .as_deref()
-                        .or((index == 0).then_some(fallback_identity)),
-                    role: attributes.role.as_deref(),
-                    labels: Some(&attributes.labels),
-                },
-                None => AccessResource::for_identity(link.identity.as_str()),
+                // Each link with what is known of it: a link whose role,
+                // labels or spawner are not known is decided closed by a
+                // rule keyed on them, whether it is the agent or one of its
+                // ancestors.
+                Some(agent) => agent.resource((index == 0).then_some(fallback_identity)),
+                // An ancestor the cache does not hold is an identity and
+                // nothing more.
+                None => KnownResource::whole(AccessResource::for_identity(link.identity.as_str())),
             })
             .collect::<Vec<_>>();
         super::engine::evaluate_access_lineage(
@@ -1549,10 +1887,7 @@ impl AccessView {
         Self::lineage_in(&cache, identity)
     }
 
-    fn lineage_in(
-        cache: &BTreeMap<String, Arc<AgentResourceAttributes>>,
-        identity: &str,
-    ) -> Vec<LineageLink> {
+    fn lineage_in(cache: &AttributeCache, identity: &str) -> Vec<LineageLink> {
         let resolve = |key: &str| {
             cache.get(key).cloned().or_else(|| {
                 cache
@@ -1576,6 +1911,14 @@ impl AccessView {
             .attributes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::lineage_of_attributes_in(&cache, attributes)
+    }
+
+    /// [`Self::lineage_for_attributes`] over a cache that is already held.
+    fn lineage_of_attributes_in(
+        cache: &AttributeCache,
+        attributes: &AgentResourceAttributes,
+    ) -> Vec<LineageLink> {
         let resolve = |key: &str| {
             cache.get(key).cloned().or_else(|| {
                 cache
@@ -1584,12 +1927,12 @@ impl AccessView {
                     .cloned()
             })
         };
-        Self::lineage_from_attributes(Arc::new(attributes.clone()), &resolve)
+        Self::lineage_from_attributes(Arc::new(CachedAgent::whole(attributes.clone())), &resolve)
     }
 
     fn lineage_from_attributes(
-        own: Arc<AgentResourceAttributes>,
-        resolve: &impl Fn(&str) -> Option<Arc<AgentResourceAttributes>>,
+        own: Arc<CachedAgent>,
+        resolve: &impl Fn(&str) -> Option<Arc<CachedAgent>>,
     ) -> Vec<LineageLink> {
         let mut visited = BTreeSet::from([own.identity.clone()]);
         let mut lineage = vec![LineageLink {
@@ -1690,17 +2033,21 @@ impl AccessView {
         let resources = lineage
             .iter()
             .enumerate()
-            .map(|(index, link)| match link.attributes.as_ref() {
-                Some(attributes) => AccessResource {
-                    identity: Some(link.identity.as_str()),
-                    agent_id: attributes
-                        .agent_id
-                        .as_deref()
-                        .or((index == 0).then_some(link.identity.as_str())),
-                    role: attributes.role.as_deref(),
-                    labels: Some(&attributes.labels),
-                },
-                None => AccessResource::for_identity(link.identity.as_str()),
+            .map(|(index, link)| {
+                // What the owner captured with the record is of the whole
+                // member as it was then.
+                KnownResource::whole(match link.attributes.as_ref() {
+                    Some(attributes) => AccessResource {
+                        identity: Some(link.identity.as_str()),
+                        agent_id: attributes
+                            .agent_id
+                            .as_deref()
+                            .or((index == 0).then_some(link.identity.as_str())),
+                        role: attributes.role.as_deref(),
+                        labels: Some(&attributes.labels),
+                    },
+                    None => AccessResource::for_identity(link.identity.as_str()),
+                })
             })
             .collect::<Vec<_>>();
         if !super::engine::evaluate_access_lineage(
@@ -1743,17 +2090,14 @@ impl AccessView {
                     })
                     .cloned()
             });
+            // With what is known of the ancestor now: a deny its current
+            // entry cannot rule out refuses, as a deny that matches it.
             current.is_some_and(|current| {
                 super::engine::matching_deny_rule(
                     &self.config,
                     &self.principal,
                     ACTION_AGENT_VIEW,
-                    &AccessResource {
-                        identity: Some(current.identity.as_str()),
-                        agent_id: current.agent_id.as_deref(),
-                        role: current.role.as_deref(),
-                        labels: Some(&current.labels),
-                    },
+                    &current.resource(None),
                 )
                 .is_some()
             })
@@ -1792,8 +2136,9 @@ impl AccessView {
     /// match `identity` only through attributes the bare identity does not
     /// carry: a role, a label, or another agent that may be its spawn
     /// ancestor. A decision on an identity the attribute cache does not know
-    /// cannot honour such a deny, so a read that must fail closed withholds
-    /// the identity instead ([`Self::can_view_uncaptured_member`] does so for
+    /// cannot rule such a deny out, so the identity is refused
+    /// ([`Self::decide_agent`]), and a read that decides its rows by other
+    /// means withholds it ([`Self::can_view_uncaptured_member`] does so for
     /// `agent.view`). An admin, and a disabled config, have none.
     pub(crate) fn has_deny_undecidable_by_identity(&self, action: &str, identity: &str) -> bool {
         self.config.enabled
@@ -1809,12 +2154,13 @@ impl AccessView {
     /// True when the agent's resource attributes (role/labels) are present in
     /// the shared attribute cache, keyed by identity or projected `agent_id`.
     ///
-    /// A cache-MISS means `decide_agent` falls back to a bare-identity resource
-    /// with `role: None, labels: None`, so a label/role-scoped deny rule fails
-    /// the rule closed and DOES NOT match — i.e. the agent is not actually
-    /// hidden. Long-lived SSE streams use this to detect a member spawned after
-    /// the one-time subscribe prime and re-prime the cache before deciding, so
-    /// the deny resolves against real attributes instead of failing open.
+    /// On a cache miss [`Self::decide_agent`] has no entry to match a rule
+    /// scoped by a role or a label against: it refuses the agent while such
+    /// a deny applies to the caller, and decides it by its bare name
+    /// otherwise. Long-lived SSE streams use this to detect a member spawned
+    /// after the one-time subscribe prime and re-prime the cache before
+    /// deciding, so the rules are matched against the member's own
+    /// attributes.
     pub fn knows_agent(&self, identity: &str) -> bool {
         let alias = self.runtime_alias_member(identity);
         let identity = alias.member_key(identity);
@@ -1828,7 +2174,7 @@ impl AccessView {
 
     /// Whether `cache` holds the agent `identity` names, by its identity or
     /// its projected `agent_id`.
-    fn known_in(cache: &BTreeMap<String, Arc<AgentResourceAttributes>>, identity: &str) -> bool {
+    fn known_in(cache: &AttributeCache, identity: &str) -> bool {
         cache.contains_key(identity)
             || cache
                 .values()
@@ -1925,11 +2271,15 @@ fn private_owner_denial(identity: &str) -> AccessDecision {
 
 impl AccessView {
     /// This principal's view under the configuration committed now, of the
-    /// same console.
+    /// same console, judging an agent the attribute cache does not know as
+    /// this view does.
     pub(crate) fn refreshed(&self) -> AccessView {
-        self.controller()
+        let mut refreshed = self
+            .controller()
             .view_for_caller(self.subject(), self.private_owner_key())
-            .on_console(self.console_identifies_people)
+            .on_console(self.console_identifies_people);
+        refreshed.unknown_agents = self.unknown_agents;
+        refreshed
     }
 }
 
@@ -2356,9 +2706,10 @@ mod tests {
     #[test]
     fn knows_agent_detects_cold_cache_so_label_deny_can_be_made_fail_closed() {
         // A broad allow + a label-scoped DENY. On a cold cache the deny cannot
-        // match (no labels), so the member would FAIL OPEN (visible). The
-        // long-lived SSE streams use `knows_agent` to detect this cold state
-        // and re-prime before deciding so the deny resolves fail-closed.
+        // be decided for the member (its labels are not known), so the view
+        // refuses it. The long-lived SSE streams use `knows_agent` to detect
+        // this cold state and re-prime before deciding, so the deny is then
+        // decided by the member's own labels.
         let mut config = enabled_config();
         // Everyone-views-all (subject-only allow).
         config.rules.push(AccessRule {
@@ -2378,12 +2729,18 @@ mod tests {
         let controller = AccessController::new(config).expect("controller");
         let view = controller.view_for_subject(None);
 
-        // Cold cache: the secret member is unknown, so the label-scoped deny
-        // does NOT match and the broad allow leaks it (the fail-open bug).
+        // Cold cache: the secret member is unknown, and its bare name cannot
+        // decide the label-scoped deny, so the view refuses it. Judged by
+        // the name alone (the topology family's question) the deny does not
+        // match and the broad allow shows it.
         assert!(!view.knows_agent("identity:secret-1"));
         assert!(
-            view.can_view_agent("identity:secret-1"),
-            "cold cache currently fails OPEN — this is what knows_agent() detects"
+            !view.can_view_agent("identity:secret-1"),
+            "an agent the cache does not know is refused under a deny its name cannot decide"
+        );
+        assert!(
+            view.can_view_name("identity:secret-1"),
+            "judged by the name alone, the deny on a label does not match"
         );
 
         // The SSE re-prime path records the member's real attributes (here via
@@ -2861,9 +3218,12 @@ mod tests {
         assert!(!bob.knows_agent("gone"));
         assert!(!bob.can_view_captured_member(&[captured("gone", "secret")]));
         assert!(bob.can_view_captured_member(&[captured("gone", "public")]));
-        // The bare identity of the same retired member is not hidden by the
-        // label deny: that is the gap captured attributes close.
-        assert!(bob.can_view_agent("gone"));
+        // The bare identity of the same retired member, which the cache does
+        // not know, is refused as well: the label deny cannot be decided
+        // for it. Judged by the name alone it is not hidden, which is the
+        // gap captured attributes close.
+        assert!(!bob.can_view_agent("gone"));
+        assert!(bob.can_view_name("gone"));
         // An admin sees it either way.
         let root = controller.view_for_subject(Some("root@example.test"));
         assert!(root.can_view_captured_member(&[captured("gone", "secret")]));
@@ -3211,6 +3571,478 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An agent recorded as ended, of which only its name and the labels
+    /// given are known, is decided closed by a rule on a role for a view
+    /// and for the decision fence alike. A record of the whole agent under
+    /// the same name ends that: the rules then decide it by the role and
+    /// labels recorded. A cache replaced from a roster holds whole agents
+    /// only: an agent the roster names is decided by its row, and one it
+    /// does not name is not known any more.
+    #[test]
+    fn a_record_of_the_whole_agent_ends_what_was_not_known_of_it() {
+        const BOB: &str = "bob@example.test";
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-views".to_string(),
+                    actions: vec!["agent.view".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "bob-is-denied-the-workers".to_string(),
+                    effect: AccessEffect::Deny,
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    roles: vec!["worker".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let ended = AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        };
+        let whole = |identity: &str, role: &str| AgentResourceAttributes {
+            identity: identity.to_string(),
+            agent_id: None,
+            role: Some(role.to_string()),
+            labels: BTreeMap::new(),
+        };
+        // What a view and the fence answer Bob for the agent, and whether
+        // the cache knows it.
+        let seen = |controller: &AccessController| {
+            let view = controller.view_for_subject(Some(BOB));
+            let by_fence = controller
+                .decision_fence(Some(BOB), None)
+                .can_see_origin("aide");
+            (
+                view.can_view_agent("aide"),
+                by_fence,
+                view.knows_agent("aide"),
+            )
+        };
+
+        controller.record_ended_agent_attributes(ended.clone());
+        assert_eq!(
+            seen(&controller),
+            (false, false, true),
+            "ended, its role not known: a deny by role refuses it"
+        );
+        controller.record_agent_attributes(whole("aide", "reader"));
+        assert_eq!(
+            seen(&controller),
+            (true, true, true),
+            "recorded whole as a reader: the deny on the workers does not apply"
+        );
+        controller.record_agent_attributes(whole("aide", "worker"));
+        assert_eq!(
+            seen(&controller),
+            (false, false, true),
+            "recorded whole as a worker: the deny applies by its role"
+        );
+
+        controller.record_ended_agent_attributes(ended.clone());
+        controller.replace_agent_attributes([whole("aide", "reader"), whole("other", "reader")]);
+        assert_eq!(
+            seen(&controller),
+            (true, true, true),
+            "a replaced cache holds the roster's row of the agent, whole"
+        );
+        controller.record_ended_agent_attributes(ended);
+        controller.replace_agent_attributes([whole("other", "reader")]);
+        assert_eq!(
+            seen(&controller),
+            (false, false, false),
+            "a replaced cache that does not name the agent does not know it: the deny on a \
+             role cannot be decided for it and refuses it, and the fence shows a person \
+             nothing of an agent it does not know"
+        );
+    }
+
+    /// A spawn under the name of an agent that has ended is decided on that
+    /// name's entry, which is known: its role and its labels are not, so a
+    /// deny on spawn by a role or by a label applies and an allow by a role
+    /// grants nothing. A name the cache does not know is no agent yet: a
+    /// spawn under it is judged by the name, whatever deny by role or label
+    /// applies to the caller.
+    #[test]
+    fn a_spawn_under_an_ended_agents_name_is_decided_closed() {
+        const BOB: &str = "bob@example.test";
+        const ERIN: &str = "erin@example.test";
+        const GRACE: &str = "grace@example.test";
+        const HEIDI: &str = "heidi@example.test";
+        let rule = |id: &str, subject: &str| AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: vec!["agent.*".to_string()],
+            ..AccessRule::default()
+        };
+        let every_agent = |id: &str, subject: &str| AccessRule {
+            agents: vec!["*".to_string()],
+            ..rule(id, subject)
+        };
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                every_agent("bob-drives-every-agent", BOB),
+                AccessRule {
+                    effect: AccessEffect::Deny,
+                    roles: vec!["worker".to_string()],
+                    ..rule("bob-is-denied-the-workers", BOB)
+                },
+                every_agent("erin-drives-every-agent", ERIN),
+                AccessRule {
+                    effect: AccessEffect::Deny,
+                    match_labels: BTreeMap::from([("tier".to_string(), "vault".to_string())]),
+                    ..rule("erin-is-denied-the-vault", ERIN)
+                },
+                AccessRule {
+                    roles: vec!["worker".to_string()],
+                    ..rule("grace-is-granted-the-workers", GRACE)
+                },
+                every_agent("heidi-drives-every-agent", HEIDI),
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        let spawns = |subject: &str, name: &str| {
+            controller
+                .view_for_subject(Some(subject))
+                .allows_agent(crate::access::ACTION_AGENT_SPAWN, name)
+        };
+        assert_eq!(
+            [BOB, ERIN, GRACE, HEIDI].map(|subject| spawns(subject, "aide")),
+            [false, false, false, true],
+            "under an ended agent's name: denied by role, denied by label, not granted by role, \
+             granted on every agent"
+        );
+        assert_eq!(
+            [BOB, ERIN, GRACE, HEIDI].map(|subject| spawns(subject, "a-new-name")),
+            [true, true, false, true],
+            "under a name no agent holds: by the name"
+        );
+    }
+
+    /// A deny decides the actions it names. A deny by role on reading an
+    /// agent (viewing it, reading its memory) refuses both under an ended
+    /// agent's name, whose role is not known, and says nothing of a spawn:
+    /// a person whose allow covers a spawn under the name is granted it, as
+    /// the same person is granted the retirement of a live agent and a
+    /// spawn under its name. The agent seated under the name is then decided
+    /// by its own role and labels.
+    #[test]
+    fn a_deny_on_reading_alone_does_not_refuse_a_spawn_under_an_ended_agents_name() {
+        const IVAN: &str = "ivan@example.test";
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "ivan-drives-every-agent".to_string(),
+                    subjects: vec![IVAN.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "ivan-reads-no-worker".to_string(),
+                    effect: AccessEffect::Deny,
+                    subjects: vec![IVAN.to_string()],
+                    actions: vec![
+                        ACTION_AGENT_VIEW.to_string(),
+                        crate::access::ACTION_AGENT_MEMORY_READ.to_string(),
+                    ],
+                    roles: vec!["worker".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        let allowed = |action: &str| {
+            controller
+                .view_for_subject(Some(IVAN))
+                .allows_agent(action, "aide")
+        };
+        assert_eq!(
+            [
+                ACTION_AGENT_VIEW,
+                crate::access::ACTION_AGENT_MEMORY_READ,
+                crate::access::ACTION_AGENT_SPAWN,
+            ]
+            .map(allowed),
+            [false, false, true],
+            "the ended agent: reading refused by the deny, the spawn under its name granted"
+        );
+        // Seated again as a reader, the name is decided by its row: the
+        // deny on the workers does not match it.
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: Some("reader".to_string()),
+            labels: BTreeMap::new(),
+        });
+        assert_eq!(
+            [ACTION_AGENT_VIEW, crate::access::ACTION_AGENT_MEMORY_READ,].map(allowed),
+            [true, true],
+            "seated again as a reader: decided by the new row"
+        );
+    }
+
+    /// A row of a walk made earlier may be older than an agent's end. It
+    /// never replaces an entry recorded as ended: the agent stays decided
+    /// closed, whatever role the stale row names, until a record of the
+    /// whole agent from the roster. An agent that is not recorded as ended
+    /// is recorded from such a row, and recorded again when the row changes.
+    #[test]
+    fn a_row_of_a_kept_walk_never_replaces_an_entry_recorded_as_ended() {
+        const BOB: &str = "bob@example.test";
+        const GRACE: &str = "grace@example.test";
+        let rule = |id: &str, subject: &str| AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: vec!["agent.view".to_string()],
+            ..AccessRule::default()
+        };
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    agents: vec!["*".to_string()],
+                    ..rule("bob-views-every-agent", BOB)
+                },
+                AccessRule {
+                    effect: AccessEffect::Deny,
+                    roles: vec!["worker".to_string()],
+                    ..rule("bob-is-denied-the-workers", BOB)
+                },
+                AccessRule {
+                    roles: vec!["reader".to_string()],
+                    ..rule("grace-is-granted-the-readers", GRACE)
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let row = |identity: &str, role: &str| AgentResourceAttributes {
+            identity: identity.to_string(),
+            agent_id: None,
+            role: Some(role.to_string()),
+            labels: BTreeMap::new(),
+        };
+        let sees = |identity: &str| {
+            [BOB, GRACE].map(|subject| {
+                controller
+                    .view_for_subject(Some(subject))
+                    .can_view_agent(identity)
+            })
+        };
+
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        // The stale row names the ended agent a reader: were it recorded,
+        // Bob's deny on the workers would not apply and Grace's grant would.
+        controller.record_snapshot_agent_attributes(row("aide", "reader"));
+        assert_eq!(
+            sees("aide"),
+            [false, false],
+            "the entry recorded as ended stays: denied by role, not granted by role"
+        );
+        controller.record_agent_attributes(row("aide", "reader"));
+        assert_eq!(
+            sees("aide"),
+            [true, true],
+            "a record of the whole agent from the roster ends it"
+        );
+        controller.record_snapshot_agent_attributes(row("aide", "worker"));
+        assert_eq!(
+            sees("aide"),
+            [false, false],
+            "an entry that is not of an ended agent is replaced by the row"
+        );
+        controller.record_snapshot_agent_attributes(row("scribe", "reader"));
+        assert_eq!(
+            sees("scribe"),
+            [true, true],
+            "an agent the cache does not know is recorded from the row"
+        );
+    }
+
+    /// A view refreshed under the configuration committed now judges an
+    /// agent the cache does not know as the view it was refreshed from: one
+    /// that judges such an agent by its name still does, and one that is
+    /// closed for it still is.
+    #[test]
+    fn a_refreshed_view_judges_an_agent_the_cache_does_not_know_as_before() {
+        const BOB: &str = "bob@example.test";
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "bob-views-every-agent".to_string(),
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "bob-is-denied-the-workers".to_string(),
+                    effect: AccessEffect::Deny,
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.view".to_string()],
+                    roles: vec!["worker".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let closed = controller.view_for_subject(Some(BOB));
+        let by_name = controller
+            .view_for_subject(Some(BOB))
+            .judging_unknown_agents_by_name();
+        assert_eq!(
+            [&closed, &by_name].map(|view| view.can_view_agent("nobody")),
+            [false, true],
+            "an agent the cache does not know: closed, and by its name"
+        );
+        assert_eq!(
+            [closed.refreshed(), by_name.refreshed()].map(|view| view.can_view_agent("nobody")),
+            [false, true],
+            "refreshed: each as before"
+        );
+    }
+
+    /// An ended agent is recorded with its name and nothing its spawn
+    /// recorded: its role and who spawned it are not known. A view and the
+    /// decision fence decide it closed: a deny on a role refuses it, and a
+    /// grant on a role or on the agent that spawned it grants nothing. An
+    /// agent it spawned is decided through it the same way: the deny on a
+    /// role refuses that agent too, and no grant reaches it through the
+    /// ended one. The same name seated again is decided by its row.
+    #[test]
+    fn an_ended_agent_and_an_agent_it_spawned_are_decided_closed_by_what_is_not_known() {
+        const BOB: &str = "bob@example.test";
+        const DAVE: &str = "dave@example.test";
+        const GRACE: &str = "grace@example.test";
+        let rule = |id: &str, subject: &str| AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: vec!["agent.view".to_string()],
+            ..AccessRule::default()
+        };
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    agents: vec!["planner".to_string()],
+                    ..rule("bob-is-granted-the-planners-members", BOB)
+                },
+                AccessRule {
+                    effect: AccessEffect::Deny,
+                    roles: vec!["worker".to_string()],
+                    ..rule("bob-is-denied-the-workers", BOB)
+                },
+                AccessRule {
+                    agents: vec!["planner".to_string()],
+                    ..rule("dave-is-granted-the-planners-members", DAVE)
+                },
+                AccessRule {
+                    roles: vec!["worker".to_string()],
+                    ..rule("grace-is-granted-the-workers", GRACE)
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let spawned_by = |spawner: &str| {
+            BTreeMap::from([(
+                crate::console_spawn::SPAWNED_BY_LABEL.to_string(),
+                spawner.to_string(),
+            )])
+        };
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: "planner".to_string(),
+            agent_id: None,
+            role: Some("lead".to_string()),
+            labels: BTreeMap::new(),
+        });
+        // The ended agent: its name alone.
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: "apprentice".to_string(),
+            agent_id: None,
+            role: Some("reader".to_string()),
+            labels: spawned_by("aide"),
+        });
+        let sees = |subject: &str, identity: &str| {
+            let by_view = controller
+                .view_for_subject(Some(subject))
+                .can_view_agent(identity);
+            let by_fence = controller
+                .decision_fence(Some(subject), None)
+                .can_see_origin(identity);
+            assert_eq!(
+                by_view, by_fence,
+                "{subject} on {identity}: the view and the fence"
+            );
+            by_view
+        };
+        assert_eq!(
+            [BOB, DAVE, GRACE].map(|subject| sees(subject, "aide")),
+            [false, false, false],
+            "the ended agent: denied by role, granted neither through a spawner nor by role"
+        );
+        assert_eq!(
+            [BOB, DAVE, GRACE].map(|subject| sees(subject, "apprentice")),
+            [false, false, false],
+            "the agent it spawned: decided through it"
+        );
+        // The same name seated again as a reader: its row decides it.
+        controller.record_agent_attributes(AgentResourceAttributes {
+            identity: "aide".to_string(),
+            agent_id: None,
+            role: Some("reader".to_string()),
+            labels: spawned_by("planner"),
+        });
+        assert_eq!(
+            [BOB, DAVE, GRACE].map(|subject| sees(subject, "aide")),
+            [true, true, false],
+            "seated again as a reader"
+        );
     }
 
     #[test]
@@ -4186,5 +5018,101 @@ mod tests {
             assert!(owner.can_view_captured_member(&captured));
             assert!(!other.can_view_captured_member(&captured));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod spawn_facts_not_known_tests {
+    use super::*;
+    use crate::access::{AccessControlConfig, AccessEffect, AccessRule};
+
+    const PERSON: &str = "bob@example.test";
+
+    fn rule(id: &str, effect: AccessEffect, selector: AccessRule) -> AccessRule {
+        AccessRule {
+            id: id.to_string(),
+            effect,
+            subjects: vec![PERSON.to_string()],
+            actions: vec!["agent.*".to_string()],
+            ..selector
+        }
+    }
+
+    /// Whether `rules` let the person view the agent `kept`, a worker whose
+    /// own row carries `team = blue`, recorded with what a spawn registered
+    /// of it not known.
+    fn views(rules: Vec<AccessRule>) -> bool {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules,
+            ..AccessControlConfig::default()
+        })
+        .expect("access controller");
+        controller.record_agent_spawn_facts_not_known(AgentResourceAttributes {
+            identity: "kept".to_string(),
+            agent_id: None,
+            role: Some("worker".to_string()),
+            labels: [("team".to_string(), "blue".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        controller
+            .view_for_subject(Some(PERSON))
+            .can_view_agent("kept")
+    }
+
+    #[test]
+    fn an_agent_whose_spawn_facts_are_not_known_is_decided_by_its_own_row_and_closed_by_the_rest() {
+        let by = |key: &str, value: &str| AccessRule {
+            match_labels: [(key.to_string(), value.to_string())].into_iter().collect(),
+            ..AccessRule::default()
+        };
+        let named = |agent: &str| AccessRule {
+            agents: vec![agent.to_string()],
+            ..AccessRule::default()
+        };
+        let role = AccessRule {
+            roles: vec!["worker".to_string()],
+            ..AccessRule::default()
+        };
+        // Its own row decides: its role and the label its row carries.
+        assert!(views(vec![rule(
+            "its-role",
+            AccessEffect::Allow,
+            role.clone()
+        )]));
+        assert!(views(vec![rule(
+            "its-own-label",
+            AccessEffect::Allow,
+            by("team", "blue")
+        )]));
+        assert!(views(vec![rule(
+            "its-name",
+            AccessEffect::Allow,
+            named("kept")
+        )]));
+        // What a spawn may have registered is not known: an allow by a label
+        // its row does not carry, or on another agent, does not reach it.
+        assert!(!views(vec![rule(
+            "a-spawn-label",
+            AccessEffect::Allow,
+            by("tier", "vault")
+        )]));
+        assert!(!views(vec![rule(
+            "a-spawner",
+            AccessEffect::Allow,
+            named("alpha")
+        )]));
+        // And a deny by such a label, or on another agent, applies to it.
+        assert!(!views(vec![
+            rule("its-role", AccessEffect::Allow, role.clone()),
+            rule("off-a-spawn-label", AccessEffect::Deny, by("tier", "vault")),
+        ]));
+        assert!(!views(vec![
+            rule("its-role", AccessEffect::Allow, role),
+            rule("off-a-spawner", AccessEffect::Deny, named("alpha")),
+        ]));
     }
 }

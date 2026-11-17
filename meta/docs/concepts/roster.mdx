@@ -295,6 +295,10 @@ answers the check from that WorkGraph:
   not decode, the check answers unavailable. Meerkat asks again, up to three
   attempts, then settles the run the same way.
 
+A mob runtime composed without a WorkGraph service has no check, and
+neither has one whose storage provider has no WorkGraph: there is no item
+and no claim to check, and its durable workers continue unchecked.
+
 The check knows the worker by its member owner key
 (`agent:mob/<mob_id>/agent/<identity>`) and by its session (`session:<id>`);
 a claim under any other key belongs to another owner. Two limits apply. A

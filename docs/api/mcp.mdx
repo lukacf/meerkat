@@ -384,7 +384,32 @@ ask its user.
   a host offers that mode only as the operator's explicit choice. `rkat mcp
   login` prints the exact `rkat mcp remove` and `rkat mcp add` commands for
   each.
-- **Discovery, registration and scopes.** The authorization server's metadata
+- **Discovery, registration and scopes.** The server's protected resource
+  metadata (RFC 9728), named by its `401` challenge or found at a well-known
+  URL, names the authorization server. A server that publishes none (the
+  2025-03-26 MCP authorization revision) is taken to be its own
+  authorization server: the metadata is then read from the origin of the
+  configured server URL, its `issuer` must be that origin (written with or
+  without one trailing slash, and nothing else), and the
+  configured URL is the resource. A server publishes none when its
+  challenge names no document and every location the document is looked
+  for says so: the two well-known URLs at the origin root (with and without
+  the server's path) by `404` or `410`, and the one under the server's own
+  endpoint path by `404`, `410`, `403`, `405` or a `401` whose challenge
+  names no resource metadata (the endpoint's own guard answers there). Any
+  other answer without a document (a server error, a redirect, `401` at the
+  origin root) refuses the login, unless
+  another of the candidate locations serves the document. A metadata
+  document is required either
+  way (no default endpoint paths are assumed), a document served at one of
+  these locations (the earliest that serves one), or named by the challenge
+  the host passes on, is always the one followed, and a host-registered
+  client is never discovered this way. A document served only behind the
+  endpoint's own guard is not seen. `rkat mcp login` passes the
+  endpoint's own challenge on; the RPC and REST login starts pass none, so a
+  document named only in that challenge is not seen by them. The
+  authorization server's
+  metadata
   is read from RFC 8414 discovery, falling back to OpenID Connect discovery.
   Dynamic client registration declares `application_type: "native"`. The
   attempt requires the scopes the server's `401` challenge names (its

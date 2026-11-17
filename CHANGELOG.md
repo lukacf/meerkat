@@ -62,10 +62,10 @@ them.
   (first in 0.9.5); shown by runs on the published 0.9.14 with a `jsonl`
   realm and by tests on the 0.9.15 and 0.9.16 trees; 0.9.5 through 0.9.13
   were not run. Measured by tests of this change for `mob/cancel_all_work`
-  (the cancelled run started by a member send and by a client's own
-  `turn/start`) on a `jsonl` realm and on in-memory stores, with a `sqlite`
-  realm as the control, and for a session with no mob through the session
-  runtime's own boundary cancel, which no public JSON-RPC method sends;
+  (the cancelled run started by a member send, on in-memory stores, and by
+  a client's own `turn/start`, on a `jsonl` realm with a `sqlite` realm as
+  the control), and for a session with no mob through the session runtime's
+  own boundary cancel, which no public JSON-RPC method sends;
   `mob/force_cancel` and a member stop that cancels at the run's boundary
   reach the same state by reading and were not run.
 

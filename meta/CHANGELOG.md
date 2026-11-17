@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   upgrade. There is no notice on a gateway of an earlier release, which
   names no bundle, and a console of an earlier release ignores the new
   member.
+- Console: the rendering of an open question set, as the Console's
+  `meta/decisions/rendering` answers it, ends with a closing note: "Answer
+  these questions in the Console, in the agent's chat or under Approvals.
+  If this page offers no way to answer them, it runs an earlier Console:
+  reload the page, or, in an application that builds the Console in,
+  update its Console." A Console page of an earlier release shows a
+  question set, where it shows one at all, as the text of a decision with
+  no way to answer; it now reads there what to do. The answer names what
+  was added (a blank line and the note) in the new member
+  `rendering_suffix`, and a page of this release takes it off and says in
+  its own words where the set is answered. The note is not part of the
+  held rendering: `subject_digest` (the digest a decide compares) and
+  `parts` are those of the rendering without it, the stdio answer does not
+  carry it, and a set that ended and a decision of another kind are
+  answered as before.
 
 ### Fixed
 

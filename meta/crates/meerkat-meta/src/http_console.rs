@@ -1510,7 +1510,10 @@ fn attach_console_bundle(experience: &mut Value) {
     }
 }
 
-/// The version a console page gives its app script, if it names one.
+/// The version a console page gives its app script, if it names one. The
+/// console's build writes it in one form, lowercase hex digits, and fails
+/// otherwise (`console/build.cjs`), so this reader and the page's own
+/// (`console/src/lib/console-bundle.ts`) cut the same text.
 fn console_bundle_of(index_html: &str) -> Option<&str> {
     const APP_SCRIPT: &str = "console-app.js?v=";
     let version = &index_html[index_html.find(APP_SCRIPT)? + APP_SCRIPT.len()..];

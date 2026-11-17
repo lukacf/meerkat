@@ -91,7 +91,7 @@ graph TD
     Ensure the `comms` Cargo feature is compiled in (enabled by default in the CLI; opt-in on the `meerkat` facade crate).
   </Step>
   <Step title="Generate identity">
-    Identity is auto-generated on first run. Factory-built sessions keep their keypair across restarts in a directory outside the state root and the realm (see [where a session's keys are kept](#where-a-session%E2%80%99s-keys-are-kept)). A standalone `CoreCommsConfig` resolves `identity_dir` relative to the base directory supplied by its host.
+    Identity is auto-generated on first run. With in-process comms, the default, factory-built sessions keep their keypair across restarts in a directory outside the state root and the realm (see [where a session's keys are kept](#where-a-session%E2%80%99s-keys-are-kept)). A standalone `CoreCommsConfig` resolves `identity_dir` relative to the base directory supplied by its host.
   </Step>
   <Step title="Configure trusted peers">
     Let mob wiring, host binding, or the typed pairing protocol install machine-authorized trust. Do not seed `trusted_peers.json` by hand: a non-empty persisted file is rejected at runtime startup because it is a projection, not trust authority. Route by the derived `PeerId`, never by the display name.
@@ -115,8 +115,8 @@ Each agent has an Ed25519 keypair managed by the `Keypair` type (`crates/meerkat
 With in-process comms, the default, a session with comms has its own key pair,
 in a directory named by the session id that holds `identity.key` and
 `identity.pub`. That directory is not in the state root and not in the realm:
-it lies under the user's home, and the place depends on the command that built
-the session.
+by default it lies under the user's home, and the place depends on the command
+that built the session.
 
 | Command | Session keys under |
 |---------|--------------------|

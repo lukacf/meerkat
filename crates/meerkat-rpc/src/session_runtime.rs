@@ -49833,10 +49833,11 @@ mod tests {
     /// The row pins that equality and the answers: after a member's running
     /// run was cancelled, the first turn a client starts on the member's
     /// session runs, and so does the turn after it. Through 0.9.16 that
-    /// first turn was answered "-32603 turn abandoned" and not run on a
-    /// WholeBlob store, which the fixture's in-memory stores are (the
-    /// cancelled run's closing save, promoted by the runtime alone, left the
-    /// live session's checkpoint base behind the store).
+    /// first turn made its model call and was then answered "-32603 turn
+    /// abandoned", its result not kept, on a WholeBlob store, which the
+    /// fixture's in-memory stores are (the cancelled run's closing save,
+    /// promoted by the runtime alone, left the live session's checkpoint
+    /// base behind the store).
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_all_work_on_a_member_keeps_the_members_registration() {
@@ -49976,6 +49977,10 @@ mod tests {
             turns_after_a_cancelled_turn_on_a_realm(meerkat_store::RealmBackend::Sqlite).await;
         println!("sqlite realm ({profile}): next turn {next:?}, the turn after it {after_next:?}");
         assert_eq!(
+            profile, "HeadCanonicalV1",
+            "a sqlite realm's session store is HeadCanonical: the control's store"
+        );
+        assert_eq!(
             (next, after_next),
             (Ok(()), Ok(())),
             "(the first turn after the cancelled turn, the turn after it) on a sqlite realm \
@@ -49986,16 +49991,22 @@ mod tests {
     /// On a realm created with the `jsonl` backend (a WholeBlob store) the
     /// first turn a client starts on a member's session after
     /// `mob/cancel_all_work` ended the member's running turn runs. RED
-    /// before: it was answered "-32603 turn abandoned" and not run (the
-    /// cancelled run's closing save, promoted by the runtime alone, left the
-    /// live session's checkpoint base behind the store), and only the turn
-    /// after it ran.
+    /// before: it made its model call and was then answered "-32603 turn
+    /// abandoned", its result not kept (the cancelled run's closing save,
+    /// promoted by the runtime alone, left the live session's checkpoint
+    /// base behind the store), and only the turn after it ran. The row
+    /// asserts the realm's store profile, so it cannot pass on a store the
+    /// defect never touched.
     #[cfg(all(feature = "mob", feature = "mcp"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_first_turn_after_a_cancelled_turn_runs_on_a_jsonl_realm() {
         let (profile, next, after_next) =
             turns_after_a_cancelled_turn_on_a_realm(meerkat_store::RealmBackend::Jsonl).await;
         println!("jsonl realm ({profile}): next turn {next:?}, the turn after it {after_next:?}");
+        assert_eq!(
+            profile, "WholeBlobV1",
+            "a jsonl realm's session store is WholeBlob: the store the row is about"
+        );
         assert_eq!(
             (next, after_next),
             (Ok(()), Ok(())),
@@ -50126,6 +50137,10 @@ mod tests {
         let profile = format!(
             "{:?}",
             persistence.runtime_store().session_persistence_profile()
+        );
+        assert_eq!(
+            profile, "WholeBlobV1",
+            "a jsonl realm's session store is WholeBlob: the store the row is about"
         );
         let runtime = Arc::new(
             SessionRuntime::new(

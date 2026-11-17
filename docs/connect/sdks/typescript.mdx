@@ -4,12 +4,12 @@ description: "Use Node service operations, native application composition and a 
 icon: "js"
 ---
 
-`@rkat/toolkit` version `0.9.15` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
+`@rkat/toolkit` version `0.9.16` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
 
 ## Install
 
 ```sh
-npm install https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15/rkat-toolkit-0.9.15.tgz
+npm install https://github.com/lukacf/meerkat/releases/download/connect-v0.9.16/rkat-toolkit-0.9.16.tgz
 ```
 
 ## Build from source
@@ -49,7 +49,7 @@ connector imports remain independent of this entrypoint.
 | Fresh application | `new ToolkitApplicationPreparation(preparation, finalize).build(builder, { signal })` |
 | Admitted replacement (development only) | `new ToolkitApplicationUpdate(startup).configure(builder)` |
 
-Connect 0.9.15 does not support in-place updates that change an application's
+Connect 0.9.16 does not support in-place updates that change an application's
 tool policy, definition, instructions or runtime.
 Replacement requires a matching development SDK and gateway; see the
 [release limits](/connect/availability).

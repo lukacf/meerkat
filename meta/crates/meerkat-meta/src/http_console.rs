@@ -4305,6 +4305,10 @@ mod console_ended_member_access_tests;
 mod console_member_memory_scope_tests;
 
 #[cfg(test)]
+#[path = "console_recorded_field_refusal_tests.rs"]
+mod console_recorded_field_refusal_tests;
+
+#[cfg(test)]
 #[path = "console_stored_session_seat_tests.rs"]
 mod console_stored_session_seat_tests;
 
@@ -6684,7 +6688,11 @@ pub(crate) enum ConsoleMemberFieldKind {
     /// The method creates the member, or records something under its name
     /// (a subscription, a goal, an edge). A name a member hidden from the
     /// caller holds is refused as an unknown member's: the name is taken,
-    /// and nothing may be recorded for the hidden member.
+    /// and nothing may be recorded for the hidden member. The refusal is
+    /// given once the access rules allowed the request (its access check,
+    /// or for a topology apply the handler's own), which judge the name
+    /// swapped for one no member holds: a caller the rules refuse reads
+    /// their refusal, as for a name no member holds.
     Recorded,
 }
 
@@ -7074,10 +7082,14 @@ fn absent_member_spelling(spelling: &str, nonce: &str) -> String {
 }
 
 /// The names [`console_rpc_resolve_members`] swapped in a request for the
-/// members hidden from its caller.
+/// members hidden from its caller, and the refusal it owes for one of them.
 #[derive(Debug, Default)]
 pub(crate) struct ConsoleAbsentNames {
     nonce: Option<String>,
+    /// The caller's spelling of the first name a hidden member holds in a
+    /// field the method creates or records under
+    /// ([`ConsoleMemberFieldKind::Recorded`]).
+    refused: Option<String>,
 }
 
 /// A fresh suffix for the names a request swaps: no member name holds it.
@@ -7093,7 +7105,26 @@ impl ConsoleAbsentNames {
     pub(crate) fn fresh() -> Self {
         Self {
             nonce: Some(absent_name_nonce()),
+            refused: None,
         }
+    }
+
+    /// The refusal owed to a request of `method` that names a hidden member
+    /// in a field the method creates or records under: the words the method
+    /// answers a name no member holds in
+    /// ([`hidden_recorded_member_refusal`]), with the name as the caller
+    /// spelled it. It is given once the access rules allowed the request,
+    /// which judged the swapped name as they judge a name no member holds:
+    /// right after the request's access check and before any handler, so
+    /// that no handler receives a request with such a name swapped. A
+    /// topology apply is the one exception: that check asks nothing of it
+    /// and its handler asks the rules itself, so the refusal is handed to
+    /// the handler, which gives it once the rules allowed the request and
+    /// applies nothing ([`crate::rpc::topology_methods::handle_apply`]).
+    pub(crate) fn recorded_refusal(&self, method: &str) -> Option<JsonRpcError> {
+        self.refused
+            .as_deref()
+            .map(|spelling| hidden_recorded_member_refusal(method, spelling))
     }
 
     /// The name no member holds that stands for `spelling`.
@@ -7220,8 +7251,12 @@ fn hidden_recorded_member_refusal(method: &str, spelling: &str) -> JsonRpcError 
 /// it is swapped for a name no member holds, so the method takes its own
 /// path for an absent member, and [`ConsoleAbsentNames::restore`] spells the
 /// answer back with the caller's name; in a field naming a member the
-/// method creates or records something for, the request is refused as one
-/// naming a name no member holds ([`hidden_recorded_member_refusal`]).
+/// method creates or records something for, it is swapped the same way and
+/// the request is owed a refusal as one naming a name no member holds
+/// ([`ConsoleAbsentNames::recorded_refusal`], in the words of
+/// [`hidden_recorded_member_refusal`]), which the caller gives right after
+/// the request's access check and before any handler: every caller that
+/// dispatches such a method must give it.
 pub(crate) fn console_rpc_resolve_members(
     view: Option<&AccessView>,
     method: &str,
@@ -7252,6 +7287,7 @@ fn console_rpc_resolve_members_with(
         );
     let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
     let mut nonce: Option<String> = None;
+    let mut refused: Option<String> = None;
     let fields = console_method_member_fields_or_subject(method);
     for field in fields {
         visit_member_field(params, field.path, &mut |slot| {
@@ -7264,29 +7300,26 @@ fn console_rpc_resolve_members_with(
             if !hidden {
                 return Ok(());
             }
-            match field.kind {
-                ConsoleMemberFieldKind::Recorded => {
-                    Err(hidden_recorded_member_refusal(method, spelling))
-                }
-                ConsoleMemberFieldKind::Subject => {
-                    let nonce = nonce.get_or_insert_with(absent_name_nonce);
-                    let absent = absent_member_spelling(spelling, nonce);
-                    *slot = Value::String(absent);
-                    Ok(())
-                }
+            // A name in a field the method creates or records under is
+            // noted for the refusal the request is owed after its access
+            // check; it is swapped like any other, so that check judges a
+            // name no member holds.
+            if field.kind == ConsoleMemberFieldKind::Recorded && refused.is_none() {
+                refused = Some(spelling.to_string());
             }
+            let nonce = nonce.get_or_insert_with(absent_name_nonce);
+            let absent = absent_member_spelling(spelling, nonce);
+            *slot = Value::String(absent);
+            Ok(())
         })?;
     }
     // The access rules judge every subject spelling a request carries
     // ([`console_rpc_member_targets`]), one its method's entry does not
-    // list included. For a method that reads or acts on a member, a hidden
-    // member named under such a spelling is swapped too, under the same
-    // suffix, so the rules judge a name no member holds there as well. A
-    // value that is no string stays as it is.
-    if fields
-        .iter()
-        .any(|field| field.kind == ConsoleMemberFieldKind::Subject)
-    {
+    // list included. For a method that names a member in any field, a
+    // hidden member named under such a spelling is swapped too, under the
+    // same suffix, so the rules judge a name no member holds there as
+    // well. A value that is no string stays as it is.
+    if !fields.is_empty() {
         for spelling in SUBJECT_MEMBER {
             let [key] = spelling.path else { continue };
             if fields.iter().any(|field| field.path == spelling.path) {
@@ -7305,7 +7338,7 @@ fn console_rpc_resolve_members_with(
             }
         }
     }
-    Ok(ConsoleAbsentNames { nonce })
+    Ok(ConsoleAbsentNames { nonce, refused })
 }
 
 /// The present, non-empty subject spellings of a request
@@ -7492,9 +7525,10 @@ pub(crate) fn live_access_violation(
 /// Every mapped requirement must pass; the first failing one is reported.
 ///
 /// A member the caller may not know of ([`AccessView::hides_agent`]: it is
-/// private to another person) never reaches this check: the request's
-/// member resolution ([`console_rpc_resolve_members`]) answered it as a
-/// member that does not exist before.
+/// private to another person) never reaches this check under its own name:
+/// the request's member resolution ([`console_rpc_resolve_members`])
+/// swapped it for a name no member holds before, in every field, so the
+/// check judges that name as it judges any name no member holds.
 ///
 /// A read, a plan or a change of one long-term agent that names an agent
 /// the caller may not view is not judged here either
@@ -13600,6 +13634,17 @@ async fn handle_console_aggregator_rpc(
         // The refusal names the member as the caller spelled it.
         return absent.restore(response_value(response_id, None, Some(error)));
     }
+    // A request the rules allow that names a hidden member where its method
+    // creates or records under a name is refused here, as naming an unknown
+    // member, before any handler ([`ConsoleAbsentNames::recorded_refusal`]).
+    // A topology apply is not: the check above asks nothing of it, and this
+    // console serves no such method, so it is answered below as any other
+    // request for it.
+    if request.method != crate::rpc::topology_methods::TOPOLOGY_APPLY_METHOD
+        && let Some(refusal) = absent.recorded_refusal(request.method.as_str())
+    {
+        return response_value(response_id, None, Some(refusal));
+    }
     let response = Box::pin(async {
     // Each awaiting arm runs as its own boxed future, built in
     // `box_in_own_frame`'s frame. At opt-level 0 LLVM gives every local of
@@ -14236,6 +14281,20 @@ async fn handle_console_runtime_rpc_with_visibility(
         // The refusal names the member as the caller spelled it.
         return absent.restore(response_value(response_id, None, Some(error)));
     }
+    // A request the rules allow that names a hidden member where its method
+    // creates or records under a name is refused here, as naming an unknown
+    // member, before any handler ([`ConsoleAbsentNames::recorded_refusal`]).
+    // A topology apply is not: the check above asks nothing of it and its
+    // handler asks the rules itself, so the refusal goes to its arm, which
+    // answers a console without topology control as for any other name and
+    // hands the refusal to the handler to give once the rules allowed the
+    // request.
+    let mut owed = absent.recorded_refusal(request.method.as_str());
+    if request.method != crate::rpc::topology_methods::TOPOLOGY_APPLY_METHOD
+        && let Some(refusal) = owed.take()
+    {
+        return response_value(response_id, None, Some(refusal));
+    }
     // The method arms answer in one boxed future, so the answer is spelled
     // back with the caller's names whichever arm answers.
     let response = Box::pin(async {
@@ -14746,6 +14805,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     access_view,
                     authenticated_principal,
                     topology_apply_scope,
+                    owed,
                 )
                 .await,
             )

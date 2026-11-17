@@ -199,6 +199,17 @@ impl ControlPeer {
 /// every member.
 async fn listening(state: &std::path::Path, mob_id: &str) -> (crate::UnifiedRuntime, ControlPeer) {
     let (runtime, _server) = server(state, mob_id).await;
+    // The runtime reads who its members are kept apart from in the
+    // background from its start, and answers every name as no member
+    // until that read has succeeded: the rows begin once it has.
+    let record = runtime.mob_runtime().private_owners();
+    record
+        .first_attempts_settled(std::time::Duration::from_secs(30))
+        .await;
+    assert!(
+        !record.first_read_pending(),
+        "the runtime's first read of its members has succeeded"
+    );
     let keys = GatewayPeerKeys::ephemeral();
     let mut table = ControlGrantTable::new();
     table.insert(
@@ -293,9 +304,15 @@ fn member_request(verb: &str, member: &str, far: &GatewayPeerKeys) -> ControlReq
     }
 }
 
-/// What an answer says once the identity's name is taken out of it.
+/// What an answer says once the identity's name is taken out of it, as it
+/// is spelled and as the roster keys its member.
 fn shape(answer: &ControlResponse, identity: &str) -> String {
-    format!("{answer:?}").replace(identity, "<identity>")
+    format!("{answer:?}")
+        .replace(identity, "<identity>")
+        .replace(
+            crate::member_comms_id::mob_member_id(identity).as_str(),
+            "<identity>",
+        )
 }
 
 /// Whether the listener's grant policy refused the request.

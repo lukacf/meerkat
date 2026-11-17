@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `AnnouncementStore` (Rust): five methods with default bodies, `judges_readers`, `replay_announcers`, `put_subscription_with_roster`, `owed_announcers` and `seal_batch_with_roster`. An implementation outside Meta compiles unchanged and answers `judges_readers` `false` until it overrides that method (see Breaking).
 - `AgentMemoryProvider` gains the provided method `recall_in_scope`; its default answers that the call is unsupported, so every implementor builds unchanged. A provider that serves a private member's `memory` tool implements it; until it does, that member's recall through it answers unsupported. The bundled SQLite store implements it.
+- Python SDK: `Meta.builder().on_schedule_fire(name, handler)` registers the
+  handler for a host runnable before the runtime first connects. A schedule
+  with a `host_runnable` target that is due when the gateway starts can fire
+  before `build()` returns the runtime; for a program that uses `build()`, a
+  handler registered on the runtime (`runtime.on_schedule_fire`) is not
+  there yet, the fire is answered with an error and that occurrence ends
+  `delivery_failed`. A handler given to the builder answers it; it can run
+  before `build()` returns, so it must not need the runtime object. A host
+  that makes `MetaRuntime(config)` itself and registers before `connect()`
+  had no such window. A later call for one name replaces the earlier, a
+  handler for a name `host_runnables()` does not declare raises `ValueError`
+  at `build()`, and `runtime.on_schedule_fire` is unchanged. No option is
+  sent to the gateway and the `meta/init` request is unchanged. (The lost
+  fire was shown by a run with the SDK's start held open; it was not seen
+  in an unforced start.)
 
 ### Changed
 

@@ -299,7 +299,10 @@ them.
   member's wake refused). A socket file that a listener which has ended left
   at the path is removed and bound as before, so a restarted host starts as
   before; the dial's other failures leave the path free as before. A
-  listener of the same process is replaced as before. The dial is bounded at
+  listener of the same process is replaced as before, as long as the path is
+  written the same way: the rule goes by the path as given, so the same file
+  reached under a second spelling (for example through a symlinked directory)
+  is now refused as held where it was replaced. The dial is bounded at
   two seconds; a connection, a listener whose backlog is full and a dial
   that does not end within the bound all count as held. The listener that
   holds the path sees one connection that closes without a byte. The

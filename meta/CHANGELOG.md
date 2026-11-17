@@ -135,7 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   these questions in the Console, in the agent's chat or under Approvals.
   If this page offers no way to answer them, it runs an earlier Console:
   reload the page, or, in an application that builds the Console in,
-  update its Console." A Console page of an earlier release shows a
+  update its Console." A Console page of 0.9.14 or earlier shows a
   question set, where it shows one at all, as the text of a decision with
   no way to answer; it now reads there what to do. The answer names what
   was added (a blank line and the note) in the new member

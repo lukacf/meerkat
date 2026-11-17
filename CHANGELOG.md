@@ -239,10 +239,9 @@ them.
 
   - wake its own session: with `delivery` set to `event_steer` or
     `event_queue`, each notification of the script is an input of its own
-    that starts a turn of the session that started the monitor (never
-    another session), with no outside input, and wakes a dormant mob member.
-    The default, `notification`, appends to the session's context and starts
-    no turn;
+    that starts a turn, with no outside input, and wakes a dormant mob
+    member. The default, `notification`, appends to the session's context
+    and starts no turn;
   - choose its own rate: the notification rate and line size are arguments
     of the call, within hard caps (at most 1000 notifications per window, a
     window of 1 second to 24 hours, 1 MiB per line). No host setting bounds
@@ -257,9 +256,10 @@ them.
 - `meerkat-tools`, `meerkat-contracts`, docs: the words "high-trust" are gone
   from `monitor_start`'s description, from the `monitors/start` line of the
   RPC method catalog (`artifacts/schemas/rpc-methods.json`) and from the
-  docs: an agent with shell is already trusted with a shell. The tool's name
-  and the method's name are unchanged. The Shell capability's description
-  now names `monitor_start`.
+  built-in tools reference, the tools concept and examples pages, the
+  durable jobs guide and the RPC reference: an agent with shell is already
+  trusted with a shell. The tool's name and the method's name are
+  unchanged. The Shell capability's description now names `monitor_start`.
 
 - `rkat mcp get` masks every env and header value in its text form, and a
   server URL is shown without its userinfo and query in `rkat mcp get`, the

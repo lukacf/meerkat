@@ -610,6 +610,14 @@ This prints the effective runtime model registry for the active realm, including
 rkat doctor
 ```
 
+The first line is the realm's config document: `ok config <path>`, or
+`warn config missing config at <path>` when the realm has none yet. A
+`warn config` line also names a project `.rkat/config.toml` whose
+`[confinement]` or `[governance]` table is not what is in effect, with where
+the section is read from (see
+[config files](/cli/configuration#config-files)); that line is a warning
+only and does not change `doctor`'s verdict.
+
 For self-hosted setups, `doctor` checks the normalized `/v1/models` endpoint for each configured server and warns when configured aliases are missing from the returned model list.
 
 For Gemma 4, prefer `chat_completions` in your server config unless you have validated a specific `responses` path for your serving stack.
@@ -996,4 +1004,7 @@ Shows status for compiled/runtime capabilities.
 rkat init
 ```
 
-Creates `.rkat/config.toml` from the global template.
+Creates `.rkat/config.toml` as a copy of the user document
+(`~/.rkat/config.toml`, created from the template when missing). A run reads
+only the hook entries of that file; every other setting of a project goes in
+its realm document (see [config files](/cli/configuration#config-files)).

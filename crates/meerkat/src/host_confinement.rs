@@ -835,8 +835,51 @@ impl HostConfinement {
         realm_document: &Path,
         user_document: Option<&Path>,
     ) -> Vec<HostConfinementNotice> {
-        let _ = (context_root, effective, realm_document, user_document);
-        Vec::new()
+        let Some(context) = context_root else {
+            return Vec::new();
+        };
+        let project_file = |root: &Path| root.join(".rkat").join("config.toml");
+        let mut files = vec![project_file(context)];
+        if let Some(project) =
+            meerkat_core::find_project_root(context).map(|root| project_file(&root))
+            && !files.contains(&project)
+        {
+            files.push(project);
+        }
+        let composed: Vec<PathBuf> = std::iter::once(realm_document)
+            .chain(user_document)
+            .map(resolve_existing)
+            .collect();
+        let mut notices = Vec::new();
+        for file in files {
+            if composed.contains(&resolve_existing(&file)) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for section in effective.administered_sections_not_in_effect(&text) {
+                notices.push(HostConfinementNotice {
+                    warning: true,
+                    text: unread_section_text(section, &file, realm_document, user_document),
+                });
+            }
+        }
+        notices
+    }
+
+    /// Log [`Self::unread_project_sections`] in the host's log.
+    pub fn log_unread_project_sections(
+        context_root: Option<&Path>,
+        effective: &meerkat_core::Config,
+        realm_document: &Path,
+        user_document: Option<&Path>,
+    ) {
+        for notice in
+            Self::unread_project_sections(context_root, effective, realm_document, user_document)
+        {
+            tracing::warn!("{}", notice.text);
+        }
     }
 
     /// Log [`Self::startup_report`] in the host's log.
@@ -974,6 +1017,57 @@ fn workspace_protections(root: &Path) -> Vec<PathAccess> {
 #[cfg(not(target_os = "macos"))]
 fn workspace_protections(_root: &Path) -> Vec<PathAccess> {
     Vec::new()
+}
+
+/// The warning for `section`, which the project file `file` states and
+/// which is not in effect ([`HostConfinement::unread_project_sections`]):
+/// the file, the table, and where the host reads the section. For
+/// confinement that is the user document and the flags first, then the
+/// realm's own document.
+fn unread_section_text(
+    section: meerkat_core::AdministeredSection,
+    file: &Path,
+    realm_document: &Path,
+    user_document: Option<&Path>,
+) -> String {
+    let stated = format!(
+        "the project file '{}' states a [{section}] table that is not in effect: a project file's [{section}] is not read",
+        file.display()
+    );
+    match section {
+        meerkat_core::AdministeredSection::Confinement => {
+            // The Linux workspace preset cannot keep a project's own realm
+            // state from its confined processes, so such a start is refused
+            // without a state root elsewhere; the clause uses that
+            // refusal's remedy.
+            let state_root = if cfg!(target_os = "linux") {
+                " (on Linux a workspace confinement also needs --state-root <dir> outside every confinement write grant; see OS process confinement in the CLI configuration docs)"
+            } else {
+                ""
+            };
+            let realm_is_user = user_document
+                .is_some_and(|user| resolve_existing(user) == resolve_existing(realm_document));
+            let places = match user_document {
+                Some(user) => format!(
+                    "State confinement in the user config document '{}' or with the --confinement flags{state_root}",
+                    user.display()
+                ),
+                None => format!("State confinement with the --confinement flags{state_root}"),
+            };
+            if realm_is_user {
+                format!("{stated}. {places}")
+            } else {
+                format!(
+                    "{stated}. {places}; the other document this host reads it from is the realm's config document '{}'",
+                    realm_document.display()
+                )
+            }
+        }
+        meerkat_core::AdministeredSection::Governance => format!(
+            "{stated}. This host reads it from the realm's config document '{}' and the documents that realm inherits from",
+            realm_document.display()
+        ),
+    }
 }
 
 /// `paths` once each, without a path that another listed path contains, in
@@ -1608,6 +1702,25 @@ mod tests {
                 said[0].text
             );
         }
+
+        // The user document and the flags come first, with what a Linux
+        // start needs besides; the realm's document is named after them.
+        let position = |named: &str| said[0].text.find(named).expect("named above");
+        assert!(
+            position(&user_document.display().to_string())
+                < position(&realm_document.display().to_string())
+                && position("--confinement") < position(&realm_document.display().to_string()),
+            "{}",
+            said[0].text
+        );
+        assert_eq!(
+            said[0]
+                .text
+                .contains("--state-root <dir> outside every confinement write grant"),
+            cfg!(target_os = "linux"),
+            "{}",
+            said[0].text
+        );
 
         std::fs::write(
             &project_file,

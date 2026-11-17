@@ -74,15 +74,18 @@ The active realm document is the head of the runtime config chain. Under the
 default project-local state root it is
 `<project-root>/.rkat/realms/<realm>/config.toml`.
 
-Compatibility files still exist:
+Two more files carry the same name:
 
-| Scope | Path |
-|-------|------|
-| User | `~/.rkat/config.toml` |
-| Project | `.rkat/config.toml` |
+| Scope | Path | What reads it |
+|-------|------|---------------|
+| User | `~/.rkat/config.toml` | The reserved `global` realm's document: every realm whose chain ends in `global` inherits it, and its `[confinement]` applies to every realm |
+| Project | `.rkat/config.toml` | Written by `rkat init` as a copy of the user document. A run reads only its hook entries (`[[hooks.entries]]`); no other table in it has an effect, `[confinement]` and `[governance]` included |
 
-These remain convention inputs for templates and compatibility workflows.
-CLI, RPC, REST, and MCP all resolve the same realm chain.
+Ordinary settings for one project (models, tools, limits and the like) go in
+that project's realm document, not in the project file; `rkat doctor` prints
+the realm document's path on its `config` line. For `[confinement]` see
+[OS process confinement](#os-process-confinement). CLI, RPC, REST, and MCP
+all resolve the same realm chain.
 
 Realm config supports explicit inheritance:
 

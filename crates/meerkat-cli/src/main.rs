@@ -6234,6 +6234,9 @@ pub(crate) fn with_cli_confinement(
     scope: &RuntimeScope,
     workspace_root: &Path,
 ) -> anyhow::Result<AgentFactory> {
+    // Said first, so a start this function refuses still names a project
+    // file whose administered section is not in effect.
+    report_cli_unread_project_sections(scope, config, workspace_root);
     let confinement = meerkat::HostConfinement::resolve(&config.confinement, Some(workspace_root))?;
     let user_document = cli_global_config_path(scope);
     let mut inputs =
@@ -6376,6 +6379,22 @@ fn cli_unread_project_sections(
         &realm_document,
         Some(&cli_global_config_path(scope)),
     )
+}
+
+/// Print [`cli_unread_project_sections`] once per process on stderr, each as
+/// a warning. It is said whether or not the run confines anything: a table
+/// nobody reads matters most when nothing else states the section.
+fn report_cli_unread_project_sections(
+    scope: &RuntimeScope,
+    config: &Config,
+    workspace_root: &Path,
+) {
+    static REPORTED: std::sync::Once = std::sync::Once::new();
+    REPORTED.call_once(|| {
+        for notice in cli_unread_project_sections(scope, config, workspace_root) {
+            eprintln!("{}", render_cli_confinement_notice(&notice));
+        }
+    });
 }
 
 /// The doctor's `config` warnings for [`cli_unread_project_sections`], one
@@ -10379,6 +10398,11 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
     } else {
         ok = false;
         println!("warn\tconfig\tmissing config at {}", config_path.display());
+    }
+    // A project file's administered section that is not in effect is a
+    // warning only: it does not change the doctor's verdict.
+    for line in doctor_unread_project_section_lines(scope, &config) {
+        println!("{line}");
     }
 
     let provider_keys: [(&str, &[&str]); 2] = [
@@ -35587,6 +35611,15 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             "{}",
             lines[0]
         );
+
+        // The doctor's line is a warning only: with it, and nothing else
+        // amiss, the doctor's verdict stays good.
+        assert_eq!(
+            doctor_unread_project_section_lines(&scope, &config).len(),
+            1
+        );
+        let verdict = handle_doctor(&scope).await;
+        assert!(verdict.is_ok(), "{verdict:?}");
     }
 
     /// A confined command whose processes could change the realm state is

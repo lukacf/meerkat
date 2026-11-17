@@ -744,7 +744,7 @@ impl AppState {
         // The head document composes with the same ancestors as at start, so
         // a config write cannot cut the realm from their `[confinement]`.
         let base_config_store: Arc<dyn ConfigStore> = Arc::new(
-            FileConfigStore::new(head_config_doc, meerkat_models::canonical())
+            FileConfigStore::new(head_config_doc.clone(), meerkat_models::canonical())
                 .with_realm_chain(realm.clone(), Arc::clone(&realm_config_source)),
         );
         let config_store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::TaggedConfigStore::new(
@@ -870,6 +870,12 @@ impl AppState {
             bootstrap.context.user_config_root.as_deref(),
         );
         host_confinement.log_startup(&host_inputs, &convention_sources);
+        meerkat::HostConfinement::log_unread_project_sections(
+            conventions_context_root.as_deref(),
+            &config,
+            &head_config_doc,
+            layout.global_config_path().as_deref(),
+        );
         // The agents' in-process file tools never write the host's inputs,
         // the realm's own documents or the convention sources, in any
         // confinement mode. Without --context-root the tools are rooted in

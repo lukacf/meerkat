@@ -3144,9 +3144,54 @@ impl Config {
     /// misleads nobody and is not listed.
     #[must_use]
     pub fn administered_sections_not_in_effect(&self, document: &str) -> Vec<AdministeredSection> {
-        let _ = document;
-        Vec::new()
+        let Ok(stated) = toml::from_str::<toml::Table>(document) else {
+            return AdministeredSection::ALL
+                .into_iter()
+                .filter(|section| states_table_header(document, *section))
+                .collect();
+        };
+        AdministeredSection::ALL
+            .into_iter()
+            .filter(|section| {
+                let Some(table) = stated.get(&section.to_string()) else {
+                    return false;
+                };
+                if table.as_table().is_some_and(toml::Table::is_empty) {
+                    return false;
+                }
+                let in_effect = match section {
+                    AdministeredSection::Confinement => table
+                        .clone()
+                        .try_into::<crate::ConfinementConfig>()
+                        .is_ok_and(|stated| stated.requires_the_same(&self.confinement)),
+                    AdministeredSection::Governance => table
+                        .clone()
+                        .try_into::<crate::GovernanceConfig>()
+                        .is_ok_and(|stated| {
+                            self.governance
+                                .as_ref()
+                                .map_or_else(|| stated.is_empty(), |here| *here == stated)
+                        }),
+                };
+                !in_effect
+            })
+            .collect()
     }
+}
+
+/// Whether a line of `document`, text that is not TOML, opens a table of
+/// `section`: `[section]`, `[section.key]` or an array form of either.
+fn states_table_header(document: &str, section: AdministeredSection) -> bool {
+    let name = section.to_string();
+    document.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('[')
+            && line
+                .trim_start_matches('[')
+                .trim_start()
+                .strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.trim_start().starts_with([']', '.']))
+    })
 }
 
 impl std::fmt::Display for AdministeredSection {

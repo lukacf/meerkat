@@ -93766,7 +93766,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "a0050864817f".trim() : "";
+  const named = true ? "7c40ad94afbb".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {

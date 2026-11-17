@@ -33,6 +33,10 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-connect` started without `--state-root`, with `--realm X` or with "new" and a name in its terminal picker: the realm is now looked for under every ancestor's state root, as `rkat` looks for it (see Meerkat's changelog for this release: Breaking, "Where a realm is looked for", and Upgrade, "Before you upgrade, find realms that exist twice"). A realm X that exists under a farther ancestor's root, a home-level root included, is taken from there, where X was made or used in the user-global root; in the picker this happens after "new" and without a word. X under two state roots on the path refuses the start: `resolve selected realm: realm 'X' exists under more than one candidate state root: ...`, exit status 1. A `.rkat` entry on the path that cannot be examined refuses the start before any prompt (`resolve selected realm: ...` or `resolve realm inventory roots: ...`, exit status 1). Application setup, the gateway's stdio binding and the Python and TypeScript toolkits name their state root and are not affected. Before you upgrade, run the finding command of that Upgrade note for the directory you start `meerkat-connect` in. (Read from the source; not run.)
+
 ## [0.9.16] - 2026-11-16
 
 ### Fixed

@@ -274,6 +274,72 @@ describe("Python SDK example controls", { concurrency: 4 }, () => {
   });
 });
 
+describe("Mob control examples", { concurrency: 2 }, () => {
+  const mobExamples = ["038-mob-control-py", "039-mob-control-ts"];
+  for (const example of mobExamples) {
+    it(`${example}: drives the synthetic mob, stops one run and cancels the rest`, async () => {
+      const result = await runExample(example, "success",
+        { ANTHROPIC_API_KEY: "synthetic-not-a-key" });
+      successful(result);
+      const requests = result.requests.slice(2);
+      // Status reads are polls; everything else has one order.
+      assert.deepEqual(
+        requests.map((r) => r.method).filter((method) => method !== "mob/member_status"),
+        ["mob/create", "mob/spawn", "mob/spawn", "mob/wire", "mob/wait_kickoff",
+          "mob/members", "mob/member_history", "mob/stream_open",
+          "mob/member_send",
+          "mob/member_send", "mob/stop_member_run", "mob/stop_member_run",
+          "mob/member_send", "mob/member_send", "mob/member_send", "mob/cancel_all_work",
+          "mob/member_send", "mob/stream_close", "mob/destroy"]);
+      assert.ok(requests.some((r) => r.method === "mob/member_status"));
+
+      const { profiles } = requests[0].params.definition;
+      assert.deepEqual(Object.keys(profiles), ["editor", "researcher"]);
+      for (const profile of Object.values(profiles)) {
+        assert.equal(profile.model, "claude-sonnet-5-5");
+        assert.equal(profile.tools.comms, true);
+      }
+      // One entry point: only the editor takes work from outside the mob,
+      // and every send goes to it through the mob, never to its session.
+      assert.equal(profiles.editor.external_addressable, true);
+      assert.equal(profiles.researcher.external_addressable, undefined);
+      const sends = requests.filter((r) => r.method === "mob/member_send");
+      assert.ok(sends.every((r) => r.params.agent_identity === "editor-1"));
+      assert.ok(result.requests.every((r) => !/^(turn|session)\//.test(r.method)));
+      for (const spawn of requests.filter((r) => r.method === "mob/spawn")) {
+        assert.match(spawn.params.initial_message, /^You are the /);
+      }
+
+      // The stop names the run that the long job opened (the second run the
+      // fixture started), and the second stop repeats that id.
+      const stops = requests.filter((r) => r.method === "mob/stop_member_run");
+      assert.deepEqual(stops.map((r) => r.params.run_id),
+        Array(2).fill("019d1234-0000-7000-8000-000000002002"));
+      assert.ok(stops.every((r) => r.params.agent_identity === "editor-1" && r.params.reason));
+      // The cancel names the member by the reference its spawn returned, with
+      // two sends waiting behind the run it ends.
+      const cancel = requests.find((r) => r.method === "mob/cancel_all_work");
+      assert.deepEqual(cancel.params, { member_ref: "synthetic-ref-editor-1" });
+      assert.deepEqual(result.records.filter((r) => "cancelled_queued" in r),
+        [{ cancelled_queued: 2 }]);
+
+      assert.match(result.stdout, /system prompt: \d+ characters, skills \[.mob-communication.\]/);
+      assert.match(result.stdout, /stop: stopped, inputs ended: \[\{/);
+      assert.match(result.stdout, /the same stop again: not_current/);
+      assert.equal(result.stdout.match(/run ended: cancelled/g)?.length, 2);
+      assert.match(result.stdout, /editor-1 answered: .Synthetic answer./);
+      assert.match(result.stdout, /Mob destroyed\./);
+    });
+    it(`${example}: a refused mob fails nonzero and leaves no child`, async () => {
+      const result = await runExample(example, "create-error",
+        { ANTHROPIC_API_KEY: "synthetic-not-a-key" });
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /Synthetic mob refusal/);
+      assert.equal(result.requests.at(-1).method, "mob/create");
+    });
+  }
+});
+
 describe("022 REST subprocess", () => {
   for (const mode of ["success", "http-503", "connection-refused"]) {
     it(`${mode} has a truthful exit status and diagnostic`, async () => {

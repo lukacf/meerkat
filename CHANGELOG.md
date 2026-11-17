@@ -51,12 +51,47 @@ them.
 
 - `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::ClassifyRecoveredInputDurability` gains the public field `pending_terminal_carrier: bool`, and the public enum `generated::meerkat::TransitionId` gains six variants named `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier` with the phase suffixes `Initializing`, `Idle`, `Attached`, `Running`, `Retired` and `Stopped`. `meerkat-runtime`: the variant `ClassifyRecoveredInputDurability` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; an exhaustive `match` on `TransitionId` adds the arms. No wire form and no stored form changes.
 
+- Behaviour-only (not measured by the gate): `meerkat`, `meerkat-tools`:
+  `enable_shell` / `.shell(bool)` / `override_shell`, the config's
+  `tools.shell_enabled` and a mob profile's `tools.shell` keep their shape
+  and now also turn on `monitor_start`; and a shell job manager whose
+  dispatcher does not enable `monitor_start`, or whose session may not
+  start a monitor, no longer runs a recorded resumable monitor again, and
+  ends as `needs_attention` the ones that session's own tool started.
+  `JobManager::spawn_monitor_for_call` keeps its signature and records
+  the monitor as the host's: an embedder that used it as its own tool's
+  path starts monitors the session does not end. In `meerkat-core`,
+  `ToolExecutionPolicy::permits_call` and `permits`,
+  `ComposedToolFilter::allows` and the projection of
+  `PreparedToolSurface::of` keep their shape and now refuse or hide
+  `monitor_start` where `shell` is out. See Changed, Fixed and the
+  Upgrade notes.
+
 ### Added
 
 - `meerkat-core` (Rust): `local_realms_candidates`, `RealmConfig::resolve_locator_among_roots` and its `_with` form, `RealmRootResolution` (non-exhaustive) and `StorageLayout::unreadable_realm_roots`, for a host that resolves a realm among several state roots.
 
 - `meerkat-mob-pack`: new module `content_warnings`, the rules behind the
   `rkat mob pack` report. Its six public items are named under Changed.
+
+- Rust API of `meerkat-tools`: the trait
+  `builtin::shell::MonitorRerunAdmission`, its answer
+  `builtin::shell::MonitorRerunAnswer` (admitted, refused, or not known)
+  and `DurableShellJobRuntime::with_monitor_rerun_admission`, through
+  which the builder of a session's tools says whether the session may
+  start a monitor at the moment a recorded one would be run again. A
+  runtime without one runs every recorded resumable monitor again, as
+  before.
+- Rust API of `meerkat-core`: `tool_scope::tool_never_wider_than`, which
+  names the tool a tool is never offered or callable more widely than
+  (`shell` for `monitor_start`).
+- The job failure code `monitor_start_not_permitted`, the `reason` of a
+  `needs_attention` monitor job that was not run again. Failure codes are
+  open strings.
+- A monitor job records who started it. The session's own `monitor_start`
+  tool records the job's tool identity at version `v2`; the host's
+  `monitors/start` route records `v1`, as every earlier release did for
+  both. No wire type changes.
 
 ### Changed
 
@@ -116,6 +151,65 @@ them.
   `meerkat-mob-pack` for the same rules, in `content_warnings`:
   `pack_content_warnings`, `classify_packed_file`, `classify_packed_path`,
   `has_signing_key_form`, `PackContentWarning` and `PackedPathConcern`.
+
+- `meerkat`, `meerkat-tools`, on every surface that switches shell
+  (`enable_shell` / `.shell(bool)` / `override_shell`, the config's
+  `tools.shell_enabled`, a mob profile's `tools.shell`, the CLI's
+  `--tools workspace` and `--tools full`): `shell` now turns on the whole
+  shell family. Every agent with shell whose session has durable job and
+  blob stores is offered `monitor_start` beside `shell`, `shell_jobs`,
+  `shell_job_status` and `shell_job_cancel`, with no configuration. Before,
+  the tool needed a policy enable in a custom dispatcher build, which no
+  stock surface offered. A session without durable job and blob stores is
+  not offered it, as its `shell` offers no `background`.
+
+  To keep the earlier tool list, deny the name. In a mob profile:
+
+  ```toml
+  [profiles.<name>.tools]
+  shell = true
+  deny = ["monitor_start"]
+  ```
+
+  Outside a mob, `session/create` takes a session tool filter,
+  `"tool_filter": {"Deny": ["monitor_start"]}`, which hides the tool and
+  refuses a call by name for the session; a turn's
+  `turn_tool_overlay.blocked_tools` (CLI `--block-tool monitor_start`, for a
+  run's first turn) does so for that turn; and a fork's or a mob spawn's
+  `tool_access_policy` deny list, or a Rust build's `tool_access_policy`,
+  denies it for the session. A grant-gated shell
+  family keeps `monitor_start` closed with its other tools until a grant,
+  which opens all five; a read-only profile lists it, as it lists `shell`,
+  and refuses every call. Under a grant gate on the name `shell` alone,
+  the grant of `shell` opens `monitor_start` too, and each
+  `monitor_start` call is admitted as a use of that grant: a call made
+  after the grant ended is refused with the gate's refusal for `shell`.
+
+  What a monitor may do that a background `shell` command may not:
+
+  - wake its own session: with `delivery` set to `event_steer` or
+    `event_queue`, each notification of the script is an input of its own
+    that starts a turn of the session that started the monitor (never
+    another session), with no outside input, and wakes a dormant mob member.
+    The default, `notification`, appends to the session's context and starts
+    no turn;
+  - choose its own rate: the notification rate and line size are arguments
+    of the call, within hard caps (at most 1000 notifications per window, a
+    window of 1 second to 24 hours, 1 MiB per line). No host setting bounds
+    the rate below the caps;
+  - run again after a host restart: a `replayable` monitor, and a
+    `checkpoint_resumable` one with a checkpoint, is run again at the
+    session's next shell job call, where a background `shell` command ends
+    as `worker_lost`. See Fixed for what stops that.
+
+  A monitor counts against the shell family's limit of concurrent processes.
+
+- `meerkat-tools`, `meerkat-contracts`, docs: the words "high-trust" are gone
+  from `monitor_start`'s description, from the `monitors/start` line of the
+  RPC method catalog (`artifacts/schemas/rpc-methods.json`) and from the
+  docs: an agent with shell is already trusted with a shell. The tool's name
+  and the method's name are unchanged. The Shell capability's description
+  now names `monitor_start`.
 
 ### Fixed
 
@@ -198,6 +292,29 @@ them.
   `--oauth-account-selection unverified`, as before for any such
   authorization server.
 
+- `meerkat-tools`, `meerkat`: a later deny now holds for a monitor's re-run
+  after a host restart. A recorded resumable monitor is run again only while
+  its session may still start one: `monitor_start` enabled for it, not
+  denied by name, not closed by its grant gate, and its profile not
+  read-only, as the session's current build resolves them, and not hidden
+  by the session's own tool filter or an inherited filter. Otherwise the
+  session never runs it again. At its next shell job call, a monitor its
+  own tool started ends as `needs_attention` with the failure code
+  `monitor_start_not_permitted`; a monitor the host's route started, and
+  one recorded before this release, is left as it is for the host's
+  route. Earlier releases ran such a monitor again whatever the session's
+  tools said. A session whose shell family was turned off has no shell job
+  call, so nothing of its own runs a recorded monitor again. Where what
+  the session may do cannot be read at that moment (its tool filters or
+  its grants are unreadable), nothing is decided: the monitor is neither
+  run again nor ended, and the session's next shell job call asks again.
+
+  What the re-run asks is the session's execution policy, its durable
+  tool filters and its grant gate. The re-run happens outside any run, so
+  a grant scoped to one run does not admit it. A turn's block list, a
+  governed application tool policy and a host's dispatch admission are not
+  asked.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)
@@ -216,6 +333,48 @@ them.
 
 - Before you upgrade, find realms that exist twice. The same realm id with a manifest under two state roots on one path is refused at the first start from the nested directory after the upgrade (see Breaking). Such a pair exists where a `.rkat` appeared in a directory after work there under a parent directory (the next command wrote a second realm of the same id under the nearer root); where the same `--realm` name was used from two nested project roots (the home directory counts as one for anyone with `~/.rkat`); after `rkat realm create` from a nested root, which on this release too creates the realm under its own state root without looking under the others; and for a server started with `--realm X --context-root C` where C has its own `.rkat` and X lies under an ancestor's root. To find them on 0.9.16: `rkat storage doctor --root <dir>/.rkat/realms`, with one `--root` for each directory on the path that has a `.rkat` and one for the user-global realms root (`$XDG_DATA_HOME/meerkat/realms`, else `~/.local/share/meerkat/realms`, on Linux; `~/Library/Application Support/meerkat/realms` on macOS; `%APPDATA%\meerkat\realms` on Windows); it reports each such id as `split-brain-realm` with both directories. On this release `rkat storage doctor` without a root reads them all. To go on with one copy, add `--state-root '<root>'` to the command. To keep one copy and archive the other: `rkat --realm <id> storage migrate --root '<A>' --root '<B>' --apply --adopt-root <root to keep>`: the adopted realm stays untouched where it lies and the other copy is renamed to `<root>/<id>.pre-<version>-<timestamp>.split-brain` and kept read-only until `rkat storage prune --apply` removes it, by default once it is 30 days old. Look at both copies first: a copy you did not create should not be adopted. The doctor may also list a realm directory under a project that a confined start left there before it was refused with the advice to pass `--state-root`: it holds no session and is safe to leave; it can be deleted, or archived with the adopt command (read from the source, not run). (The finding command by a row on the 0.9.16 code, the adopt command by rows on the 0.9.16 code and on this release.)
 
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A deny list, a spawn's or a fork's tool access policy, a session's tool
+  filter, a turn's block list or a grant gate on the name `shell` that
+  closes `shell` closes `monitor_start` with it, at every build and after a
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force: a `monitor_start` call is checked against it when it
+  is dispatched. A session whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade, and, unless only a turn's block list closes it, its recorded
+  monitors are not run again. An allow list that names `monitor_start` and
+  not `shell` no longer admits the monitor. The rule goes by the tool's
+  name: a host's or an MCP server's tool exposed as `monitor_start` is
+  bound to `shell` in the same way, and where shell is on with durable
+  stores the built-in tool takes the name.
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one, and nothing in Meerkat can teach it the name: add `monitor_start` to
+  such a guard, or deny the tool. A governed application tool policy admits
+  only the tools it names, so it refuses `monitor_start` until it names it.
+- A live session of an agent with shell is offered `monitor_start` from its
+  next build. Its stored session and its stored system prompt are not
+  rewritten; the tool list sent to the provider gains one definition.
+- A store that holds a recorded monitor: a session that may start a monitor
+  runs it again after a restart, as before. One that may not (a denied name,
+  a closed grant gate, a read-only profile, a tool filter that hides it) no
+  longer runs it again, and does not end it either: every monitor recorded
+  before this release is left for the host's route, as is every monitor an
+  operator starts. Only a monitor the session's own tool starts from this
+  release on is ended as `needs_attention`.
+- An operator's monitor on a session that may not start one: in earlier
+  releases the session's next shell job call resumed an operator's lost
+  resumable monitor. Now that call does not, and the monitor waits until
+  an operator calls `monitors/start` or `jobs/cancel` for that session:
+  the host's route recovers a session's jobs only when it is called.
+- Going back to an earlier release: it runs every recorded resumable
+  monitor again at the session's next shell job call, whatever the
+  session's tools say, so cancel the monitors a deny should hold before
+  going back. A host that offered `monitor_start` itself on the earlier
+  release meets one more thing there: a re-dispatch of the call that
+  started a monitor under this release answers a submission conflict
+  instead of joining its job.
+
 ### Known limitations
 
 - `rkat mob pack` still packs every regular file under the mob directory,
@@ -229,6 +388,24 @@ them.
   them. The list misses much, and a warning removes nothing. Keep such
   files out of the mob directory, and read `rkat mob inspect <pack>`
   before a pack leaves your machine.
+
+- No host setting bounds a monitor's notification rate below the hard caps:
+  a monitor with event delivery starts turns of its own session at a rate
+  the model chooses. `deny` is the control.
+- The host's own monitor route is not bound by a member's deny: an
+  operator's `monitors/start` or job cancel for a session runs that
+  session's recorded resumable monitors again under the host's authority.
+- A monitor that an agent started before this release, which only a Rust
+  host's own tool policy could allow, is recorded as the host's monitors
+  are. After a later deny the session neither runs it again nor ends it:
+  it stays lost until the host's route recovers the session's jobs or
+  cancels it.
+- A deny does not stop a monitor that is already running; cancel its job.
+  `jobs/list` with the session's id lists its jobs (a monitor's
+  `runner.name` is `meerkat.monitor_script`) and `jobs/cancel` with the
+  job's id cancels one. Cancel before the restart that brings the deny:
+  after a restart, the host's cancel of a lost resumable monitor starts it
+  once more before it cancels it.
 
 ## [0.9.16] - 2026-11-16
 

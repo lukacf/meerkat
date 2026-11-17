@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Mob announcements: an announce by a member, and a subscription with an earlier start, are refused for now while a roster they need cannot be read: `AnnouncementError::NativeUnavailable`, JSON-RPC error -32047 with kind `native_unavailable` and the text `native state unavailable: <detail>`; a member's tool answers that text as a refusal. A subscription with an earlier start replays nothing that a member announced once that member has ended. On a host with an announcement store of its own that does not say it judges readers (`AnnouncementStore::judges_readers`, default `false`; the stock store answers `true`), an announce by a member that is private to a person, or that its team's roster does not name, and every subscription with an earlier start are refused: `AnnouncementError::Configuration`, JSON-RPC invalid params -32602, text `<what> is not taken: this host's announcement store does not judge who receives a member's announcement (AnnouncementStore::judges_readers answers false)`. A shared member's announce and a subscription that starts now are taken as before. Such a host learns it at the first such announce or subscription, not when it is composed.
 - An agent's `mob_spawn_member` (in its own `labels`, in a `specs` entry and in a `members` entry), `delegate` and `fork_off` refuse a call that supplies one of these label keys: `role`, `source_mob_id`, `delegate_host_identity`, `group`, `addressable`, `console_watched`, `console_alert_level`, `console_degraded`, `console_degraded_reason`, `singleton`. The call fails as invalid arguments (`invalid_arguments`), the message names the tool and the key (`labels.<key> is the Console's own: it writes or reads this key of a member's row itself, and a spawn cannot set it; remove it from the spawn's labels`), and nothing is spawned. `display_name` and every other label are carried as before. A prompt, profile or tool description that tells an agent to set one of these keys in a spawn no longer works: the call is refused. A host's or a person's own calls (`meta/ensure_member`, `meta/fork_member`, the runtime's own spawn) still accept these keys (read from the source); what `source_mob_id` and `delegate_host_identity` then do on the member's row has changed: see Changed.
 - Agent memory: a member name that lies under `private/` or `set-aside/` is refused at creation with `member id '<name>' lies under a name agent memory reserves` (JSON-RPC `-32602` on `meta/ensure_member`; the same text from the Console's doors and from a member's spawn). While a host cannot yet tell whether a private member is a registered agent's, that member's `memory` tool answers `memory is not ready yet` and stores nothing; a temporary council participant forked from a side chat or from a private member answers `a council participant keeps no memory of its own`. A private member no longer recalls the notes it stored under its plain name before the upgrade.
+- Behaviour only: a mob profile's `shell = true` keeps its shape and now
+  also turns on `monitor_start` for the member. See Changed, Upgrade, and
+  Breaking in the Meerkat changelog.
 
 ### Security
 
@@ -29,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A stdio gateway launch without `persistent_state`, which is what the SDKs start unless a state directory is given: the files its agents write by a relative path now go into a workspace inside the launch's own temporary directory and are removed with it when the gateway exits. Before, they were written into the directory that holds that temporary directory and stayed there. A launch whose agents' files must outlast it gives `persistent_state` (see Breaking).
 - Agent memory: the first start on this release with agent memory configured runs one step, on a gateway before any reader is given the memory store: it sets aside the notes that private members stored under their plain names (see Security). The step runs once for each gateway mob and memory store, writes one marker and changes no stored form. A start that cannot run it is refused and changes nothing: `meta/init` answers the storage code -32014 with a message that begins `agent memory could not be prepared:` and ends by saying that nothing was changed and what can be done (start again, or start without agent memory; where the event log of a hosted mob cannot be read, also destroy that mob, which the message names), and a library build fails with the same message. This can refuse a start that was accepted before: where the handle or the creation record of one hosted mob cannot be read (the message says `the mobs the agent mob tools host could not be read` and does not name the mob), or where an event log cannot be read; a memory store that keeps refusing the step refuses every start. A start without agent memory configured runs no step and leaves the notes where they are. After a return to an earlier release: a note that a private member stores there is not set aside when this release is started again, because the step has run.
 - Agent memory, after a return to an earlier release: the earlier release opens the store as it is (no table, column or schema version differs) and rewrites nothing. Notes in a private scope (`private/<owner>/<member name>`): no member reads them there. The earlier release binds a private member's `memory` tool to its plain name again: it does not find its notes of this release, a forget of one of its notes by id is refused, and a note it stores during the rollback goes under its plain name; back on this release it recalls its notes of this release again and not that one, and that note is not set aside, because the first-start step has run. On the earlier release's Console an access administrator sees the private scopes with their bodies; their owners and everyone else see nothing and are answered `access denied: agent.memory.read` by id; a quarantined record in such a scope can be decided by nobody there. Notes under `set-aside/<name>` stay set aside: recall and injection read only live notes under a plain name, the memory steward keeps out of the scope, nothing brings a forgotten note back, and the memory panel shows the scope to access administrators only; the step's marker is ordinary audit rows there, which the earlier release neither reads as a marker nor removes, and its dream history may show fewer earlier dream runs right after. What an earlier release does not close: its member creation admits a name that is the text of such a scope's key (`private/<owner>/<member name>` or `set-aside/<name>`), and its memory panel then judges that scope by that member's labels, so everyone that member is shown to there, its creator among them, can read the notes in it; its Distiller writes the session notes of such a member that is not private to a person into the scope, where they stay: under `private/<owner>/<member name>` the owner's private member recalls them after the return, under `set-aside/<name>` no member recalls them and the memory panel shows them to access administrators only; that Distiller is also shown the titles, never the text, of the notes set aside in the last 7 days when such a member sits under `set-aside/<name>`; if such a member retires there, its pending harvest stays pending after the return, shown to the owner and administrators, under `set-aside/<name>` to access administrators only; its steward's usage audit can put the title, never the text, of a set-aside note into one prompt when that note was given to a registered agent's turn shortly before the upgrade; and a reply of the steward's model that names the ids of records in a private scope gets a rank written on them (no prompt of the steward shows those ids). On this release a member name under either prefix is refused at creation. (By the source at the 0.9.15 tag and by runs of a gateway built from that tag over a store this release wrote; the same at 0.9.16 by a diff of the sources, not run.)
+- `monitor_start` is never offered or callable more widely than `shell`.
+  A profile's `deny`, a spawn's tool access policy, a turn's block list or
+  a grant gate on the name `shell` (`grant_gated = { tools = ["shell"] }`)
+  that closes `shell` closes `monitor_start` with it, also after a gateway
+  restart, and the grant that opens `shell` opens it, for as long as that
+  grant is in force. A member whose
+  `shell` is closed by name is therefore not offered the monitor by the
+  upgrade.
+- An operator's monitor on a member that may not start one: in earlier
+  releases the member's next shell job call resumed an operator's lost
+  resumable monitor after a gateway restart. Now it does not, and the
+  monitor waits until an operator calls `monitors/start` or `jobs/cancel`
+  for that member's session.
+- Going back to an earlier release: it runs every recorded resumable
+  monitor again at the member's next shell job call, whatever the
+  member's profile says, so cancel the monitors a deny should hold before
+  going back. See the Upgrade notes in the Meerkat changelog.
+- A pre-tool hook or a host's dispatch admission that refuses or inspects
+  `shell` calls by the tool's name does not take a `monitor_start` call for
+  one: add `monitor_start` to such a guard, or deny the tool. See the
+  Upgrade notes in the Meerkat changelog.
 
 ### Added
 
@@ -99,6 +123,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `MobHandleControlHandler` gets the roster entries' labels read; the
   runtime's record of its members is read by the listener a runtime starts
   (`start_control_listener`, `start_control_listener_with_authorizer`).
+- A member whose profile says `shell = true` is offered the whole shell
+  family on a stock gateway, with no configuration: `monitor_start` beside
+  `shell`, `shell_jobs`, `shell_job_status` and `shell_job_cancel`. A script
+  monitor can notify its own member and, with event delivery, start its
+  turns at a rate the model chooses; see Changed in the Meerkat changelog
+  for what a monitor may do. To keep the earlier tool list:
+
+  ```toml
+  [profiles.<name>.tools]
+  shell = true
+  deny = ["monitor_start"]
+  ```
+
+  A grant-gated shell family (`grant_gated = { families = ["shell"] }`)
+  keeps `monitor_start` closed with its other tools until a grant, which
+  opens all five. A read-only member lists it, as it lists `shell`, and is
+  refused every call.
 
 ### Fixed
 
@@ -140,6 +181,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to the init request, and a gateway that exits without a refusal
   (`InitOutcomeUnknownError`), were not affected. Affected: every release
   of the TypeScript SDK up to 0.9.16.
+- A deny, a closed grant gate or `read_only = true` that a member's profile
+  gained after the member started a script monitor now holds for the
+  monitor's re-run after a gateway restart: at the member's next shell job
+  call the monitor is not run again and its job ends as `needs_attention`
+  (`monitor_start_not_permitted`). A tool filter that hides the tool stops
+  the re-run too. An operator's own monitor for the member, and one
+  recorded before this release, is not the member's to end: the member
+  neither runs nor ends it, and the host's own monitor route, which the
+  member's deny does not bind, decides. See Fixed and Known limitations in
+  the Meerkat changelog.
 
 ### Known limitations
 

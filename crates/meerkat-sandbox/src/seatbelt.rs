@@ -19,6 +19,11 @@ use meerkat_core::confinement::{
 // Process information is denied explicitly: the default deny does not cover
 // every process-info read on every macOS version (such as another process's
 // arguments and environment). The later same-sandbox allow wins over it.
+// `uname` reads the host name and the kernel version with the other kernel
+// names and fails as a whole when one is refused, so both are readable.
+// Metadata alone (never a listing or file data) is readable on the system
+// alias links `/etc`, `/tmp` and `/var`, which a path spelled through one
+// resolves by, and on the fixed system directories above baseline paths.
 const BASELINE: &str = r#"(version 1)
 (deny default)
 (allow process-exec)
@@ -32,15 +37,29 @@ const BASELINE: &str = r#"(version 1)
   (sysctl-name "hw.logicalcpu")
   (sysctl-name "hw.physicalcpu") (sysctl-name "hw.machine")
   (sysctl-name "kern.ostype") (sysctl-name "kern.osrelease")
-  (sysctl-name "kern.osversion") (sysctl-name "kern.argmax"))
+  (sysctl-name "kern.osversion") (sysctl-name "kern.argmax")
+  (sysctl-name "kern.hostname") (sysctl-name "kern.version"))
 (allow file-read*
   (literal "/")
   (subpath "/System/Library") (subpath "/usr/lib")
   (subpath "/bin") (subpath "/usr/bin")
   (subpath "/sbin") (subpath "/usr/sbin")
   (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))
+(allow file-read-metadata
+  (literal "/etc") (literal "/tmp") (literal "/var") (literal "/private")
+  (literal "/usr") (literal "/System") (literal "/dev"))
 (allow file-write-data (require-all (literal "/dev/null") (vnode-type CHARACTER-DEVICE)))
 "#;
+
+// What a launch with IP access needs to turn a name into an address and to
+// verify a server certificate: the system resolver's socket and service name
+// (a lookup is answered by that daemon, not by an IP socket of the process)
+// and the system certificate authority files. No other Unix socket, service
+// or keychain. Whether Seatbelt asks for the socket, the service name or both
+// differs between macOS versions, so both are named.
+const RESOLVER_SOCKET_PATH: &str = "/private/var/run/mDNSResponder";
+const RESOLVER_SERVICE_NAME: &str = "com.apple.dnssd.service";
+const SYSTEM_CA_DIRECTORY: &str = "/private/etc/ssl";
 
 fn quote(value: &str) -> Result<String, ConfinementRefusal> {
     if value.chars().any(char::is_control) {
@@ -157,6 +176,49 @@ fn grant(
     Ok(())
 }
 
+/// Allow the metadata, and nothing else, of every directory above a granted
+/// path. A program that resolves a path one component at a time (a script
+/// runtime resolving its main file, `realpath`) reads it; without it such a
+/// program fails inside its own grant. The root is readable by the baseline
+/// and a granted path is granted whole, so neither is named. These rules
+/// precede every deny rule, and a later deny wins. With every read allowed
+/// there is nothing left to allow.
+fn allow_metadata_above_grants(
+    policy: &mut String,
+    read: &FilesystemAccess,
+    write: &FilesystemAccess,
+) -> Result<(), ConfinementRefusal> {
+    let FilesystemAccess::Paths(read) = read else {
+        return Ok(());
+    };
+    let write: &[PathAccess] = match write {
+        FilesystemAccess::Unrestricted => &[],
+        FilesystemAccess::Paths(paths) => paths.as_slice(),
+    };
+    let mut granted = BTreeSet::new();
+    for access in read.iter().chain(write) {
+        granted.insert(normalize(access.path())?);
+    }
+    let mut above = BTreeSet::new();
+    for path in &granted {
+        above.extend(
+            path.ancestors()
+                .skip(1)
+                .filter(|ancestor| ancestor.parent().is_some() && !granted.contains(*ancestor)),
+        );
+    }
+    for directory in above {
+        let value = quote(
+            directory
+                .to_str()
+                .ok_or(ConfinementRefusal::UnsupportedRequirement)?,
+        )?;
+        writeln!(policy, "(allow file-read-metadata (literal {value}))")
+            .map_err(|_| ConfinementRefusal::PreparationFailed)?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_support(
     requirement: &ExecutionConfinement,
 ) -> Result<(), ConfinementRefusal> {
@@ -180,16 +242,27 @@ pub(super) fn lower(
     let mut policy = BASELINE.to_owned();
     grant(&mut policy, "file-read*", &spec.read)?;
     grant(&mut policy, "file-write*", &spec.write)?;
+    allow_metadata_above_grants(&mut policy, &spec.read, &spec.write)?;
+    let resolves_names = matches!(spec.network, IpNetworkAccess::Unrestricted);
     match &spec.network {
         IpNetworkAccess::Denied => {}
         IpNetworkAccess::Unrestricted => {
             policy.push_str("(allow network-outbound (remote ip \"*:*\"))\n(allow network-inbound (local ip \"*:*\"))\n(allow network-bind (local ip \"*:*\"))\n");
+            writeln!(
+                policy,
+                "(allow system-socket (socket-domain AF_UNIX))\n(allow network-outbound (remote unix-socket (literal {})))\n(allow file-read* (require-any (literal {ca}) (subpath {ca})))",
+                quote(RESOLVER_SOCKET_PATH)?,
+                ca = quote(SYSTEM_CA_DIRECTORY)?,
+            )
+            .map_err(|_| ConfinementRefusal::PreparationFailed)?;
         }
         // Empty Connect is exactly Denied; nonempty was refused above.
         IpNetworkAccess::Connect(_) => {}
     }
     if !spec.unix_connect.is_empty() {
-        policy.push_str("(allow system-socket (socket-domain AF_UNIX))\n");
+        if !resolves_names {
+            policy.push_str("(allow system-socket (socket-domain AF_UNIX))\n");
+        }
         for path in &spec.unix_connect {
             let (predicate, _) = filter(path)?;
             // Unix connect resolves the original system alias and requires its
@@ -260,6 +333,15 @@ pub(super) fn lower(
             .map_err(|_| ConfinementRefusal::PreparationFailed)?;
     }
     policy.push_str("(deny mach-lookup (xpc-service-name-prefix \"\"))\n");
+    if resolves_names {
+        // After the service denial above: the later rule is the one that holds.
+        writeln!(
+            policy,
+            "(allow mach-lookup (global-name {}))",
+            quote(RESOLVER_SERVICE_NAME)?
+        )
+        .map_err(|_| ConfinementRefusal::PreparationFailed)?;
+    }
     if !protected_executables.is_empty()
         || !matches!(spec.write, FilesystemAccess::Unrestricted)
         || !spec.deny_write.is_empty()

@@ -2266,16 +2266,24 @@ struct ReadinessAnswer {
 
 /// Start or join the readiness check and bound it by `budget`. On expiry
 /// the hold is dropped; the shared check is cancelled once nobody holds it.
-/// The caller owns the agents private to `private_owner_key`.
+/// The caller owns the agents private to `private_owner_key`. `identity` is
+/// the member as the caller spelled it, and `resolved` the name the voice
+/// host is asked under where the console resolved the member to another.
 async fn readiness_within_budget(
     controller: &crate::console_voice::ConsoleVoiceController,
     principal: &str,
     private_owner_key: Option<&str>,
     identity: &str,
+    resolved: Option<&str>,
     budget: Duration,
 ) -> ReadinessAnswer {
     let started = std::time::Instant::now();
-    let flight = match controller.readiness_flight(principal, private_owner_key, identity) {
+    let flight = match controller.readiness_flight_resolved(
+        principal,
+        private_owner_key,
+        identity,
+        resolved,
+    ) {
         Ok(flight) => flight,
         Err(failure) => {
             return ReadinessAnswer {
@@ -2438,6 +2446,7 @@ mod voice_readiness_budget_tests {
             "alice",
             None,
             "agent-a",
+            None,
             Duration::from_millis(50),
         )
         .await;
@@ -2487,6 +2496,7 @@ mod voice_readiness_budget_tests {
             "alice",
             None,
             "agent-a",
+            None,
             Duration::from_secs(5),
         )
         .await;
@@ -2561,8 +2571,9 @@ async fn handle_console_voice_rpc(
             }
         }
     };
-    let response = absent
-        .restore(handle_console_voice_rpc_inner(state, controller, auth, request, started).await);
+    let response = absent.restore(
+        handle_console_voice_rpc_inner(state, controller, auth, request, &absent, started).await,
+    );
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let ok = response.get("error").is_none_or(Value::is_null);
     let phase = response
@@ -2592,7 +2603,8 @@ async fn handle_console_voice_rpc_inner(
     state: &ConsoleJsonState,
     controller: Option<&crate::console_voice::ConsoleVoiceController>,
     auth: &ConsoleHttpAuthContext,
-    request: JsonRpcRequest,
+    mut request: JsonRpcRequest,
+    absent: &ConsoleAbsentNames,
     request_started: std::time::Instant,
 ) -> Value {
     use crate::console_voice::{
@@ -2631,6 +2643,21 @@ async fn handle_console_voice_rpc_inner(
             return response_value(id, None, Some(denial));
         }
     }
+    // A call's requests are kept under the name its caller spelled, which
+    // the call's teardown carries too: every verb below reads the caller's
+    // spelling. The name the member resolution left (for a member hidden
+    // from the caller, a name no member holds) is the one the voice host
+    // and the live voice path are asked under, by the two verbs that ask
+    // them: the readiness and the open.
+    let resolved_identity = request
+        .params
+        .get("identity")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    request.params = absent.restore(std::mem::take(&mut request.params));
+    let resolved_identity = resolved_identity.filter(|resolved| {
+        request.params.get("identity").and_then(Value::as_str) != Some(resolved.as_str())
+    });
     if request.method == VOICE_READINESS_METHOD {
         let parsed: VoiceReadiness = match serde_json::from_value(request.params) {
             Ok(parsed) => parsed,
@@ -2652,6 +2679,7 @@ async fn handle_console_voice_rpc_inner(
             principal,
             auth.audience.private_owner_key(),
             &parsed.identity,
+            resolved_identity.as_deref(),
             VOICE_READINESS_SERVER_BUDGET,
         )
         .await;
@@ -2747,10 +2775,11 @@ async fn handle_console_voice_rpc_inner(
     };
     match request.method.as_str() {
         VOICE_OPEN_METHOD => match controller
-            .open_while_authenticated(
+            .open_resolved_while_authenticated(
                 principal,
                 auth.audience.private_owner_key(),
                 parsed,
+                resolved_identity,
                 auth.verification
                     .clone()
                     .map(crate::http_sse::StreamAuthentication::new),
@@ -4326,6 +4355,10 @@ mod console_announcement_audience_tests;
 #[cfg(test)]
 #[path = "console_question_set_tests.rs"]
 mod console_question_set_tests;
+
+#[cfg(test)]
+#[path = "console_request_name_tests.rs"]
+mod console_request_name_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -7158,6 +7191,20 @@ fn restore_absent_names(value: Value, suffix: &str) -> Value {
     }
 }
 
+/// The refusal of a request that names, in a field its method records, a
+/// member hidden from the caller: the words the method answers a name no
+/// member holds in. A topology apply answers an edge's end no member holds
+/// through the topology
+/// ([`crate::rpc::topology_methods::member_not_found_rpc_error`]); every
+/// other such method answers an unknown identity.
+fn hidden_recorded_member_refusal(method: &str, spelling: &str) -> JsonRpcError {
+    if method == crate::rpc::topology_methods::TOPOLOGY_APPLY_METHOD {
+        crate::rpc::topology_methods::member_not_found_rpc_error(spelling)
+    } else {
+        unknown_identity_rpc_error(spelling)
+    }
+}
+
 /// Resolve every member a console request names through `view`, the
 /// caller's audience, in one place, before any rule or handler reads it
 /// (the table of the member fields of each method is
@@ -7174,7 +7221,7 @@ fn restore_absent_names(value: Value, suffix: &str) -> Value {
 /// path for an absent member, and [`ConsoleAbsentNames::restore`] spells the
 /// answer back with the caller's name; in a field naming a member the
 /// method creates or records something for, the request is refused as one
-/// naming an unknown member.
+/// naming a name no member holds ([`hidden_recorded_member_refusal`]).
 pub(crate) fn console_rpc_resolve_members(
     view: Option<&AccessView>,
     method: &str,
@@ -7218,7 +7265,9 @@ fn console_rpc_resolve_members_with(
                 return Ok(());
             }
             match field.kind {
-                ConsoleMemberFieldKind::Recorded => Err(unknown_identity_rpc_error(spelling)),
+                ConsoleMemberFieldKind::Recorded => {
+                    Err(hidden_recorded_member_refusal(method, spelling))
+                }
                 ConsoleMemberFieldKind::Subject => {
                     let nonce = nonce.get_or_insert_with(absent_name_nonce);
                     let absent = absent_member_spelling(spelling, nonce);

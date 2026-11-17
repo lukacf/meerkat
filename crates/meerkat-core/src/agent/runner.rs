@@ -1217,7 +1217,11 @@ where
         Ok(())
     }
 
-    /// Rotate runtime auth-lease tracking alongside a live LLM identity swap.
+    /// Move runtime auth-lease tracking alongside a live LLM identity swap.
+    ///
+    /// The target's lease is acquired when absent; the previous credential's
+    /// lease is left as it is (see
+    /// [`Self::stage_auth_lease_credential_identity`]).
     pub fn rotate_auth_lease_auth_binding(
         &self,
         previous: Option<&crate::AuthBindingRef>,
@@ -1229,77 +1233,57 @@ where
             .map(|_| ())
     }
 
-    /// Stage a credential-authority rotation and retain exact generated
-    /// lifecycle snapshots so a later model-routing rejection can restore both
-    /// credentials.
+    /// Stage a session's move to another credential.
+    ///
+    /// A credential's lease is that credential's lifecycle on the lease
+    /// handle, and every session of a host shares the handle. A session that
+    /// leaves a credential therefore releases nothing: the other sessions on
+    /// it, and the sessions started on it later, keep it. Only a sign-out or
+    /// a credential removal withdraws a lease, for every session at once.
+    ///
+    /// The target's lease is acquired only when it is absent, and only then
+    /// is its exact generated lifecycle snapshot retained, so a later
+    /// model-routing rejection undoes this session's own acquire and never
+    /// rewrites a lease other sessions already use.
     pub(crate) fn stage_auth_lease_credential_identity(
         &self,
         previous: Option<&crate::AuthCredentialIdentity>,
         target: Option<&crate::AuthCredentialIdentity>,
     ) -> Result<StagedAuthLeaseRotation, AgentError> {
+        let nothing_staged = StagedAuthLeaseRotation {
+            handle: None,
+            snapshots: Vec::new(),
+        };
         let Some(generated_handle) = self.auth_lease_handle.as_ref() else {
-            return Ok(StagedAuthLeaseRotation {
-                handle: None,
-                snapshots: Vec::new(),
-            });
+            return Ok(nothing_staged);
         };
         let handle = generated_handle.as_handle();
         if previous == target {
-            return Ok(StagedAuthLeaseRotation {
-                handle: None,
-                snapshots: Vec::new(),
-            });
+            return Ok(nothing_staged);
         }
-        let previous_key = previous.map(crate::handles::LeaseKey::from_credential_identity);
-        let target_key = target.map(crate::handles::LeaseKey::from_credential_identity);
-        let mut snapshots = Vec::new();
-        if let Some(target_key) = target_key.as_ref() {
-            snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(target_key));
-        }
-        if let Some(previous_key) = previous_key.as_ref()
-            && target_key.as_ref() != Some(previous_key)
-        {
-            snapshots.push(handle.capture_auth_lifecycle_restore_snapshot(previous_key));
+        let Some(target_identity) = target else {
+            return Ok(nothing_staged);
+        };
+        let target_key = crate::handles::LeaseKey::from_credential_identity(target_identity);
+        let target_snapshot = handle.snapshot(&target_key);
+        if target_snapshot.credential_present && target_snapshot.phase.is_some() {
+            return Ok(nothing_staged);
         }
         let staged = StagedAuthLeaseRotation {
             handle: Some(generated_handle.clone()),
-            snapshots,
+            snapshots: vec![handle.capture_auth_lifecycle_restore_snapshot(&target_key)],
         };
-
-        if let Some(target_identity) = target {
-            let target_key = crate::handles::LeaseKey::from_credential_identity(target_identity);
-            let target_snapshot = handle.snapshot(&target_key);
-            if !(target_snapshot.credential_present && target_snapshot.phase.is_some())
-                && let Err(error) = handle.acquire_lease(&target_key, u64::MAX)
-            {
-                let rollback = staged.rollback();
-                return Err(match rollback {
-                    Ok(()) => AgentError::ConfigError(format!(
-                        "failed to rotate auth lease to credential {target_key}: {error}"
-                    )),
-                    Err(rollback_error) => AgentError::ConfigError(format!(
-                        "failed to rotate auth lease to credential {target_key}: {error}; \
-                         additionally failed to restore staged auth state: {rollback_error}"
-                    )),
-                });
-            }
-        }
-        if let Some(previous_identity) = previous {
-            let previous_key =
-                crate::handles::LeaseKey::from_credential_identity(previous_identity);
-            if let Err(error) = handle.release_lease(&previous_key) {
-                let rollback = staged.rollback();
-                return Err(AgentError::ConfigError(match rollback {
-                    Err(rollback_error) => format!(
-                        "failed to release previous auth lease {previous_key} during rotation: \
-                         {error}; additionally failed to release newly acquired target lease: \
-                         {rollback_error}"
-                    ),
-                    Ok(()) => format!(
-                        "failed to release previous auth lease {previous_key} during rotation: {error}"
-                    ),
-                }));
-            }
+        if let Err(error) = handle.acquire_lease(&target_key, u64::MAX) {
+            let rollback = staged.rollback();
+            return Err(match rollback {
+                Ok(()) => AgentError::ConfigError(format!(
+                    "failed to rotate auth lease to credential {target_key}: {error}"
+                )),
+                Err(rollback_error) => AgentError::ConfigError(format!(
+                    "failed to rotate auth lease to credential {target_key}: {error}; \
+                     additionally failed to restore staged auth state: {rollback_error}"
+                )),
+            });
         }
         Ok(staged)
     }

@@ -2710,6 +2710,66 @@ mod tests {
         );
     }
 
+    /// Another overlay of the same turn whose allow-list holds every one of
+    /// the binding's tools, and more, leaves a composed allow-list equal to
+    /// the binding's own, which cannot be told from an attention overlay
+    /// that stands alone. A session with some of the binding's tools takes
+    /// it narrowed to those. A session with none of them takes no
+    /// allow-list: its turn has the session's own tools, the ones the other
+    /// overlay left out among them.
+    #[tokio::test]
+    async fn an_attention_overlay_composed_with_a_wider_allow_list_reads_as_one_that_stands_alone()
+    {
+        let attention = bound_attention_overlay().await;
+        let own = attention
+            .allowed_tools
+            .clone()
+            .expect("the attention overlay has an allow-list");
+        assert!(
+            own.contains(&tool("workgraph_get")) && !own.contains(&tool("send_message")),
+            "the binding's mode allows workgraph_get and not send_message: {own:?}"
+        );
+        let mut wider = own.clone();
+        wider.push(tool("send_message"));
+        let other = meerkat_core::service::TurnToolOverlay {
+            tool_choice_plan: Vec::new(),
+            allowed_tools: Some(wider),
+            blocked_tools: None,
+            dispatch_context: BTreeMap::new(),
+        };
+        let composed = compose_turn_tool_overlay(Some(other), attention).expect("compose");
+        let names = |allowed: &[meerkat_core::types::ToolName]| {
+            allowed
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            composed.allowed_tools.as_deref().map(names),
+            Some(names(&own)),
+            "the composed allow-list is the binding's own: send_message is not in it"
+        );
+
+        let with_one = workgraph_attention_overlay_for_session_tools(
+            composed.clone(),
+            &[tool("workgraph_get"), tool("read_file")],
+        );
+        assert_eq!(
+            with_one.allowed_tools,
+            Some(vec![tool("workgraph_get")]),
+            "a session with one of the binding's tools takes the list narrowed to it"
+        );
+        let with_none = workgraph_attention_overlay_for_session_tools(
+            composed,
+            &[tool("send_message"), tool("read_file")],
+        );
+        assert_eq!(
+            with_none.allowed_tools, None,
+            "a session with none of the binding's tools takes no allow-list: read_file, \
+             which the other overlay left out, is among its turn's tools"
+        );
+    }
+
     /// An overlay with no attention projection is not touched: an allow-list
     /// that names a tool the session lacks goes on as it is, to be refused.
     #[test]

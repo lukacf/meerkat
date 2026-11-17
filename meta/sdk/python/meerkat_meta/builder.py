@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from ._transport import PersistentTransport
+from .agent_builder import _check_schedule_fire_registration
 from .errors import GatewayTransportConflictError
 from .identity_first_models import IdentityBootstrapMode, RoleMigrationDeclaration
 from .live import ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig
@@ -57,6 +58,10 @@ class MetaBuilderConfig:
     identity_creation: dict[str, Any] | None = None
     routing_config_path: str | None = None
     host_runnables: list[str] = field(default_factory=list)
+    # Schedule-fire handlers by host runnable name, given to the builder so
+    # that they are in place before the runtime first connects. Host-local:
+    # nothing of them is sent to the gateway.
+    schedule_fire_handlers: dict[str, Any] = field(default_factory=dict)
     installed_artifacts: list[ToolArtifactRef] | None = None
     memory_config: Any | None = None
     agent_memory_config: Any | None = None
@@ -570,13 +575,39 @@ class MetaBuilder:
         schedule-host runnable: a durable schedule with target
         ``{"target_kind": "host_runnable", "runnable": "<name>"}`` fires as
         ``callback/schedule_fire`` into this process, dispatched to the
-        handler registered via :meth:`MetaRuntime.on_schedule_fire`.
+        handler registered via :meth:`on_schedule_fire` (in place before the
+        first connect) or :meth:`MetaRuntime.on_schedule_fire`.
         """
         names = list(names)
         for name in names:
             if not isinstance(name, str) or not name.strip():
                 raise ValueError(f"host runnable names must be non-empty strings, got {name!r}")
         self._config.host_runnables = names
+        return self
+
+    def on_schedule_fire(self, name: str, handler: Any) -> MetaBuilder:
+        """Register the handler for a named host runnable before the first connect.
+
+        ``handler`` runs when a durable schedule with a ``host_runnable``
+        target of ``name`` fires (``callback/schedule_fire``), with the
+        occurrence dict (``schedule_id``, ``occurrence_id``, ``due_at``,
+        optional ``payload``). Sync or async; raising fails the occurrence
+        attempt in the durable schedule store.
+
+        The handler is in place before :meth:`build` connects, so a schedule
+        that is due when the gateway starts finds it. A handler registered on
+        the runtime (:meth:`MetaRuntime.on_schedule_fire`) is there only once
+        ``build()`` has returned, and the gateway can fire such a schedule
+        before that. A later call for one name replaces the earlier, and a
+        registration on the runtime still replaces or adds afterwards.
+
+        ``name`` must be one :meth:`host_runnables` declares, in either order
+        of the two calls: :meth:`build` refuses a handler for an undeclared
+        name with ``ValueError``, since the gateway fires declared names only.
+        A declared name may have no handler at ``build()``.
+        """
+        _check_schedule_fire_registration(name, handler)
+        self._config.schedule_fire_handlers[name] = handler
         return self
 
     def installed_artifacts(self, artifacts: Iterable[ToolArtifactRef]) -> MetaBuilder:
@@ -1396,6 +1427,18 @@ class MetaBuilder:
             raise ValueError(
                 "identity_bootstrap_mode() requires roster() because every "
                 "explicit bootstrap mode is identity-first"
+            )
+        undeclared = sorted(
+            name
+            for name in self._config.schedule_fire_handlers
+            if name not in self._config.host_runnables
+        )
+        if undeclared:
+            raise ValueError(
+                "on_schedule_fire() was given a handler for a host runnable that "
+                "host_runnables() does not declare: "
+                + ", ".join(repr(name) for name in undeclared)
+                + "; the gateway fires declared names only"
             )
         transport = self._config.gateway_transport
         if isinstance(transport, PersistentTransport) and not transport._is_fresh():

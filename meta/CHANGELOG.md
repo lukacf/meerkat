@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Python SDK: `Meta.builder().on_schedule_fire(name, handler)` registers the
+  handler for a host runnable before the runtime first connects. A schedule
+  with a `host_runnable` target that is due when the gateway starts can fire
+  before `build()` returns the runtime; a handler registered on the runtime
+  (`runtime.on_schedule_fire`) is not there yet, the fire is answered with an
+  error and that occurrence ends `delivery_failed`. A handler given to the
+  builder answers it. A later call for one name replaces the earlier, a
+  handler for a name `host_runnables()` does not declare raises `ValueError`
+  at `build()`, and `runtime.on_schedule_fire` is unchanged. No option is
+  sent to the gateway and the `meta/init` request is unchanged.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

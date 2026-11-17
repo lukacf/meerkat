@@ -1534,7 +1534,10 @@ A [source](/api/rpc#mob-announcement-sources) may name the collector that
 advances it: `"runner": {"host_runnable": "<name>", "every_seconds": <n>}`.
 The host owns the runnable's code: it registers the name in
 `runtime_options.host_runnables` and handles each fire (`host_runnables`
-and `on_schedule_fire` in the Python SDK). Meta schedules the runnable for
+and `on_schedule_fire` in the Python SDK; register the handler on the
+builder, `MetaBuilder.on_schedule_fire`, so that it is in place before the
+first connect: a runner's schedule can be due when the gateway starts). Meta
+schedules the runnable for
 every live source that names it, through the gateway's schedule service,
 first at the declaration and then every `every_seconds` (60 to 2,592,000).
 A changed cadence restarts the interval at the change. Each schedule Meta

@@ -1075,6 +1075,62 @@ async fn reset_all_leaves_other_peoples_private_side_chats_alone() -> TestResult
     Ok(())
 }
 
+/// A person's `meta/reset_all` acts on the members that person sees and on
+/// no others: it neither closes nor names another person's private side
+/// chat, and it acts on a member the person sees whose roster row holds a
+/// label naming a mob, as on any member of the runtime's own mob.
+#[tokio::test]
+async fn reset_all_acts_on_the_members_its_caller_sees_and_on_no_others() -> TestResult {
+    let (_temp_dir, runtime) = runtime("reset-all-callers-members").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    seeded_member(
+        &runtime,
+        "worker",
+        "beta",
+        &[("source_mob_id", "another-mob")],
+    )
+    .await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+
+    let reset = console_rpc_as(&app, Some(&bob), "meta/reset_all", json!({})).await;
+    assert!(
+        !reset.to_string().contains("alpha-side"),
+        "the answer names Alice's side chat nowhere: {reset:#}"
+    );
+    assert!(
+        runtime
+            .handle()
+            .get_member(&AgentIdentity::from("alpha-side"))
+            .await?
+            .is_some(),
+        "Alice's side chat is still seated: {reset:#}"
+    );
+    let body = if reset["result"].is_object() {
+        &reset["result"]
+    } else {
+        &reset["error"]["data"]
+    };
+    let acted_on = body["retired_delegates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        acted_on
+            .iter()
+            .any(|detail| detail["identity"] == json!("beta") && detail.get("mob_id").is_none()),
+        "the member Bob sees is acted on as a member of the runtime's own mob: {reset:#}"
+    );
+    assert!(
+        !body["failed"].to_string().contains("beta"),
+        "and nothing of it fails: {reset:#}"
+    );
+    Ok(())
+}
+
 /// A shared member wired to a private side chat names it in no peer list
 /// another person reads: its console row's `wired_to` and the identity
 /// inspection's peers leave it out, while the owner's name it.
@@ -1618,7 +1674,8 @@ fn priming_records_an_ended_private_member_with_its_owner() {
     record_live_and_registered_attributes(
         &controller,
         Vec::new(),
-        &BTreeMap::new(),
+        &crate::console_spawn::SpawnRegistry::default(),
+        &BTreeSet::new(),
         &BTreeSet::new(),
         &BTreeMap::from([("alpha-side".to_string(), Some("alice-key".to_string()))]),
         "",

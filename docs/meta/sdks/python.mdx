@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [fa0a5003395b](https://github.com/lukacf/meerkat/commit/fa0a5003395b406399b94d7bca46a8f8712a0c53) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -1163,6 +1163,23 @@ store. Options include `realm`, `selection`, `max_entries`,
 serializes them to the gateway wire contract. Automatic injection defaults to a
 500 ms timeout and skips the memory block if recall fails.
 
+`recall_agent_memory` selects records and does not list them (see
+[Reading agent memory](/meta/concepts/memory#reading-agent-memory)). To see
+everything an identity holds, read its manifest with the full tier:
+
+```python
+handle = runtime.mob_handle()
+
+# Every active record of the identity: metadata only, no bodies.
+for meta in await handle.manifest_agent_memory("scout", tier="full"):
+    print(meta.id, meta.title, meta.age_days)
+
+# The most recently updated records with their bodies: at most 64 a call.
+newest = await handle.recall_agent_memory(
+    "scout", selection="always", max_entries=64
+)
+```
+
 **Storage durability declarations.** The gateway is fail-closed about
 durable storage: a store that cannot open is a startup error, never a
 silent in-memory fallback. The `config.runtime_store` and
@@ -1896,7 +1913,9 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 | `gating_dismiss(pending_id, *, approver_id, presented_digest)` | `GatingQuestionSetResult` | From 0.9.15. Dismiss an open question set: the agent is told no answer is coming |
 | `memory_query(filters)` | `MemoryQueryResult` | Query the assertion ledger by `entity`, `topic`, and `store` filters |
 | `remember_agent_memory(identity, ...)` | `AgentMemoryRecord` | Persist durable memory for an identity |
-| `recall_agent_memory(identity, ...)` | `list[AgentMemoryRecord]` | Recall identity-scoped durable memory |
+| `recall_agent_memory(identity, *, selection, query_text, query_terms, max_entries, realm)` | `list[AgentMemoryRecord]` | Select active records of the identity: `"contextual"` (default) returns the ones that match the query, `"always"` the most recently updated; at most `max_entries` (default 8, at most 64), no cursor. Not a listing: see [Reading agent memory](/meta/concepts/memory#reading-agent-memory) |
+| `manifest_agent_memory(identity, *, tier, k, realm)` | `list[AgentMemoryRecordMeta]` | List the identity's active records as metadata, never bodies: `tier="full"` returns all of them, `"working_set"` (default) a bounded set |
+| `update_agent_memory(identity, memory_id, *, title, body, tags, realm)` | `AgentMemoryUpdateResult` | Replace an active record; the result names the new record (`memory_id`) and the one it replaced (`supersedes`) |
 | `forget_agent_memory(identity, memory_id)` | `AgentMemoryForgetResult` | Delete identity-scoped durable memory |
 | `memory_stores()` | `list[MemoryStoreInfo]` | List available memory stores |
 | `memory_index(...)` | `MemoryIndexResult` | Index an operational memory assertion |

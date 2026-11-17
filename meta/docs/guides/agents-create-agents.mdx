@@ -185,7 +185,10 @@ set outside the policy, in the approver map of the launch's access file:
 unless that map binds the rule's approver id to the stdio operator or to a
 person a declared ingress attests, a held change can only be withdrawn or
 lapse at its deadline (see
-[Approval rules](/reference/identity-policy#approval-rules)).
+[Approval rules](/reference/identity-policy#approval-rules)). In 0.9.15 and
+0.9.16 the decision is taken through the host, not in the Console, which
+shows it: see
+[Decisions held for a person](/guides/console#decisions-held-for-a-person).
 
 A tool's answer is this outcome without its `operation_id`. An operation id
 is the host's handle on a change (`meta/identity/operation` reads by it): an

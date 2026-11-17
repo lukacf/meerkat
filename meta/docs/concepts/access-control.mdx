@@ -228,6 +228,71 @@ meta = await (
 )
 ```
 
+### Keys
+
+These are all the keys of an access configuration, in the file and in the
+Console's access methods alike.
+
+The configuration itself:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `enabled` | `true` or `false`; `false` when left out | The switch. While it is `false` every check allows. |
+| `admins` | List of subjects | The subjects with full access, who also edit this configuration. At least one while `enabled` is `true`. |
+| `groups` | Table, one entry per group name | Named sets of subjects. |
+| `rules` | List of rules | The rules. They are judged as a set; their order does not matter. |
+| `approvers` | Table, one entry per approver id | Who holds each approver id (see [Approver identities](#approver-identities)). |
+
+A group, `[groups.<name>]`:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `description` | Text, optional | A note for people. No check reads it. |
+| `members` | List of subjects | The subjects in the group. |
+
+A rule, one `[[rules]]` table:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `id` | Text, required | The rule's name. It is not empty, and no two rules have the same one. |
+| `description` | Text, optional | A note for people; the Console's Access panel shows it as the rule's title. No check reads it. |
+| `effect` | `"allow"` or `"deny"`; `"allow"` when left out | Whether a matching rule allows or denies. |
+| `subjects` | List of subjects | Selects callers: the subjects the rule applies to. `"*"` is every signed-in subject. |
+| `groups` | List of group names | Selects callers: the members of any listed group. Each name must be a group the configuration defines. |
+| `actions` | List, required, not empty | The actions the rule is about: exact names, a family such as `agent.*`, or `*`. A name that is no action is refused. |
+| `agents` | List of agent names | Selects agents by name (see the paragraph on `agents` above). `"*"` is every agent. |
+| `roles` | List of role names | Selects agents by role. An agent's role is the role of its member in the mob, which is the name of the profile it is built from. `"*"` is every agent whose role is known. |
+| `match_labels` | Table of label and value | Selects agents by label: every label written must have the value written. |
+
+`subjects` and `groups` select the callers a rule applies to, and `agents`,
+`roles` and `match_labels` select the agents. A rule with neither `subjects`
+nor `groups` applies to every caller, a caller who is not signed in included
+(for a rule that has one of them, see
+[Relationship to authentication](#relationship-to-authentication)). A rule
+with none of `agents`, `roles` and `match_labels` applies to every agent, and
+to the actions that concern no agent. When a rule has more than one of the
+three, an agent must match each of them.
+
+An approver, `[approvers."<approver id>"]`, has `subjects`, `groups`,
+`ingress_subjects` and `people`; an entry of `people` has `subjects` and
+`ingress_subjects`; an entry of `ingress_subjects` has `ingress` and `subject`
+(see [Approver identities](#approver-identities)).
+
+Check the spelling of a key in the file. When the file is loaded, a key that is
+not in these tables is dropped and the rest of its table applies: the gateway
+starts and says nothing about it. A rule written with `role` or `subject` in
+place of `roles` or `subjects` therefore has no such selector: if it names no
+other agent selector (`agents`, `match_labels`) it applies to every agent, and
+if it names no `groups` it applies to every caller. A rule whose `effect` is
+misspelt is loaded as an allow rule, and a misspelt `enabled` leaves every rule
+unenforced. Only an unknown key in an entry of `people` or of
+`ingress_subjects` refuses the file (since 0.9.11). The Console's access
+methods (`meta/access/set`, `meta/access/rules/upsert`,
+`meta/access/groups/set`) refuse an unknown key from 0.9.16. How to check a
+running gateway's file against what it loaded: the Known limitation on the
+access file's loader in the
+[Meta 0.9.16 release notes](https://github.com/lukacf/meerkat/blob/meta-v0.9.16/meta/CHANGELOG.md).
+
 ### Approver identities
 
 `approvers` binds the approver ids that gating requests name in `requested_approver` to the principals who may decide as them. A binding lists subjects, groups, or both; several principals may hold one id, such as a shared role.

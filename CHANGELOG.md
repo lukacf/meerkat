@@ -41,7 +41,8 @@ them.
   remote MCP server that publishes only OAuth authorization-server metadata
   at its own origin can be logged in to. Such a server follows the 2025-03-26
   MCP authorization revision: its `401` challenge names no
-  `resource_metadata`, it has no protected resource metadata (RFC 9728), and
+  `resource_metadata`, it has no protected resource metadata (RFC 9728:
+  every well-known URL of it answers `404` or `410`), and
   `/.well-known/oauth-authorization-server` at its origin names its
   endpoints. From 0.6.34 through 0.9.16 the login failed with `MCP OAuth
   discovery failed for '<server>': no oauth-protected-resource metadata
@@ -54,7 +55,9 @@ them.
   endpoint, `https` or loopback endpoints, no redirects. A metadata document
   is required (no default endpoint paths are assumed), protected resource
   metadata a server does publish is always the one followed (a defect of it
-  still fails the login), and a host-registered client is never discovered
+  still fails the login, and so does a well-known URL of it that answers
+  anything but `404` or `410` without a document: a server error, a
+  redirect, `401` or `403`), and a host-registered client is never discovered
   this way. A server with neither document is refused with both named. A
   server of this kind without an OpenID Connect UserInfo endpoint needs
   `--oauth-account-selection unverified`, as before for any such

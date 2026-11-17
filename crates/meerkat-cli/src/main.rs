@@ -24131,6 +24131,8 @@ struct MobRunPackInvocation<'a> {
     detach: bool,
     json: bool,
     cli_trust_policy: Option<TrustPolicyArg>,
+    /// Sees the composed configuration before the pack's mob is built.
+    config_observer: Option<DeployConfigObserver>,
 }
 
 #[cfg(feature = "mob")]
@@ -24169,6 +24171,7 @@ async fn execute_mob_run_pack_with_stack_relief(
                 detach: invocation.detach,
                 json: invocation.json,
                 cli_trust_policy: invocation.cli_trust_policy,
+                config_observer: None,
             },
         )
         .await
@@ -24209,6 +24212,9 @@ async fn execute_mob_run_pack(
         CliOverrides::default(),
     )?;
     meerkat::HostConfigLayer::apply(&layers, &mut effective_config);
+    if let Some(observer) = invocation.config_observer.as_ref() {
+        observer(&effective_config);
+    }
     let flow_id = choose_mobpack_flow(&archive, invocation.flow)?;
     if invocation.detach && flow_id.is_none() {
         // Refuse before the durable mob-create side effect below.
@@ -37617,6 +37623,237 @@ auth_profile = "inline"
             }),
             "the --max-tool-calls flag wins, the realm [limits] budget wins over the pack, and \
              the pack fills the duration both left unset"
+        );
+    }
+
+    /// A scope over `root` whose realm document is `document`, with a packed
+    /// fixture mob beside it.
+    #[cfg(feature = "mob")]
+    async fn pack_confinement_fixture(
+        root: &std::path::Path,
+        document: Option<&str>,
+    ) -> (RuntimeScope, PathBuf) {
+        let mut scope = test_scope_with_context(root.to_path_buf());
+        scope.user_config_root = Some(root.to_path_buf());
+        if let Some(document) = document {
+            let config_path = meerkat_store::realm_paths_in(
+                &scope.locator.state_root,
+                scope.locator.realm.as_str(),
+            )
+            .config_path;
+            std::fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("mkdir config");
+            std::fs::write(&config_path, document).expect("write config");
+        }
+        let mob_dir = create_mobpack_fixture_dir(root);
+        let pack = root.join("confinement-proof.mobpack");
+        execute_mob_pack(&mob_dir, &pack, None)
+            .await
+            .expect("pack succeeds");
+        (scope, pack)
+    }
+
+    /// An observer that keeps the `[confinement]` of the configuration it is
+    /// shown.
+    #[cfg(feature = "mob")]
+    fn confinement_observer() -> (
+        DeployConfigObserver,
+        Arc<Mutex<Option<meerkat_core::ConfinementConfig>>>,
+    ) {
+        let observed = Arc::new(Mutex::new(None));
+        let observer: DeployConfigObserver = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |config: &Config| {
+                *observed.lock().expect("lock observed") = Some(config.confinement.clone());
+            }
+        });
+        (observer, observed)
+    }
+
+    /// The `[confinement]` a run of `pack` composes on `scope`. The run is
+    /// detached and the fixture pack has no flow, so the run ends at its own
+    /// refusal once the configuration is composed, before any mob is built.
+    #[cfg(feature = "mob")]
+    async fn pack_run_composed_confinement(
+        scope: &RuntimeScope,
+        pack: &std::path::Path,
+    ) -> meerkat_core::ConfinementConfig {
+        let (observer, observed) = confinement_observer();
+        let refusal = Box::pin(execute_mob_run_pack(
+            scope,
+            MobRunPackInvocation {
+                pack,
+                flow: None,
+                prompt: None,
+                raw_params: &[],
+                detach: true,
+                json: false,
+                cli_trust_policy: Some(TrustPolicyArg::Permissive),
+                config_observer: Some(observer),
+            },
+        ))
+        .await
+        .expect_err("a detached run of a pack without a flow is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("requires a mobpack with a callable flow"),
+            "unexpected refusal: {refusal}"
+        );
+        observed
+            .lock()
+            .expect("lock observed")
+            .take()
+            .expect("the pack run composed a configuration")
+    }
+
+    /// The `[confinement]` a deploy of `pack` composes on `scope`, with the
+    /// process's selection in the deploy flags as `rkat mob deploy` passes it.
+    #[cfg(feature = "mob")]
+    async fn deploy_composed_confinement(
+        scope: &RuntimeScope,
+        pack: &std::path::Path,
+    ) -> meerkat_core::ConfinementConfig {
+        let (observer, observed) = confinement_observer();
+        let output = Box::pin(execute_mob_deploy_internal(
+            scope,
+            pack,
+            "hello",
+            DeployInvocation {
+                cli_trust_policy: Some(TrustPolicyArg::Permissive),
+                surface: DeploySurfaceArg::Cli,
+                cli_overrides: CliOverrides {
+                    confinement: scope.confinement.clone(),
+                    ..CliOverrides::default()
+                },
+                #[cfg(feature = "rpc-surface")]
+                rpc_io: None,
+                config_observer: Some(observer),
+            },
+        ))
+        .await
+        .expect("deploy succeeds");
+        assert!(
+            output.contains("deployed\tmob="),
+            "unexpected output: {output}"
+        );
+        observed
+            .lock()
+            .expect("lock observed")
+            .take()
+            .expect("the deploy composed a configuration")
+    }
+
+    /// A pack run applies the `--confinement` flags as a deploy does: with a
+    /// flag and no `[confinement]` document, both compose the flag's
+    /// selection for every launch kind.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_composes_the_confinement_flag_as_deploy_does() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (mut scope, pack) = pack_confinement_fixture(temp.path(), None).await;
+        scope.confinement = Some(meerkat_core::LaunchConfinement::TrustedHost);
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+        let deploy = deploy_composed_confinement(&scope, &pack).await;
+
+        assert_eq!(
+            deploy,
+            meerkat_core::ConfinementConfig::for_all(meerkat_core::LaunchConfinement::TrustedHost),
+            "a deploy composes the flag's selection"
+        );
+        assert_eq!(
+            run, deploy,
+            "a pack run composes the selection a deploy composes from the same flag"
+        );
+    }
+
+    /// Without a `--confinement` flag a pack run and a deploy both compose
+    /// the realm document's `[confinement]`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_and_deploy_compose_the_documents_confinement_without_a_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (scope, pack) =
+            pack_confinement_fixture(temp.path(), Some(UNENFORCEABLE_CONFINEMENT)).await;
+        let (documents, _) = load_config(&scope).await.expect("load config");
+        assert!(
+            documents
+                .confinement
+                .all
+                .as_ref()
+                .is_some_and(meerkat_core::LaunchConfinement::requires_confinement),
+            "the document selects a confinement: {:?}",
+            documents.confinement
+        );
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+        let deploy = deploy_composed_confinement(&scope, &pack).await;
+
+        assert_eq!(
+            deploy, documents.confinement,
+            "a deploy composes the document's selection"
+        );
+        assert_eq!(
+            run, documents.confinement,
+            "a pack run composes the document's selection"
+        );
+    }
+
+    /// A `--confinement` flag replaces the realm document's `[confinement]`
+    /// on a pack run and on a deploy alike.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_confinement_flag_replaces_the_documents_selection_as_on_deploy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (mut scope, pack) =
+            pack_confinement_fixture(temp.path(), Some(UNENFORCEABLE_CONFINEMENT)).await;
+        scope.confinement = Some(meerkat_core::LaunchConfinement::TrustedHost);
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+        let deploy = deploy_composed_confinement(&scope, &pack).await;
+
+        assert_eq!(
+            deploy,
+            meerkat_core::ConfinementConfig::for_all(meerkat_core::LaunchConfinement::TrustedHost),
+            "on a deploy the flag replaces the document's selection"
+        );
+        assert_eq!(
+            run, deploy,
+            "on a pack run the flag replaces the document's selection as on a deploy"
+        );
+    }
+
+    /// A pack run composes a `--confinement workspace` selection for every
+    /// launch kind. The run ends at its own refusal once the configuration
+    /// is composed, so the selection is read from the composed table alone:
+    /// nothing is lowered and no surface is built.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_run_pack_composes_a_workspace_confinement_flag_for_every_launch_kind() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (mut scope, pack) = pack_confinement_fixture(temp.path(), None).await;
+        let selection =
+            meerkat_core::LaunchConfinement::Workspace(meerkat_core::WorkspaceConfinement {
+                network: meerkat_core::WorkspaceNetwork::Denied,
+                read: Vec::new(),
+                write: Vec::new(),
+            });
+        scope.confinement = Some(selection.clone());
+
+        let run = pack_run_composed_confinement(&scope, &pack).await;
+
+        for kind in meerkat_core::ConfinementLaunchKind::ALL {
+            assert_eq!(
+                run.statement(kind),
+                Some(&selection),
+                "a pack run composes the flag's workspace selection for {kind:?}"
+            );
+        }
+        assert_eq!(
+            run,
+            meerkat_core::ConfinementConfig::for_all(selection),
+            "the composed table is the flag's selection and nothing else"
         );
     }
 

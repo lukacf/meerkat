@@ -35,6 +35,29 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::ClassifyRecoveredInputDurability` gains the public field `pending_terminal_carrier: bool`, and the public enum `generated::meerkat::TransitionId` gains six variants named `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier` with the phase suffixes `Initializing`, `Idle`, `Attached`, `Running`, `Retired` and `Stopped`. `meerkat-runtime`: the variant `ClassifyRecoveredInputDurability` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; an exhaustive `match` on `TransitionId` adds the arms. No wire form and no stored form changes.
+
+### Fixed
+
+- `meerkat-runtime`: a session whose finished run was still unsettled
+  when its runtime was registered again (a restart of the host, for one)
+  now has that run finalized at its first drain when the run had consumed
+  an input the runtime marks ephemeral: a peer's progress notice (a
+  response that is not the final one) to a request the session had sent.
+  The registration keeps that input's row, and the first drain records
+  the run's completion with its outcome and takes the session checkpoint
+  the run still owed. Before, the registration left the row out of the
+  recovered session while the store went on naming it, and the session's
+  first drain, a stop, an unregister, and after one of those every later
+  registration were refused with
+  `Recovery corruption: pending terminal owner <id> is absent from the live shell`;
+  a mob marked such a member `broken`. A batch in which one run had
+  consumed such a notice together with a durable input was refused the
+  same way and is finalized as well. An ephemeral input that had not run
+  is still dropped at a restart. The refusal is in 0.8.11 through 0.9.16.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

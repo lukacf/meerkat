@@ -6039,7 +6039,9 @@ impl AgentFactory {
     /// [`crate::HostConfinement::convention_sources`]), and
     /// `realm_documents` is [`crate::HostConfinement::realm_documents`] of
     /// the realm it serves. Those tools run in the host process, so OS
-    /// process confinement does not reach them, whatever its mode.
+    /// process confinement does not reach them, whatever its mode. The
+    /// reading tools (`blob_load_file`, `view_image`) do not read the
+    /// declared paths either.
     ///
     /// A declared path that lies strictly inside a dispatcher's project
     /// root is refused with everything under it (a realm state root given

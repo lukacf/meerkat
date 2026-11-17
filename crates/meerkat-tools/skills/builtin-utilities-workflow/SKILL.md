@@ -18,7 +18,9 @@ turn. They are not a durable planning system by themselves.
   (`.rkat/` at the project root or in any directory under it) or the other
   files the host keeps its state and configuration in: such a call returns
   `invalid_arguments`, and a patch that names one such path applies none of
-  its operations. Do not retry it through another path. Engine configuration
+  its operations. `blob_load_file` and `view_image` do not read those paths
+  either and answer `invalid_arguments` the same way. Do not retry it through
+  another path. Engine configuration
   (MCP servers, hooks, skills, auth profiles) is changed by the operator
   with the `rkat` CLI or by editing the files, not by an agent's file tools.
 - Use `view_image` when the user references a local image or when visual

@@ -687,7 +687,11 @@ fn compute_replacements(
         let mut new_slice: &[String] = &chunk.new_lines;
         let mut found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
 
-        if found.is_none() && pattern.last().is_some_and(String::is_empty) {
+        // Unchanged lines that end in an empty line may stand for the file's
+        // last newline: retry without it, as long as a line is left to
+        // match. A pattern is never reduced to nothing, which would match
+        // anywhere.
+        if found.is_none() && pattern.len() > 1 && pattern.last().is_some_and(String::is_empty) {
             pattern = &pattern[..pattern.len() - 1];
             if new_slice.last().is_some_and(String::is_empty) {
                 new_slice = &new_slice[..new_slice.len() - 1];
@@ -1094,6 +1098,54 @@ mod tests {
         apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma");
+    }
+
+    /// A hunk whose only unchanged line is an empty line names a blank line
+    /// of the file. Where the file has none to match, the hunk is refused
+    /// and the file is left as it was, with or without the end marker.
+    #[test]
+    fn update_hunk_with_only_an_empty_unchanged_line_needs_a_matching_line() {
+        for (case, hunk) in [
+            ("with the end marker", "@@\n+head\n\n*** End of File"),
+            ("without the end marker", "@@\n+head\n"),
+        ] {
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            let path = root.join("lines.txt");
+            std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+            let patch = wrap_patch(&format!("*** Update File: lines.txt\n{hunk}"));
+            let result = apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(()));
+
+            assert!(
+                matches!(
+                    &result,
+                    Err(ApplyPatchError::ComputeReplacements(message))
+                        if message.contains("Failed to find expected lines")
+                ),
+                "{case}: expected a context mismatch, got {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "alpha\nbeta\n",
+                "{case}: the file is unchanged"
+            );
+        }
+    }
+
+    /// Unchanged lines that end in an empty line, standing for the file's
+    /// last newline, still match the file's last lines.
+    #[test]
+    fn update_hunk_ending_in_an_empty_unchanged_line_still_applies() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("lines.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+        let patch = wrap_patch("*** Update File: lines.txt\n@@\n alpha\n-beta\n+gamma\n");
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
     }
 
     #[test]

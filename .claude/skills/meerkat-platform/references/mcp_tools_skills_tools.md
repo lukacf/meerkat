@@ -90,7 +90,8 @@ Shell:
 Others: `apply_patch {patch}` takes `*** Begin Patch` ... `*** End Patch` with
 `*** Add File:`, `*** Update File:` (optionally `*** Move to:`) and `*** Delete
 File:` sections, paths relative to the project root. `view_image {path}` reads
-PNG, JPEG, GIF, WebP or SVG up to 5 MB inside the project root, and is hidden
+PNG, JPEG, GIF or WebP up to 5 MB inside the project root (a file whose
+content is none of these is refused), and is hidden
 when the model cannot take image tool results. `blob_save_file {blob_id, path,
 overwrite?}`, `blob_load_file {path, media_type?}` and `blob_inspect {blob_id}`
 move blobs to and from project files. `apply_patch` and `blob_save_file` run

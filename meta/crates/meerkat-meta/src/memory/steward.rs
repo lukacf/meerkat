@@ -1786,7 +1786,7 @@ impl StewardEngine {
             .await?;
 
         // Usage audit (§9.2).
-        let usage = self.usage_audit(&signals, run).await?;
+        let usage = self.usage_audit(&signals, partition, run).await?;
         let usage_text = render_usage_verdicts(&usage);
         // §16 Q6: dead-weight verdicts become the durable operator review
         // queue ("memories you might want to correct"). Best-effort — a
@@ -2618,6 +2618,7 @@ impl StewardEngine {
     async fn usage_audit(
         &self,
         signals: &SignalPacket,
+        partition: &DreamPartition,
         run: &mut DreamRun,
     ) -> Result<Vec<(String, String, String)>, StewardError> {
         if signals.ledger.is_empty() {
@@ -2666,16 +2667,31 @@ impl StewardEngine {
             .iter()
             .map(|entry| entry.record_id.clone())
             .collect();
-        // The ledger names records by id. A record that lies in a scope kept
-        // apart by its key is read by no dream, whoever was once given it.
-        let records: Vec<_> = self
+        let mut records = self
             .store
             .records_by_ids(&self.realm, &ids)
             .await
-            .map_err(store_err)?
-            .into_iter()
-            .filter(|record| !record.scope.kept_apart_by_its_key())
-            .collect();
+            .map_err(store_err)?;
+        // The ledger names a record by its id, as it was when it was put
+        // into a turn. A record that lies in a scope kept apart by its key
+        // is read by no dream, whoever was once given it. A record that was
+        // forgotten since, or that now lies in a scope this dream does not
+        // cover, is not judged either: nothing of it enters the prompt.
+        records.retain(|record| {
+            !record.scope.kept_apart_by_its_key()
+                && !matches!(
+                    record.status,
+                    crate::memory::records::RecordStatus::Tombstoned
+                )
+                && partition.covers(&record.scope)
+        });
+        if records.is_empty() {
+            run.phases.push((
+                "usage_audit".to_string(),
+                "no live record among the turn-injected ones, skipped".to_string(),
+            ));
+            return Ok(Vec::new());
+        }
         let mut sample_text = String::new();
         for record in &records {
             let injections = turn_ledger
@@ -2696,12 +2712,17 @@ impl StewardEngine {
         }
         // Bounded evidence windows around the most recent TURN injections
         // (a build-surface session key points at spawn assembly, not at a
-        // turn where the record could have proven useful).
+        // turn where the record could have proven useful), of the records
+        // that are judged.
+        let judged: HashSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
         let mut evidence_text = String::new();
         let mut sessions_seen = HashSet::new();
         for entry in turn_ledger.iter().copied() {
             if evidence_text.len() > MAX_GATHERED_TOTAL_BYTES / 2 {
                 break;
+            }
+            if !judged.contains(entry.record_id.as_str()) {
+                continue;
             }
             let Some(session) = entry.session_key.as_deref() else {
                 continue;
@@ -8410,6 +8431,171 @@ mod tests {
         assert!(later.contains("Shared release note"), "a later dream ran");
         for private in ["Closed side chat note", "PRIVATE-CLOSED-DETAIL"] {
             assert!(!later.contains(private), "no later prompt holds {private}");
+        }
+    }
+
+    /// Notes that were set aside at the first start
+    /// ([`crate::memory::set_aside`]) feed no dream: neither their titles
+    /// nor their text reach a phase's prompt, as live notes or as recent
+    /// tombstones, and nothing of them reaches mob scope. A shared member's
+    /// memory is dreamed as before.
+    #[tokio::test]
+    async fn the_steward_dreams_over_no_set_aside_note() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        for (identity, title, body) in [
+            (
+                "identity:worker",
+                "Shared release note",
+                "SHARED-RELEASE-DETAIL",
+            ),
+            ("ledger", "Ledger salary note", "SET-ASIDE-DETAIL"),
+        ] {
+            fixture
+                .store
+                .remember_authored(
+                    &identity_scope(identity),
+                    new_record(title, body),
+                    MemoryAuthor::Operator { principal: None },
+                )
+                .await
+                .expect("seed identity record");
+        }
+        fixture
+            .store
+            .set_plain_names_aside(
+                REALM,
+                "mob:main",
+                BTreeSet::from(["ledger".to_string()]),
+                now_ms() + 1,
+            )
+            .await
+            .expect("the first start's step");
+
+        for _ in 0..2 {
+            let before = fixture.llm.prompts().len();
+            fixture.engine.note_session_completed();
+            let outcome = fixture.engine.dream_now().await;
+            assert!(matches!(outcome, DreamOutcome::Completed(_)), "{outcome:?}");
+            let prompts = fixture.llm.prompts()[before..].join("\n");
+            assert!(
+                prompts.contains("Shared release note"),
+                "a shared member's memory is dreamed"
+            );
+            for set_aside in ["Ledger salary note", "SET-ASIDE-DETAIL"] {
+                assert!(!prompts.contains(set_aside), "no prompt holds {set_aside}");
+            }
+        }
+        let mob_records = fixture
+            .store
+            .manifest(&[mob_scope()], ManifestTier::Full)
+            .await
+            .expect("mob manifest");
+        assert!(
+            mob_records.is_empty(),
+            "nothing of them reaches mob scope: {mob_records:?}"
+        );
+    }
+
+    /// The usage audit judges no note that was set aside at the first start
+    /// and no forgotten note. Such a note can still be in the injection
+    /// ledger (it was put into a turn of a member of the name before): the
+    /// audit's prompt holds neither its line nor its title. A live note of
+    /// a shared member with a turn row is judged as before.
+    #[tokio::test]
+    async fn the_usage_audit_judges_no_set_aside_and_no_forgotten_note() {
+        let fixture = build_fixture(
+            vec![
+                empty_gather(),
+                json_reply(serde_json::json!([])),
+                empty_consolidate(),
+            ],
+            vec![],
+        );
+        for (id, identity, title) in [
+            ("mem-shared", "identity:worker", "Shared turn note"),
+            ("mem-forgotten", "identity:worker", "Forgotten worker note"),
+            ("mem-ledger", "ledger", "Ledger salary note"),
+        ] {
+            seed_active(
+                &fixture.store,
+                id,
+                &identity_scope(identity),
+                title,
+                "went into a live turn once",
+            )
+            .await;
+        }
+        fixture
+            .store
+            .log_injections(
+                REALM,
+                &[
+                    ("mem-shared", "identity:worker", "sess-1"),
+                    ("mem-forgotten", "identity:worker", "sess-1"),
+                    ("mem-ledger", "ledger", "sess-2"),
+                ]
+                .map(|(record, identity, session)| InjectionLogEntry {
+                    record_id: record.to_string(),
+                    identity: identity.to_string(),
+                    session_key: Some(session.to_string()),
+                    surface: InjectionSurface::Turn,
+                    at_ms: 2,
+                }),
+            )
+            .await
+            .expect("ledger");
+        for session in ["sess-1", "sess-2"] {
+            fixture
+                .transcripts
+                .insert(session, vec!["do the thing", "done"]);
+        }
+        let token = fixture
+            .store
+            .stage(StagedMutationBatch {
+                kind: StagedBatchKind::FreshWrite,
+                realm: REALM.to_string(),
+                author: MemoryAuthor::Application,
+                ops: vec![StagedOp::Tombstone {
+                    id: "mem-forgotten".to_string(),
+                    rationale: None,
+                }],
+            })
+            .await
+            .expect("stage the forgetting");
+        fixture.store.commit(token).await.expect("forget the note");
+        fixture
+            .store
+            .set_plain_names_aside(
+                REALM,
+                "mob:main",
+                BTreeSet::from(["ledger".to_string()]),
+                now_ms() + 1,
+            )
+            .await
+            .expect("the first start's step");
+
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        assert!(
+            run.phases
+                .iter()
+                .any(|(phase, detail)| phase == "usage_audit" && detail.contains("judged")),
+            "the audit ran on the shared member's turn row: {:?}",
+            run.phases
+        );
+        let prompts = fixture.llm.prompts().join("\n");
+        assert!(
+            prompts.contains("- mem-shared ["),
+            "a shared member's live note is judged: {prompts}"
+        );
+        for withheld in ["mem-ledger", "Ledger salary note", "- mem-forgotten ["] {
+            assert!(
+                !prompts.contains(withheld),
+                "the audit's prompt holds {withheld}: {prompts}"
+            );
         }
     }
 

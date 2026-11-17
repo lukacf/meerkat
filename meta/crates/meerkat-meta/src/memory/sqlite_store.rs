@@ -55,6 +55,12 @@ use super::staged::{
     validate_batch,
 };
 
+mod set_aside;
+
+pub(crate) use set_aside::SetAsideOutcome;
+#[cfg(test)]
+pub(crate) use set_aside::set_aside_scope_key;
+
 /// Per-scope retention floors (§7.3): exceeded floors WARN the steward via
 /// tracing; deterministic code never evicts.
 pub const DEFAULT_SCOPE_FLOOR_RECORDS: usize = 4_000;
@@ -1797,6 +1803,10 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
 
     fn as_tombstone_source(&self) -> Option<Arc<dyn crate::memory::distiller::TombstoneSource>> {
         Some(Arc::new(self.clone()))
+    }
+
+    fn as_bundled_store(&self) -> Option<SqliteAgentMemoryStore> {
+        Some(self.clone())
     }
 }
 

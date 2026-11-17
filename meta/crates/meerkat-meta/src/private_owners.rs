@@ -390,6 +390,17 @@ fn creating_member(provenance: &meerkat_mob::MobProvenance) -> CreatingMember<'_
     }
 }
 
+/// The member a mob's creation record names as the mob's creator: the id
+/// of the mob that member is seated in, and its roster member id. `None`
+/// for a record that names no member, and for one that does not say which
+/// member created the mob.
+pub(crate) fn named_creator(provenance: &meerkat_mob::MobProvenance) -> Option<(String, String)> {
+    match creating_member(provenance) {
+        CreatingMember::Named(mob, member) => Some((mob.to_string(), member.to_string())),
+        CreatingMember::NoMember | CreatingMember::Undecidable => None,
+    }
+}
+
 /// The wait before the next try of a durable read that failed, growing to
 /// [`SEED_RETRY_MAX`].
 fn next_wait(wait: std::time::Duration) -> std::time::Duration {

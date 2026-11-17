@@ -10,8 +10,8 @@ and Gemini responses. Set one reasoning-effort level for all of them.
 - What a refusal looks like: a level a model does not accept is refused,
   never lowered, and the refusal names the levels the model accepts when a
   source states them
-- A provider-specific parameter: the Anthropic thinking budget, as a request
-  of its own (a budget and a level on one request are refused)
+- A provider-specific parameter under the typed `provider_tag`: Anthropic
+  adaptive thinking, as a request of its own
 - Per-session model routing across configured providers
 
 The runnable calls compare configured providers, set the level and use one
@@ -25,9 +25,9 @@ the runtime it talks to: an older runtime makes the SDK raise
 ## Supported Providers
 | Provider | Models | Env Var |
 |----------|--------|---------|
-| Anthropic | `claude-opus-4-8`, `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
-| OpenAI | `gpt-5.5` | `OPENAI_API_KEY` |
-| Gemini | `gemini-3.5-flash`, `gemini-3.1-pro-preview` | `GEMINI_API_KEY` |
+| Anthropic | `claude-opus-5-5`, `claude-sonnet-5-5` | `ANTHROPIC_API_KEY` |
+| OpenAI | `gpt-6-astra` | `OPENAI_API_KEY` |
+| Gemini | `gemini-4-hydrogen`, `gemini-4-argon` | `GEMINI_API_KEY` |
 
 ## Run
 

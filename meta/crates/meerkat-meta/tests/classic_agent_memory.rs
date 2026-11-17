@@ -806,6 +806,162 @@ async fn builder_full_memory_stack_installs_engines_and_panel() {
     assert!(err.contains("requires persistent_state"), "{err}");
 }
 
+/// Every file named `name` under `root`.
+fn files_named(root: &std::path::Path, name: &str, found: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_named(&path, name, found);
+        } else if path.file_name().is_some_and(|file| file == name) {
+            found.push(path);
+        }
+    }
+}
+
+/// The library builder runs the bundled agent memory store's first start's
+/// step before it returns the runtime. A store that holds notes under the
+/// name of a member private to a person and under a shared member's name,
+/// and no marker of the step (as an earlier release leaves it), is opened
+/// by a build over the same state: when the build returns, the private
+/// member's name's notes are set aside and the shared member's are as they
+/// were.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_builder_start_sets_notes_aside_before_it_returns_the_runtime() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let state = dir.path().join("state");
+    let definition = test_definition();
+    let build = |definition: MobDefinition| {
+        let state = state.clone();
+        async move {
+            Box::pin(
+                UnifiedRuntime::builder()
+                    .definition(definition)
+                    .persistent_state(state)
+                    .persistent_agent_memory_stack(
+                        AgentMemoryConfig::default(),
+                        meerkat_meta::memory_wiring::MemoryEnginesConfig::default(),
+                    )
+                    .default_llm_client(Arc::new(CaptureClient::default()))
+                    .build(),
+            )
+            .await
+            .expect("build over the bundled agent memory store")
+        }
+    };
+
+    let runtime = build(definition.clone()).await;
+    for (name, labels) in [
+        (
+            "ledger",
+            std::collections::BTreeMap::from([(
+                "console.private_to".to_string(),
+                "console-caller:v1:aa".to_string(),
+            )]),
+        ),
+        ("helper", std::collections::BTreeMap::new()),
+    ] {
+        Box::pin(
+            runtime.mob_handle().spawn_spec(
+                SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from(name))
+                    .with_labels(labels),
+            ),
+        )
+        .await
+        .expect("seat a member");
+    }
+    let store = runtime
+        .memory_panel_store()
+        .expect("panel store registered by the builder stack path");
+    for (name, title, body) in [
+        ("ledger", "Ledger fact", "LEDGER-KEPT"),
+        ("helper", "Helper fact", "HELPER-KEPT"),
+    ] {
+        store
+            .remember_authored(
+                &MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: name.to_string(),
+                },
+                NewMemoryRecord {
+                    kind: MemoryKind::Fact,
+                    title: title.to_string(),
+                    description: String::new(),
+                    body: body.to_string(),
+                    tags: vec![],
+                    evidence: vec![],
+                    verification: None,
+                },
+                MemoryAuthor::Agent {
+                    identity: name.to_string(),
+                },
+            )
+            .await
+            .expect("store a note");
+    }
+    drop(store);
+    runtime.shutdown().await;
+    drop(runtime);
+
+    // As an earlier release leaves the store: without the step's marker.
+    let mut realm_files = Vec::new();
+    files_named(&state, "default.sqlite3", &mut realm_files);
+    assert_eq!(
+        realm_files.len(),
+        1,
+        "one memory realm file: {realm_files:?}"
+    );
+    let db = rusqlite::Connection::open(&realm_files[0]).expect("the realm's store file");
+    let removed = db
+        .execute(
+            "DELETE FROM audit WHERE stage_token LIKE 'set-aside-first-start/%'",
+            [],
+        )
+        .expect("remove the marker");
+    assert_eq!(
+        removed, 1,
+        "the first build ran the step and left its marker"
+    );
+    drop(db);
+
+    let runtime = build(definition).await;
+    let store = runtime
+        .memory_panel_store()
+        .expect("panel store registered by the builder stack path");
+    let page = store
+        .records_page("default", None, None, None, 16, None)
+        .await
+        .expect("the store's records");
+    let mut notes: Vec<(String, &str, String)> = page
+        .records
+        .into_iter()
+        .map(|record| {
+            (
+                record.scope.key().to_string(),
+                record.status.kind_str(),
+                record.body,
+            )
+        })
+        .collect();
+    notes.sort();
+    assert_eq!(
+        notes,
+        [
+            ("helper".to_string(), "active", "HELPER-KEPT".to_string()),
+            (
+                "set-aside/ledger".to_string(),
+                "tombstoned",
+                "LEDGER-KEPT".to_string()
+            ),
+        ],
+        "the build returned with the private member's name's notes set aside"
+    );
+    drop(store);
+    runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn gate_still_rejects_invalid_memory_combinations() {
     // Identity-first inputs (a custom AgentCustomizer) still require the

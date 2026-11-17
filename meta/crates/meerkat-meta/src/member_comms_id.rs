@@ -585,6 +585,7 @@ pub(crate) async fn validate_raw_member_target(
         ));
     }
     refuse_runtime_plane_member(&mob_member_id_str(&alias), None)?;
+    refuse_reserved_memory_name(&alias)?;
     if let Some(identity_runtime) = identity_runtime {
         match identity_runtime.identity_for_member_mutation(&alias).await {
             Ok(Some(identity)) => {
@@ -604,6 +605,27 @@ pub(crate) async fn validate_raw_member_target(
         }
     }
     Ok(alias)
+}
+
+/// Refuse a member id or alias whose memory name
+/// ([`logical_memory_identity`]) lies under a key namespace agent memory
+/// reserves (`crate::memory::records::names_reserved_key_namespace`): no
+/// member is created under such a name. The one check of the roads that
+/// create a member below an identity: the member creation doors
+/// ([`validate_raw_member_target`]) and the spawns a mob's spawn customizer
+/// is asked about (`crate::private_owners`, which says which those are: a
+/// host's own resume spawn on the mob handle, which can only seat again a
+/// member seated under the name before, is not among them).
+pub(crate) fn refuse_reserved_memory_name(member_id_or_alias: &str) -> Result<(), String> {
+    if crate::memory::records::names_reserved_key_namespace(&logical_memory_identity(
+        member_id_or_alias,
+    )) {
+        return Err(format!(
+            "member id '{}' lies under a name agent memory reserves",
+            runtime_alias_str(member_id_or_alias)
+        ));
+    }
+    Ok(())
 }
 
 /// The single creation check for the console's runtime-plane identities.
@@ -2023,5 +2045,35 @@ mod tests {
             alice.as_str(),
             &[("agent_identity", "personal:bob")]
         )));
+    }
+
+    /// A raw member is refused a name that lies under a key namespace agent
+    /// memory reserves (`private/` and `set-aside/`): such a name is the key
+    /// of no member's memory. Every other name is admitted as before, a
+    /// name that holds a `/` included.
+    #[tokio::test]
+    async fn a_raw_member_name_under_a_reserved_memory_key_is_refused() {
+        for name in [
+            "private/console-caller:v1:aa/ledger-side",
+            "private/ledger-side",
+            "set-aside/ledger-side",
+        ] {
+            assert!(
+                validate_raw_member_target(None, name).await.is_err(),
+                "'{name}' is refused"
+            );
+        }
+        for name in [
+            "ledger-side",
+            "team/ledger-side",
+            "private",
+            "privateer/ledger-side",
+            "set-aside",
+        ] {
+            assert!(
+                validate_raw_member_target(None, name).await.is_ok(),
+                "'{name}' is admitted"
+            );
+        }
     }
 }

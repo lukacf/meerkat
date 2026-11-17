@@ -11739,6 +11739,11 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExternalPeerReciprocalTrustRemoval {
+        pub key: ExternalPeerKey,
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnwireExternalPeer {
         pub key: ExternalPeerKey,
         pub edge: ExternalPeerEdge,
@@ -12966,6 +12971,9 @@ pub enum Input {
         inputs::AuthorizeRetiringMemberTrustCleanupObserved,
     ),
     AuthorizeExternalPeerReciprocalTrust(inputs::AuthorizeExternalPeerReciprocalTrust),
+    AuthorizeExternalPeerReciprocalTrustRemoval(
+        inputs::AuthorizeExternalPeerReciprocalTrustRemoval,
+    ),
     UnwireExternalPeer(inputs::UnwireExternalPeer),
     CleanupRetiringExternalPeer(inputs::CleanupRetiringExternalPeer),
     RestoreRetiringExternalPeer(inputs::RestoreRetiringExternalPeer),
@@ -13256,6 +13264,9 @@ impl Input {
             }
             Self::AuthorizeExternalPeerReciprocalTrust(_) => {
                 InputKind::AuthorizeExternalPeerReciprocalTrust
+            }
+            Self::AuthorizeExternalPeerReciprocalTrustRemoval(_) => {
+                InputKind::AuthorizeExternalPeerReciprocalTrustRemoval
             }
             Self::UnwireExternalPeer(_) => InputKind::UnwireExternalPeer,
             Self::CleanupRetiringExternalPeer(_) => InputKind::CleanupRetiringExternalPeer,
@@ -13581,6 +13592,7 @@ pub enum InputKind {
     AuthorizeMemberTrustCleanupObserved,
     AuthorizeRetiringMemberTrustCleanupObserved,
     AuthorizeExternalPeerReciprocalTrust,
+    AuthorizeExternalPeerReciprocalTrustRemoval,
     UnwireExternalPeer,
     CleanupRetiringExternalPeer,
     RestoreRetiringExternalPeer,
@@ -15232,6 +15244,13 @@ pub mod effects {
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalPeerReciprocalTrustRemovalRequested {
+        pub key: ExternalPeerKey,
+        pub edge: ExternalPeerEdge,
+        pub peer_id: PeerId,
+        pub epoch: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PersistSupervisorAuthority {
         pub peer_id: PeerId,
         pub signing_key: PeerSigningKey,
@@ -15992,6 +16011,9 @@ pub enum Effect {
     MemberPeerRebindAuthorized(effects::MemberPeerRebindAuthorized),
     MemberPeerOverlayAuthorized(effects::MemberPeerOverlayAuthorized),
     ExternalPeerReciprocalTrustRequested(effects::ExternalPeerReciprocalTrustRequested),
+    ExternalPeerReciprocalTrustRemovalRequested(
+        effects::ExternalPeerReciprocalTrustRemovalRequested,
+    ),
     PersistSupervisorAuthority(effects::PersistSupervisorAuthority),
     DeleteSupervisorAuthority(effects::DeleteSupervisorAuthority),
     EmitWiringLifecycleNotice(effects::EmitWiringLifecycleNotice),
@@ -16200,6 +16222,7 @@ pub enum EffectKind {
     MemberPeerRebindAuthorized,
     MemberPeerOverlayAuthorized,
     ExternalPeerReciprocalTrustRequested,
+    ExternalPeerReciprocalTrustRemovalRequested,
     PersistSupervisorAuthority,
     DeleteSupervisorAuthority,
     EmitWiringLifecycleNotice,
@@ -17245,6 +17268,8 @@ pub enum TransitionId {
     AuthorizeRetiringMemberTrustCleanupObservedRunning,
     AuthorizeRetiringMemberTrustCleanupObservedStopped,
     AuthorizeExternalPeerReciprocalTrustRunning,
+    AuthorizeExternalPeerReciprocalTrustRemovalRunning,
+    AuthorizeExternalPeerReciprocalTrustRemovalStopped,
     RecoverExternalPeerWiringRunning,
     RecoverExternalPeerWiringAlreadyRecovered,
     RecoverExternalPeerUnwireRunning,

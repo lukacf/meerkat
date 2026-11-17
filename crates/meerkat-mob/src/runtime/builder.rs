@@ -12401,6 +12401,7 @@ impl MobBuilder {
                 member_live_open_cleanup_inflight: BTreeSet::new(),
                 next_member_live_open_cleanup_ticket: 0,
                 orphan_release_reservations: BTreeMap::new(),
+                external_peer_reciprocal_trust_targets: BTreeMap::new(),
                 host_binding_incarnations,
                 host_runtime_incarnations: BTreeMap::new(),
                 next_peer_delivery_ticket: 0,

@@ -582,9 +582,10 @@ fn local_delivery(
         .ok_or("mob announcements require the gateway's runtime machine")?;
     let mob_id = MobId::new(runtime.mob_handle().mob_id().to_string())
         .map_err(|error| format!("this gateway's mob id: {error}"))?;
-    Ok(MobNativeDelivery::new(
-        mob_id, identities, mob_tools, machine, sessions,
-    ))
+    Ok(
+        MobNativeDelivery::new(mob_id, identities, mob_tools, machine, sessions)
+            .with_members_apart(mob_runtime.private_owners().clone()),
+    )
 }
 
 /// How a gateway's configuration has its control channel serve the keyed

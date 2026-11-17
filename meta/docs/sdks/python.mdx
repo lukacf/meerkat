@@ -1914,7 +1914,7 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 | `recall_agent_memory(identity, *, selection, query_text, query_terms, max_entries, realm)` | `list[AgentMemoryRecord]` | Select active records of the identity: `"contextual"` (default) returns the ones that match the query, `"always"` the most recently updated; at most `max_entries` (default 8, at most 64), no cursor. Not a listing: see [Reading agent memory](/concepts/memory#reading-agent-memory) |
 | `manifest_agent_memory(identity, *, tier, k, realm)` | `list[AgentMemoryRecordMeta]` | List the identity's active records as metadata, never bodies: `tier="full"` returns all of them, `"working_set"` (default) a bounded set |
 | `update_agent_memory(identity, memory_id, *, title, body, tags, realm)` | `AgentMemoryUpdateResult` | Replace an active record; the result names the new record (`memory_id`) and the one it replaced (`supersedes`) |
-| `forget_agent_memory(identity, memory_id)` | `AgentMemoryForgetResult` | Delete identity-scoped durable memory |
+| `forget_agent_memory(identity, memory_id)` | `AgentMemoryForgetResult` | Withdraw a record from the agent: it is no longer recalled, injected or listed. Not an erasure: the bundled store keeps the record's text (see [`meta/agent_memory/forget`](/api/rpc#meta%2Fagent_memory%2Fforget)) |
 | `memory_stores()` | `list[MemoryStoreInfo]` | List available memory stores |
 | `memory_index(...)` | `MemoryIndexResult` | Index an operational memory assertion |
 

@@ -7,72 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
+### Breaking
 
-- `meta_gateway` (the console/HTTP binary) answers a `meta/init` whose runtime
-  bootstrap fails on the request's `id` and with its reason, as the stdio
-  gateway does. A mob composition provenance refusal (the state directory
-  holds a mob that the launch's definition does not match, or a composition
-  manifest that cannot be judged) answers `-32019` with the refusal's `kind`
-  and facts as `error.data` (for example `{"kind": "divergent", "fields":
-  [...], "manifest": ...}`) and the message `Runtime bootstrap failed: failed
-  to bootstrap mob runtime: <reason>`. Any other bootstrap failure keeps
-  `-32603`, with the message `Runtime bootstrap failed: <reason>`. Before,
-  both were `-32603` with `id: null` and the message `failed to bootstrap
-  local runtime`, and the reason was on standard error only, so a host that
-  starts this binary and matched that answer must match the new one. Meta
-  0.9.9 through 0.9.16 answered so (by a run on 0.9.16's code; the earlier
-  versions read from the source at their tags). No new code and no new kind:
-  `-32019` and its kinds are the ones the SDKs' `CompositionProvenanceError`
-  already carries, and the SDKs start the stdio gateway, which is unchanged.
-  The gateway's own log line for such a start is the `meta/init refused`
-  warning with the code and the reason, in place of the `gateway startup
-  failed` error. A start that fails before its answer at another place than
-  the runtime bootstrap still answers `-32603` with `id: null`.
+- Behaviour-only (not measured by the gate): the answer of `meta_gateway` (the Console gateway binary) to a `meta/init` whose runtime bootstrap is refused or fails. The answer is now on the request's `id`. A mob composition provenance refusal (the state directory holds a mob that the launch's definition does not match, or a composition manifest that cannot be judged) answers `-32019` with the refusal's `kind` and facts as `error.data` (for example `{"kind": "divergent", "fields": [...], "manifest": ...}`) and the message `Runtime bootstrap failed: failed to bootstrap mob runtime: <reason>`, as the stdio gateway answers it; before, it answered `-32603` with `id: null`, no data and the message `failed to bootstrap local runtime`, and the reason was on standard error only. Any other bootstrap failure keeps `-32603`, now on the request's `id` with the message `Runtime bootstrap failed: <reason>` (before: `id: null` and `failed to bootstrap local runtime`). A client that starts this binary and matched these refusals on `-32603`, on a null `id` or on that message must match `-32019`, the request's `id` and the new message. Meta 0.9.9, the oldest release looked at, through 0.9.16 answered the old way. No new code and no new kind: `-32019` and its kinds are the ones the SDKs' `CompositionProvenanceError` already carries, and the SDKs start the stdio gateway, which is unchanged. The gateway's own log line for such a start is the `meta/init refused` warning with the code and the reason, in place of the `gateway startup failed` error. A start that fails before its answer at another place than the runtime bootstrap still answers `-32603` with `id: null`.
 
 ### Fixed
 
-- A persistent `meta_gateway` (`persistent_sessions: true`) with no mob
-  definition file (`config/mob.toml` or `<workspace>/definition.json`) starts
-  again after an upgrade on the state directory that holds its mob, with no
-  operator step. Such a launch runs the built-in default mob, whose id was
-  derived from the launch, the release version included; the state directory
-  keeps the id it was created with, so the first start of every later release
-  was refused: `the supplied mob definition diverges from the canonical
-  definition in this storage, in: id` (answered as `-32603` `failed to
-  bootstrap local runtime`). Meta 0.9.9 through 0.9.16 had this (by a run on
-  0.9.16's code from a second workspace; the release version's part in the id
-  read from the source at each tag). The gateway now takes the mob id the
-  state directory records (`definition.id` in `<state
-  directory>/event_log.sqlite3.composition.json`) for the built-in default
-  mob. The 0.9.16 upgrade step, copying that `definition` to
-  `<workspace>/definition.json`, is no longer needed; a workspace that has
-  the file keeps starting, and a definition file still names its own mob. A
-  state directory that records no mob gets an id derived from the launch
-  without the release version, so a mob created by this release keeps its id
-  under the next one. What else this changes: the release version was one of
-  many launch inputs in that id, and each of them parted default mobs on one
-  state directory by the same refusal: the workspace path, the realm, the
-  isolation setting, the runtime profile, the Console's read-only setting,
-  the runtime, project and context roots, the compaction policy, the HTTP
-  listen address and public base URL, the control listener, the host
-  configuration file, the workspace's configuration files, `manifest.toml`
-  and every file under `skills/`, `hooks/`, `mcp/` and `config/`,
-  `auth_config` and `console_voice`, and the flow editor's host deploy
-  switch. A start with no definition file on a state directory that holds a
-  mob now serves that mob under any of them, from any workspace. In
-  particular a state directory created under a sign-in configuration and
-  started again without `auth_config` is served on a Console that identifies
-  nobody, as a mob with a definition file always was. Before a start, check
-  that `store_path` names the state directory of the mob you mean to run and
-  that the launch carries the `auth_config` its Console needs. The definition
-  is still judged: a launch with no definition file on a state directory
-  whose mob was created from a definition file is refused with `-32019`
-  `divergent`, naming the fields that differ. Going back: a 0.9.16 or earlier
-  gateway on a default mob that this release created derives its own id and
-  refuses as before, unless the workspace has the `definition.json` of the
-  0.9.16 step. Rust: `mob_composition_manifest::recorded_definition_id` reads
-  the recorded id.
+- A persistent `meta_gateway` (`persistent_sessions: true`) with no mob definition file (`config/mob.toml` or `<workspace>/definition.json`) starts again after an upgrade on the state directory that holds its mob, with no operator step. Such a launch runs the built-in default mob, whose id was derived from the launch, the release version included; the state directory keeps the id it was created with, so the first start of every later release was refused: `the supplied mob definition diverges from the canonical definition in this storage, in: id` (answered as `-32603` `failed to bootstrap local runtime`). Meta 0.9.9, the oldest release looked at, through 0.9.16 had this. The gateway now takes the mob id the state directory records (`definition.id` in `<state directory>/event_log.sqlite3.composition.json`) for the built-in default mob. The 0.9.16 upgrade step, copying that `definition` to `<workspace>/definition.json`, is no longer needed; a workspace that has the file keeps starting, and a definition file still names its own mob. A state directory that records no mob gets an id derived from the launch without the release version, so a mob created by this release keeps its id under the next one. What else this changes: the release version was one of many launch inputs in that id, and each of them parted default mobs on one state directory by the same refusal: the workspace path, the realm, the isolation setting, the runtime profile, the Console's read-only setting, the runtime, project and context roots, the compaction policy, the HTTP listen address and public base URL, the control listener, the host configuration file, the workspace's configuration files, `manifest.toml` and every file under `skills/`, `hooks/`, `mcp/` and `config/`, `auth_config` and `console_voice`, and the flow editor's host deploy switch. A start with no definition file on a state directory that holds a mob now serves that mob under any of them, from any workspace. In particular a state directory created under a sign-in configuration and started again without `auth_config` is served on a Console that identifies nobody, as a mob with a definition file always was. Before a start, check that `store_path` names the state directory of the mob you mean to run and that the launch carries the `auth_config` its Console needs. The definition is still judged: a launch with no definition file on a state directory whose mob was created from a definition file is refused with `-32019` `divergent`, naming the fields that differ. Going back: a 0.9.16 or earlier gateway on a default mob that this release created derives its own id and refuses as before, unless the workspace has the `definition.json` of the 0.9.16 step. Rust: `mob_composition_manifest::recorded_definition_id` reads the recorded id.
 
 ## [0.9.16] - 2026-11-16
 

@@ -1821,6 +1821,70 @@ async fn the_first_drain_after_a_restart_checkpoints_the_session_of_an_ephemeral
     .await;
 }
 
+/// A run whose result carries a JSON-null structured output commits, and its
+/// host ends before the completion is finalized. The next start recovers the
+/// store, and its first drain takes the session checkpoint and finalizes the
+/// completion with the run's result, the null structured output included.
+/// Such a row used to fail its digest check on every read (the result was
+/// written with an explicit null and read back without it), so the next
+/// start could not read its pending terminal owner and the session could not
+/// be registered again.
+#[tokio::test]
+async fn a_terminal_carrier_with_a_null_structured_output_is_recovered_at_the_next_start() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+
+    let fixture = Fixture::with_initial_input(false).await;
+    let input_id = old_input_id();
+    let mut session = meerkat_core::Session::with_id(fixture.session_id.clone());
+    session.push(Message::User(UserMessage::text("retained history")));
+    session.push(Message::User(UserMessage::text("the committed turn")));
+    let mut result = carrier_run_result(&fixture.session_id, COMMITTED_RUN_TEXT);
+    result.structured_output = Some(serde_json::Value::Null);
+    let terminal = CoreApplyTerminal::RunResult(Box::new(result));
+    fixture
+        .consume_batch(
+            &[(input_id.clone(), InputDurability::Durable)],
+            Some(session),
+            Some(&terminal),
+        )
+        .await;
+    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 1);
+    let committed_snapshot = fixture
+        .store
+        .load_session_snapshot(&fixture.runtime_id())
+        .await
+        .unwrap()
+        .expect("the run's commit stored its session");
+
+    let driver = fixture
+        .fresh_driver_from_durable()
+        .await
+        .expect("the next start recovers the store");
+    let mut executor = SessionCheckpointRecorder::default();
+    crate::runtime_loop::test_drain_recovered_input_terminal_completions(&driver, &mut executor)
+        .await
+        .expect("the startup drain checkpoints the session and finalizes the completion");
+    assert_eq!(executor.snapshots, vec![committed_snapshot]);
+
+    let row = fixture
+        .store
+        .load_input_state(&fixture.runtime_id(), &input_id)
+        .await
+        .expect("the finalized row reads")
+        .expect("the finalized row is stored");
+    let completion = row.state.terminal_completion.unwrap();
+    assert!(matches!(
+        completion.phase,
+        InputTerminalCompletionPhase::Finalized { .. }
+    ));
+    let Some(crate::completion::CompletionOutcome::Completed(result)) = completion.outcome else {
+        panic!("the committed run result must survive finalization");
+    };
+    assert_eq!(result.text, COMMITTED_RUN_TEXT);
+    assert_eq!(result.structured_output, Some(serde_json::Value::Null));
+    assert_eq!(fixture.pending_terminal_owner_rows(&input_id), 0);
+}
+
 /// A stored-only publisher for a drain that must publish nothing.
 struct NoPublication;
 

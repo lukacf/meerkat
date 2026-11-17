@@ -1682,7 +1682,6 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId },
             AuthorizeRetiringMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
-            AuthorizeExternalPeerReciprocalTrustRemoval { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             CleanupRetiringExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RestoreRetiringExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
@@ -2458,6 +2457,11 @@ macro_rules! mob_catalog_machine_dsl {
             // in the same actor command as its seat commit, and the replay
             // of a spawn row that carries it records it again.
             RecordMemberInstructionLineage { agent_identity: AgentIdentity, root_identity: AgentIdentity },
+            // The removal twin of AuthorizeExternalPeerReciprocalTrust
+            // (0.9.17). Declared last: the kernel's `Input` and `InputKind`
+            // follow this list's order, so a new input goes at the end and
+            // no published variant's implicit discriminant moves.
+            AuthorizeExternalPeerReciprocalTrustRemoval { key: ExternalPeerKey, agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -2909,10 +2913,6 @@ macro_rules! mob_catalog_machine_dsl {
             MemberPeerRebindAuthorized { agent_identity: AgentIdentity, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint },
             MemberPeerOverlayAuthorized { agent_identity: AgentIdentity, peer_id: PeerId, peer_overlay_endpoints: Set<MemberPeerEndpoint>, epoch: u64 },
             ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64 },
-            // The removal of the row `ExternalPeerReciprocalTrustRequested`
-            // added: the member's peer (`peer_id`) leaves the trust store of
-            // the edge's external peer.
-            ExternalPeerReciprocalTrustRemovalRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             PersistSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String> },
             DeleteSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion },
             // D-wiring-observability (#27): pair-valued notice emitted from
@@ -3202,6 +3202,13 @@ macro_rules! mob_catalog_machine_dsl {
             // with the admission the host derived, build without one, or
             // refuse the build.
             MemberDispatchAdmissionResolved { lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer>, verdict: Enum<MemberDispatchAdmissionVerdict> },
+            // The removal of the row `ExternalPeerReciprocalTrustRequested`
+            // added (0.9.17): the member's peer (`peer_id`) leaves the trust
+            // store of the edge's external peer. Declared last: the kernel's
+            // `Effect` and `EffectKind` follow this list's order, so a new
+            // effect goes at the end and no published variant's implicit
+            // discriminant moves.
+            ExternalPeerReciprocalTrustRemovalRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
         }
 
         // One total, pure classifier over desired authority, lease ownership,

@@ -24381,12 +24381,6 @@ pub enum TransitionId {
     ClassifyRecoveredInputDurabilityDiscardEphemeralRunning,
     ClassifyRecoveredInputDurabilityDiscardEphemeralRetired,
     ClassifyRecoveredInputDurabilityDiscardEphemeralStopped,
-    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing,
-    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle,
-    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached,
-    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning,
-    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired,
-    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped,
     ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing,
     ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle,
     ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached,
@@ -26570,6 +26564,12 @@ pub enum TransitionId {
     DeferInputBehindBacklogEndedWithRefusedRunRunning,
     DeferInputBehindBacklogEndedWithRefusedRunRetired,
     DeferInputBehindBacklogEndedWithRefusedRunStopped,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired,
+    ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

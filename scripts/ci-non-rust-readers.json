@@ -2985,6 +2985,16 @@
   },
   "not_readers": [
     {
+      "source": "crates/meerkat-cli/src/main.rs",
+      "literal": "cli_unread_project_sections(workspace_root)",
+      "why": "Reads the .rkat/config.toml of the project rkat runs in, a runtime convention of the host's own project root; reads nothing in the checkout."
+    },
+    {
+      "source": "crates/meerkat-cli/src/main.rs",
+      "literal": "report_cli_unread_project_sections(workspace_root)",
+      "why": "Warns about the .rkat/config.toml of the project rkat runs in, a runtime convention of the host's own project root; reads nothing in the checkout."
+    },
+    {
       "source": "crates/meerkat-cli/tests/cli_auth_flow.rs",
       "literal": "derive_workspace_realm_id(workspace_root)",
       "why": "Derives a realm id from the checkout path; reads nothing under it."

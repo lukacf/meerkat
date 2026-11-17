@@ -4590,6 +4590,25 @@ pub enum LiveStalenessPosition {
     OutsideTurnBoundary,
 }
 
+/// What a staleness caller that holds the turn boundary does with the
+/// WholeBlob checkpoint base of a live actor the authority verdict keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeptLiveActorBase {
+    /// The actor runs again: its base is compared with the store's committed
+    /// authority and the actor is rebased on the committed document when
+    /// they differ.
+    RebasedWhenItDiffers,
+    /// The caller ends the actor (an archive, which cancels the actor's
+    /// checkpointer gate before its own save): no later checkpoint is taken
+    /// from the base, so it is not compared. The actor can also be one whose
+    /// runtime registration a durability reload replaced under it; a
+    /// retirement reloads the registration and leaves the actor to its
+    /// archive. That actor's tool scope still answers to the replaced
+    /// registration's visibility owner, which refuses every change, so the
+    /// actor cannot be synchronized in place.
+    LeftAsItIs,
+}
+
 /// What [`PersistentSessionService::live_session_export`] observed.
 ///
 /// A live session that durable authority outranks has no live export; that
@@ -7870,6 +7889,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
+        self.discard_stale_live_session_if_needed_with_kept_base(
+            id,
+            position,
+            KeptLiveActorBase::RebasedWhenItDiffers,
+        )
+        .await
+    }
+
+    /// [`Self::discard_stale_live_session_if_needed`], with what happens to
+    /// the checkpoint base of an actor the verdict keeps given by the caller.
+    async fn discard_stale_live_session_if_needed_with_kept_base(
+        &self,
+        id: &SessionId,
+        position: LiveStalenessPosition,
+        kept_base: KeptLiveActorBase,
+    ) -> Result<bool, SessionError> {
         let cause = match self.live_session_authority(id).await? {
             LiveSessionAuthority::DurableAuthoritative { reason } => {
                 // A live actor that continues the store's standing provisional
@@ -7910,9 +7945,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // one this layer was never told of: the actor is rebased on the
             // committed document, as the runtime's settle relies on. Outside
             // the boundary a commit and its acknowledgement are legitimately
-            // apart, and nothing is compared.
+            // apart, and nothing is compared. Nor for a caller that ends the
+            // actor (`KeptLiveActorBase::LeftAsItIs`).
             LiveSessionAuthority::LiveAuthoritative { .. } => {
-                if position != LiveStalenessPosition::TurnBoundaryHeld
+                if kept_base != KeptLiveActorBase::RebasedWhenItDiffers
+                    || position != LiveStalenessPosition::TurnBoundaryHeld
                     || !self.live_whole_blob_base_differs_from_store(id).await?
                 {
                     return Ok(false);
@@ -19155,9 +19192,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // boundary commit left a durable tail every committed read
             // refuses. This archive holds the quiescent boundary and the
             // recovery gate, so it settles that tail and observes once more;
-            // a held or refused tail ends the archive typed.
+            // a held or refused tail ends the archive typed. An actor the
+            // verdict keeps is left as it is: this archive ends it.
             match self
-                .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+                .discard_stale_live_session_if_needed_with_kept_base(
+                    id,
+                    LiveStalenessPosition::TurnBoundaryHeld,
+                    KeptLiveActorBase::LeftAsItIs,
+                )
                 .await
             {
                 Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
@@ -19170,9 +19212,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await?;
                     let _ = self
-                        .discard_stale_live_session_if_needed(
+                        .discard_stale_live_session_if_needed_with_kept_base(
                             id,
                             LiveStalenessPosition::TurnBoundaryHeld,
+                            KeptLiveActorBase::LeftAsItIs,
                         )
                         .await?;
                 }

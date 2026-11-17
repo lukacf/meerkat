@@ -64,16 +64,18 @@ Meerkat 0.9.16 is Core 0.9.16, Meta 0.9.16 and Connect 0.9.16, built from one
 commit. What asks something of a 0.9.15 user, or tells them something, is in
 the subsections below.
 
-0.9.16 has no migration of stored state and no adoption step. The release
-notes name none, and no changed source line of the release touches a store
-schema, a store, journal or format version, or a migration (by a search of the
-changed lines of Core, Meta and Connect; not by loading state that a 0.9.15
-binary wrote). Of the one machine that changes the notes say: "No input,
-effect, state field or outcome value of the machine changes, the machine's
-version stays `1`". Of the question sets a 0.9.15 store holds: "Every call
-0.9.15 held keeps its key and its decision id byte for byte, so the question
-sets of a 0.9.15 store are found, listed, answered and settled as before, and
-nothing is migrated."
+0.9.16 has no migration of stored state and, with one exception, no adoption
+step. The release notes name none, and no changed source line of the release
+touches a store schema, a store, journal or format version, or a migration (by
+a search of the changed lines of Core, Meta and Connect; not by loading state
+that a 0.9.15 binary wrote). One such load was made, of a persistent
+`meta_gateway`'s state, and it found the one step this section asks of an
+operator before a gateway starts: see the first item under Meta 0.9.16. Of the
+one machine that changes the notes say: "No input, effect, state field or
+outcome value of the machine changes, the machine's version stays `1`". Of the
+question sets a 0.9.15 store holds: "Every call 0.9.15 held keeps its key and
+its decision id byte for byte, so the question sets of a 0.9.15 store are
+found, listed, answered and settled as before, and nothing is migrated."
 
 ### Rust hosts: two enums gain variants
 
@@ -170,6 +172,36 @@ of its reach.
 Meta 0.9.16 pins Core `=0.9.16`. The full list is in `meta/CHANGELOG.md`
 under `## [0.9.16]`.
 
+- **A persistent `meta_gateway` on its built-in default definition does not
+  start after the upgrade until its definition is given as a file.** This is a
+  `meta_gateway` launched with `persistent_sessions: true` in a workspace that
+  has neither `config/mob.toml` nor a definition file. The built-in default
+  definition's mob id is derived from, among other things, the gateway's
+  version, so the 0.9.16 gateway computes another id than the one recorded in
+  the state directory and refuses to start on it. What you see: the gateway
+  exits with code 1 and answers `meta/init` with
+  `{"error":{"code":-32603,"message":"failed to bootstrap local runtime"},"id":null,"jsonrpc":"2.0"}`;
+  the reason is only in the gateway's log:
+  `the supplied mob definition diverges from the canonical definition in this storage, in: id`.
+  Nothing is lost, and the 0.9.15 gateway still starts on that state. **Do:**
+  copy the `definition` object from
+  `<state directory>/event_log.sqlite3.composition.json` (by default the state
+  directory is `<workspace>/state`) into a new file
+  `<workspace>/definition.json`, then start the 0.9.16 gateway: it starts on
+  the recorded mob, with its members and their sessions. You can do this
+  before the upgrade or after the first refused start. This is not new in
+  0.9.16: it holds for every upgrade of such a gateway since Meta 0.9.9, and
+  on such a gateway the same refusal follows from moving the workspace or
+  changing a file under its `config/`, `skills/`, `hooks/` or `mcp/`
+  directories; with the definition given as a file the id no longer depends on
+  any of these. The stdio gateway (`rpc_gateway`, which the SDKs start) is not
+  affected. (Shown by runs: state written by the published 0.9.15 gateway on
+  its built-in default definition was refused by the 0.9.16 release candidate,
+  and served by it after the copy, with the member and its session as they
+  were; the published 0.9.15 gateway refused a moved copy of its own workspace
+  in the same way, and the definition file cured that as well. That it holds
+  since 0.9.9, that a changed file under those directories has the same effect
+  and that the stdio gateway is not affected: read from the source.)
 - **A name hidden from the caller answers as a name no agent holds.** A
   request that names an agent the caller may not see because it is private
   to another person now gets, on each of these doors, "the answer the same

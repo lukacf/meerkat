@@ -511,6 +511,25 @@ fn is_synthesizing_release(version: &str) -> bool {
     parts.next().is_none() && major == 0 && minor == 8 && (9..29).contains(&patch)
 }
 
+/// The mob id the composition manifest beside `mob_storage_path` records
+/// (its `definition.id`): the mob the persistent storage was created for.
+///
+/// `None` when there is no manifest. A manifest that cannot be read, is not
+/// a manifest, or is of a schema this build cannot judge is the refusal
+/// [`verify_before_resume`] raises for it. The id of a mob never changes in
+/// its event log, so the recorded id names the stored mob for as long as
+/// the storage lives; a launch that supplies no mob id of its own takes it,
+/// and its definition is still judged before the resume.
+pub fn recorded_definition_id(
+    mob_storage_path: &Path,
+) -> Result<Option<meerkat_mob::MobId>, MobCompositionProvenanceError> {
+    let manifest = manifest_path(mob_storage_path);
+    let Some(bytes) = read_manifest_file(&manifest)? else {
+        return Ok(None);
+    };
+    Ok(Some(parse_manifest(&manifest, &bytes)?.definition.id))
+}
+
 /// Verify a non-empty storage path was created for the supplied composition.
 ///
 /// Called on the resume branch, before the builder is constructed, so every
@@ -1252,6 +1271,50 @@ mod tests {
             serde_json::to_vec_pretty(manifest).expect("manifest serializes"),
         )
         .expect("write manifest");
+    }
+
+    /// The recorded mob id is read from the manifest beside the storage:
+    /// none without a manifest, the definition's id from a current manifest
+    /// and from a predecessor's, and the manifest's own refusal when it
+    /// cannot be judged.
+    #[test]
+    fn the_recorded_definition_id_is_read_from_the_manifest_beside_the_storage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let storage = temp.path().join("event_log.sqlite3");
+        assert_eq!(
+            recorded_definition_id(&storage).expect("no manifest is not a refusal"),
+            None
+        );
+
+        let recorded = definition("gpt-5.5");
+        record_on_create(&storage, &recorded, CompositionAuthority::Authoritative)
+            .expect("the manifest is recorded");
+        assert_eq!(
+            recorded_definition_id(&storage).expect("a current manifest reads"),
+            Some(recorded.id.clone())
+        );
+
+        write_manifest_beside(&storage, &predecessor_manifest(&recorded, "0.8.26"));
+        assert_eq!(
+            recorded_definition_id(&storage).expect("a predecessor manifest reads"),
+            Some(recorded.id.clone())
+        );
+
+        std::fs::write(manifest_path(&storage), b"not a manifest").expect("write manifest");
+        assert!(matches!(
+            recorded_definition_id(&storage),
+            Err(MobCompositionProvenanceError::Malformed { .. })
+        ));
+
+        write_manifest_beside(
+            &storage,
+            &json!({ "manifest_version": MANIFEST_VERSION + 1 }),
+        );
+        assert!(matches!(
+            recorded_definition_id(&storage),
+            Err(MobCompositionProvenanceError::UnsupportedVersion { found, supported, .. })
+                if found == MANIFEST_VERSION + 1 && supported == MANIFEST_VERSION
+        ));
     }
 
     /// The predecessor spelling of the creator field reads as the creator

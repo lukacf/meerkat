@@ -125,8 +125,7 @@ fn meta_gateway_bootstraps_persistent_runtime() {
 /// -32014) before it opens any store, and the store boots again once the
 /// first gateway has exited. The refused gateway gets its own workspace and
 /// gateway home, so the store directory is the only thing it shares with the
-/// first. The third reuses the first's workspace: the fallback mob's id
-/// derives from it, and the store pins the first gateway's definition.
+/// first. The third start is from the first's workspace again.
 #[test]
 fn meta_gateway_refuses_a_store_another_gateway_holds() {
     let bin = env!("CARGO_BIN_EXE_meta_gateway");

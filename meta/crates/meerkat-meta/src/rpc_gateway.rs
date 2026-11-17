@@ -5315,6 +5315,75 @@ actions = ["agent.view"]
         assert!(err.contains("access_config_path"), "{err}");
     }
 
+    /// A refusal of an access file's content names the file: a file that
+    /// does not parse, one that does not validate, and an approver map that
+    /// names an ingress the launch does not declare.
+    #[test]
+    fn gateway_runtime_options_name_the_refused_access_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for (name, content) in [
+            ("unparsed.toml", "enabled = ["),
+            ("no-admin.toml", "enabled = true"),
+            (
+                "undeclared-ingress.toml",
+                r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#,
+            ),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write access config");
+            let params = json!({
+                "runtime_options": { "access_config_path": path.to_string_lossy() }
+            });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("{name} must refuse initialization"),
+                Err(err) => err,
+            };
+            assert!(
+                err.starts_with("runtime_options.access_config_path is invalid: "),
+                "{name}: {err}"
+            );
+            assert!(
+                err.ends_with(&format!(" (file '{}')", path.display())),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    /// A refusal of a gating file's content names the file: a file that
+    /// does not parse and ones whose actions are not valid.
+    #[test]
+    fn gateway_runtime_options_name_the_refused_gating_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for (name, content) in [
+            ("unparsed.toml", "actions = ["),
+            ("unparsed.json", "{"),
+            ("no-actions.toml", "title = \"no actions\"\n"),
+            ("no-tier.toml", "[actions.deploy]\nnote = \"no tier\"\n"),
+            ("unknown-tier.toml", "[actions]\ndeploy = \"r9\"\n"),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write gating config");
+            let params = json!({
+                "runtime_options": { "gating_config_path": path.to_string_lossy() }
+            });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("{name} must refuse initialization"),
+                Err(err) => err,
+            };
+            assert!(err.contains("gating_config_path"), "{name}: {err}");
+            assert!(
+                err.ends_with(&format!(" (file '{}')", path.display())),
+                "{name}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn gateway_runtime_options_parse_mcp_accounts() {
         let params = json!({
@@ -10036,10 +10105,14 @@ fn parse_gateway_runtime_options(
         None | Some(Value::Null) => {}
         Some(Value::String(path)) => {
             OptInConfigPath::Access.refuse_empty(path)?;
-            parsed.access =
-                Some(crate::AccessController::load(path).map_err(|err| {
-                    format!("runtime_options.access_config_path is invalid: {err}")
-                })?);
+            parsed.access = Some(crate::AccessController::load(path).map_err(|err| {
+                let refusal = format!("runtime_options.access_config_path is invalid: {err}");
+                // A read failure names the file itself.
+                match err {
+                    crate::AccessConfigError::Io(_) => refusal,
+                    _ => naming_the_file(refusal, path),
+                }
+            })?);
         }
         Some(_) => {
             return Err("runtime_options.access_config_path must be a string".to_string());
@@ -10051,7 +10124,16 @@ fn parse_gateway_runtime_options(
         parsed.access.as_ref(),
         &parsed.decision_ingresses.clone().unwrap_or_default(),
     )
-    .map_err(|err| format!("runtime_options.access_config_path is invalid: {err}"))?;
+    .map_err(|err| {
+        let refusal = format!("runtime_options.access_config_path is invalid: {err}");
+        match runtime_options
+            .get("access_config_path")
+            .and_then(Value::as_str)
+        {
+            Some(path) => naming_the_file(refusal, path),
+            None => refusal,
+        }
+    })?;
     // The account modes of MCP servers; absent or null keeps every server's
     // account the system's.
     match runtime_options.get("mcp_accounts") {
@@ -10478,17 +10560,36 @@ impl OptInConfigPath {
     }
 }
 
+/// `refusal` of the content of the configuration file at `path`, with the
+/// file named: a launch can apply such a file without its program naming
+/// it, and the option's name alone does not say which file was refused.
+fn naming_the_file(refusal: String, path: &str) -> String {
+    format!("{refusal} (file '{path}')")
+}
+
 fn read_gateway_config_file(path: &str, option_name: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read runtime_options.{option_name} '{path}': {err}"))?;
     if path.ends_with(".json") {
-        return serde_json::from_str(&text)
-            .map_err(|err| format!("invalid JSON in runtime_options.{option_name}: {err}"));
+        return serde_json::from_str(&text).map_err(|err| {
+            naming_the_file(
+                format!("invalid JSON in runtime_options.{option_name}: {err}"),
+                path,
+            )
+        });
     }
-    let toml_value: toml::Value = toml::from_str(&text)
-        .map_err(|err| format!("invalid TOML in runtime_options.{option_name}: {err}"))?;
-    serde_json::to_value(toml_value)
-        .map_err(|err| format!("failed to normalize runtime_options.{option_name}: {err}"))
+    let toml_value: toml::Value = toml::from_str(&text).map_err(|err| {
+        naming_the_file(
+            format!("invalid TOML in runtime_options.{option_name}: {err}"),
+            path,
+        )
+    })?;
+    serde_json::to_value(toml_value).map_err(|err| {
+        naming_the_file(
+            format!("failed to normalize runtime_options.{option_name}: {err}"),
+            path,
+        )
+    })
 }
 
 fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, String> {
@@ -10503,6 +10604,11 @@ fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, St
 
 fn parse_gateway_gating_config_path(path: &str) -> Result<GatewayGatingConfig, String> {
     let value = read_gateway_config_file(path, "gating_config_path")?;
+    gating_config_of(&value).map_err(|refusal| naming_the_file(refusal, path))
+}
+
+/// The gating configuration the content `value` of a gating file defines.
+fn gating_config_of(value: &Value) -> Result<GatewayGatingConfig, String> {
     let actions = value
         .get("actions")
         .and_then(Value::as_object)

@@ -290,6 +290,11 @@ a parent that is a file) goes to the same strict load, which stops startup when
 it cannot open, read, parse or validate the file. The loader does not check the
 file type before reading, so a FIFO at that path blocks startup instead of
 stopping it with an error.
+A gateway's refusal of the file's content names the file. When an SDK builder applied
+the file by convention (the program called no `accessControl` /
+`access_control`), the SDK also says so once at the refused start: one warning
+(`console.warn` in TypeScript, the `meerkat_meta` logger in Python) lists the
+files the builder applied from the working directory.
 
 Configure trusted [console authentication](/guides/authentication) separately.
 The authenticated token supplies the caller's subject; a `subject` in a preview

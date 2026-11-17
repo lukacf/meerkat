@@ -1157,6 +1157,16 @@ class MetaRuntime:
         # after shutdown or a failed bootstrap detaches ``_transport``.
         self._gateway_lifetime: Any = None
         self._dispatcher = CallbackDispatcher()
+        # Schedule-fire handlers the builder was given, in place before any
+        # connect: a schedule that is due when the gateway starts fires while
+        # the first init is still settling. ``on_schedule_fire`` on this
+        # runtime replaces or adds afterwards. Any mapping is taken; a config
+        # that carries none, or something else under that name, registers
+        # nothing.
+        builder_handlers = getattr(config, "schedule_fire_handlers", None)
+        if isinstance(builder_handlers, Mapping):
+            for name, handler in builder_handlers.items():
+                self._dispatcher.register_schedule_fire_handler(name, handler)
         self._rust_http_base: str | None = None
         self._rust_http_public_base: str | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -1337,8 +1347,17 @@ class MetaRuntime:
         gateway sends ``callback/schedule_fire`` and this handler runs with
         the occurrence dict (``schedule_id``, ``occurrence_id``, ``due_at``,
         optional ``payload``). Sync or async; raising fails the occurrence
-        attempt in the durable schedule store. Register before or after
-        :meth:`connect` — fires only start once a schedule targets the name.
+        attempt in the durable schedule store.
+
+        A persistent store can already hold a schedule for the name that is
+        due: the gateway can then fire it during the start, before
+        :meth:`connect` returns. A handler registered on this runtime before
+        ``connect()`` is in place for that fire; one registered after it can
+        come too late. A runtime that ``MetaBuilder.build()`` returns is
+        already connected, so a program that uses ``build()`` gives such a
+        handler to the builder (``MetaBuilder.on_schedule_fire``), which
+        installs it before the first connect. A fire that finds no handler
+        fails that occurrence.
         """
         self._dispatcher.register_schedule_fire_handler(name, handler)
 

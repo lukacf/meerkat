@@ -826,6 +826,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:stop_after_turn_reaches_model_test",
         "//crates/meerkat-mob-mcp:stop_cancels_a_staged_run_test",
         "//crates/meerkat-mob-mcp:temporary_council_test",
+        "//crates/meerkat-mob-mcp:trust_store_never_holds_own_key_test",
         "//crates/meerkat-mob-pack:meerkat_mob_pack_unit_test",
         "//crates/meerkat-mob:adaptive_disabled_thinking_test",
         "//crates/meerkat-mob:approval_branch_fork_test",

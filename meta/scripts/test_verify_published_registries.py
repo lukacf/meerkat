@@ -8,7 +8,10 @@ import importlib.util
 import hashlib
 import io
 from pathlib import Path
+import sys
 import unittest
+from unittest import mock
+from urllib.error import HTTPError
 
 
 SCRIPT = Path(__file__).with_name("verify-published-registries.py")
@@ -274,6 +277,262 @@ class PublishedRegistryTests(unittest.TestCase):
                 downloader=exact_artifact,
                 sleeper=lambda _: None,
             )
+
+
+class FakeTime:
+    """A clock that moves only when the verifier sleeps or a read takes time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def npm_serving_from(fake: FakeTime, served_at: float, *, npm_read_seconds: float = 0.0):
+    """Every registry serves at once, except npm: 404 until `served_at`."""
+
+    def reader(url: str) -> dict:
+        if "npmjs.org" in url:
+            fake.now += npm_read_seconds
+            if fake.now < served_at:
+                raise HTTPError(url, 404, "Not Found", None, None)
+        return exact_payload(url)
+
+    return reader
+
+
+class FlushCounting(io.StringIO):
+    flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
+        super().flush()
+
+
+class RegistryWaitTests(unittest.TestCase):
+    """The wait is a deadline on a clock, long enough for a registry that
+    accepts an upload some minutes before it serves the version."""
+
+    def wait(self, fake: FakeTime, reader, **kwargs) -> list[str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                registries.verify_with_retries(
+                    "0.8.0", reader=reader, downloader=exact_artifact,
+                    sleeper=fake.sleep, **kwargs,
+                )
+            finally:
+                self.lines = output.getvalue().splitlines()
+        return self.lines
+
+    def test_npm_serving_eight_minutes_after_the_first_read_is_within_the_default_wait(self):
+        fake = FakeTime()
+        lines = self.wait(fake, npm_serving_from(fake, 480.0))
+        self.assertEqual(fake.now, 480.0)
+        self.assertEqual(len(fake.sleeps), 48)
+        self.assertIn("@rkat/meta-sdk 0.8.0 on npm", lines[-1])
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+
+    def test_a_registry_that_never_serves_fails_at_the_deadline_and_is_named(self):
+        fake = FakeTime()
+        with self.assertRaises(registries.RegistryVerificationError) as raised:
+            self.wait(fake, npm_serving_from(fake, float("inf")), clock=fake.clock)
+        message = str(raised.exception)
+        self.assertEqual(
+            message,
+            "release 0.8.0 was not fully public after 181 attempts in 1800 s "
+            "(deadline 1800 s); still failing: npm; last answer: "
+            "npm: HTTP Error 404: Not Found",
+        )
+        # No read starts after the deadline, and none is skipped before it.
+        self.assertEqual(fake.now, 1800.0)
+        self.assertEqual(fake.sleeps, [10.0] * 180)
+        self.assertEqual(len(self.lines), 180)
+        self.assertEqual(
+            self.lines[0],
+            "Registry verification attempt 1 incomplete (0 s of 1800 s): "
+            "npm: HTTP Error 404: Not Found",
+        )
+        self.assertEqual(
+            self.lines[-1],
+            "Registry verification attempt 180 incomplete (1790 s of 1800 s): "
+            "npm: HTTP Error 404: Not Found",
+        )
+
+    def test_every_registry_still_failing_at_the_deadline_is_named(self):
+        fake = FakeTime()
+
+        def reader(url: str) -> dict:
+            if "npmjs.org" in url or "pypi.org" in url:
+                raise HTTPError(url, 404, "Not Found", None, None)
+            return exact_payload(url)
+
+        with self.assertRaisesRegex(
+            registries.RegistryVerificationError, r"still failing: PyPI, npm; last answer: "
+        ):
+            self.wait(fake, reader, clock=fake.clock, deadline_seconds=60.0)
+        self.assertEqual(fake.now, 60.0)
+
+    def test_serving_at_the_deadline_passes_and_just_after_it_fails(self):
+        fake = FakeTime()
+        lines = self.wait(fake, npm_serving_from(fake, 1800.0), clock=fake.clock)
+        self.assertTrue(lines[-1].startswith("Verified exact registry metadata"))
+        self.assertEqual(fake.now, 1800.0)
+
+        late = FakeTime()
+        with self.assertRaisesRegex(registries.RegistryVerificationError, "still failing: npm"):
+            self.wait(late, npm_serving_from(late, 1800.5), clock=late.clock)
+        self.assertEqual(late.now, 1800.0)
+
+    def test_slow_reads_count_against_the_deadline(self):
+        """The bound is time on the clock, not a number of reads."""
+        fake = FakeTime()
+        with self.assertRaisesRegex(
+            registries.RegistryVerificationError,
+            r"after 6 attempts in 1850 s \(deadline 1800 s\); still failing: npm",
+        ):
+            self.wait(fake, npm_serving_from(fake, float("inf"), npm_read_seconds=300.0),
+                      clock=fake.clock)
+        self.assertEqual(len(fake.sleeps), 5)
+
+    def test_a_wait_that_would_check_no_registry_fails_without_waiting(self):
+        def never(_seconds: float) -> None:
+            raise AssertionError("waited for a selection that checks nothing")
+
+        with self.assertRaisesRegex(registries.RegistryVerificationError, "no registry was checked"):
+            registries.verify_with_retries(
+                "0.8.0", reader=exact_payload, downloader=exact_artifact, sleeper=never,
+                crate_sha256={}, only_crates=True,
+            )
+
+    def test_a_wrong_artifact_is_still_refused_at_the_end_of_the_wait(self):
+        fake = FakeTime()
+        with self.assertRaisesRegex(
+            registries.RegistryVerificationError, "still failing: npm; last answer: npm: npm tarball checksum mismatch"
+        ):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                registries.verify_with_retries(
+                    "0.8.0", reader=exact_payload,
+                    downloader=lambda url: b"other bytes" if "npm.example" in url else ARTIFACTS[url],
+                    sleeper=fake.sleep, clock=fake.clock, deadline_seconds=30.0,
+                )
+
+    def test_each_attempt_line_is_flushed_as_it_is_written(self):
+        fake = FakeTime()
+        output = FlushCounting()
+        with contextlib.redirect_stdout(output):
+            registries.verify_with_retries(
+                "0.8.0", reader=npm_serving_from(fake, 20.0), downloader=exact_artifact,
+                sleeper=fake.sleep,
+            )
+        self.assertEqual(len(output.getvalue().splitlines()), 3)
+        self.assertGreaterEqual(output.flushes, 3)
+
+
+class RegistrySelectionTests(unittest.TestCase):
+    """--only-registry: the job that published the SDK packages waits for
+    exactly the registries it published to."""
+
+    def test_only_the_named_registries_are_read(self):
+        seen = []
+
+        def reader(url):
+            seen.append(url)
+            return exact_payload(url)
+
+        checked = registries.verify_once("0.8.0", reader=reader, downloader=exact_artifact,
+                                         only_registries=frozenset({"PyPI", "npm"}))
+        self.assertEqual(checked, ["PyPI", "npm"])
+        self.assertEqual(seen, [
+            "https://pypi.org/pypi/meerkat-meta/0.8.0/json",
+            "https://registry.npmjs.org/%40rkat%2Fmeta-sdk/0.8.0",
+        ])
+
+    def test_the_success_line_names_only_the_registries_checked(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            registries.verify_with_retries(
+                "0.8.0", reader=exact_payload, downloader=exact_artifact,
+                only_registries=frozenset({"PyPI", "npm"}),
+            )
+        self.assertEqual(
+            output.getvalue().strip(),
+            "Verified exact registry metadata and checksummed artifacts for meerkat-meta 0.8.0 "
+            "wheel+sdist on PyPI and @rkat/meta-sdk 0.8.0 on npm "
+            "(--only-registry: crates.io was not checked)",
+        )
+        self.assertEqual(
+            registries.success_line("0.8.0", ["npm"], only_registries=frozenset({"npm"})),
+            "Verified exact registry metadata and checksummed artifacts for @rkat/meta-sdk 0.8.0 "
+            "on npm (--only-registry: crates.io and PyPI were not checked)",
+        )
+
+    def test_a_selected_registry_that_does_not_serve_is_waited_for_and_named(self):
+        fake = FakeTime()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaisesRegex(
+            registries.RegistryVerificationError, "still failing: npm; last answer: npm: HTTP Error 404"
+        ):
+            registries.verify_with_retries(
+                "0.8.0", reader=npm_serving_from(fake, float("inf")), downloader=exact_artifact,
+                sleeper=fake.sleep, clock=fake.clock, only_registries=frozenset({"PyPI", "npm"}),
+            )
+        self.assertEqual(fake.now, 1800.0)
+
+
+class RegistryCommandLineTests(unittest.TestCase):
+    def run_cli(self, *argv: str):
+        seen: dict = {}
+
+        def record(version, **kwargs):
+            seen.update(kwargs, version=version)
+
+        errors = io.StringIO()
+        with mock.patch.object(registries, "verify_with_retries", record), \
+                mock.patch.object(sys, "argv", ["verify-published-registries.py", *argv]), \
+                contextlib.redirect_stderr(errors):
+            try:
+                status = registries.main()
+            except SystemExit as stop:
+                status = stop.code
+        return status, seen, errors.getvalue()
+
+    def test_the_default_wait_is_thirty_minutes_on_the_clock(self):
+        status, seen, _ = self.run_cli("--version", "v0.8.0")
+        self.assertEqual(status, 0)
+        self.assertEqual(seen["version"], "0.8.0")
+        self.assertEqual(seen["deadline_seconds"], 1800.0)
+        self.assertEqual(seen["delay_seconds"], 10.0)
+        self.assertIsNone(seen["attempts"])
+        self.assertIsNone(seen["only_registries"])
+
+    def test_the_wait_and_the_selection_are_passed_through(self):
+        status, seen, _ = self.run_cli("--version", "0.8.0", "--deadline-seconds", "90",
+                                       "--only-registry", "PyPI", "--only-registry", "npm")
+        self.assertEqual(status, 0)
+        self.assertEqual(seen["deadline_seconds"], 90.0)
+        self.assertEqual(seen["only_registries"], frozenset({"PyPI", "npm"}))
+
+    def test_a_selection_of_registries_and_of_crates_together_is_refused(self):
+        status, seen, errors = self.run_cli(
+            "--version", "0.8.0", "--only-registry", "npm", "--only-crates",
+            "--crate-sha256", "meerkat-meta=" + "0" * 64,
+        )
+        self.assertEqual(status, 2)
+        self.assertEqual(seen, {})
+        self.assertIn("--only-registry and --only-crates", errors)
+
+    def test_an_unknown_registry_is_refused(self):
+        status, seen, _ = self.run_cli("--version", "0.8.0", "--only-registry", "crates.io")
+        self.assertEqual(status, 2)
+        self.assertEqual(seen, {})
 
 
 if __name__ == "__main__":

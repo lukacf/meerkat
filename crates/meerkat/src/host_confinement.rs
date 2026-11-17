@@ -816,6 +816,29 @@ impl HostConfinement {
             .collect()
     }
 
+    /// A warning for each administered section (`[confinement]`,
+    /// `[governance]`) that a project file states and that is not in effect
+    /// in `effective`, the configuration the host composed
+    /// ([`meerkat_core::Config::administered_sections_not_in_effect`]). The
+    /// project files are `<context_root>/.rkat/config.toml` and the same
+    /// file of the project root found above the context root. A host reads
+    /// these sections from the config documents it composes
+    /// (`realm_document`, the realm's own, and `user_document`), and
+    /// confinement from its flags as well, never from a project file; the
+    /// warning names the file, the table and where the host does read it. A
+    /// project file that is one of those documents is read and is not
+    /// named, and neither is one that states what is in effect.
+    #[must_use]
+    pub fn unread_project_sections(
+        context_root: Option<&Path>,
+        effective: &meerkat_core::Config,
+        realm_document: &Path,
+        user_document: Option<&Path>,
+    ) -> Vec<HostConfinementNotice> {
+        let _ = (context_root, effective, realm_document, user_document);
+        Vec::new()
+    }
+
     /// Log [`Self::startup_report`] in the host's log.
     pub fn log_startup(&self, inputs: &[(HostInput, PathBuf)], convention_sources: &[PathBuf]) {
         for notice in self.startup_report(inputs, convention_sources) {
@@ -1608,6 +1631,168 @@ mod tests {
             );
         }
         assert!(!host.untrusted_source(&home.join(".rkat").join("mcp.toml")));
+    }
+
+    /// The realm's and the user's config documents of a host over `base`.
+    fn composed_documents(base: &Path) -> (PathBuf, PathBuf) {
+        (
+            base.join("state").join("ws-1").join("config.toml"),
+            base.join("home").join(".rkat").join("config.toml"),
+        )
+    }
+
+    const PROJECT_WORKSPACE_TABLE: &str = "[confinement.all]\nmode = \"workspace\"\n";
+
+    /// A configuration in which the workspace preset confines every kind.
+    fn workspace_in_effect() -> meerkat_core::Config {
+        meerkat_core::Config {
+            confinement: ConfinementConfig::for_all(LaunchConfinement::Workspace(
+                WorkspaceConfinement::default(),
+            )),
+            ..meerkat_core::Config::default()
+        }
+    }
+
+    /// A `[confinement]` table in the project file confines nothing. When
+    /// it is not what is in effect the host says so: one warning that names
+    /// the file, the table, the two documents the host does read it from,
+    /// and the flags. A `[governance]` table gets its own warning.
+    #[test]
+    fn a_project_file_section_not_in_effect_is_named_with_where_it_is_read() {
+        let (_temp, base) = tree();
+        let work = base.join("work");
+        let project_file = work.join(".rkat").join("config.toml");
+        let (realm_document, user_document) = composed_documents(&base);
+        let notices = |effective: &meerkat_core::Config| {
+            HostConfinement::unread_project_sections(
+                Some(&work),
+                effective,
+                &realm_document,
+                Some(&user_document),
+            )
+        };
+
+        std::fs::write(&project_file, PROJECT_WORKSPACE_TABLE).unwrap();
+        let said = notices(&meerkat_core::Config::default());
+        assert_eq!(said.len(), 1, "one warning for the one table: {said:?}");
+        assert!(said[0].warning, "{said:?}");
+        for named in [
+            project_file.display().to_string(),
+            "[confinement]".to_owned(),
+            realm_document.display().to_string(),
+            user_document.display().to_string(),
+            "--confinement".to_owned(),
+        ] {
+            assert!(
+                said[0].text.contains(&named),
+                "the warning names {named}: {}",
+                said[0].text
+            );
+        }
+
+        std::fs::write(
+            &project_file,
+            format!(
+                "{PROJECT_WORKSPACE_TABLE}\n[governance.decisions]\noperator_approver_ids = [\"team:owners\"]\n"
+            ),
+        )
+        .unwrap();
+        let said = notices(&workspace_in_effect());
+        assert_eq!(said.len(), 1, "only the section not in effect: {said:?}");
+        assert!(said[0].warning, "{said:?}");
+        for named in [
+            project_file.display().to_string(),
+            "[governance]".to_owned(),
+            realm_document.display().to_string(),
+        ] {
+            assert!(
+                said[0].text.contains(&named),
+                "the warning names {named}: {}",
+                said[0].text
+            );
+        }
+        assert!(!said[0].text.contains("--confinement"), "{}", said[0].text);
+    }
+
+    /// The warning does not depend on the table parsing as its section, and
+    /// it covers the project root's file when the context root lies below
+    /// it.
+    #[test]
+    fn an_unreadable_table_or_a_project_root_above_the_context_is_named_too() {
+        let (_temp, base) = tree();
+        let work = base.join("work");
+        let nested = work.join("crates").join("one");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project_file = work.join(".rkat").join("config.toml");
+        std::fs::write(&project_file, "[confinement]\nmode = \"workspace\"\n").unwrap();
+        let (realm_document, user_document) = composed_documents(&base);
+
+        for context in [&work, &nested] {
+            let said = HostConfinement::unread_project_sections(
+                Some(context),
+                &workspace_in_effect(),
+                &realm_document,
+                Some(&user_document),
+            );
+            assert_eq!(said.len(), 1, "{}: {said:?}", context.display());
+            assert!(
+                said[0].text.contains(&project_file.display().to_string())
+                    && said[0].text.contains("[confinement]"),
+                "{}",
+                said[0].text
+            );
+        }
+    }
+
+    /// Nothing is said when nobody is misled: no context root, no project
+    /// file, a file without the sections, a table that states what is in
+    /// effect, and a project file that is itself a document the host
+    /// composes (a host started in the user's home directory).
+    #[test]
+    fn nothing_is_said_of_a_project_file_that_misleads_nobody() {
+        let (_temp, base) = tree();
+        let work = base.join("work");
+        let project_file = work.join(".rkat").join("config.toml");
+        let (realm_document, user_document) = composed_documents(&base);
+        let nothing = meerkat_core::Config::default();
+        let said = |context: Option<&Path>, effective: &meerkat_core::Config, user: &Path| {
+            HostConfinement::unread_project_sections(
+                context,
+                effective,
+                &realm_document,
+                Some(user),
+            )
+        };
+
+        assert!(said(None, &nothing, &user_document).is_empty());
+        assert!(said(Some(&work), &nothing, &user_document).is_empty());
+        for silent in ["[agent]\nmax_turns = 3\n", "[confinement]\n"] {
+            std::fs::write(&project_file, silent).unwrap();
+            assert!(
+                said(Some(&work), &nothing, &user_document).is_empty(),
+                "said something about: {silent}"
+            );
+        }
+
+        std::fs::write(&project_file, PROJECT_WORKSPACE_TABLE).unwrap();
+        assert!(
+            said(Some(&work), &workspace_in_effect(), &user_document).is_empty(),
+            "a table that states what is in effect"
+        );
+        assert!(
+            said(Some(&work), &nothing, &project_file).is_empty(),
+            "a project file that is the user document is read"
+        );
+        assert!(
+            HostConfinement::unread_project_sections(
+                Some(&work),
+                &nothing,
+                &project_file,
+                Some(&user_document)
+            )
+            .is_empty(),
+            "a project file that is the realm's document is read"
+        );
     }
 
     /// The realm document list stays level with the path authority: every

@@ -6357,6 +6357,36 @@ fn report_cli_confinement(
     });
 }
 
+/// The warnings for a project file whose `[confinement]` or `[governance]`
+/// table is not in effect in `config`, this scope's composed configuration
+/// ([`meerkat::HostConfinement::unread_project_sections`]): the file under
+/// the scope's context root (else `workspace_root`) and under the project
+/// root above it, against the realm's and the user's documents this scope
+/// composes.
+fn cli_unread_project_sections(
+    scope: &RuntimeScope,
+    config: &Config,
+    workspace_root: &Path,
+) -> Vec<meerkat::HostConfinementNotice> {
+    let realm_document =
+        cli_filesystem_realm_config_source(scope).config_doc_path(&scope.locator.realm);
+    meerkat::HostConfinement::unread_project_sections(
+        Some(scope.context_root.as_deref().unwrap_or(workspace_root)),
+        config,
+        &realm_document,
+        Some(&cli_global_config_path(scope)),
+    )
+}
+
+/// The doctor's `config` warnings for [`cli_unread_project_sections`], one
+/// line per section.
+fn doctor_unread_project_section_lines(scope: &RuntimeScope, config: &Config) -> Vec<String> {
+    cli_unread_project_sections(scope, config, &cli_project_root(scope))
+        .into_iter()
+        .map(|notice| format!("warn\tconfig\t{}", notice.text))
+        .collect()
+}
+
 /// One line of the CLI's confinement report: a warning is marked as one.
 fn render_cli_confinement_notice(notice: &meerkat::HostConfinementNotice) -> String {
     if notice.warning {
@@ -35442,6 +35472,121 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             cli_mcp_stdio_profile(&factory).profile.capabilities(),
             Ok(None)
         ));
+    }
+
+    /// A `[confinement]` or `[governance]` table in the project file is not
+    /// read. When it is not what the run composes, `rkat` says so in one
+    /// stderr warning per section that names the file, the table and the
+    /// documents it reads (for confinement the flags as well), and
+    /// `rkat doctor` prints the same as `config` warnings. A table that
+    /// does not parse is named too. Nothing is said about a project file
+    /// without the table or with a table that states what is in effect, and
+    /// the same table in the realm's own document takes effect.
+    #[tokio::test]
+    async fn test_cli_names_a_project_file_section_that_is_not_in_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(workspace.join(".rkat")).unwrap();
+        let mut scope = test_scope(base.join("realms"), "notice-realm");
+        scope.context_root = Some(workspace.clone());
+        let project_file = workspace.join(".rkat").join("config.toml");
+        let realm_document =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+                .config_path;
+        let user_document = cli_global_config_path(&scope);
+        let said = |config: &Config| -> Vec<String> {
+            cli_unread_project_sections(&scope, config, &workspace)
+                .iter()
+                .map(render_cli_confinement_notice)
+                .collect()
+        };
+
+        // No table: nothing is said.
+        std::fs::write(&project_file, "[agent]\nmax_turns = 3\n").unwrap();
+        let (config, _) = load_config(&scope).await.expect("load config");
+        assert!(said(&config).is_empty(), "{:?}", said(&config));
+        assert!(doctor_unread_project_section_lines(&scope, &config).is_empty());
+
+        // A table the run does not compose: one warning, and the doctor's.
+        std::fs::write(&project_file, UNENFORCEABLE_CONFINEMENT).unwrap();
+        let (config, _) = load_config(&scope).await.expect("load config");
+        assert!(
+            config.confinement.is_empty(),
+            "the project file's table is not composed"
+        );
+        let lines = said(&config);
+        assert_eq!(
+            lines.len(),
+            1,
+            "one warning for the project file: {lines:?}"
+        );
+        assert!(lines[0].starts_with("warning: "), "{}", lines[0]);
+        for named in [
+            project_file.display().to_string(),
+            "[confinement]".to_owned(),
+            realm_document.display().to_string(),
+            user_document.display().to_string(),
+            "--confinement".to_owned(),
+        ] {
+            assert!(
+                lines[0].contains(&named),
+                "the warning names {named}: {}",
+                lines[0]
+            );
+        }
+        let doctor = doctor_unread_project_section_lines(&scope, &config);
+        assert_eq!(doctor.len(), 1, "{doctor:?}");
+        assert!(
+            doctor[0].starts_with("warn\tconfig\t")
+                && doctor[0].contains(&project_file.display().to_string())
+                && doctor[0].contains(&realm_document.display().to_string()),
+            "{}",
+            doctor[0]
+        );
+
+        // A table that does not parse as the section is named too.
+        std::fs::write(&project_file, "[confinement]\nmode = \"workspace\"\n").unwrap();
+        let lines = said(&config);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&project_file.display().to_string())
+                && lines[0].contains("[confinement]"),
+            "{}",
+            lines[0]
+        );
+
+        // The realm's own document is where the table takes effect, and a
+        // project file that states the same is not named.
+        std::fs::write(&project_file, UNENFORCEABLE_CONFINEMENT).unwrap();
+        std::fs::create_dir_all(realm_document.parent().unwrap()).unwrap();
+        std::fs::write(&realm_document, UNENFORCEABLE_CONFINEMENT).unwrap();
+        let (config, _) = load_config(&scope).await.expect("load config");
+        assert!(
+            !config.confinement.is_empty(),
+            "the realm document's table is composed"
+        );
+        assert!(said(&config).is_empty(), "{:?}", said(&config));
+        assert!(doctor_unread_project_section_lines(&scope, &config).is_empty());
+
+        // The other administered section, by the same rule.
+        std::fs::write(
+            &project_file,
+            format!(
+                "{UNENFORCEABLE_CONFINEMENT}\n[governance.decisions]\noperator_approver_ids = [\"team:owners\"]\n"
+            ),
+        )
+        .unwrap();
+        let lines = said(&config);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("warning: ")
+                && lines[0].contains(&project_file.display().to_string())
+                && lines[0].contains("[governance]")
+                && lines[0].contains(&realm_document.display().to_string()),
+            "{}",
+            lines[0]
+        );
     }
 
     /// A confined command whose processes could change the realm state is

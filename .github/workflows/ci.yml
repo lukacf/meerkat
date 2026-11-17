@@ -2618,7 +2618,9 @@ jobs:
     # fans its execution out over partitions. Same trigger as main-unit.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_archive_build_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The mob[openai-live] row reached the old 60 minutes twice on the
+    # 0.9.16 release tree, in the build step; before that it took 29m11s.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.main_archive_build_matrix) }}
@@ -2658,7 +2660,50 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # The runner's size and 12 GiB of swap before the build, the script of
+      # the meerkat-meta unit rows (see main-unit). Nothing here fails a row.
+      - name: Show the runner's size and add swap (archive build)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            nproc
+            free -m
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          vmstat -t 30 >"${RUNNER_TEMP}/archive-build-vmstat.log" 2>&1 </dev/null &
+          swapfile=/archive-build-swapfile
+          need_gib=40
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/archive-build-swapfile
+              need_gib=20
+            fi
+          fi
+          avail_kib="$(df --output=avail -k "$(dirname "${swapfile}")" | tail -n 1 | tr -d ' ')"
+          if ((avail_kib < need_gib * 1024 * 1024)); then
+            echo "::warning title=Archive build swap::under ${need_gib} GiB free for ${swapfile}: no swap added"
+            exit 0
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          show_resources
+
+      # Under the job's limit: at the job's limit (job 133748229187) no
+      # later step ran, not even an always() one.
       - name: Build nextest archive (lib and bin targets)
+        timeout-minutes: 105
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
@@ -2676,6 +2721,16 @@ jobs:
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest archive ${PACKAGES} --lib --bins \
             --archive-file "${RUNNER_TEMP}/nextest-${ARCHIVE}.tar.zst"
+
+      - name: Show memory after the archive build
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          free -m
+          swapon --show || true
+          grep -E '^(pswpin|pswpout|oom_kill) ' /proc/vmstat || true
+          cat "${RUNNER_TEMP}/archive-build-vmstat.log" || true
 
       - name: Verify the partitions cover every test exactly once
         shell: bash

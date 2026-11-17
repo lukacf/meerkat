@@ -3243,6 +3243,76 @@ fn composition_remedy(change: &str) -> &'static str {
     }
 }
 
+impl AdministeredSection {
+    /// Every administered section, in the order hosts report them.
+    pub const ALL: [Self; 2] = [Self::Confinement, Self::Governance];
+}
+
+impl Config {
+    /// The administered sections that `document`, the text of a config file
+    /// this configuration was not composed from, states and that are not in
+    /// effect here.
+    ///
+    /// A section counts when its table is present, not empty, and either
+    /// does not parse as the section or states something other than this
+    /// configuration does: for `[confinement]`, another requirement for some
+    /// launch kind ([`crate::ConfinementConfig::requires_the_same`]); for
+    /// `[governance]`, a section that differs from the one here, an absent
+    /// one being the default. In text that is not TOML at all, a table
+    /// header of the section counts. A file that states what is in effect
+    /// misleads nobody and is not listed.
+    #[must_use]
+    pub fn administered_sections_not_in_effect(&self, document: &str) -> Vec<AdministeredSection> {
+        let Ok(stated) = toml::from_str::<toml::Table>(document) else {
+            return AdministeredSection::ALL
+                .into_iter()
+                .filter(|section| states_table_header(document, *section))
+                .collect();
+        };
+        AdministeredSection::ALL
+            .into_iter()
+            .filter(|section| {
+                let Some(table) = stated.get(&section.to_string()) else {
+                    return false;
+                };
+                if table.as_table().is_some_and(toml::Table::is_empty) {
+                    return false;
+                }
+                let in_effect = match section {
+                    AdministeredSection::Confinement => table
+                        .clone()
+                        .try_into::<crate::ConfinementConfig>()
+                        .is_ok_and(|stated| stated.requires_the_same(&self.confinement)),
+                    AdministeredSection::Governance => table
+                        .clone()
+                        .try_into::<crate::GovernanceConfig>()
+                        .is_ok_and(|stated| {
+                            self.governance
+                                .as_ref()
+                                .map_or_else(|| stated.is_empty(), |here| *here == stated)
+                        }),
+                };
+                !in_effect
+            })
+            .collect()
+    }
+}
+
+/// Whether a line of `document`, text that is not TOML, opens a table of
+/// `section`: `[section]`, `[section.key]` or an array form of either.
+fn states_table_header(document: &str, section: AdministeredSection) -> bool {
+    let name = section.to_string();
+    document.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('[')
+            && line
+                .trim_start_matches('[')
+                .trim_start()
+                .strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.trim_start().starts_with([']', '.']))
+    })
+}
+
 impl std::fmt::Display for AdministeredSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -4441,6 +4511,120 @@ max_tool_calls = 12
         assert_eq!(config.agent.model, "cli-model");
         assert_eq!(config.budget_limits().max_tokens, Some(50000));
         assert_eq!(config.budget.max_tokens, None);
+    }
+
+    /// A config file a configuration was not composed from is judged
+    /// against what is in effect: an administered section it states
+    /// differently, or that does not parse, is listed; one that states what
+    /// is in effect, an empty or absent one, and every ordinary section are
+    /// not.
+    #[test]
+    fn a_file_is_judged_on_the_administered_sections_not_in_effect() {
+        const WORKSPACE: &str = "[confinement.all]\nmode = \"workspace\"\n";
+        const APPROVERS: &str =
+            "[governance.decisions]\noperator_approver_ids = [\"team:owners\"]\n";
+        let nothing = Config::default();
+        let confined = Config {
+            confinement: crate::ConfinementConfig::for_all(crate::LaunchConfinement::Workspace(
+                crate::WorkspaceConfinement::default(),
+            )),
+            ..Config::default()
+        };
+        let governed = Config {
+            governance: Some(
+                toml::from_str::<Config>(APPROVERS)
+                    .expect("a governance section")
+                    .governance
+                    .expect("a present section"),
+            ),
+            ..Config::default()
+        };
+
+        // Stated differently from what is in effect.
+        assert_eq!(
+            nothing.administered_sections_not_in_effect(WORKSPACE),
+            vec![AdministeredSection::Confinement]
+        );
+        assert_eq!(
+            confined.administered_sections_not_in_effect(
+                "[confinement.all]\nmode = \"workspace\"\nnetwork = \"unrestricted\"\n"
+            ),
+            vec![AdministeredSection::Confinement]
+        );
+        assert_eq!(
+            confined.administered_sections_not_in_effect(
+                "[confinement.shell]\nmode = \"trusted_host\"\n"
+            ),
+            vec![AdministeredSection::Confinement]
+        );
+        assert_eq!(
+            nothing.administered_sections_not_in_effect(APPROVERS),
+            vec![AdministeredSection::Governance]
+        );
+        assert_eq!(
+            nothing.administered_sections_not_in_effect(&format!("{WORKSPACE}{APPROVERS}")),
+            AdministeredSection::ALL.to_vec()
+        );
+
+        // A table that does not parse as its section, and a table header in
+        // text that is not TOML.
+        for unreadable in [
+            "[confinement]\nmode = \"workspace\"\n",
+            "confinement = \"workspace\"\n",
+            "[confinement.all]\nmode = workspace\n",
+        ] {
+            assert_eq!(
+                confined.administered_sections_not_in_effect(unreadable),
+                vec![AdministeredSection::Confinement],
+                "{unreadable}"
+            );
+        }
+        assert_eq!(
+            governed.administered_sections_not_in_effect("[governance]\nreviewers = 2\n"),
+            vec![AdministeredSection::Governance]
+        );
+
+        // What is in effect, restated: per launch kind for confinement,
+        // with `trusted_host` the same as no statement.
+        assert!(
+            confined
+                .administered_sections_not_in_effect(WORKSPACE)
+                .is_empty()
+        );
+        assert!(
+            confined
+                .administered_sections_not_in_effect(
+                    "[confinement.shell]\nmode = \"workspace\"\n\n[confinement.command_hooks]\nmode = \"workspace\"\n\n[confinement.mcp_stdio]\nmode = \"workspace\"\n"
+                )
+                .is_empty()
+        );
+        assert!(
+            nothing
+                .administered_sections_not_in_effect("[confinement.all]\nmode = \"trusted_host\"\n")
+                .is_empty()
+        );
+        assert!(
+            governed
+                .administered_sections_not_in_effect(APPROVERS)
+                .is_empty()
+        );
+
+        // Nothing stated: absent, empty, ordinary sections, and text that is
+        // not TOML without a header of an administered section.
+        for silent in [
+            "",
+            "[confinement]\n",
+            "[governance]\n",
+            "[agent]\nmax_turns = 3\n\n[limits]\nmax_sessions = 4\n",
+            "[agent\nconfinement_note = 1\n",
+        ] {
+            assert!(
+                confined
+                    .administered_sections_not_in_effect(silent)
+                    .is_empty(),
+                "{silent}"
+            );
+        }
     }
 
     /// The operator's `--confinement*` selection replaces the composed

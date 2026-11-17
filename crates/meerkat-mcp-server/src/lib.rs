@@ -1662,6 +1662,7 @@ impl MeerkatMcpState {
             .global_config_path()
             .unwrap_or_else(|| realms_root.join("__no_global__").join("config.toml"));
         let fs_realm_config_source = mcp_realm_config_source(&realms_root, global_doc);
+        let head_config_doc = fs_realm_config_source.config_doc_path(&realm_id);
         let mut config = load_config_async(
             &realm_id,
             &realms_root,
@@ -1748,6 +1749,12 @@ impl MeerkatMcpState {
             bootstrap.context.user_config_root.as_deref(),
         );
         host_confinement.log_startup(&host_inputs, &convention_sources);
+        meerkat::HostConfinement::log_unread_project_sections(
+            conventions_context_root.as_deref(),
+            &config,
+            &head_config_doc,
+            layout.global_config_path().as_deref(),
+        );
         // The factory reads its hooks and skills from the context root, or
         // from its project root when there is none: those are the convention
         // sources its file tools must not write.

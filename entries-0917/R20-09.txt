@@ -17,5 +17,6 @@
   a filter, a block list or a grant gate on `shell` closes it; what a live
   session with shell is offered; which recorded monitors are run again; an
   operator's monitor on a session that may not start one. Read from the
-  source: the guards that go by the tool's name, and going back to an
-  earlier release, read at 0.9.15.)
+  source: the guards that go by the tool's name; a tool exposed under the
+  name and the built-in taking it; and going back to an earlier release,
+  read at 0.9.15.)

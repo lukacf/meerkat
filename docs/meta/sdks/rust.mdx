@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from Meerkat Meta main at [fa0a5003395b](https://github.com/lukacf/meerkat/commit/fa0a5003395b406399b94d7bca46a8f8712a0c53) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -165,8 +165,10 @@ markdown files from the same agent-memory directory. Markdown is not a live
 provider. To supply another storage or retrieval authority, pass any
 `Arc<dyn AgentMemoryProvider>` with `.agent_memory(provider, config)`.
 
-Rust callers can write, read, and delete durable records through the unified
-runtime:
+Rust callers can write, read, and forget durable records through the unified
+runtime. A forget withdraws a record from the agent; with the bundled store
+it is not an erasure (see
+[`meta/agent_memory/forget`](/meta/api/rpc#meta%2Fagent_memory%2Fforget)):
 
 ```rust
 use meerkat_meta::{AgentMemoryRecallRequest, AgentMemorySelection, NewAgentMemory};

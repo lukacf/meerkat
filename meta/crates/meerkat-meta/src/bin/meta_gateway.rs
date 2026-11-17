@@ -314,6 +314,54 @@ fn conventional_paths(workspace_root: &Path) -> ConventionalPaths {
     .with_meerkat_config_from_workspace(workspace_root)
 }
 
+/// The configuration files and roots a launch names or adopts, for
+/// [`meerkat_meta::gateway_composition::declare_host_paths`]: the
+/// workspace's `config/`, `deployment/`, `skills/`, `hooks/` and `mcp/`
+/// directories (the directories the gateway counts as its configuration),
+/// its `definition.json` and its `manifest.toml` (read at every start,
+/// whether or not a file exists there yet), the shell's process records
+/// under the runtime root, the host configuration file, the provider
+/// credentials root, and the skill files `definition` names by path. The
+/// workspace's `.rkat` directory needs no declaration.
+fn launch_named_paths(
+    workspace_root: &Path,
+    runtime_root: &Path,
+    paths: &ConventionalPaths,
+    provider_credentials_root: Option<&Path>,
+    definition: &MobDefinition,
+) -> Vec<PathBuf> {
+    let mut named = vec![
+        workspace_root.join("config"),
+        workspace_root.join("deployment"),
+        workspace_root.join("skills"),
+        workspace_root.join("hooks"),
+        workspace_root.join("mcp"),
+        workspace_root.join("definition.json"),
+        workspace_root.join("manifest.toml"),
+    ];
+    // Meerkat keeps those records on the platforms where it holds the
+    // shell's process groups in custody.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    named.push(runtime_root.join(meerkat_tools::builtin::shell::PROCESS_CUSTODY_DIR));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = runtime_root;
+    named.extend(paths.meerkat_config_toml.clone());
+    named.extend(provider_credentials_root.map(Path::to_path_buf));
+    named.extend(meerkat_meta::gateway_composition::definition_skill_files(
+        definition,
+    ));
+    named
+}
+
+/// The directories a launch's stores live in: the state directory and the
+/// gateway home (the runtime registry and the peer key).
+fn launch_state_paths(layout: &MetaStorageLayout) -> Vec<PathBuf> {
+    std::iter::once(layout.state_dir())
+        .chain(layout.gateway_home())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 fn collect_recursive_files(root: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -747,6 +795,7 @@ fn build_persistent_session_service(
     member_mcp_custody: &Arc<meerkat_meta::MemberMcpCustody>,
     provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
     personal_accounts: Option<&meerkat_meta::PersonalAccountOwnerCheck>,
+    named_paths: Vec<PathBuf>,
 ) -> anyhow::Result<PersistentSessionServiceParts> {
     let store_dir = layout.state_dir().to_path_buf();
     fs::create_dir_all(&store_dir)
@@ -792,6 +841,14 @@ fn build_persistent_session_service(
         .comms(true)
         .memory(true)
         .mcp_apps(mcp_apps);
+    // The gateway declares its state directory, its gateway home and the
+    // configuration paths its launch names or adopts to the members' file
+    // tools.
+    factory = meerkat_meta::gateway_composition::declare_host_paths(
+        factory,
+        launch_state_paths(layout),
+        named_paths,
+    );
     // The launch's provider credential store replaces the process default
     // before the factory is cloned for live or consumed by its builder.
     if let Some(persistence) = provider_auth_persistence {
@@ -2845,6 +2902,44 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             error.to_string(),
         )
     })?;
+    // The members' file tools are rooted at the project root. The gateway
+    // starts only where that root is apart from every directory the launch
+    // keeps its state in.
+    let kept = [
+        (
+            "the state directory (store_path)",
+            Some(layout.state_dir().to_path_buf()),
+        ),
+        (
+            "the gateway home",
+            layout.gateway_home().map(Path::to_path_buf),
+        ),
+        (
+            "the provider credentials root (provider_credentials_root)",
+            params.provider_credentials_root.clone(),
+        ),
+    ];
+    for (what, directory) in kept {
+        if let Some(directory) = directory
+            && let Some((root, directory)) =
+                meerkat_meta::gateway_composition::tools_root_in_state(&project_root, &directory)
+        {
+            return Err(refuse_init(
+                &request_id,
+                -32602,
+                format!(
+                    "init params: the members' file tools are rooted at {}, the project root \
+                     (the workspace root when no project_root is given), and that directory is \
+                     {what} {} or lies inside it. The gateway keeps that directory out of the \
+                     file tools' reach, so the two must be apart: set project_root to a \
+                     directory outside it, or move that directory so that it is not the \
+                     project root and does not contain it",
+                    root.display(),
+                    directory.display()
+                ),
+            ));
+        }
+    }
     let persistent_sessions = params.persistent_sessions.unwrap_or(false);
     let provider_credentials_root = params.provider_credentials_root.clone();
     // Host-level compaction policy: validated once here so a typo or a zero
@@ -3188,6 +3283,13 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             &member_mcp_custody,
             provider_auth_persistence.clone(),
             personal_accounts.as_ref(),
+            launch_named_paths(
+                &workspace_root,
+                &runtime_root,
+                &paths,
+                provider_credentials_root.as_deref(),
+                &definition,
+            ),
         )?;
         if let Some(options) = tool_grant_options {
             options.apply(&adapter);
@@ -3303,6 +3405,19 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .comms(true)
             .memory(true)
             .mcp_apps(console_ui.mcp_apps_sandbox_url.is_some());
+        // As in the persistent arm: the paths the gateway declares to the
+        // members' file tools.
+        factory = meerkat_meta::gateway_composition::declare_host_paths(
+            factory,
+            launch_state_paths(&layout),
+            launch_named_paths(
+                &workspace_root,
+                &runtime_root,
+                &paths,
+                provider_credentials_root.as_deref(),
+                &definition,
+            ),
+        );
         // As in the persistent arm: the launch's provider credential store.
         if let Some(persistence) = provider_auth_persistence.clone() {
             factory = factory.with_provider_auth_persistence(persistence);

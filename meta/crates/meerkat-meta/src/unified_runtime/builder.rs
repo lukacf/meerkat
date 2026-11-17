@@ -3626,6 +3626,14 @@ impl UnifiedRuntimeBuilder {
         } else {
             None
         };
+        // The access file this builder was given, when its controller
+        // persists to one, and the sibling a save of it is written
+        // through: the runtime declares both to its members' file tools.
+        let host_named_paths: Vec<PathBuf> = self
+            .access_controller
+            .as_ref()
+            .map(crate::access::AccessController::persist_paths)
+            .unwrap_or_default();
         let mut spec = if let Some((store_path, realm, ephemeral, authority)) = persistent {
             MobBootstrapSpec::persistent_inner_with_provider_stores(
                 definition,
@@ -3651,6 +3659,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .await
             .map_err(storage_resolution_builder_error)?
@@ -3681,6 +3690,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .map_err(storage_resolution_builder_error)?
         } else {
@@ -3709,6 +3719,7 @@ impl UnifiedRuntimeBuilder {
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
                 personal_accounts.clone(),
+                host_named_paths,
             )
             .map_err(storage_resolution_builder_error)?;
             spec._ephemeral_dir = Some(Arc::new(temp_dir));

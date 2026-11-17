@@ -347,6 +347,22 @@ impl AccessController {
         self
     }
 
+    /// The files a save of this controller writes, when it persists to
+    /// one ([`AccessController::load`],
+    /// [`AccessController::with_persist_path`]): the file administrator
+    /// edits persist back to, and the sibling a save writes before it is
+    /// renamed over that file. Empty when no file is set.
+    pub(crate) fn persist_paths(&self) -> Vec<PathBuf> {
+        let path = self
+            .inner
+            .persist_path
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let sibling = path.as_deref().and_then(save_sibling);
+        path.into_iter().chain(sibling).collect()
+    }
+
     /// Join these access facts to a governed composition's authorization
     /// publication (the one its native grant owner publishes through), once,
     /// at quiescent startup: before any configuration or attribute writer
@@ -985,6 +1001,15 @@ impl AccessController {
     }
 }
 
+/// The sibling file a save of the access file at `path` writes before it
+/// is renamed over `path`: `<file name>.tmp` beside it. `None` for a path
+/// without a file name.
+fn save_sibling(path: &Path) -> Option<PathBuf> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".tmp");
+    Some(path.with_file_name(name))
+}
+
 fn persist_config(path: &Path, config: &AccessControlConfig) -> Result<(), AccessConfigError> {
     let rendered =
         toml::to_string_pretty(config).map_err(|err| AccessConfigError::Parse(err.to_string()))?;
@@ -998,18 +1023,12 @@ fn persist_config(path: &Path, config: &AccessControlConfig) -> Result<(), Acces
     // concurrent reader never observes a half-written (truncated) config.
     // Mutations are serialized by the mutation lock, so the fixed temp name
     // has no racing writer.
-    let mut tmp = path.to_path_buf();
-    let mut tmp_name = path
-        .file_name()
-        .map(std::ffi::OsString::from)
-        .ok_or_else(|| {
-            AccessConfigError::Io(format!(
-                "access config path has no file name: {}",
-                path.display()
-            ))
-        })?;
-    tmp_name.push(".tmp");
-    tmp.set_file_name(tmp_name);
+    let tmp = save_sibling(path).ok_or_else(|| {
+        AccessConfigError::Io(format!(
+            "access config path has no file name: {}",
+            path.display()
+        ))
+    })?;
     std::fs::write(&tmp, format!("{header}{rendered}"))
         .map_err(|err| AccessConfigError::Io(err.to_string()))?;
     std::fs::rename(&tmp, path).map_err(|err| AccessConfigError::Io(err.to_string()))

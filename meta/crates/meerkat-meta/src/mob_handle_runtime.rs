@@ -9182,6 +9182,13 @@ impl MobBootstrapSpec {
             .comms(caps.comms)
             .memory(caps.memory)
             .mcp_apps(caps.mcp_apps);
+        // The runtime declares the directory its stores live in, and the
+        // skill files its definition names, to the members' file tools.
+        factory = crate::gateway_composition::declare_host_paths(
+            factory,
+            [store_path.clone()],
+            crate::gateway_composition::definition_skill_files(&definition),
+        );
         if let Some(provider) = mcp_call_context_provider {
             factory = factory.mcp_call_context_provider(provider);
         }
@@ -9480,6 +9487,7 @@ impl MobBootstrapSpec {
             None,
             None,
             None,
+            Vec::new(),
         )
         .await
     }
@@ -9537,6 +9545,7 @@ impl MobBootstrapSpec {
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
         personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
+        host_named_paths: Vec<PathBuf>,
     ) -> Result<Self, StorageResolutionError> {
         // The startup checks and the composition record need to know whether
         // the mob store outlives the process.
@@ -9714,6 +9723,18 @@ impl MobBootstrapSpec {
         if let Some(root) = session_identity_config_root {
             factory = factory.user_config_root(root);
         }
+        // The runtime declares the directory its stores live in, the files
+        // its host names (`host_named_paths`: the access file a builder was
+        // given) and the skill files its definition names to the members'
+        // file tools.
+        factory =
+            crate::gateway_composition::declare_host_paths(
+                factory,
+                [store_path.clone()],
+                host_named_paths.into_iter().chain(
+                    crate::gateway_composition::definition_skill_files(&definition),
+                ),
+            );
         if let Some(provider) = mcp_call_context_provider {
             factory = factory.mcp_call_context_provider(provider);
         }
@@ -10065,6 +10086,7 @@ impl MobBootstrapSpec {
             None,
             None,
             None,
+            Vec::new(),
         )
     }
 
@@ -10096,6 +10118,7 @@ impl MobBootstrapSpec {
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
         personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
+        host_named_paths: Vec<PathBuf>,
     ) -> Result<Self, StorageResolutionError> {
         caps.image_generation |= mob_definition_may_use_image_generation(&definition);
         let config = crate::compaction_policy::with_meta_compaction_defaults(
@@ -10186,6 +10209,18 @@ impl MobBootstrapSpec {
         if let Some(root) = session_identity_config_root {
             factory = factory.user_config_root(root);
         }
+        // The runtime declares the directory its stores live in, the files
+        // its host names (`host_named_paths`: the access file a builder was
+        // given) and the skill files its definition names to the members'
+        // file tools.
+        factory =
+            crate::gateway_composition::declare_host_paths(
+                factory,
+                [store_path.clone()],
+                host_named_paths.into_iter().chain(
+                    crate::gateway_composition::definition_skill_files(&definition),
+                ),
+            );
         if let Some(provider) = mcp_call_context_provider {
             factory = factory.mcp_call_context_provider(provider);
         }
@@ -23570,6 +23605,7 @@ comms = true
                 None,
                 None,
                 None,
+                Vec::new(),
             )
             .await
             .expect("persistent constructor")
@@ -23593,6 +23629,7 @@ comms = true
                 None,
                 None,
                 None,
+                Vec::new(),
             )
             .expect("bootstrap spec")
         }

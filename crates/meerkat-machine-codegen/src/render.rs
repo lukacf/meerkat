@@ -1380,6 +1380,11 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // operator instructions (0.9.15).
             "RecordMemberInstructionLineageRunning",
             "RecordMemberInstructionLineageStopped",
+            // The removal twin of the reciprocal trust request (0.9.17),
+            // declared beside the request in the catalog: after every
+            // variant 0.9.16 published.
+            "AuthorizeExternalPeerReciprocalTrustRemovalRunning",
+            "AuthorizeExternalPeerReciprocalTrustRemovalStopped",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

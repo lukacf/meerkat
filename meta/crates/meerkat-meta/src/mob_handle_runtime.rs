@@ -2872,6 +2872,19 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     crate::member_comms_id::reserved_authority_label_refusal(key),
                 ));
             }
+            // Nor does an agent's spawn carry a label key that differs only
+            // by letter case from a label only Meta writes, or one Core
+            // reserves for runtime facts (`role`, `mob_id`, `meerkat_id`,
+            // the `meerkat` namespace): refused as console member creation
+            // refuses it.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && let Some(refusal) =
+                    crate::console_spawn::caller_reserved_label_refusal_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name, refusal,
+                ));
+            }
             // Nor does an agent's spawn set a key of a member's row that is
             // the Console's own: the row says those itself.
             if crate::console_spawn::is_console_spawn_tool(call.name)

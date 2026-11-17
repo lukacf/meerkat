@@ -16720,7 +16720,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }
                 },
             };
-            if let Err(message) = crate::member_comms_id::validate_member_creation_labels(&labels) {
+            // A person on the console is not the host: the stricter check,
+            // which also refuses a near miss of a label only Meta writes and
+            // the label keys Core reserves.
+            if let Err(message) =
+                crate::member_comms_id::validate_caller_member_creation_labels(&labels)
+            {
                 return invalid_params(response_id, message);
             }
             let context = request.params.get("context").cloned();

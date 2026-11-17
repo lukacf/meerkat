@@ -204,7 +204,11 @@ State confinement for every launch kind in the user document,
 `mode = "workspace"`. It applies at every start of `rkat`, `rkat-rpc`,
 `rkat-rest` and `rkat-mcp` and to every realm of that user; with
 `--user-config-root <dir>` the user document is `<dir>/.rkat/config.toml`. A
-table for one kind (`[confinement.shell]`, `[confinement.command_hooks]`,
+server started without `--context-root` refuses the workspace preset at its
+start, so with this table in the user document every `rkat-rpc`, `rkat-rest`
+and `rkat-mcp` start needs `--context-root`, the `rkat-rpc` an SDK starts
+included (the SDK's `context_root` or `contextRoot` option). A table for one
+kind (`[confinement.shell]`, `[confinement.command_hooks]`,
 `[confinement.mcp_stdio]`) replaces `all` for that kind in that document:
 confine all three kinds, not the shell alone, and do not rely on a realm
 document as its only statement.
@@ -233,15 +237,19 @@ files as they then are, also where an earlier confined run changed them. A mob
 member placed on another host runs under that host's confinement, not the
 controller's.
 
-As soon as one launch kind has a requirement, `rkat` prints one confinement
-line for each of the three kinds (`shell`, `command_hooks`, `mcp_stdio`), and
-the line of a kind without a requirement reads `trusted host`. With no
-requirement it prints none. A line that says the requirement cannot be
-enforced on this host means every launch of that kind is refused, not that it
-runs unconfined. When some kinds are confined and others run as the trusted
-host, `rkat` warns that it gives no guarantee for its own inputs (the realm
-state, the user config document and the credential store): a process the agent
-drives can still change them, and no project file is refused.
+As soon as one launch kind has a requirement, a command that runs agents
+prints one confinement line for each of the three kinds (`shell`,
+`command_hooks`, `mcp_stdio`), and the line of a kind without a requirement
+reads `trusted host`; so do some commands that run none, such as
+`rkat session list` and `rkat skill list`. Commands that only read
+configuration, such as `rkat config get`, `rkat realm current` and
+`rkat mcp list`, print none. With no requirement none is printed. A line that
+says the requirement cannot be enforced on this host means every launch of
+that kind is refused, not that it runs unconfined. When some kinds are
+confined and others run as the trusted host, `rkat` warns that it gives no
+guarantee for its own inputs (the realm state, the user config document and
+the credential store): a process the agent drives can still change them, and
+no project file is refused.
 
 With every launch kind confined (the example above, or the flags):
 

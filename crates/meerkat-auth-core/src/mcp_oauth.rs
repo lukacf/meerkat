@@ -5969,8 +5969,10 @@ impl ResourceMetadataPlace {
     }
 }
 
-/// Whether a `WWW-Authenticate` challenge of `response` names resource
-/// metadata. A challenge that cannot be read counts as one that does.
+/// Whether a `WWW-Authenticate` challenge of `response` mentions resource
+/// metadata: the parameter's name anywhere in the header, in any letter
+/// case. Its value is not parsed, so a value written in any form counts,
+/// and a header that is not text counts as one that mentions it.
 fn challenge_names_resource_metadata(response: &reqwest::Response) -> bool {
     response
         .headers()
@@ -5978,7 +5980,7 @@ fn challenge_names_resource_metadata(response: &reqwest::Response) -> bool {
         .iter()
         .any(|challenge| {
             challenge.to_str().map_or(true, |header| {
-                resource_metadata_from_header(header).is_some()
+                header.to_ascii_lowercase().contains("resource_metadata")
             })
         })
 }

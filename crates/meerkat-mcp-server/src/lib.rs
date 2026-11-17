@@ -12375,7 +12375,12 @@ mod tests {
             event_address: _,
             pairing_password: _,
         } = config.comms;
-        let RestServerConfig { host: _, port: _ } = config.rest;
+        let RestServerConfig {
+            host: _,
+            port: _,
+            allowed_origins: _,
+            served_hosts: _,
+        } = config.rest;
         let MobHostConfig {
             realm: _,
             listen_tcp: _,

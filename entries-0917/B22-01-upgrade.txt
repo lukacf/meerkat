@@ -6,7 +6,9 @@
   overlap, which took the path without an error before, now has its
   member's build fail (a restored mob member is recorded broken) and stays
   so until that successor is started again or the member is respawned (see
-  Changed). (Shown by tests on real sockets inside one process, the refusal
-  during the overlap among them; two processes were not run, and how a
-  successor that was refused during the overlap comes back is read from the
+  Changed). (Shown by tests on real sockets inside one process, at the
+  listener: its start is refused on a path a live listener holds, and a
+  socket file no listener holds is taken over. Two processes were not run;
+  and that the member's build then fails, that a restored mob member is
+  recorded broken, and how a refused successor comes back are read from the
   source.)

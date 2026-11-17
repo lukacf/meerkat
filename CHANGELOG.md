@@ -35,6 +35,10 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- Mobs: one create of a mob id at a time. While a create of a mob id is under way, another create of that id is refused at once, with nothing built, although the mob is not listed yet: a definition create with `mob already exists: <id>`, a mobpack create with the existing `duplicate mobpack create raced for mob id '<id>' ...` answer. This holds on every surface that creates mobs (the agent mob tools, `mob/create` on `rkat-rpc`, the MCP create, the CLI). The id is free again as soon as that create ends, with or without its mob. If a create never ends, its id stays taken until the host process is restarted; nothing about it is stored, so a restart frees it.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

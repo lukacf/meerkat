@@ -20,8 +20,9 @@ const NAME_PRINT_MAX_CHARS: usize = 64;
 
 /// One failed server's report: its name, the failure in fixed words, and the
 /// end of its stderr tail, marked when earlier output is not shown and when
-/// the server's stderr was still open as the tail was read (more may have
-/// followed).
+/// the capture had not reached the end of the server's stderr as the tail
+/// was read: the stream was still open, or its read stopped early (more may
+/// have followed).
 pub(crate) fn render(failure: &McpStdioSetupFailure, tail: Option<&McpStdioStderrTail>) -> String {
     // The name comes from configuration: it is shown escaped and bounded,
     // never as terminal input.
@@ -35,11 +36,11 @@ pub(crate) fn render(failure: &McpStdioSetupFailure, tail: Option<&McpStdioStder
     if lines.is_empty() {
         report.push_str(match (tail.total_bytes == 0, tail.complete) {
             (true, true) => "\n  it wrote nothing to stderr",
-            // The capture had not ended when the tail was read: nothing
-            // yet is not nothing.
+            // The capture had not reached the end of the stream when the
+            // tail was read: nothing so far is not nothing.
             (true, false) => {
                 "\n  it had written nothing to stderr when this was read \
-                 (its stderr was still open)"
+                 (the end of its stderr was not reached)"
             }
             (false, _) => "\n  its stderr output holds no whole line to show",
         });
@@ -48,9 +49,9 @@ pub(crate) fn render(failure: &McpStdioSetupFailure, tail: Option<&McpStdioStder
     report.push_str(match (tail.truncated || left_out, tail.complete) {
         (false, true) => "\n  its last stderr output:",
         (true, true) => "\n  its last stderr output (earlier output cut):",
-        (false, false) => "\n  its last stderr output (its stderr was still open):",
+        (false, false) => "\n  its last stderr output (the end of its stderr was not reached):",
         (true, false) => {
-            "\n  its last stderr output (earlier output cut; its stderr was still open):"
+            "\n  its last stderr output (earlier output cut; the end of its stderr was not reached):"
         }
     });
     for line in lines {
@@ -236,20 +237,21 @@ mod tests {
         assert!(
             report.ends_with(
                 "\n  it had written nothing to stderr when this was read \
-                 (its stderr was still open)"
+                 (the end of its stderr was not reached)"
             ),
             "{report}"
         );
         let report = render(&exited("open", 1), Some(&open("starting\n", false)));
         assert!(
-            report
-                .ends_with("\n  its last stderr output (its stderr was still open):\n  | starting"),
+            report.ends_with(
+                "\n  its last stderr output (the end of its stderr was not reached):\n  | starting"
+            ),
             "{report}"
         );
         let report = render(&exited("open", 1), Some(&open("late line\n", true)));
         assert!(
             report.ends_with(
-                "\n  its last stderr output (earlier output cut; its stderr was still open):\
+                "\n  its last stderr output (earlier output cut; the end of its stderr was not reached):\
                  \n  | late line"
             ),
             "{report}"

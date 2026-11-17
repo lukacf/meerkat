@@ -76,6 +76,25 @@ them.
 
 - `meerkat-runtime`: a session whose finished run was still unsettled when its runtime was registered again (a restart of the host, for one) now has that run finalized at its first drain when the run had consumed an input the runtime marks ephemeral: a peer's progress notice (a response that is not the final one) to a request the session had sent. The registration keeps that input's row, and the first drain records the run's completion with its outcome and takes the session checkpoint the run still owed. Before, the registration left the row out of the recovered session while the store went on naming it, and the session's first drain, a stop and an unregister were refused with `Recovery corruption: pending terminal owner <id> is absent from the live shell`; after a refused stop or unregister every later registration was refused too; a mob marked such a member `broken`. A batch in which one run had consumed such a notice together with a durable input was refused the same way and is finalized as well. An ephemeral input that had not run is still dropped at a restart. A store that already holds such a row is finalized at the next registration and first drain (shown by a row on a store the test builds; no kept state of an earlier release was run). Not shown: that a member a mob has already marked `broken`, or a session whose stop or unregister was already refused, comes back by this change. The refusal is in 0.8.11 through 0.9.16 (by the source at the release tags).
 
+- TypeScript SDK (`@rkat/sdk`): a call written to an `rkat-rpc` process that
+  is gone, before the Node program has returned to its event loop (shortly
+  after a kill, or after a stretch of synchronous work during which the
+  process ended), now rejects with `PROCESS_EXITED` and the process's
+  stderr, like any call the process died on. Before, the write's
+  `write EPIPE` error was raised outside the call and ended a program
+  without a handler for uncaught exceptions (`Unhandled 'error' event`, exit
+  code 1), although the call was inside a try/catch. This holds for every
+  request, for starting a streaming session or turn, and for subscribing to
+  a session's, a mob's or a mob member's events. The reply to a tool call
+  the process asked for, written in that window, is dropped without an
+  error raised; the call that was waiting on the process rejects with
+  `PROCESS_EXITED`. A process that keeps running after it closed its input,
+  or whose output can no longer be read, now fails pending and later calls
+  with `PROTOCOL_ERROR` about a second later and is stopped the way
+  `close()` stops it; a failed read of its stderr only ends the stderr an
+  error message carries. Affected: every release of the TypeScript SDK
+  since 0.3.0.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

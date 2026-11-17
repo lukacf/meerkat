@@ -125,6 +125,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   check, as a runtime without a WorkGraph service does, and the run
   continues. Present in every release since the resume check was added in
   0.9.5.
+- TypeScript SDK: when a gateway that the SDK started refuses the start
+  after it has accepted the init request, and exits, `builder.build()` now
+  always rejects with the refusal (today inside `GatewayStartupCleanupError`,
+  as its `startupError`). Before, the Node program could be ended by an
+  unhandled `write EPIPE` error (`Unhandled 'error' event`, exit code 1)
+  although `build()` was inside a try/catch: the SDK asked the exiting
+  gateway to shut down, and the failed write was raised outside the call.
+  The same holds for any request or callback reply written to a gateway
+  whose input is gone, and for a failed read of its output: the waiting
+  requests and every later request on that gateway process reject with
+  `TransportReaderFailedError`; for the waiting requests its `reason` names
+  the failed write or read. A refusal that the gateway gives as its answer
+  to the init request, and a gateway that exits without a refusal
+  (`InitOutcomeUnknownError`), were not affected. Affected: every release
+  of the TypeScript SDK up to 0.9.16.
 
 ### Known limitations
 

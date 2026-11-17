@@ -3841,6 +3841,22 @@ async fn schedule_tool_call(
     name: &str,
     args: Value,
 ) -> Result<Value, meerkat_core::ToolError> {
+    schedule_tool_call_in(
+        tools,
+        &meerkat_core::ToolDispatchContext::default(),
+        name,
+        args,
+    )
+    .await
+}
+
+/// A schedule tool call as the turn `context` describes makes it.
+async fn schedule_tool_call_in(
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+    context: &meerkat_core::ToolDispatchContext,
+    name: &str,
+    args: Value,
+) -> Result<Value, meerkat_core::ToolError> {
     let args = serde_json::value::RawValue::from_string(args.to_string())
         .map_err(|error| meerkat_core::ToolError::invalid_arguments(name, error.to_string()))?;
     let outcome = tools
@@ -3850,7 +3866,7 @@ async fn schedule_tool_call(
                 name,
                 args: &args,
             },
-            &meerkat_core::ToolDispatchContext::default(),
+            context,
         )
         .await?;
     let text = outcome
@@ -4019,6 +4035,89 @@ async fn the_schedule_tools_point_no_schedule_at_an_archived_agent() -> TestResu
     Ok(())
 }
 
+/// An agent's own turn that names an archived agent it is not wired to is
+/// answered as its turn that names an agent nobody holds: the same code
+/// (`schedule_target_not_a_peer`) and the same sentence, by a create and by
+/// an update that retargets its own schedule, and nothing is written. The
+/// answer does not say that the name is an archived agent's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archived_agent_out_of_an_agents_reach_answers_as_a_name_no_agent_holds() -> TestResult {
+    let agents = created_agents("schedule-tools-archived-out-of-reach").await?;
+    let mob = agents.mob.mob_id().to_string();
+    let service = agents.fixture.service.clone();
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_registry_for_test(
+        service.clone(),
+        agents.registry.clone(),
+    );
+    let ledger_identity = AgentIdentity::from("ledger");
+    agents.mob.ensure_member_live(&ledger_identity).await?;
+    let ledger = agents
+        .mob
+        .get_member(&ledger_identity)
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("ledger has a session")?;
+    let as_ledger =
+        meerkat_core::ToolDispatchContext::default().with_runtime_identity(ledger, None);
+
+    // The agent's own schedule, for itself, written by its own turn.
+    let own = schedule_tool_call_in(
+        &tools,
+        &as_ledger,
+        "meerkat_schedule_create",
+        tool_schedule("own", member_tool_target(&mob, "ledger")),
+    )
+    .await
+    .map_err(|error| format!("an agent schedules for itself: {error:?}"))?;
+    let own = own["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string();
+    agents.archive("archive-1", "scout").await;
+    let before = service.list().await?;
+
+    let mut created = Vec::new();
+    let mut retargeted = Vec::new();
+    for member in ["scout", "nobody"] {
+        for (name, args, answers) in [
+            (
+                "meerkat_schedule_create",
+                tool_schedule("late", member_tool_target(&mob, member)),
+                &mut created,
+            ),
+            (
+                "meerkat_schedule_update",
+                json!({ "schedule_id": own, "target": member_tool_target(&mob, member) }),
+                &mut retargeted,
+            ),
+        ] {
+            let answer = schedule_tool_call_in(&tools, &as_ledger, name, args)
+                .await
+                .err();
+            assert!(
+                matches!(
+                    &answer,
+                    Some(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+                ),
+                "{name} for {member}, out of the agent's reach, is refused as one: {answer:?}"
+            );
+            answers.push(format!("{answer:?}").replace(member, "<member>"));
+        }
+    }
+    assert_eq!(
+        created[0], created[1],
+        "a create for an archived agent out of reach answers as one for a name no agent holds"
+    );
+    assert_eq!(
+        retargeted[0], retargeted[1],
+        "an update to an archived agent out of reach answers as one to a name no agent holds"
+    );
+    assert_eq!(service.list().await?, before, "nothing was written");
+    agents.stop().await;
+    Ok(())
+}
+
 /// A schedule that names an agent's session follows the agent's archive and
 /// unarchive as a schedule that names the agent does: Core's entry of the
 /// agent records the session its member was bound to, and its unarchive
@@ -4085,6 +4184,87 @@ async fn a_schedule_that_names_an_agents_session_follows_its_archive_and_unarchi
     assert_eq!(agents.state(&scouts).await, (Active, false));
     assert_eq!(agents.state(&ledgers).await, (Active, false));
     agents.stop().await;
+    Ok(())
+}
+
+/// A schedule that is no Console schedule and whose target names an agent (a
+/// member target, as the agents' schedule tools and a host write one) is
+/// listed on that agent's view, beside its Console schedules and never among
+/// them, and on no other agent's view.
+#[tokio::test]
+async fn the_console_lists_a_schedule_another_writer_aimed_at_the_agent() -> TestResult {
+    let fixture = fixture(
+        "console-other-schedules",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let mob = fixture.runtime.handle().mob_id().to_string();
+    let schedule = fixture
+        .service
+        .create(meerkat::CreateScheduleRequest {
+            name: Some("a note".to_owned()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Once {
+                due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+            },
+            target: meerkat::TargetBinding::Mob(Box::new(meerkat::MobTargetBinding::Member {
+                mob_id: mob,
+                member_id: "beta".to_string(),
+                action: meerkat::ScheduledMobAction::Send {
+                    content: meerkat_core::ContentInput::Text("Say hello.".into()),
+                    render_metadata: None,
+                },
+            })),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .schedule_id;
+
+    let listed = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/list",
+        json!({ "identity": "beta" }),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["schedules"],
+        json!([]),
+        "it is no Console schedule: {listed:#?}"
+    );
+    let others = listed["result"]["other_schedules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        others
+            .iter()
+            .map(|other| other["schedule_id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(schedule.to_string())],
+        "the agent's view lists the schedule aimed at it: {listed:#?}"
+    );
+    assert_eq!(others[0]["content"], json!("Say hello."), "{listed:#?}");
+
+    let other_agent = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        other_agent["result"]["other_schedules"],
+        json!([]),
+        "another agent's view does not list it: {other_agent:#?}"
+    );
+    fixture.stop().await;
     Ok(())
 }
 

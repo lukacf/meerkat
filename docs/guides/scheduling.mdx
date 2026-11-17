@@ -315,6 +315,48 @@ prompt actions only and reject session-only prompt overrides such as
 - `spawn_helper`: create a helper in a mob and wait for it
 - `fork_helper`: fork from an existing member and wait for it
 
+On a host that holds mobs, a schedule a mob member writes with its schedule
+tools is judged as that member's own message would be. A create or update
+whose target names another member (a `member` target, the source of a
+`fork_helper`, a mob-member identity, or that member's session) is accepted
+only when the two are members of one mob and wired to each other. Any
+other such target, a name no member holds included, is refused as a policy
+denial with the code `schedule_target_not_a_peer`, in the same words
+whatever it names. A `flow` or `spawn_helper` target, which has the host
+act in a mob, is accepted for the writer's own mob and for a mob the writer
+created, and refused in the same way for any other mob. A member's schedule
+for itself is accepted. A session target that names a session no member
+holds, other than the writer's own, is refused for a member in the same
+way. A schedule the host writes (over RPC, REST or the schedule service) is
+not judged, and neither is one written by a session that is no member of a
+mob: this rule is about mob members, not about every agent. An update whose
+`target` is absent or `null` keeps the schedule's target and is judged on
+it.
+
+A member host (`rkat mob host`) holds no wiring: a mob's wiring lives with
+its controlling host. A member placed there schedules for itself only, by
+its identity, a `member` target or its own session; a target that names
+any other member, or another session, is refused in the same way.
+
+A schedule whose target is a session created on demand
+(`materialize_on_demand_session`) has the host build a fresh session when
+it fires. That session is built as the host builds a session by default,
+not as the writer's session was built, so such a schedule is the host's to
+write. An agent's schedule tools take one (a create, any update of a
+schedule that has such a target, the resume of a paused one) only when the
+agent's own session is built that way too and nothing narrows its tools: it
+is no mob member, no tool family is switched against the host's, it has no
+budget or auth binding of its own, and it is under no tool access policy,
+declared restriction, tool filter, per-turn overlay, grant gate,
+application tool policy, replaced tool dispatcher or per-run hook. Any
+other agent's write is refused as a policy denial with the code
+`schedule_session_creation_not_allowed`, and nothing is stored; the agent
+can still read, pause and delete such a schedule. A host that wants its
+agents to schedule fresh sessions sets
+`agent_schedules_may_create_sessions = true` under `[tools]` in its
+configuration; the key is read when the host starts and is off by default.
+A schedule of this form stored earlier is not changed and fires as before.
+
 Example flow target:
 
 ```json
@@ -604,10 +646,18 @@ Every schedule tool that returns one schedule (`meerkat_schedule_get`, `meerkat_
 
 A schedule with many occurrences has a long history, and `meerkat_schedule_occurrences` returns it one page of summaries at a time, in due order: 50 occurrences unless `limit` asks for another size, at most 200 (a larger `limit` returns 200), with the opaque `cursor` from `page.next_cursor` to continue. A summary (`view: "summary"`, the default for a page) carries the occurrence's identity, timing and delivery state, the target's kind and ids, the last receipt summarized, and the first 160 characters of a runtime outcome or failure detail (`runtime_outcome.detail_head`, `failure_detail_head`): no trigger, target action or prompt. `view: "full"` returns each occurrence whole, with its trigger and target once. To read less, pass `occurrence_id` (that one occurrence whole, with all of its delivery receipts; add `view: "summary"` to shorten it), `due_after_utc` / `due_before_utc` (inclusive, RFC 3339 with any offset) or `phase`. To cover one local day, pass its first instant and its last instant, for example `2026-03-29T00:00:00+01:00` and `2026-03-29T23:59:59.999+02:00`. A receipt with stage `completed` means delivery finished, not that the target's work succeeded.
 
-Agent-authored `spawn_helper` and `fork_helper` schedules capture the creator's
-effective tool-access policy at creation time. This prevents a scheduled
-helper from gaining tools the creator could not use. Public host APIs reject
-helper-tooling modes that depend on an active parent context.
+An agent writes a `spawn_helper` or `fork_helper` schedule only when it holds
+the mob tools as well as the schedule tools (a mob profile with both
+`tools.mob` and `tools.schedule`), or on a host whose configuration sets
+`agent_schedules_may_create_sessions = true` under `[tools]`; any other
+agent's write, update or resume of one is refused with the code
+`schedule_session_creation_not_allowed`. Agent-authored `spawn_helper` and
+`fork_helper` schedules capture the creator's effective tool-access policy at
+creation time, and the helper is held to that policy. The helper is built
+from the role the schedule names: give an agent the schedule tools beside
+the mob tools only if it may hold the tools of every role it can name.
+Public host APIs reject helper-tooling modes that depend on an active parent
+context.
 
 ## Tearing down an embedded schedule host
 

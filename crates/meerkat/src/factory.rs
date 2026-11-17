@@ -8652,6 +8652,237 @@ impl AgentFactory {
         built
     }
 
+    /// Whether `build` is this factory's default build: a session built
+    /// from it is under no restriction that a session this factory builds
+    /// with nothing set would not be under.
+    ///
+    /// A schedule whose target is a session created on demand has the host
+    /// build such a default session at the fire. A writer whose own build
+    /// is the default one gains nothing by it; any other writer would get a
+    /// session without its restrictions, so its schedule tools refuse the
+    /// write (`CurrentSessionScheduleToolDispatcher::with_host_default_build`).
+    ///
+    /// The build is taken apart field by field with no rest pattern: a
+    /// field added to [`AgentBuildConfig`] does not compile here until it
+    /// is classified as one that restricts the session's tools or as one
+    /// that does not. A restricting field makes the build not the default
+    /// one whatever it holds beyond its empty value. A tool family switch
+    /// is the default when it is unset or says what the factory's own
+    /// switch says, so the comparison is with what this factory would
+    /// build, not with a constant.
+    ///
+    /// Read after a resumed session's stored tooling is merged into the
+    /// build, so a resumed session is classified by what it runs under.
+    /// The credential binding is not read here but where the provider is
+    /// settled ([`Self::binding_is_the_hosts_default`]).
+    /// What a host changes on a live session after the build (a filter, a
+    /// per-turn overlay, a grant gate) is not a fact of the build: the
+    /// agent loop states it on every dispatch
+    /// ([`meerkat_core::ToolDispatchContext::live_tool_narrowing`]).
+    pub(crate) fn build_is_the_factorys_default(
+        &self,
+        build: &AgentBuildConfig,
+        config: &Config,
+    ) -> bool {
+        // A switch the factory itself resolves from a flag.
+        let as_the_factory = |switch: ToolCategoryOverride, factory: bool| match switch {
+            ToolCategoryOverride::Inherit => true,
+            ToolCategoryOverride::Enable => factory,
+            ToolCategoryOverride::Disable => !factory,
+        };
+        // A switch the factory resolves from more than a flag (the model,
+        // the provider): only the unset one is known to be the default.
+        let unset = |switch: ToolCategoryOverride| switch == ToolCategoryOverride::Inherit;
+        let AgentBuildConfig {
+            // RESTRICTING: who the session is.
+            mob_member_binding,
+            mob_incarnation,
+            // RESTRICTING: the tool family switches.
+            override_builtins,
+            override_shell,
+            override_memory,
+            override_schedule,
+            override_workgraph,
+            override_mob,
+            override_comms,
+            override_image_generation,
+            override_web_search,
+            // RESTRICTING: policies, filters, admissions and gates.
+            tool_access_policy,
+            declared_tool_restriction,
+            tool_dispatch_admission,
+            grant_gated_tools,
+            grant_gated_tools_where_mounted,
+            application_tool_policy,
+            tool_consequence_policy_registry,
+            initial_tool_filter,
+            initial_tool_visibility_state,
+            // RESTRICTING: a pre-built dispatcher REPLACES the factory's
+            // own tools (it skips the shell and file tool resolution), so
+            // the session can hold less than a session the factory builds.
+            tool_dispatcher_override,
+            // RESTRICTING: per-run hooks can refuse a tool call.
+            hooks_override,
+            hook_engine_override,
+            // RESTRICTING: what the session may spend. A session the fire
+            // creates is built with the configuration's own budget, so a
+            // budget of the build's own (other than the configuration's)
+            // is a bound it would not be under.
+            budget_limits,
+            // RESTRICTING, CLASSIFIED APART: whose credentials the session
+            // runs on. The binding is read once the provider is settled
+            // and a resumed build's binding is seated
+            // ([`Self::binding_is_the_hosts_default`]), since a build
+            // records the binding its resolution selected and a session
+            // rebuilt from storage is built on the recorded one.
+            auth_binding: _,
+            // NOT RESTRICTING: the model and how it is called.
+            model_fallback: _,
+            model: _,
+            provider: _,
+            self_hosted_server_id: _,
+            custom_models: _,
+            image_generation_provider: _,
+            auto_compact_threshold_override: _,
+            compaction_curator_override: _,
+            max_tokens: _,
+            system_prompt: _,
+            output_schema: _,
+            structured_output_retries: _,
+            llm_client_override: _,
+            agent_llm_client_override: _,
+            agent_llm_client_decorator: _,
+            provider_params: _,
+            call_timeout_override: _,
+            // NOT RESTRICTING: tools and stores the build adds or swaps in.
+            // `external_tools` is composed WITH the factory's tools: it adds
+            // callback tools and takes none away.
+            external_tools: _,
+            mcp_servers: _,
+            refused_mcp_servers: _,
+            recoverable_tool_defs: _,
+            blob_store_override: _,
+            #[cfg(not(target_arch = "wasm32"))]
+                detached_job_store_override: _,
+            #[cfg(not(target_arch = "wasm32"))]
+                shell_job_delivery_projector_override: _,
+            image_generation_machine_override: _,
+            image_generation_executor_override: _,
+            web_search_executor_override: _,
+            schedule_tools: _,
+            workgraph_tools: _,
+            workgraph_namespace_grant: _,
+            // `host_tools` is one more part composed BESIDE the build's
+            // tools, whatever the base is: it adds and takes none away.
+            host_tools: _,
+            mob_tool_authority_context: _,
+            mob_tools: _,
+            session_store_override: _,
+            skill_engine_override: _,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+                mcp_auth_resolver: _,
+            // NOT RESTRICTING: identity, placement, prompt and lifecycle.
+            keep_alive: _,
+            comms_name: _,
+            peer_meta: _,
+            resume_session: _,
+            resume_session_intent: _,
+            event_tx: _,
+            preload_skills: _,
+            realm_id: _,
+            instance_id: _,
+            backend: _,
+            config_generation: _,
+            silent_comms_intents: _,
+            max_inline_peer_notifications: _,
+            app_context: _,
+            fork_source: _,
+            prompt_context_fork_source: _,
+            additional_instructions: _,
+            wait_for_mcp: _,
+            shell_env: _,
+            shell_timeout_secs: _,
+            checkpointer: _,
+            resume_override_mask: _,
+            runtime_build_mode: _,
+            initial_metadata_entries: _,
+            session_comms_runtime_override: _,
+            prepared_controller: _,
+            host_prompt_sections: _,
+        } = build;
+        mob_member_binding.is_none()
+            && mob_incarnation.is_none()
+            && as_the_factory(*override_builtins, self.enable_builtins)
+            && as_the_factory(*override_shell, self.enable_shell)
+            && as_the_factory(*override_memory, self.enable_memory)
+            && as_the_factory(*override_schedule, self.enable_schedule)
+            && as_the_factory(*override_workgraph, self.enable_workgraph)
+            && as_the_factory(*override_mob, self.enable_mob)
+            && as_the_factory(*override_comms, self.enable_comms)
+            && unset(*override_image_generation)
+            && unset(*override_web_search)
+            && tool_access_policy.is_none()
+            && declared_tool_restriction
+                .as_ref()
+                .is_none_or(meerkat_core::ops::DeclaredToolRestriction::is_unrestricted)
+            && tool_dispatch_admission.is_none()
+            && grant_gated_tools.is_none()
+            && grant_gated_tools_where_mounted.is_none()
+            && *application_tool_policy == meerkat_core::ApplicationToolPolicyBinding::Unmanaged
+            && tool_consequence_policy_registry.is_none()
+            && initial_tool_filter
+                .as_ref()
+                .is_none_or(|filter| *filter == meerkat_core::ToolFilter::All)
+            && initial_tool_visibility_state.is_none()
+            && tool_dispatcher_override.is_none()
+            && *hooks_override == HookRunOverrides::default()
+            && hook_engine_override.is_none()
+            && budget_limits
+                .as_ref()
+                .is_none_or(|limits| *limits == config.budget_limits())
+    }
+
+    /// Whether the credential binding a build runs on is one this host
+    /// selects by default, so that it is no bound a session the host
+    /// creates would not be under: the build names none, or names one
+    /// the default resolution would select for `provider` with none
+    /// named (the selection of each realm of the build's chain, then the
+    /// environment default). Any other binding is the session's own. The
+    /// comparison is with what this host would select, not with
+    /// "none": a build records the binding its resolution selected, and
+    /// a session rebuilt from storage is built on the recorded one. A
+    /// resolution that fails answers no.
+    fn binding_is_the_hosts_default(
+        build: &AgentBuildConfig,
+        config: &Config,
+        provider: Provider,
+    ) -> bool {
+        let Some(binding) = build.auth_binding.as_ref() else {
+            return true;
+        };
+        Self::resolve_realm_binding_candidates_for_provider(
+            config,
+            provider,
+            None,
+            build.realm_id.as_ref(),
+        )
+        .is_ok_and(|selected| {
+            selected
+                .iter()
+                .any(|target| target.auth_binding == *binding)
+        })
+    }
+
+    /// Whether a build may mount the mob tools: its mob family is not
+    /// switched off and it carries a generated mob authority context. The
+    /// tools are mounted when the build or the factory also supplies them.
+    fn build_has_mob_authority(build: &AgentBuildConfig) -> bool {
+        !matches!(build.override_mob, ToolCategoryOverride::Disable)
+            && build.mob_tool_authority_context.as_ref().is_some_and(
+                meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
+            )
+    }
+
     async fn assemble_agent(
         &self,
         mut build_config: AgentBuildConfig,
@@ -8740,6 +8971,9 @@ impl AgentFactory {
         // the resumed binding is settled against the registry's provider below.
         let caller_auth_binding = build_config.auth_binding.clone();
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        // Classified here: after the resumed session's stored tooling is in
+        // the build, before anything below takes a field out of it.
+        let factorys_default_build = self.build_is_the_factorys_default(&build_config, config);
         // The build's scoped tool grant gate. The session's metadata records
         // the category overrides the caller asked for, before the gate mounts
         // its gated families as if enabled. A mob member's build carries the
@@ -9054,6 +9288,11 @@ impl AgentFactory {
         } else {
             None
         };
+        // The binding is classified here: the provider is settled and a
+        // resumed build's binding is seated, before the credential
+        // resolution writes the binding it selects into the build.
+        let factorys_default_build = factorys_default_build
+            && Self::binding_is_the_hosts_default(&build_config, config, provider);
         if let Some(client) = build_config.llm_client_override.as_ref() {
             let claimed_provider = client.provider();
             if !matches!(claimed_provider, Provider::Other) && claimed_provider != provider {
@@ -10409,6 +10648,11 @@ impl AgentFactory {
             // must be applied at creation or a gated agent could schedule a
             // helper that escapes its own containment.
             let creator_tool_access_policy = build_config.tool_access_policy.clone();
+            // Whether this build mounts the mob tools (step 9d below
+            // composes them by the same facts): a session that holds them
+            // creates helpers with tools of its own.
+            let mob_tools_held = Self::build_has_mob_authority(&build_config)
+                && (build_config.mob_tools.is_some() || self.mob_tools.is_some());
             let schedule_dispatcher = match build_config.mob_member_binding.clone() {
                 Some(binding) => Arc::new(
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
@@ -10418,14 +10662,18 @@ impl AgentFactory {
                             crate::surface::MobMemberCurrentSessionScheduleResolver::new(binding),
                         ),
                     )
-                    .with_creator_tool_access_policy(creator_tool_access_policy),
+                    .with_creator_tool_access_policy(creator_tool_access_policy)
+                    .with_host_default_build(factorys_default_build)
+                    .with_mob_tools_held(mob_tools_held),
                 ) as Arc<dyn AgentToolDispatcher>,
                 None => Arc::new(
                     meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
                         schedule_dispatcher,
                         session.id().clone(),
                     )
-                    .with_creator_tool_access_policy(creator_tool_access_policy),
+                    .with_creator_tool_access_policy(creator_tool_access_policy)
+                    .with_host_default_build(factorys_default_build)
+                    .with_mob_tools_held(mob_tools_held),
                 ) as Arc<dyn AgentToolDispatcher>,
             };
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -10539,13 +10787,7 @@ impl AgentFactory {
         // generated authority context (an embedder can set both directly):
         // the mob operator dispatchers in its external tools were bound to no
         // authority above, so they hide and deny, and this surface agrees.
-        let effective_mob = !matches!(build_config.override_mob, ToolCategoryOverride::Disable)
-            && build_config
-                .mob_tool_authority_context
-                .as_ref()
-                .is_some_and(
-                    meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
-                );
+        let effective_mob = Self::build_has_mob_authority(&build_config);
         let mob_factory = build_config
             .mob_tools
             .take()
@@ -27382,6 +27624,201 @@ mod tests {
         assert_eq!(
             compaction.auto_compact_threshold, 9_000,
             "per-build override must beat the explicit config knob and model-aware scaling"
+        );
+    }
+
+    /// Which builds are the factory's default build: the one with nothing
+    /// set, and one whose tool family switch says what the factory's own
+    /// says. Each kind of restriction makes a build not the default one: a
+    /// member binding, a family switched against the factory's, a tool
+    /// access policy, a declared restriction, a grant gate, an application
+    /// tool policy, a tool filter, a replaced dispatcher, per-run hooks, a
+    /// budget of its own. A budget that is the configuration's own is the
+    /// default. The binding is read apart
+    /// (`a_binding_the_host_selects_by_default_is_not_the_sessions_own`).
+    #[test]
+    fn a_build_under_any_restriction_is_not_the_factorys_default_build() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hidden = || {
+            meerkat_core::types::ToolNameSet(
+                [meerkat_core::types::ToolName::new("datetime")]
+                    .into_iter()
+                    .collect(),
+            )
+        };
+        let build = |change: &dyn Fn(&mut AgentBuildConfig)| {
+            let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+            change(&mut build);
+            build
+        };
+
+        // A factory with the built-in tools and the shell on, as the RPC
+        // host, the MCP server, the member host and a gateway build theirs.
+        let on = AgentFactory::new(temp.path().join("on"))
+            .builtins(true)
+            .shell(true)
+            .schedule(true);
+        let config = Config::default();
+        assert!(on.build_is_the_factorys_default(&build(&|_| {}), &config));
+        assert!(
+            on.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.override_shell = ToolCategoryOverride::Enable;
+                }),
+                &config
+            ),
+            "a switch that says what the factory's says is the default"
+        );
+        assert!(
+            on.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.budget_limits = Some(Config::default().budget_limits());
+                }),
+                &config
+            ),
+            "the configuration's own budget is the default"
+        );
+        let restricted: [(&str, &dyn Fn(&mut AgentBuildConfig)); 13] = [
+            ("a member binding", &|build| {
+                build.mob_member_binding = Some(meerkat_core::MobMemberBinding {
+                    mob_id: "desk".to_string(),
+                    role: "worker".to_string(),
+                    member: "anna".to_string(),
+                });
+            }),
+            ("the shell switched off", &|build| {
+                build.override_shell = ToolCategoryOverride::Disable;
+            }),
+            ("the built-in tools switched off", &|build| {
+                build.override_builtins = ToolCategoryOverride::Disable;
+            }),
+            ("the schedule tools switched off", &|build| {
+                build.override_schedule = ToolCategoryOverride::Disable;
+            }),
+            ("the mob tools switched on", &|build| {
+                build.override_mob = ToolCategoryOverride::Enable;
+            }),
+            ("a tool access policy", &|build| {
+                build.tool_access_policy =
+                    Some(meerkat_core::ops::ToolAccessPolicy::DenyList(hidden()));
+            }),
+            ("a grant gate", &|build| {
+                build.grant_gated_tools =
+                    Some(meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"));
+            }),
+            ("a grant gate where mounted", &|build| {
+                build.grant_gated_tools_where_mounted =
+                    Some(meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"));
+            }),
+            ("an application tool policy", &|build| {
+                build.application_tool_policy = meerkat_core::ApplicationToolPolicyBinding::Inherit;
+            }),
+            ("a tool filter", &|build| {
+                build.initial_tool_filter = Some(meerkat_core::ToolFilter::Deny(hidden()));
+            }),
+            ("a replaced tool dispatcher", &|build| {
+                build.tool_dispatcher_override = Some(Arc::new(
+                    meerkat_core::DynamicToolComposite::new(Vec::new()),
+                ));
+            }),
+            ("per-run hooks", &|build| {
+                build.hooks_override.disable = vec![meerkat_core::HookId::new("guard")];
+            }),
+            ("a budget of its own", &|build| {
+                build.budget_limits =
+                    Some(meerkat_core::BudgetLimits::unlimited().with_max_tokens(100));
+            }),
+        ];
+        for (kind, change) in restricted {
+            assert!(
+                !on.build_is_the_factorys_default(&build(change), &config),
+                "a build with {kind} is not the default build"
+            );
+        }
+
+        // A factory whose own shell is off, as the REST host and the CLI
+        // build theirs unless their configuration turns it on: a session
+        // created with the shell off is built as the host builds one.
+        let off = AgentFactory::new(temp.path().join("off")).schedule(true);
+        assert!(
+            off.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.override_shell = ToolCategoryOverride::Disable;
+                    build.override_builtins = ToolCategoryOverride::Disable;
+                }),
+                &config
+            ),
+            "switched off where the factory's own is off"
+        );
+        assert!(
+            !off.build_is_the_factorys_default(
+                &build(&|build| {
+                    build.override_shell = ToolCategoryOverride::Enable;
+                }),
+                &config
+            ),
+            "switched on where the factory's own is off"
+        );
+    }
+
+    /// Which bindings are the host's own selection: none named, and the
+    /// binding the default resolution selects for the provider in the
+    /// build's realm. A second binding of that realm, the default binding
+    /// of a realm that is not on the build's chain, and that same binding
+    /// for another provider are the session's own.
+    #[test]
+    fn a_binding_the_host_selects_by_default_is_not_the_sessions_own() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.desk]
+default_binding = "main"
+
+[realm.desk.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.desk.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "SCHEDULE_ROW_KEY_NOT_SET" }
+
+[realm.desk.binding.main]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+
+[realm.desk.binding.second]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+"#,
+        )
+        .expect("the row's configuration parses");
+        let desk = || RealmId::parse("desk").expect("realm id");
+        let build = |realm: Option<RealmId>, binding: Option<&str>| {
+            let mut build = AgentBuildConfig::new("gpt-5.4");
+            build.realm_id = realm;
+            build.auth_binding = binding.map(|binding| configured_auth_binding("desk", binding));
+            build
+        };
+        let is_default = |build: &AgentBuildConfig, provider: Provider| {
+            AgentFactory::binding_is_the_hosts_default(build, &config, provider)
+        };
+        assert!(is_default(&build(Some(desk()), None), Provider::OpenAI));
+        assert!(is_default(&build(None, None), Provider::OpenAI));
+        assert!(
+            is_default(&build(Some(desk()), Some("main")), Provider::OpenAI),
+            "the binding the realm selects by default"
+        );
+        assert!(
+            !is_default(&build(Some(desk()), Some("second")), Provider::OpenAI),
+            "a second binding of the realm is the session's own"
+        );
+        assert!(
+            !is_default(&build(None, Some("main")), Provider::OpenAI),
+            "the default of a realm that is not on the build's chain"
+        );
+        assert!(
+            !is_default(&build(Some(desk()), Some("main")), Provider::Anthropic),
+            "a binding the host would not select for this provider"
         );
     }
 

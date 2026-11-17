@@ -1539,7 +1539,15 @@ every live source that names it, through the gateway's schedule service,
 first at the declaration and then every `every_seconds` (60 to 2,592,000).
 A changed cadence restarts the interval at the change. Each schedule Meta
 makes for a runner is labelled `mob_announcements.source_runner`, and Meta
-never changes or ends a schedule without that label. `sources/put` refuses a
+never changes or ends a schedule without that label. The label is the
+gateway's: an agent's schedule tools refuse a create or an update that
+carries it, and neither list nor change a schedule that carries it. At each
+start the gateway keeps the runner schedules it made, resumes one that is
+paused, sets its timing back to the source's, and deletes any other schedule
+that carries the label. A runner schedule made by an earlier version is
+rebuilt at the first start after an upgrade: the collector of every live
+source that names a runner runs once at that start and then at its interval.
+`sources/put` refuses a
 runner that names a blank runnable or the memory steward's (`-32602`).
 A runner on a gateway that schedules none, such as the console gateway or
 one without a schedule service, never fires there: such a source collects

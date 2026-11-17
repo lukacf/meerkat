@@ -13,6 +13,7 @@ use meerkat::surface::{
 use meerkat::{
     DeliveryDispatch, ExistingDelivery, ExistingDeliveryAnswer, IdentityTargetBinding,
     MobTargetBinding, Occurrence, ScheduleDeliveryIdentity, ScheduleDomainError,
+    ScheduleWriteJudge, ScheduleWriteVerdict, SessionTargetBinding, TargetBinding,
     TargetProbeOutcome,
 };
 use meerkat_core::types::SessionId;
@@ -209,6 +210,126 @@ impl SurfaceScheduleMobHost for HostObservationScheduleMobHost {
     }
 }
 
+/// The member host's judge of the schedule writes its sessions' turns make
+/// ([`ScheduleWriteJudge`]), over the host actor's residency projection.
+///
+/// A member host holds no wiring fact: a mob's wiring lives with its
+/// controlling host. So the only member a schedule written here may name is
+/// the member its writer is resident as: by that member's stable
+/// `mob_member:` identity, by a member target, or by the writer's own
+/// session. A schedule that names any other member (resident here or not,
+/// of the writer's mob or of another, or a name no member holds) is out of
+/// reach, with one answer for all of them. So is a schedule for another
+/// session when a resident member writes it or a resident member holds that
+/// session. A target that has a host act in a mob (a helper to spawn, a
+/// flow) is accepted for a resident member's own mob only; this host runs
+/// none of them. A host runnable, a session created on demand and an
+/// identity that names no mob member are no member's matter and are not
+/// judged here.
+///
+/// The schedule tools are composed before the host actor exists, so the
+/// judge starts unbound: until [`Self::bind_residents`] hands it the
+/// actor's projection, a session's write is unavailable, never taken.
+#[derive(Default)]
+pub struct HostResidentScheduleWriteJudge {
+    residents: std::sync::OnceLock<watch::Receiver<HostObservationProjection>>,
+}
+
+impl HostResidentScheduleWriteJudge {
+    /// A judge that does not know the residents yet.
+    #[must_use]
+    pub fn unbound() -> Self {
+        Self::default()
+    }
+
+    /// The host actor's residency projection. The first binding stands.
+    pub fn bind_residents(&self, residents: watch::Receiver<HostObservationProjection>) {
+        let _ = self.residents.set(residents);
+    }
+
+    fn judge(&self, writer_session: &SessionId, target: &TargetBinding) -> ScheduleWriteVerdict {
+        use ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        let Some(residents) = self.residents.get() else {
+            return Unavailable;
+        };
+        let projection = residents.borrow();
+        let writer_key = writer_session.to_string();
+        // The member the writer's session is resident as, if it is one.
+        let writer = match projection.sessions.get(&writer_key) {
+            Some(facts) if validate_projection_row(&writer_key, facts).is_err() => {
+                return Unavailable;
+            }
+            Some(facts) => Some((facts.mob_id.as_str(), facts.agent_identity.as_str())),
+            None => None,
+        };
+        let only_itself = |mob_id: &str, member: &str| {
+            if writer == Some((mob_id, member)) {
+                Accepted
+            } else {
+                OutOfReach
+            }
+        };
+        match target {
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => only_itself(&named.mob_id, &named.member),
+                    None => Accepted,
+                }
+            }
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => only_itself(mob_id.as_str(), member_id.as_str()),
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => only_itself(mob_id.as_str(), source_member_id.as_str()),
+                MobTargetBinding::SpawnHelper { mob_id, .. }
+                | MobTargetBinding::Flow { mob_id, .. } => match writer {
+                    Some((own_mob, _)) if own_mob != mob_id.as_str() => OutOfReach,
+                    _ => Accepted,
+                },
+            },
+            TargetBinding::Session(binding) => {
+                let session_id = match binding.as_ref() {
+                    SessionTargetBinding::ExactSession { session_id, .. }
+                    | SessionTargetBinding::ResumableSession { session_id, .. } => session_id,
+                    SessionTargetBinding::MaterializeOnDemandSession {
+                        bound_session_id: Some(session_id),
+                        ..
+                    } => session_id,
+                    SessionTargetBinding::MaterializeOnDemandSession {
+                        bound_session_id: None,
+                        ..
+                    } => return Accepted,
+                };
+                if session_id == writer_session {
+                    Accepted
+                } else if writer.is_some()
+                    || projection.sessions.contains_key(&session_id.to_string())
+                {
+                    OutOfReach
+                } else {
+                    Accepted
+                }
+            }
+            TargetBinding::HostRunnable(_) => Accepted,
+        }
+    }
+}
+
+#[async_trait]
+impl ScheduleWriteJudge for HostResidentScheduleWriteJudge {
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &SessionId,
+        target: &TargetBinding,
+    ) -> ScheduleWriteVerdict {
+        self.judge(writer_session, target)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -226,6 +347,113 @@ mod tests {
     use crate::runtime::host_observation::SessionObservationFacts;
 
     const UNSUPPORTED_DETAIL: &str = "ordinary mob targets are controller-host only";
+
+    fn mob_target(target: serde_json::Value) -> meerkat::TargetBinding {
+        serde_json::from_value(target).expect("the target decodes")
+    }
+
+    /// The member host's judge takes a member target for the member its
+    /// writer is resident as only, and a target that has a host act in a mob
+    /// for a resident member's own mob only. A session that is no resident
+    /// member names no member. Before the residents are bound, and for a
+    /// writer whose row does not match its incarnation, the answer is
+    /// unavailable.
+    #[tokio::test]
+    async fn the_resident_judge_takes_a_mob_target_for_the_writer_itself_only() {
+        use meerkat::ScheduleWriteJudge as _;
+        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+
+        let (anna, boris, visitor) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let member = |mob: &str, member: &str| {
+            mob_target(serde_json::json!({
+                "target_kind": "mob",
+                "type": "member",
+                "mob_id": mob,
+                "member_id": member,
+                "action": { "type": "send", "content": "A scheduled note." },
+            }))
+        };
+        let flow = |mob: &str| {
+            mob_target(serde_json::json!({
+                "target_kind": "mob",
+                "type": "flow",
+                "mob_id": mob,
+                "flow_id": "daily",
+                "params": {},
+            }))
+        };
+        let helper = |mob: &str| {
+            mob_target(serde_json::json!({
+                "target_kind": "mob",
+                "type": "spawn_helper",
+                "mob_id": mob,
+                "member_id": "scheduled-helper",
+                "prompt": "Look at the queue.",
+            }))
+        };
+
+        let judge = super::HostResidentScheduleWriteJudge::unbound();
+        assert_eq!(
+            judge
+                .judge_schedule_write(&anna, &member("desk", "anna"))
+                .await,
+            Unavailable,
+            "who is resident is not known yet"
+        );
+        let (_projection_tx, projection_rx) = watch::channel(HostObservationProjection {
+            sessions: BTreeMap::from([
+                (anna.to_string(), observation_row(&anna, "desk", "anna")),
+                (boris.to_string(), observation_row(&boris, "desk", "boris")),
+            ]),
+        });
+        judge.bind_residents(projection_rx);
+        for (target, verdict, case) in [
+            (member("desk", "anna"), Accepted, "itself"),
+            (member("desk", "boris"), OutOfReach, "another resident"),
+            (
+                member("yard", "anna"),
+                OutOfReach,
+                "its name in another mob",
+            ),
+            (
+                member("desk", "nobody"),
+                OutOfReach,
+                "a name no member holds",
+            ),
+            (flow("desk"), Accepted, "a flow of its own mob"),
+            (flow("yard"), OutOfReach, "a flow of another mob"),
+            (helper("desk"), Accepted, "a helper in its own mob"),
+            (helper("yard"), OutOfReach, "a helper in another mob"),
+        ] {
+            assert_eq!(
+                judge.judge_schedule_write(&anna, &target).await,
+                verdict,
+                "a resident member's schedule for {case}"
+            );
+        }
+        assert_eq!(
+            judge
+                .judge_schedule_write(&visitor, &member("desk", "anna"))
+                .await,
+            OutOfReach,
+            "a session that is no resident member names no member"
+        );
+
+        let mut unmatched = observation_row(&anna, "desk", "anna");
+        unmatched.generation += 1;
+        let judge = super::HostResidentScheduleWriteJudge::unbound();
+        let (_projection_tx, projection_rx) = watch::channel(HostObservationProjection {
+            sessions: BTreeMap::from([(anna.to_string(), unmatched)]),
+        });
+        judge.bind_residents(projection_rx);
+        assert_eq!(
+            judge
+                .judge_schedule_write(&anna, &member("desk", "anna"))
+                .await,
+            Unavailable,
+            "a writer whose row does not match its incarnation is not read as resident"
+        );
+    }
 
     fn identity_binding(mob_id: &str, member: &str) -> IdentityTargetBinding {
         let identity = mob_member_schedule_identity(&MobMemberBinding {

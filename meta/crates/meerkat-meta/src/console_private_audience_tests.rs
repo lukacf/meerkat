@@ -3759,9 +3759,10 @@ fn schedule_answer(answer: &Result<String, meerkat_core::ToolError>, schedule_id
 }
 
 /// An agent's schedule tools refuse a target that names a member private to
-/// a person the agent does not act for, as an act on a member outside the
-/// agent's reach (`access_denied`), in every target form that names one: the
-/// member, a fork helper of it, and its session. A shared target stays open.
+/// a person the agent does not act for, as every target out of the agent's
+/// reach is refused (`schedule_target_not_a_peer`), in every target form
+/// that names one: the member, a fork helper of it, and its session. A
+/// shared target stays open.
 #[tokio::test]
 async fn schedule_tools_refuse_a_private_target_outside_the_callers_reach() -> TestResult {
     const MOB: &str = "private-schedule-targets";
@@ -3803,7 +3804,11 @@ async fn schedule_tools_refuse_a_private_target_outside_the_callers_reach() -> T
         )
         .await;
         assert!(
-            matches!(&refused, Err(meerkat_core::ToolError::AccessDenied { .. })),
+            matches!(
+                &refused,
+                Err(meerkat_core::ToolError::PolicyDenied { denial })
+                    if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+            ),
             "a shared agent's schedule into a private member as {target} is refused as an \
              act outside its reach: {refused:?}"
         );
@@ -4479,7 +4484,11 @@ async fn an_injected_schedule_stores_tools_hide_a_private_members_schedule() -> 
     )
     .await;
     assert!(
-        matches!(&refused, Err(meerkat_core::ToolError::AccessDenied { .. })),
+        matches!(
+            &refused,
+            Err(meerkat_core::ToolError::PolicyDenied { denial })
+                if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+        ),
         "the shared agent's schedule into the private member is refused: {refused:?}"
     );
     Ok(())

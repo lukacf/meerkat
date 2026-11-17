@@ -31,6 +31,12 @@ const MAKE: &str = "MAKE-THE-SCHEDULE-6R";
 /// The schedule's prompt: the text of the member that made it.
 const MARKER: &str = "PRIVATE-NOTE-6R-keep-this-between-us";
 const SCHEDULE_CREATE: &str = "meerkat_schedule_create";
+/// A turn whose prompt holds this word makes a schedule whose target is a
+/// session created on demand.
+const MAKE_FRESH: &str = "MAKE-A-FRESH-SESSION-SCHEDULE-6R";
+/// The prompt of the schedule [`MAKE_FRESH`] makes: the first user text of
+/// the session its fire creates.
+const FRESH_MARKER: &str = "FRESH-SESSION-NOTE-6R";
 const SCHEDULE_LIST: &str = "meerkat_schedule_list";
 const SCHEDULE_GET: &str = "meerkat_schedule_get";
 /// The model of the profile whose members have the schedule and mob tools.
@@ -81,6 +87,8 @@ struct SeenRequest {
     last_user_text: String,
     all_messages: String,
     tool_results: String,
+    /// The names of the tools the request offers, sorted.
+    tools: Vec<String>,
 }
 
 #[derive(Default)]
@@ -138,10 +146,17 @@ impl LlmClient for ScriptedClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let last = last_user_text(request);
         let results = results_this_turn(request);
+        let mut tools: Vec<String> = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        tools.sort();
         self.seen.0.lock().unwrap().push(SeenRequest {
             last_user_text: last.clone(),
             all_messages: format!("{:?}", request.messages),
             tool_results: results.join(" | "),
+            tools,
         });
         let usage = LlmEvent::UsageUpdate {
             usage: meerkat_core::TurnUsage::host_declared(
@@ -255,6 +270,27 @@ impl LlmClient for ScriptedClient {
                 })
             };
             call("fork-a-child", FORK_OFF, args)
+        } else if first && last.contains(MAKE_FRESH) && holds(SCHEDULE_CREATE) {
+            call(
+                "make-fresh-schedule",
+                SCHEDULE_CREATE,
+                json!({
+                    "name": "a fresh session",
+                    "trigger": {
+                        "type": "interval",
+                        "start_at_utc": chrono::Utc::now().to_rfc3339(),
+                        "every_seconds": 2
+                    },
+                    "target": {
+                        "target_kind": "session",
+                        "type": "materialize_on_demand_session",
+                        "create": { "model": PLANNER_MODEL },
+                        "action": { "type": "prompt", "prompt": FRESH_MARKER }
+                    },
+                    "missing_target_policy": "mark_misfired",
+                    "planning_horizon_occurrences": 1
+                }),
+            )
         } else if first && last.contains(MAKE) && holds(SCHEDULE_CREATE) {
             let every = word(&last, "every=").parse::<u64>().unwrap_or(2);
             call(
@@ -328,6 +364,18 @@ async fn boot(label: &str) -> Launch {
 /// [`boot`]; with `stored_mob` the mob's journal is kept in a SQLite store,
 /// so that a read of it answers what the store holds.
 async fn boot_on(label: &str, stored_mob: bool) -> Launch {
+    boot_as(label, stored_mob, None).await
+}
+
+/// [`boot_on`]; with `gateway` the agent factory has the switches the
+/// gateway binary gives its own (`bin/meta_gateway.rs`: built-in tools,
+/// shell, mob, comms and memory on, the schedule tools not set), and the
+/// scripted model is the builder's default, so that a session a schedule's
+/// fire creates, which no mob builds, runs on it too. Its value is the
+/// host's configuration key `[tools] agent_schedules_may_create_sessions`:
+/// `false` is the stock configuration.
+async fn boot_as(label: &str, stored_mob: bool, gateway: Option<bool>) -> Launch {
+    let gateway_switches = gateway.is_some();
     use crate::mob_composition_manifest::CompositionAuthority;
 
     let authority = CompositionAuthority::Authoritative;
@@ -357,10 +405,28 @@ async fn boot_on(label: &str, stored_mob: bool) -> Launch {
 
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
-    let mut builder = meerkat::FactoryAgentBuilder::new(
-        meerkat::AgentFactory::new(stores.path()).comms(true),
-        meerkat::Config::default(),
-    );
+    let seen = Arc::new(Seen::default());
+    let factory = if gateway_switches {
+        meerkat::AgentFactory::new(stores.path())
+            .session_store(session_store.clone())
+            .runtime_root(stores.path())
+            .project_root(stores.path())
+            .builtins(true)
+            .shell(true)
+            .mob(true)
+            .comms(true)
+            .memory(true)
+    } else {
+        meerkat::AgentFactory::new(stores.path()).comms(true)
+    };
+    let mut config = meerkat::Config::default();
+    config.tools.agent_schedules_may_create_sessions = gateway.unwrap_or(false);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    if gateway_switches {
+        builder.default_llm_client = Some(Arc::new(ScriptedClient {
+            seen: Arc::clone(&seen),
+        }));
+    }
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(
         session_store.clone(),
     )));
@@ -437,10 +503,18 @@ external_addressable = true
 
 [profiles.worker.tools]
 comms = true
+
+[profiles.clerk]
+model = "{PLANNER_MODEL}"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.clerk.tools]
+comms = true
+schedule = true
 "#
     ))
     .expect("definition");
-    let seen = Arc::new(Seen::default());
     let spec =
         crate::mob_handle_runtime::MobBootstrapSpec::new(definition, mob_storage, sessions.clone())
             .with_session_runtime_adapter(Arc::clone(&machine))
@@ -811,6 +885,270 @@ impl Launch {
         }
         self.entry(name).await
     }
+}
+
+/// OBSERVATION of what a session created by a schedule's fire is offered, on
+/// a launch whose agent factory has the gateway binary's switches and the
+/// stock configuration. A member whose profile switches on comms (which
+/// every mob member needs) and the schedule tools, and nothing else, writes
+/// a schedule whose target is a session created on demand: refused, nothing
+/// stored. The host's own schedule of the same form fires as before, and the
+/// session the fire creates is offered its own tool list, which the row
+/// prints beside the member's: the shell and the file tools the member is
+/// not offered, and no schedule tool. The row makes no tool call but the
+/// member's refused write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fired_on_demand_sessions_tool_list_is_the_hosts_not_the_writers() {
+    let launch = boot_as("fresh", false, Some(false)).await;
+    launch.shared("clerk", "clerk").await;
+    let before = launch.seen.all().len();
+    launch.turn("clerk", &format!("{MAKE_FRESH} please")).await;
+    let writer = launch
+        .seen
+        .all()
+        .into_iter()
+        .skip(before)
+        .find(|request| request.last_user_text.contains(MAKE_FRESH))
+        .expect("the member's model request");
+    let refusal = launch
+        .seen
+        .all()
+        .into_iter()
+        .skip(before)
+        .map(|request| request.tool_results)
+        .find(|results| results.contains("make-fresh-schedule"))
+        .unwrap_or_default();
+    launch.expect(
+        refusal.contains("schedule_session_creation_not_allowed")
+            || refusal.contains("cannot create a session"),
+        format!("the member's write is refused as a schedule that creates a session: {refusal}"),
+    );
+    launch.expect(
+        launch.schedule_ids().await.is_empty(),
+        "nothing is stored for the member's write",
+    );
+
+    // The host's own schedule of that form: stored, and it fires as before.
+    let hosts: meerkat::CreateScheduleRequest = serde_json::from_value(json!({
+        "name": "the host's fresh session",
+        "trigger": {
+            "type": "interval",
+            "start_at_utc": chrono::Utc::now().to_rfc3339(),
+            "every_seconds": 2
+        },
+        "target": {
+            "target_kind": "session",
+            "type": "materialize_on_demand_session",
+            "create": { "model": PLANNER_MODEL },
+            "action": { "type": "prompt", "prompt": FRESH_MARKER }
+        },
+        "missing_target_policy": "mark_misfired",
+        "planning_horizon_occurrences": 1
+    }))
+    .expect("the host's schedule request");
+    let hosts = launch
+        .attached
+        .service
+        .create(hosts)
+        .await
+        .expect("the host's own schedule is stored");
+    // The session the schedule's target names: none until a fire creates
+    // one and binds it.
+    let bound = |schedule: &meerkat::Schedule| {
+        serde_json::to_value(&schedule.target)
+            .ok()
+            .and_then(|target| {
+                target
+                    .get("bound_session_id")
+                    .and_then(|id| id.as_str().map(str::to_owned))
+            })
+    };
+    launch.expect(
+        bound(&hosts).is_none(),
+        "the schedule names no session before its fire",
+    );
+    let writers_session = launch
+        .entry("clerk")
+        .await
+        .and_then(|seat| seat.session)
+        .map(|id| id.to_string());
+    let mut fired = None;
+    for _ in 0..120 {
+        fired = launch
+            .seen
+            .all()
+            .into_iter()
+            .skip(before)
+            .find(|request| request.last_user_text.contains(FRESH_MARKER));
+        if fired.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let mut fired_session = None;
+    for _ in 0..40 {
+        fired_session = launch
+            .attached
+            .service
+            .get(&hosts.schedule_id)
+            .await
+            .ok()
+            .as_ref()
+            .and_then(bound);
+        if fired_session.is_some() || fired.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let occurrences = launch.occurrences(&hosts.schedule_id.to_string()).await;
+    println!(
+        "OBSERVED version={} writer_profile_tools=[comms, schedule] config=Config::default()",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("OBSERVED writer tools: {}", writer.tools.join(", "));
+    match &fired {
+        Some(fired) => {
+            println!("OBSERVED fired session tools: {}", fired.tools.join(", "));
+            let beyond: Vec<&str> = fired
+                .tools
+                .iter()
+                .filter(|tool| !writer.tools.contains(tool))
+                .map(String::as_str)
+                .collect();
+            println!(
+                "OBSERVED fired session tools the writer does not hold: {}",
+                beyond.join(", ")
+            );
+            println!(
+                "OBSERVED fired session: {fired_session:?}, named by the schedule only after \
+                 its fire; the writer's session: {writers_session:?}"
+            );
+        }
+        None => println!("OBSERVED no fire within 30 s; occurrences: {occurrences:?}"),
+    }
+    launch.expect(
+        fired.is_none() || fired_session.is_some(),
+        "the fire binds the session it created to the schedule",
+    );
+    launch.expect(
+        fired_session.is_none() || fired_session != writers_session,
+        format!("the fired session is not the writer's: {fired_session:?} and {writers_session:?}"),
+    );
+    launch.expect(
+        writer.tools.iter().any(|tool| tool == SCHEDULE_CREATE),
+        format!("the member holds the schedule tools: {:?}", writer.tools),
+    );
+    launch.expect(
+        fired.is_some(),
+        format!("the host's schedule fires into a session created on demand: {occurrences:?}"),
+    );
+    if let Some(fired) = &fired {
+        let holds = |tools: &[String], name: &str| tools.iter().any(|tool| tool == name);
+        launch.expect(
+            holds(&fired.tools, "shell") && holds(&fired.tools, "apply_patch"),
+            format!(
+                "the fired session is offered the shell and the file tools: {:?}",
+                fired.tools
+            ),
+        );
+        launch.expect(
+            !holds(&writer.tools, "shell") && !holds(&writer.tools, "apply_patch"),
+            format!(
+                "the member is offered neither the shell nor the file tools: {:?}",
+                writer.tools
+            ),
+        );
+        launch.expect(
+            !fired
+                .tools
+                .iter()
+                .any(|tool| tool.starts_with("meerkat_schedule_")),
+            format!(
+                "the fired session is offered no schedule tool on this launch: {:?}",
+                fired.tools
+            ),
+        );
+    }
+    launch.finish().await;
+}
+
+/// The switches [`boot_as`] gives its agent factory are the gateway
+/// binary's, read from its source: `bin/meta_gateway.rs` builds its agent
+/// factory twice (the persistent launch and the process-local one), each
+/// with the built-in tools, the shell, mob, comms and memory on and the
+/// schedule switch not set. A change of either construction fails here, so
+/// the observation above is not kept for a binary it no longer describes.
+#[test]
+fn the_observed_factory_switches_are_the_gateway_binarys() {
+    let source: String = include_str!("bin/meta_gateway.rs")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let switches = ".builtins(true).shell(true).mob(true).comms(true).memory(true)";
+    assert_eq!(
+        source.matches("letmutfactory=AgentFactory::new(").count(),
+        2,
+        "the gateway binary builds its agent factory twice"
+    );
+    assert_eq!(
+        source.matches(switches).count(),
+        2,
+        "each construction sets exactly these switches: {switches}"
+    );
+    for switch in [".builtins(", ".shell(", ".mob(", ".comms(", ".memory("] {
+        assert_eq!(
+            source.matches(switch).count(),
+            2,
+            "{switch} is set nowhere else in the gateway binary"
+        );
+    }
+    assert_eq!(
+        source.matches(".schedule(").count(),
+        0,
+        "the gateway binary leaves the factory's schedule switch as it is"
+    );
+    let this = include_str!("console_private_member_schedule_end_tests.rs")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    assert!(
+        this.contains(&format!(
+            "meerkat::AgentFactory::new(stores.path()).session_store(session_store.clone())\
+             .runtime_root(stores.path()).project_root(stores.path()){switches}}}else"
+        )),
+        "the row's launch sets the same switches and no other"
+    );
+}
+
+/// On a launch whose configuration allows it by name
+/// (`[tools] agent_schedules_may_create_sessions = true`) the same member's
+/// schedule that creates a session is taken, and it fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_that_allows_it_takes_a_members_schedule_that_creates_a_session() {
+    let launch = boot_as("fresh-allowed", false, Some(true)).await;
+    launch.shared("clerk", "clerk").await;
+    let before = launch.seen.all().len();
+    launch.turn("clerk", &format!("{MAKE_FRESH} please")).await;
+    let schedules = launch.schedule_ids().await;
+    launch.expect(
+        schedules.len() == 1,
+        format!("the member's schedule is stored: {schedules:?}"),
+    );
+    let mut fired = false;
+    for _ in 0..120 {
+        fired = launch
+            .seen
+            .all()
+            .into_iter()
+            .skip(before)
+            .any(|request| request.last_user_text.contains(FRESH_MARKER));
+        if fired {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    launch.expect(fired, "the member's schedule fires");
+    launch.finish().await;
 }
 
 /// The console with sign-in over `launch`, and the first person's side chat

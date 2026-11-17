@@ -2455,6 +2455,34 @@ impl ToolScope {
         self.visibility_owner.visibility_state()
     }
 
+    /// Whether a live layer narrows this scope's tools now: an inherited,
+    /// policy, active or staged filter other than "all", a per-turn overlay,
+    /// or a scoped tool grant gate (a gated name, whether or not a grant
+    /// holds it open now: an open name is still under the gate's bound; a
+    /// gated server; or the mode that gates every server not configured
+    /// ungated).
+    ///
+    /// The capability filter is not counted: it hides what the session's
+    /// model cannot use, which restricts nothing the session was given.
+    /// `None` when the state cannot be read: the answer is then unknown, and
+    /// a reader that needs "nothing narrows" must not take it as that.
+    #[must_use]
+    pub fn narrowed_by_a_live_layer(&self) -> Option<bool> {
+        let visibility = self.visibility_owner.visibility_state().ok()?;
+        let state = self.state.read().ok()?;
+        Some(
+            visibility.inherited_base_filter != ToolFilter::All
+                || visibility.policy_base_filter != ToolFilter::All
+                || visibility.active_filter != ToolFilter::All
+                || visibility.staged_filter != ToolFilter::All
+                || !visibility.tool_grant_gated_names.is_empty()
+                || !visibility.tool_grant_gated_servers.is_empty()
+                || visibility.tool_grant_gates_unconfigured_servers
+                || state.active_turn_allow.is_some()
+                || !state.active_turn_deny.is_empty(),
+        )
+    }
+
     /// Snapshot the generated-authority-approved durable visibility projection.
     pub fn authorized_visibility_state(
         &self,
@@ -5043,6 +5071,72 @@ mod tests {
                 .map(|t| t.name.to_string())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    /// A scope says whether a live layer narrows its tools: nothing does on
+    /// a fresh scope; a per-turn overlay does while it is set; a filter a
+    /// host stages on the session does from the moment it is staged, and
+    /// while it is in force.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn a_scope_says_whether_a_live_layer_narrows_its_tools() {
+        let scope = scope_with_generated_visibility(tools(&["a", "b", "c"]));
+        let handle = scope.handle();
+        assert_eq!(scope.narrowed_by_a_live_layer(), Some(false));
+
+        handle.set_turn_overlay(None, raw_set(&["b"])).unwrap();
+        assert_eq!(
+            scope.narrowed_by_a_live_layer(),
+            Some(true),
+            "a per-turn overlay"
+        );
+        handle.clear_turn_overlay().unwrap();
+        assert_eq!(scope.narrowed_by_a_live_layer(), Some(false));
+
+        handle
+            .stage_external_filter(ToolFilter::Deny(set(&["a"])))
+            .unwrap();
+        assert_eq!(
+            scope.narrowed_by_a_live_layer(),
+            Some(true),
+            "a filter a host staged"
+        );
+        scope
+            .apply_staged(tools(&["a", "b", "c"]))
+            .expect("the staged filter applies");
+        assert_eq!(
+            scope.narrowed_by_a_live_layer(),
+            Some(true),
+            "a filter in force"
+        );
+
+        // A grant gate narrows while a name is closed and while a grant
+        // holds it open: an open name is still under the gate's bound.
+        let gated_scope = scope_with_generated_visibility(tools(&["a", "b", "c"]));
+        assert_eq!(gated_scope.narrowed_by_a_live_layer(), Some(false));
+        gated_scope
+            .replace_tool_grant_gate(crate::tool_grant::InstalledToolGrantGate::names(
+                BTreeSet::from([ToolName::from("b")]),
+            ))
+            .unwrap();
+        assert_eq!(
+            gated_scope.narrowed_by_a_live_layer(),
+            Some(true),
+            "a gated name no grant opened"
+        );
+        gated_scope
+            .apply_tool_grant_open_set(BTreeSet::from(["b".into()]))
+            .unwrap();
+        assert_eq!(
+            gated_scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["a".into(), "b".into(), "c".into()]),
+            "the grant holds the gated name open"
+        );
+        assert_eq!(
+            gated_scope.narrowed_by_a_live_layer(),
+            Some(true),
+            "a gated name a grant holds open"
         );
     }
 

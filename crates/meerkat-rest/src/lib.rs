@@ -828,6 +828,10 @@ impl AppState {
 
         let enable_builtins = config.tools.builtins_enabled;
         let enable_shell = config.tools.shell_enabled;
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
 
         let max_tokens = config.agent.resolved_max_tokens_per_turn();
         let rest_host = Cow::Owned(config.rest.host.clone());
@@ -954,6 +958,8 @@ impl AppState {
         let auth_lease = runtime_adapter.generated_auth_lease_handle();
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
+        #[cfg(feature = "mob")]
+        let mob_schedule_service = schedule_service.clone();
 
         Ok(Self {
             store_path,
@@ -1012,6 +1018,12 @@ impl AppState {
                     state = state.with_controlling_acceptor(acceptor);
                 }
                 let state = state.into_shared();
+                // The members of these mobs hold the schedule tools installed
+                // over the schedule service: their schedule writes are judged
+                // by the mobs' own wiring.
+                mob_schedule_service.attach_write_judge(Arc::new(
+                    meerkat_mob_mcp::MobScheduleWriteJudge::new(&state),
+                ));
                 // fork_off and council outcomes are submitted durably to the
                 // service's delivery owner, which resolves members and
                 // confirms jobs through this state.
@@ -13968,6 +13980,601 @@ mod tests {
             .unwrap();
         assert!(!state.enable_builtins);
         assert!(!state.enable_shell);
+    }
+
+    /// On the REST host a session's schedule whose target is a session
+    /// created on demand is refused unless the dispatch carries the host's
+    /// own statements about that session, which a turn dispatched here
+    /// carries none of: by a create and by an update of one the host wrote.
+    /// Nothing is written for it. The host's own call, of no session's turn,
+    /// writes one as before.
+    #[tokio::test]
+    async fn a_sessions_schedule_that_creates_a_session_is_refused_on_the_rest_host() {
+        use meerkat_core::AgentToolDispatcher as _;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let tools = ScheduleToolDispatcher::new(state.schedule_service.clone());
+        let writer = meerkat_core::ToolDispatchContext::default()
+            .with_runtime_identity(SessionId::new(), None);
+        let fresh = json!({
+            "name": "a fresh session",
+            "trigger": {
+                "type": "once",
+                "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "materialize_on_demand_session",
+                "create": { "model": "gpt-5.4" },
+                "action": { "type": "prompt", "prompt": "Run the report." }
+            }
+        });
+        let raw =
+            |args: &Value| serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let refused_session_creation =
+            |answer: &Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>| {
+                matches!(
+                    answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == "schedule_session_creation_not_allowed"
+                )
+            };
+
+        let args = raw(&fresh);
+        let created = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-sessions-write",
+                    name: "meerkat_schedule_create",
+                    args: &args,
+                },
+                &writer,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&created),
+            "a session's schedule that creates a session is refused: {created:?}"
+        );
+        assert!(
+            state.schedule_service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let hosts = tools
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "the-hosts-write",
+                name: "meerkat_schedule_create",
+                args: &args,
+            })
+            .await
+            .expect("the host's own call writes one");
+        let hosts: Value = serde_json::from_str(&hosts.result.text_content()).unwrap();
+        let stored = state.schedule_service.list().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        let args = raw(&json!({ "schedule_id": hosts["schedule_id"], "name": "renamed" }));
+        let updated = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-sessions-write",
+                    name: "meerkat_schedule_update",
+                    args: &args,
+                },
+                &writer,
+            )
+            .await;
+        assert!(
+            refused_session_creation(&updated),
+            "a session's update of a schedule that creates a session is refused: {updated:?}"
+        );
+        assert_eq!(
+            state.schedule_service.list().await.unwrap(),
+            stored,
+            "the schedule is as it was"
+        );
+    }
+
+    /// A model whose first request calls `meerkat_schedule_create` for a
+    /// schedule whose target is a session created on demand, and whose later
+    /// requests answer text.
+    struct SessionSchedulingLlmClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for SessionSchedulingLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let usage = || {
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_rest_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                })
+            };
+            let events = if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "make-a-fresh-session-schedule".into(),
+                        name: "meerkat_schedule_create".into(),
+                        args: json!({
+                            "name": "a fresh session",
+                            "trigger": {
+                                "type": "once",
+                                "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                            },
+                            "target": {
+                                "target_kind": "session",
+                                "type": "materialize_on_demand_session",
+                                "create": { "model": "gpt-5.4" },
+                                "action": { "type": "prompt", "prompt": "Run the report." }
+                            }
+                        }),
+                        meta: None,
+                    }),
+                    usage(),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    }),
+                    usage(),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    }),
+                ]
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A model that calls the tool its prompt names: a last user message
+    /// holding `CALL <tool> <json arguments>` is answered with that tool
+    /// call, every other request with the text "ok". It keeps no state, so
+    /// it serves a host loaded again over the same directory alike.
+    struct CallScriptLlmClient;
+
+    #[async_trait]
+    impl LlmClient for CallScriptLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let usage = Ok(LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    provider_for_successful_rest_test_model(&request.model),
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            });
+            let asked = match request.messages.last() {
+                Some(meerkat_core::Message::User(user)) => {
+                    let text = user.text_content();
+                    text.find("CALL ").and_then(|at| {
+                        let (name, arguments) = text[at + "CALL ".len()..].split_once(' ')?;
+                        let arguments = serde_json::Deserializer::from_str(arguments)
+                            .into_iter::<Value>()
+                            .next()?
+                            .ok()?;
+                        Some((name.to_string(), arguments))
+                    })
+                }
+                _ => None,
+            };
+            let events = match asked {
+                Some((name, args)) => vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: format!("call_{name}"),
+                        name,
+                        args,
+                        meta: None,
+                    }),
+                    usage,
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ],
+                None => vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "ok".to_string(),
+                        meta: None,
+                    }),
+                    usage,
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    }),
+                ],
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A REST host over `root`, in a realm whose configuration gives the
+    /// reserved `global` realm two OpenAI bindings: `main`, which it selects
+    /// by default, and `second`. The key's source names a variable nothing
+    /// sets: the scripted model resolves no credential.
+    async fn rest_host_with_a_default_binding(root: &std::path::Path) -> AppState {
+        let realm_id = "rest-default-binding-test";
+        let realms_root = root.join("realms");
+        let realm_root = realms_root.join(realm_id);
+        tokio::fs::create_dir_all(&realm_root).await.unwrap();
+        tokio::fs::write(
+            realm_root.join("config.toml"),
+            r#"
+[realm.global]
+default_binding = "main"
+
+[realm.global.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "SCHEDULE_ROW_KEY_NOT_SET" }
+
+[realm.global.binding.main]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+
+[realm.global.binding.second]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+"#,
+        )
+        .await
+        .unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(realms_root);
+        bootstrap.realm.selection = meerkat_core::RealmSelection::Explicit {
+            realm_id: realm_id.to_string(),
+        };
+        bootstrap.context.context_root = Some(root.to_path_buf());
+        bootstrap.context.user_config_root = Some(root.join("user"));
+        let mut state = AppState::load_from_with_bootstrap(
+            root.to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(root),
+        )
+        .await
+        .expect("the host loads");
+        state.llm_client_override = Some(Arc::new(CallScriptLlmClient));
+        state
+    }
+
+    /// One `POST` with a JSON body on `app`: the status and the JSON answer.
+    async fn rest_post(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the route answers")
+        .unwrap();
+        let status = response.status();
+        let answer = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&answer).unwrap_or(Value::Null),
+        )
+    }
+
+    /// A session on the binding the host selects by default stays a default
+    /// writer across a restart of the host. Its first life writes a schedule
+    /// that creates a session; the host is loaded again over the same
+    /// directory, the session is rebuilt from its stored record, which
+    /// carries that binding, and its change of the schedule is taken as
+    /// before. The binding is named in the first request, since a scripted
+    /// model resolves no credential: the stored record is the one a
+    /// credential resolution leaves. A session that names a binding the
+    /// host does not select by default is refused, and nothing is stored.
+    #[tokio::test]
+    async fn a_rest_session_on_the_hosts_default_binding_schedules_a_session_across_a_restart() {
+        let fresh = |name: &str| {
+            format!(
+                "CALL meerkat_schedule_create {}",
+                json!({
+                    "name": name,
+                    "trigger": {
+                        "type": "once",
+                        "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+                    },
+                    "target": {
+                        "target_kind": "session",
+                        "type": "materialize_on_demand_session",
+                        "create": { "model": "gpt-5.4" },
+                        "action": { "type": "prompt", "prompt": "Run the report." }
+                    }
+                })
+            )
+        };
+        let on = |binding: &str| json!({ "realm": "global", "binding": binding });
+
+        let temp = TempDir::new().unwrap();
+        let first = rest_host_with_a_default_binding(temp.path()).await;
+        let schedules = first.schedule_service.clone();
+        let app = router(first.clone());
+        let (status, created) = rest_post(
+            &app,
+            "/sessions",
+            json!({ "prompt": fresh("first life"), "model": "gpt-5.4", "auth_binding": on("main") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let stored = schedules.list().await.unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "a session on the host's default binding schedules a session: {created}"
+        );
+        let session_id = created["session_id"].as_str().expect("the session's id");
+        let schedule_id = stored[0].schedule_id.to_string();
+        drop(app);
+        first.shutdown_schedule_host().await;
+        unregister_runtime_sessions_for_shutdown(&first).await;
+        drop(first);
+
+        let second = rest_host_with_a_default_binding(temp.path()).await;
+        let (status, continued) = rest_post(
+            &router(second.clone()),
+            &format!("/sessions/{session_id}/messages"),
+            json!({
+                "session_id": session_id,
+                "prompt": format!(
+                    "CALL meerkat_schedule_update {}",
+                    json!({ "schedule_id": schedule_id, "name": "after the restart" })
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{continued}");
+        let stored = second.schedule_service.list().await.unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .map(|schedule| schedule.config.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("after the restart")],
+            "the session rebuilt from storage changes its schedule as before"
+        );
+
+        let other = TempDir::new().unwrap();
+        let host = rest_host_with_a_default_binding(other.path()).await;
+        let (status, named) = rest_post(
+            &router(host.clone()),
+            "/sessions",
+            json!({ "prompt": fresh("a binding of its own"), "model": "gpt-5.4", "auth_binding": on("second") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{named}");
+        let stored = host.schedule_service.list().await.unwrap();
+        assert!(
+            stored.is_empty(),
+            "a session that names a binding of its own schedules no session: {stored:?}"
+        );
+    }
+
+    /// Through REST's own door, in process: a host loaded from a realm
+    /// whose configuration is `host_config` takes `POST /sessions` with
+    /// `create` as the request's members beside the prompt, and the
+    /// session's model writes a schedule that creates a session in that
+    /// first turn. Returns the schedules the host holds afterwards, with
+    /// the host's router and the directory it lives in.
+    async fn schedules_after_a_rest_session_schedules_a_session(
+        host_config: &str,
+        create: Value,
+    ) -> (Vec<meerkat::Schedule>, Router, TempDir) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let realm_id = "rest-schedule-door-test";
+        let realms_root = temp.path().join("realms");
+        let realm_root = realms_root.join(realm_id);
+        tokio::fs::create_dir_all(&realm_root).await.unwrap();
+        tokio::fs::write(realm_root.join("config.toml"), host_config)
+            .await
+            .unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(realms_root);
+        bootstrap.realm.selection = meerkat_core::RealmSelection::Explicit {
+            realm_id: realm_id.to_string(),
+        };
+        bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
+        let mut state = AppState::load_from_with_bootstrap(
+            temp.path().to_path_buf(),
+            bootstrap,
+            false,
+            test_credential_store(temp.path()),
+        )
+        .await
+        .expect("the host loads");
+        state.llm_client_override = Some(Arc::new(SessionSchedulingLlmClient {
+            calls: AtomicUsize::new(0),
+        }));
+        let schedules = state.schedule_service.clone();
+
+        let mut body = json!({ "prompt": "Schedule the report." });
+        for (member, value) in create.as_object().unwrap() {
+            body[member] = value.clone();
+        }
+        let app = router(state);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the create route answers")
+        .unwrap();
+        let status = response.status();
+        let answer = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{body}: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        (schedules.list().await.unwrap(), app, temp)
+    }
+
+    /// One request with no body on `app`: the status and the JSON answer.
+    async fn rest_request(app: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    /// Through REST's own door: whether a session's schedule that creates a
+    /// session is taken follows what THIS host's factory builds, not a
+    /// constant. On a stock host (the shell off) a session created with the
+    /// shell off is the host's default build and writes one, as a session
+    /// created with nothing said does. On a host whose configuration turns
+    /// the built-in tools and the shell on, a session created with nothing
+    /// said, or with the shell on, writes one, and a session created with
+    /// the shell off is under a restriction the created session would not
+    /// be under: its schedule is refused and nothing is stored. The same
+    /// request is taken on a host whose configuration allows it by name.
+    /// The host's own `GET /schedules` shows a stored one with its
+    /// on-demand target, and `DELETE /schedules/{id}` ends it.
+    #[tokio::test]
+    async fn a_rest_session_schedules_a_session_when_built_as_this_host_builds_one() {
+        const STOCK: &str = "";
+        const SHELL_ON: &str = "[tools]\nbuiltins_enabled = true\nshell_enabled = true\n";
+        const SHELL_ON_AND_ALLOWED: &str = "[tools]\nbuiltins_enabled = true\nshell_enabled = true\nagent_schedules_may_create_sessions = true\n";
+        for (case, host_config, create, stored) in [
+            ("a stock host, nothing said", STOCK, json!({}), 1),
+            (
+                "a stock host, the shell off as the host has it",
+                STOCK,
+                json!({ "enable_shell": false }),
+                1,
+            ),
+            (
+                "a host with the shell, nothing said",
+                SHELL_ON,
+                json!({}),
+                1,
+            ),
+            (
+                "a host with the shell, the shell on as the host has it",
+                SHELL_ON,
+                json!({ "enable_builtins": true, "enable_shell": true }),
+                1,
+            ),
+            (
+                "a host with the shell, a session without it",
+                SHELL_ON,
+                json!({ "enable_shell": false }),
+                0,
+            ),
+            (
+                "a host with the shell that allows it, a session without it",
+                SHELL_ON_AND_ALLOWED,
+                json!({ "enable_shell": false }),
+                1,
+            ),
+        ] {
+            let (schedules, app, _host_dir) =
+                schedules_after_a_rest_session_schedules_a_session(host_config, create).await;
+            assert_eq!(schedules.len(), stored, "{case}: {schedules:?}");
+            if stored == 1 && host_config == STOCK {
+                // The host's own door: what an operator lists and deletes.
+                let (status, listed) = rest_request(&app, "GET", "/schedules").await;
+                assert_eq!(status, StatusCode::OK, "{case}: {listed}");
+                let row = &listed["schedules"][0];
+                assert_eq!(
+                    row["target"]["type"], "materialize_on_demand_session",
+                    "the field an operator looks for: {listed}"
+                );
+                let id = row["schedule_id"].as_str().expect("the schedule's id");
+                let (status, deleted) =
+                    rest_request(&app, "DELETE", &format!("/schedules/{id}")).await;
+                assert_eq!(status, StatusCode::OK, "{case}: {deleted}");
+                let (_, listed) = rest_request(&app, "GET", "/schedules").await;
+                assert_eq!(
+                    listed["schedules"].as_array().map(Vec::len),
+                    Some(0),
+                    "the deleted schedule is listed no more: {listed}"
+                );
+            }
+        }
     }
 
     fn missing_target_schedule_tool_args() -> Value {

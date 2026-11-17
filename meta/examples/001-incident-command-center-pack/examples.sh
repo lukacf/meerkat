@@ -103,6 +103,12 @@ echo "[incident-pack] building console assets"
 echo "[incident-pack] ensuring example JS deps"
 (cd "$ROOT/examples" && npm install --silent --no-fund --no-audit)
 
+# Build the server once, before the first leg. It embeds the console assets
+# built above, so it is rebuilt after them; done here, the wait for the
+# server of each leg covers its start and not a compile.
+echo "[incident-pack] building the incident example server"
+(cd "$ROOT" && cargo build -p meerkat-meta --example incident_command_center)
+
 echo "[incident-pack] using live model ${RKAT_INCIDENT_MODEL}"
 
 status=0

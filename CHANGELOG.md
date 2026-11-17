@@ -336,8 +336,9 @@ them.
   the process asked for, written in that window, is dropped without an
   error raised; the call that was waiting on the process rejects with
   `PROCESS_EXITED`. A process that keeps running after it closed its input,
-  or whose output can no longer be read, now fails pending and later calls
-  with `PROTOCOL_ERROR` about a second later and is stopped the way
+  or whose output can no longer be read, now fails pending calls, later requests and later event subscriptions
+  with `PROTOCOL_ERROR` about a second later (a later start of a streaming
+  session or turn throws `NOT_CONNECTED`) and is stopped the way
   `close()` stops it; a failed read of its stderr only ends the stderr an
   error message carries. Affected: every release of the TypeScript SDK
   since 0.3.0.
@@ -501,14 +502,17 @@ them.
   methods work for the other servers; a run starts with that server reported
   as a failed MCP server and a warning on stderr; a resumed `rkat-rpc`
   session restores the other servers' attachments and reports only that
-  server's as unavailable. A login addressed to that server, and a run in a
+  server's as unavailable. A login addressed to that server with `rkat mcp login`, and a run in a
   governed realm, are refused with a message naming the server, the field
-  and the variable. The loads of `meerkat-core` that return one list
+  and the variable; a login over the RPC or REST auth methods is refused
+  with `MCP configuration could not be read`, and the names go to the
+  host's log only. One case still fails the whole set: an unresolved file
+  server whose name a realm server also uses. The loads of `meerkat-core` that return one list
   (`McpConfig::load*`, `effective_servers_from_roots*`) keep their
   whole-load error, whose field names the server; the per-server loads
   (`McpConfig::resolve_*`, `UnresolvedMcpServer`) are additive.
 
-- `rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`: a `[confinement]` or `[governance]` table in a project's `.rkat/config.toml` that is not in effect is now reported. These hosts read the two sections from the config documents they compose and, for confinement, from the `--confinement` flags; a project file's table is not read (since 0.9.1, the first release with `[confinement]`), and until now nothing said so. `rkat` prints one `warning:` line per section on stderr at the start of a command that builds an agent, naming the file, the table and where the section is read from: for confinement the user document `~/.rkat/config.toml` and the flags first (on Linux with the `--state-root` that a start confining every launch kind needs when its realm state lies inside a write grant), then the realm's own document. `rkat doctor` prints the same as a `warn config` line and its verdict is unchanged. `rkat-rpc`, `rkat-rest` and `rkat-mcp` log it as a warning at start when they have a `--context-root`. It is reported when the table is present, not empty and not what is in effect, or does not parse as its section; a project file that restates what is in effect is not mentioned. The table is still not read from the project file. The configuration pages say where the section goes and that these hosts read only the hook entries of a project's `.rkat/config.toml`.
+- `rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`: a `[confinement]` or `[governance]` table in a project's `.rkat/config.toml` that is not in effect is now reported. These hosts read the two sections from the config documents they compose and, for confinement, from the `--confinement` flags; a project file's table is not read (since 0.9.1, the first release with `[confinement]`), and until now nothing said so. `rkat` prints one `warning:` line per project file and section on stderr at the start of a command that builds an agent, naming the file, the table and where the section is read from: for confinement the user document `~/.rkat/config.toml` and the flags first (on Linux with the `--state-root` that a start confining every launch kind needs when its realm state lies inside a write grant), then the realm's own document. `rkat doctor` prints the same as a `warn config` line and its verdict is unchanged. `rkat-rpc`, `rkat-rest` and `rkat-mcp` log it as a warning at start when they have a `--context-root`. It is reported when the table is present, not empty and not what is in effect, or does not parse as its section; a project file that restates what is in effect is not mentioned. The table is still not read from the project file. The configuration pages say where the section goes and that these hosts read only the hook entries of a project's `.rkat/config.toml`.
 
 - `rkat`, and every host's first open of a new realm (`meerkat-store`): a command that takes a realm's manifest lock (`rkat realm create`, the first open of a new realm, `rkat realm govern`) now releases it before it returns; before, the lock file could outlive the command, and the next such command in that realm, typically `rkat realm govern` right after `rkat realm create`, failed with `timed out acquiring realm manifest lock` for up to 30 seconds, and the realm was not governed. Affected: 0.9.0, where `realm govern` first shipped, to 0.9.16; this closes 0.9.16's Known limitation on the realm's manifest lock. A process that is killed while it holds the lock still leaves the file; the next command that takes the lock removes it once it is more than 30 seconds old, as before. (The failure was seen in the field on 0.9.15; the release of the lock is shown by tests.)
 
@@ -518,7 +522,10 @@ them.
 
 - `meerkat-core`: one session's fallback or live model switch onto another
   credential no longer takes the credential it leaves away from the host's
-  other sessions (0.7.0 and later): sessions on that sign-in go on, new ones
+  other sessions (by a live model switch since 0.6.0 at the
+  latest: the lines are in the source at 0.6.0 and not at 0.5.2, and were
+  not traced end to end below 0.7.0; by a fallback from a release between
+  0.8.30 and 0.8.51): sessions on that sign-in go on, new ones
   can be started, and a session that runs on, or falls back to, the
   credential another session left is no longer held. A sign-out, or the
   removal of a credential, still withdraws it for every session.

@@ -52,18 +52,24 @@ them.
   A server has no protected resource metadata when every location the
   document is looked for says so: the two well-known URLs at the origin
   root (with and without the server's path) by `404` or `410`, and the one
-  under the server's own endpoint path by `404`, `410`, `401`, `403` or
-  `405` (the endpoint's own guard answers there). Any other answer without
+  under the server's own endpoint path by `404`, `410`, `403`, `405` or a
+  `401` whose challenge names no resource metadata (the endpoint's own
+  guard answers there). Any other answer without
   a document (a server error, a redirect, `401` at the origin root) still
   fails the login, unless another of the candidate locations serves the
   document.
   Every existing check applies unchanged: the `issuer` must be that origin
   (as written, or with one trailing slash), PKCE `S256`, a registration
   endpoint, `https` or loopback endpoints, no redirects. A metadata document
-  is required (no default endpoint paths are assumed), protected resource
-  metadata a server does publish is always the one followed (a defect of it
+  is required (no default endpoint paths are assumed), a document served at
+  one of these locations (the earliest that serves one), or named by the
+  challenge the host passes on, is always the one followed (a defect of it
   still fails the login), and a host-registered client is never discovered
-  this way. A server with neither document is refused with both named. A
+  this way. A document served only behind the endpoint's own guard is not
+  seen. `rkat mcp login` passes the endpoint's own challenge on; the RPC
+  and REST login starts pass none, so a document named only in that
+  challenge is not seen by them. A server with neither document is refused
+  with both named. A
   server of this kind without an OpenID Connect UserInfo endpoint needs
   `--oauth-account-selection unverified`, as before for any such
   authorization server.

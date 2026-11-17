@@ -155,6 +155,43 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
   chain through a missing ancestor fails (a missing parent), and `rkat realm
   delete` and `rkat realm prune` keep a realm another realm names as its
   parent.
+- The MCP server's `meerkat_config` tool also refuses, with
+  `confinement_administration_required`, a `set` or `patch` that adds an
+  entry that launches a process on the host or changes what one runs: an MCP
+  server with a stdio transport, a hook with a command runtime, a skills
+  repository with a stdio or a git transport, or the shell program
+  (`shell.program`). It compares the realm's own document (an entry is
+  unchanged only as the same whole entry) and what the realm composes along
+  its parent chain: a write after which the realm would compose such an
+  entry, or a shell program, that it does not compose now is refused too (a
+  change of the realm's parent edge to a realm that holds one, the removal
+  of an own entry that shadowed a parent's, or, because a realm takes its
+  `[shell]` section whole, a write of another shell key that does not state
+  the parent's program with it). Hooks are compared as a session layers
+  them (the first entry of an id, then the convention files of the server's
+  context root and user root), so a write that takes away an entry that hid
+  a command hook of its id is refused as well. A write whose chain would not
+  compose is refused as an invalid document. Any other removal passes. The
+  host writes such entries in the document itself or through its own writers
+  (`rkat mcp add --scope realm`, JSON-RPC `config/patch`). It refuses in the
+  same way a write after which the realm would compose a looser command
+  policy for the shell tool (`shell.security_mode`,
+  `shell.security_patterns`): under an allow list another mode or a pattern
+  the list does not hold, under a deny list with patterns another mode or a
+  pattern left out. Patterns are compared as exact strings: a restated
+  policy, an allow list with fewer of its patterns and a deny list with more
+  pass. The same refusal covers a write that changes where a credential the
+  host supplies is read from or sent, in the realm's own document or in what
+  the realm composes: an auth profile, a backend or a binding added or
+  changed (`realm.<id>.auth`, `realm.<id>.backend`, `realm.<id>.binding`), a
+  default binding set or changed, a Copilot account (`realm.<id>.copilot`),
+  a connector client (`realm.<id>.connector_client`), a self-hosted server
+  (`self_hosted.servers`), or a self-hosted model added or pointed at
+  another server (`self_hosted.models`); removing one passes, except where
+  a binding that stays would then name another server or none (a binding
+  can name its server through the entry of its default model). Set up
+  providers in the realm document, with `rkat auth`, or through JSON-RPC
+  `config/patch`.
 - A host that confines every kind keeps its own inputs out of reach: a start
   in which a confined process could change the realm state, the user config
   document or the file credential store (`<config dir>/meerkat/credentials`;

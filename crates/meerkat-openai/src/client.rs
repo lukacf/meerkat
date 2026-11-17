@@ -5801,6 +5801,101 @@ mod tests {
         (format!("http://{addr}"), calls, handle)
     }
 
+    /// A local endpoint that accepts one connection and resets it once the
+    /// request has begun to arrive: a socket closed with unread data is
+    /// reset.
+    async fn spawn_resetting_endpoint() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind resetting endpoint");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept the connection");
+            let mut first = [0_u8; 1];
+            let arrived = stream.peek(&mut first).await.expect("the request arrives");
+            assert_eq!(arrived, 1);
+            drop(stream);
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// A base URL whose port is bound, never listens and stays bound while
+    /// the socket lives: every connection to it is refused.
+    fn refusing_endpoint() -> (String, tokio::net::TcpSocket) {
+        let socket = tokio::net::TcpSocket::new_v4().expect("loopback socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("bind without listening");
+        let addr = socket.local_addr().expect("local addr");
+        (format!("http://{addr}"), socket)
+    }
+
+    async fn responses_send_error(base_url: String) -> Result<(), LlmError> {
+        let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url);
+        let endpoint = client.responses_endpoint();
+        client
+            .send_responses_request(
+                &endpoint,
+                &serde_json::json!({"stream": true}),
+                meerkat_core::HttpAuthorizationContent::default(),
+                None,
+                &mut Vec::new(),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    async fn image_send_error(base_url: String) -> Result<(), LlmError> {
+        let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url);
+        let endpoint = format!("{}/v1/images/generations", client.base_url);
+        client
+            .post_json_to_openai(&endpoint, &serde_json::json!({}))
+            .await
+            .map(|_| ())
+    }
+
+    /// A Responses request whose connection the peer resets after it was
+    /// established fails as a connection failure, as a refused one does.
+    #[tokio::test]
+    async fn responses_request_reset_after_the_connect_is_a_connection_reset() {
+        let (base_url, peer) = spawn_resetting_endpoint().await;
+        let reset = responses_send_error(base_url).await;
+        peer.await.expect("resetting endpoint");
+        assert!(
+            matches!(reset, Err(LlmError::ConnectionReset)),
+            "a connection reset after the connect: {reset:?}"
+        );
+
+        let (base_url, unlistened) = refusing_endpoint();
+        let refused = responses_send_error(base_url).await;
+        drop(unlistened);
+        assert!(
+            matches!(refused, Err(LlmError::ConnectionReset)),
+            "a refused connection: {refused:?}"
+        );
+    }
+
+    /// The image requests' send path classes a reset after the connect the
+    /// same way.
+    #[tokio::test]
+    async fn image_request_reset_after_the_connect_is_a_connection_reset() {
+        let (base_url, peer) = spawn_resetting_endpoint().await;
+        let reset = image_send_error(base_url).await;
+        peer.await.expect("resetting endpoint");
+        assert!(
+            matches!(reset, Err(LlmError::ConnectionReset)),
+            "a connection reset after the connect: {reset:?}"
+        );
+
+        let (base_url, unlistened) = refusing_endpoint();
+        let refused = image_send_error(base_url).await;
+        drop(unlistened);
+        assert!(
+            matches!(refused, Err(LlmError::ConnectionReset)),
+            "a refused connection: {refused:?}"
+        );
+    }
+
     #[tokio::test]
     async fn responses_reauthorizes_once_before_streaming() {
         let (base_url, calls, server) = spawn_auth_retry_server(false).await;

@@ -2417,6 +2417,86 @@ mod tests {
         }
     }
 
+    async fn chat_send_error(base_url: String) -> Result<(), LlmError> {
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url.clone(),
+            None,
+            options(true, true, true, true),
+        );
+        client
+            .send_chat_request(
+                &format!("{base_url}/v1/chat/completions"),
+                &serde_json::json!({"stream": true}),
+                meerkat_core::HttpAuthorizationContent::default(),
+                None,
+                &mut Vec::new(),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// A chat request whose connection the peer resets after it was
+    /// established fails as a connection failure, as a refused one does; a
+    /// request that passes its bound stays a timeout.
+    #[tokio::test]
+    async fn chat_request_reset_after_the_connect_is_a_connection_reset() {
+        // An endpoint that accepts the connection and resets it once the
+        // request has begun to arrive: a socket closed with unread data is
+        // reset.
+        let resetting = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind resetting endpoint");
+        let addr = resetting.local_addr().expect("local addr");
+        let peer = tokio::spawn(async move {
+            let (stream, _) = resetting.accept().await.expect("accept the connection");
+            let mut first = [0_u8; 1];
+            let arrived = stream.peek(&mut first).await.expect("the request arrives");
+            assert_eq!(arrived, 1);
+            drop(stream);
+        });
+        let reset = chat_send_error(format!("http://{addr}")).await;
+        peer.await.expect("resetting endpoint");
+        assert!(
+            matches!(reset, Err(LlmError::ConnectionReset)),
+            "a connection reset after the connect: {reset:?}"
+        );
+
+        // Control: a refused connection. The port is bound, never listens
+        // and stays bound until the answer is in.
+        let unlistened = tokio::net::TcpSocket::new_v4().expect("loopback socket");
+        unlistened
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("bind without listening");
+        let addr = unlistened.local_addr().expect("local addr");
+        let refused = chat_send_error(format!("http://{addr}")).await;
+        drop(unlistened);
+        assert!(
+            matches!(refused, Err(LlmError::ConnectionReset)),
+            "a refused connection: {refused:?}"
+        );
+
+        // Control: a request that passes its bound.
+        let silent = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent endpoint");
+        let addr = silent.local_addr().expect("local addr");
+        let timed_out = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .expect("client")
+            .get(format!("http://{addr}/v1/chat/completions"))
+            .send()
+            .await
+            .expect_err("a silent endpoint times out");
+        let class = OpenAiCompatibleClient::map_send_error(timed_out);
+        assert!(
+            matches!(class, LlmError::NetworkTimeout { .. }),
+            "a timeout: {class:?}"
+        );
+    }
+
     #[tokio::test]
     async fn chat_completions_reauthorizes_before_reading_stream() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));

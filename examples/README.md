@@ -130,6 +130,39 @@ control, and provider-backed scenarios require their documented prerequisites
 and separate explicit runs. The ledger names remaining limitations rather than
 counting them as passed tests.
 
+### Live runs
+
+`make -C examples live` is that separate explicit run for the provider-backed
+part: it runs the cheapest path of each example that reaches a provider and
+prints one line per example (`PASS`, `FAIL` or `SKIP` with the reason).
+
+```bash
+make -C examples live-dry      # list what would run and what would be skipped; calls nothing
+make -C examples live          # run it
+LIVE_ONLY="001 036" make -C examples live
+```
+
+It needs provider keys in the environment (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`) and makes real calls on them: about 300
+short ones for the whole set, and it refuses to start when its estimate is
+above `LIVE_MAX_CALLS` (600 by default). An example whose key or prerequisite
+is absent is skipped, so one key is enough for most of the set. Each example
+runs in a fresh home directory with only the keys it needs; logs go to a
+temporary directory (or `LIVE_LOG_DIR`), never into the repository.
+
+The target builds no host, SDK or Rust example (the entries of 031 and 033
+build their own web bundles). Build first what you want it to cover:
+`make -C examples hosts sdk live-build` for the SDK, CLI and Rust examples,
+and `make -C examples web realtime` for the browser and realtime examples
+(example 032 also needs the WebCM files and the runtime package that its
+`examples.sh` prepares before it serves). The
+browser examples run in headless Chromium with every agent on
+`gemini-4-hydrogen`, reached through the proxy of `sdks/web`.
+
+What it does not cover: examples 034 and 035 (their flows are long), 028 to
+030 (they make no provider call), microphone and real-browser use of 036 and
+037, and anything beyond the first round, prompt or scenario of 031 to 033.
+
 Standalone Rust examples own separate lockfiles. `make verify-lock-consistency`
 checks these as well as the root lock; release preparation refreshes and stages
 them automatically after a version bump. Outside a release, run
@@ -322,3 +355,19 @@ The suffix indicates the primary language/surface:
 - `py` — Python SDK
 - `ts` — TypeScript SDK
 - `sh` — Shell/CLI
+
+## Model Names
+
+The examples name the newest model of each line in the catalog (for example
+`claude-sonnet-5-5`, `gpt-6-astra`, `gemini-4-hydrogen`), because they are
+copied. After a change of the catalog, list the names that have fallen behind:
+
+```bash
+python3 examples/tests/model_names.py          # exit 1 and a list when a name is behind
+python3 examples/tests/model_names.py --lines  # each line and its newest model
+```
+
+It reads the catalog in `crates/meerkat-models/src/capabilities/` and every
+tracked text file under `examples/` and `meta/examples/`; it needs no build
+and no network. An example that names an older model on purpose carries a
+line `model-names: keep <model id> (<reason>)`.

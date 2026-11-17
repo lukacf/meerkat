@@ -96,7 +96,10 @@ the builder, `MetaBuilder.on_schedule_fire(name, handler)`: the gateway can
 fire such a schedule before `build()` returns the runtime, and a fire that
 finds no handler ends that occurrence as `delivery_failed`. A handler given
 to the builder can run before `build()` returns, so it must not need the
-runtime object.
+runtime object. Releases 0.7.32 to 0.9.16 have no handler on the builder: a
+program that uses `build()` there cannot have its handler in place for such
+a fire, see
+[Schedule callbacks that arrive during startup](/sdks/python#schedule-callbacks-that-arrive-during-startup).
 
 ## Console schedules
 

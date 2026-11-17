@@ -4,7 +4,7 @@ description: "Runtime-owned R0-R3 policy evaluation, pending approvals, safe-dra
 icon: "shield-check"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Gating is a policy service owned by the Meta runtime. A caller submits an action, actor, and risk tier. The runtime evaluates that request, records the result, and may create a pending approval entry.
 
@@ -266,13 +266,14 @@ sets are read with [`meta/gating/questions`](/meta/api/rpc#meta%2Fgating%2Fquest
   three entries above is offered `ask_user`,
   also on a runtime where no person can be asked (a call then answers
   `no_human_surface`). A profile that lists it in `tools.deny`
-  (`deny = ["ask_user"]`) keeps it from its members, as for every tool
-  (not in a profile used for members of a host with a member registration
-  hook, whose build is then refused: see Known limitations
-  in the Meta changelog):
+  (`deny = ["ask_user"]`) keeps it from its members, as for every tool:
   the model is not offered it, and a call it makes anyway is refused as
   not allowed by policy. A spawn's deny policy does the same for one
-  member.
+  member. Such a profile can be used for every member: through 0.9.15 the
+  build of a member whose host decides the member's tool surface itself
+  (a host that installs a member registration hook) was refused with such
+  a deny; from 0.9.16 the deny is accepted, and such members are still not
+  offered the tool.
 
 ## API methods
 

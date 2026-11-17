@@ -1201,19 +1201,26 @@ extraction calls.
   the session is rebuilt, so on a busy session a level the model does not
   accept is answered busy first, and its typed refusal when the resume is
   sent again. With no turn running the resume rebuilds the session at once.
-  Two limits stay (read from the source, not run): a plain resume that
-  starts between the server's check and the level resume's own start runs,
-  but a request queued behind that plain resume can still be ended by the
-  rebuild; and a plain resume sent at the same moment as a level resume,
-  before either turn has started (also on a session that has no turn running),
-  runs or ends with `-32003` (`session_resume_required`), depending on which
-  of the two reaches the session first. Send the ended request again. A resume
+  Two limits stay. A plain resume that starts between the server's check
+  and the level resume's own start runs, but a request queued behind that
+  plain resume can still be ended by the rebuild (read from the source, not
+  run). And a plain resume sent at the same moment as a level resume, before
+  either turn has started (also on a session that has no turn running), is
+  answered Ok, with `-32003` (`session_resume_required`), or with one of two
+  errors that carry no kind: `-32603`
+  (`Agent error: agent error: Internal error: Runtime not ready: destroyed`)
+  or `-32005` (`request cancelled`). Whichever of these three comes, its
+  prompt may have run all the same, and is then in the session's history
+  with the model's answer once the level resume has answered. So after
+  anything but Ok on a resume that was sent beside another resume: wait
+  until the other resume has answered, read the session's history
+  (`meerkat_history`), and send the prompt again only if it is not there. A
+  resume
   that rebuilds the session for another field (`model`, `max_tokens`,
   `provider_params` without the level, and the other build fields) is
   unchanged from 0.9.14: it waits behind the running turn, rebuilds the
-  session and runs. A plain resume queued beside such a resume either runs or,
-  when the rebuild reaches the session first, ends with `-32003`
-  (`session_resume_required`) without running; send it again.
+  session and runs. A plain resume queued beside such a resume has the same
+  answers, and the same advice holds.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">

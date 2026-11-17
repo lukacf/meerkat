@@ -4,7 +4,7 @@ description: "Durable schedule ownership, occurrence claims, firing, and target 
 icon: "clock"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Meta uses Meerkat's durable `ScheduleService` as its only scheduling
 authority. Schedule definitions live in the schedule store, every firing is
@@ -65,6 +65,9 @@ Python applications register deterministic host runnables with
 `MetaBuilder.host_runnables(...)` and handle
 `callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
 The callback is delivery for a durable occurrence, not a substitute scheduler.
+In releases 0.7.32 to 0.9.16 a callback can arrive while the application is
+still starting, before its handler is registered: see
+[Schedule callbacks that arrive during startup](/meta/sdks/python#schedule-callbacks-that-arrive-during-startup).
 
 ## Console schedules
 

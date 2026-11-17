@@ -1053,7 +1053,8 @@ member's first build, so it reads or mints the member's key pair where that
 build will load it. On in-process comms, when the host declares no root, the
 seat takes the root the mob's session service reports
 (`session_comms_identity_root`: where its agent factory keeps each session's
-key pair, under the factory's `user_config_root`), so a host that composes
+key pair, under the factory's `user_config_root`; see
+[where a session's keys are kept](/guides/comms#where-a-session%E2%80%99s-keys-are-kept)), so a host that composes
 its own session service needs no
 `MobBuilder::with_member_comms_identity_root`. A declared root, and
 `MobBuilder::with_network_member_comms`, win over the report. A service that

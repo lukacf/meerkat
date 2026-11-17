@@ -56,6 +56,7 @@ docs/cli/commands.mdx	rkat capabilities
 docs/cli/commands.mdx	rkat init
 docs/cli/configuration.mdx	rkat --confinement workspace --confinement-network unrestricted --confinement-read /opt/toolchain run "Build and test the project"
 docs/cli/configuration.mdx	rkat --confinement trusted-host run "Inspect the system"
+docs/cli/configuration.mdx	rkat --confinement workspace run "Build and test the project"
 docs/cli/configuration.mdx	rkat --state-root ~/.local/share/meerkat/realms --confinement workspace run "Build and test the project"
 docs/concepts/configuration.mdx	rkat --realm team-alpha config get --format json
 docs/concepts/configuration.mdx	rkat --realm team-alpha config get --format json --with-generation

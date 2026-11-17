@@ -101,6 +101,8 @@ the first two `[4]` lines read `seat None` (TypeScript: `seat null`) and
 
 ## Notes
 
+<!-- model-names: keep claude-haiku-4-5 (the first note says how an older model answers) -->
+
 - `applies_at_next_run` is what the update answers here, where the agent has
   no conversation yet: its first run is built from the new instructions.
   For an agent that already has a conversation the answer depends on its

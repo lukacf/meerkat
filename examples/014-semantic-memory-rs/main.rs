@@ -34,6 +34,12 @@ use meerkat_core::memory::{
 use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a small
+/// limit a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     meerkat_runtime::host_stack::run_host("014-semantic-memory", async_main)?
 }
@@ -79,7 +85,7 @@ async fn run_with_client(
         model_fallback: None,
         schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
         model: "claude-sonnet-5-5".to_string(),
-        max_tokens: 1024,
+        max_tokens: MAX_TOKENS_PER_TURN,
         structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
         self_hosted_server_id: None,
@@ -179,7 +185,7 @@ async fn run_with_client(
              Always use the memory_search tool when asked about team details, \
              infrastructure, or deployment information.",
         )
-        .max_tokens_per_turn(1024)
+        .max_tokens_per_turn(MAX_TOKENS_PER_TURN)
         .resume_session(memory_session)
         .build(Arc::new(llm), Arc::new(gateway), store)
         .await?;

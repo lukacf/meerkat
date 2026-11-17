@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -28,6 +28,89 @@ npm install @rkat/meta-sdk
 
 ## Quick start
 
+In a fresh project directory, install the SDK and make the project an ES
+module (the program below uses top-level `await`):
+
+```bash
+npm install @rkat/meta-sdk
+npm pkg set type=module
+```
+
+Then create `config/mob.toml`:
+
+```toml
+[mob]
+id = "typescript-quickstart"
+
+[profiles.worker]
+model = "gpt-6-astra"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+```
+
+Set `OPENAI_API_KEY` in your environment for the model above, or choose a
+supported model and its matching provider credentials. Save the following
+as `main.ts` in that directory, replacing `/path/to/rpc_gateway` with the
+binary you installed, and run it, for example with `npx tsx main.ts`.
+Profiles are templates, not pre-created members: the roster names the agent
+the program sends to.
+
+```typescript
+import { Meta } from "@rkat/meta-sdk";
+import type { DurableAgentSpec, RosterProvider } from "@rkat/meta-sdk";
+
+// The roster names the agents of this application.
+const roster: RosterProvider = {
+  async roster(): Promise<DurableAgentSpec[]> {
+    return [
+      {
+        identity: "assistant",
+        profile: "worker",
+        addressability: "addressable",
+        displayName: "Assistant",
+        labels: {},
+        context: null,
+        additionalInstructions: ["Answer in one short sentence."],
+      },
+    ];
+  },
+};
+
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .persistentState(".meta/state")
+  .rosterProvider(roster)
+  .gateway("/path/to/rpc_gateway")
+  .build();
+
+try {
+  const status = await rt.mobHandle().status();
+  console.log("Running:", status.running);
+
+  // Send a message and wait for the answer of that turn.
+  const answer = await rt.sendAndWait("assistant", "What is a meerkat?");
+  console.log(answer);
+} finally {
+  await rt.shutdown();
+}
+```
+
+The program prints `Running: true` and the answer, and shuts the gateway
+down. The gateway writes its log to the standard error of the program.
+`sendAndWait` addresses an agent of the roster and returns the text of the
+turn it started (see [Waiting for a turn](#waiting-for-a-turn)); a build
+without a roster provider refuses it with
+`identity-first runtime not configured`. Run again, the program reuses
+the state under `.meta/state`.
+
+### Knowledge memory and a Console config
+
+The builder also takes the knowledge memory backend and the path of a Console
+config:
+
 ```typescript
 import { Meta, memory } from "@rkat/meta-sdk";
 
@@ -39,17 +122,20 @@ const rt = await Meta.builder()
   .gateway("/path/to/rpc_gateway")
   .build();
 
-const handle = rt.mobHandle();
-const status = await handle.status();
-console.log("Running:", status.running);
-
-const results = await handle.memoryQuery({
+const results = await rt.mobHandle().memoryQuery({
   entity: "identity:ops",
   topic: "deployment",
   store: "knowledge_graph",
 });
 
+await rt.shutdown();
 ```
+
+The file `consoleConfig` names must exist when the gateway starts. A missing
+file refuses the start
+(`runtime_options.console_config_path is invalid: I/O error: failed to read config/console.toml: ...`);
+an empty file is accepted. On a store with no knowledge yet, `memoryQuery`
+answers `{"assertions":[],"conflicts":[],"results":[]}`.
 
 ## Operator instructions
 
@@ -650,7 +736,34 @@ draft.registerTool("read_mail", async (args, requester) => {
 });
 ```
 
-For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and delete them with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context.
+For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and withdraw them from the agent with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context, and it is not an erasure of the record: the bundled store keeps its text (see [`meta/agent_memory/forget`](/meta/api/rpc#meta%2Fagent_memory%2Fforget)).
+
+`recallAgentMemory` selects records and does not list them: `"contextual"`
+(the default) returns the active records that match the query, `"always"`
+the most recently updated ones, and either returns at most `maxEntries`
+(8 by default, 64 at most) with no cursor (see
+[Reading agent memory](/meta/concepts/memory#reading-agent-memory)). To see
+everything an identity holds, read its manifest with the full tier.
+`handle.manifestAgentMemory(identity, { tier, k, realm })` returns metadata
+and never bodies; `handle.updateAgentMemory(identity, memoryId, { title,
+body, tags, realm })` replaces an active record and returns the new
+record's `memoryId` and the id it `supersedes`.
+
+```typescript
+const handle = runtime.mobHandle();
+
+// Every active record of the identity: metadata only, no bodies.
+const all = await handle.manifestAgentMemory("scout", { tier: "full" });
+for (const meta of all) {
+  console.log(meta.id, meta.title, meta.ageDays);
+}
+
+// The most recently updated records with their bodies: at most 64 a call.
+const newest = await handle.recallAgentMemory("scout", {
+  selection: "always",
+  maxEntries: 64,
+});
+```
 
 ## Type definitions
 

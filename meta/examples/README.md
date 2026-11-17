@@ -18,9 +18,11 @@ Numbered packs are intentionally browser-first and can include:
 - `004-mdm-console-pack`
 - `005-access-control-pack`
 
-One example is a host program and not a browser pack:
+Three examples are host programs and not browser packs:
 
 - `006-long-term-agents` (Python and TypeScript; no console, no provider key)
+- `007-supervised-python-app` (Python; a long-lived application: work, recovery, restart, a lost gateway; a provider key is optional)
+- `008-typescript-quickstart` (a TypeScript project to copy: one agent, a question, its answer; no console; a provider key for the question)
 
 ## Prerequisites
 
@@ -104,4 +106,20 @@ builds the gateway unless `META_GATEWAY_BIN` names one):
 
 ```bash
 ./006-long-term-agents/examples.sh
+```
+
+Run the supervised Python application (it runs its steps that need no API
+key, and all of them when `OPENAI_API_KEY` is set; it builds the gateway
+unless `META_GATEWAY_BIN` names one):
+
+```bash
+./007-supervised-python-app/examples.sh
+```
+
+Run the TypeScript quick start (twice on one state directory; with
+`OPENAI_API_KEY` set it also asks the agent a question and checks that the
+second run remembers the first):
+
+```bash
+./008-typescript-quickstart/examples.sh
 ```

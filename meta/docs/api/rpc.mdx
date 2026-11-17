@@ -3304,8 +3304,9 @@ Agent-memory methods are available over the SDK JSON-RPC gateway and over
 console `POST /console/rpc` when the identity runtime has an agent-memory
 provider configured. With ABAC enforced, console `recall` and `manifest`
 require both `agent.view` and `agent.memory.read` on the target identity;
-`remember` and `forget` also require mutating console access plus
-`agent.memory.write` and `agent.memory.delete` respectively.
+`remember`, `update` and `forget` also require mutating console access plus
+`agent.memory.write` (`remember`, `update`) or `agent.memory.delete`
+(`forget`).
 Older memory-naive policies receive
 [compatibility normalization](/concepts/access-control#what-gets-enforced);
 explicit memory policies are applied literally.
@@ -3328,6 +3329,12 @@ Write an identity-scoped agent memory record for later per-turn and build-contex
 
 Read identity-scoped agent memory records from the configured agent memory provider. This exposes the same durable record set used for per-turn and build-context injection. Unlike automatic injection, explicit recall reports provider errors to the caller.
 
+A recall is a selection, not a listing: it returns at most `max_entries`
+active records of the identity and takes no cursor. What each `selection`
+returns is under
+[Reading agent memory](/concepts/memory#reading-agent-memory); to enumerate,
+use [`meta/agent_memory/manifest`](#meta%2Fagent_memory%2Fmanifest).
+
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -3339,9 +3346,79 @@ Read identity-scoped agent memory records from the configured agent memory provi
 | `max_entries` | `integer` | no | Maximum records, default `8`, max `64` |
 </Accordion>
 
+The result is `{ "records": [...] }`; a record has `memory_id`, `title`,
+`body`, `tags`, `created_at_ms` and `updated_at_ms`.
+
+### `meta/agent_memory/manifest`
+
+List the metadata of an identity's active agent memory records, never their
+bodies. The tier `full` returns every active record in one answer.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tier` | `"working_set" \| "full"` | no | `"working_set"` (default): the ranked records up to `k` and the recent records that are not ranked or were changed since they were ranked, at most twice `k` together. `"full"`: every active record |
+| `k` | `integer` | no | Size of the working set, default `32`, max `512`. Refused with the tier `full` |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `records` | `object[]` | One entry per record: `id`, `kind`, `title`, `description`, `age_days` and, for a ranked record, `rank` |
+</Accordion>
+
+### `meta/agent_memory/update`
+
+Replace an active agent memory record. The new title, body and tags become a
+new active record; the replaced one is no longer recalled or listed, and
+with the bundled store its text stays in the store like a forgotten
+record's. A
+`memory_id` that is unknown, is not active (already replaced or forgotten)
+or belongs to another identity is refused invalid params (`-32602`).
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `memory_id` | `string` | yes | The active record to replace |
+| `title` | `string` | yes | Short record title, max 200 bytes |
+| `body` | `string` | yes | Memory body, max 64 KiB |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tags` | `string[]` | no | Optional labels, max 32 entries and 64 bytes each |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `memory_id` | `string` | Id of the new active record |
+| `supersedes` | `string` | Id of the record it replaced |
+</Accordion>
+
 ### `meta/agent_memory/forget`
 
-Delete one identity-scoped agent memory record from the configured provider. Providers that do not support deletes do not advertise this method in `meta/capabilities`. `forget` prevents future provider recall and future automatic injection; it cannot remove text that has already been delivered into an active model context.
+Withdraw one identity-scoped agent memory record from its agent. A forgotten
+record is no longer recalled, injected or listed in the manifest; `forget`
+cannot remove text that has already been delivered into an active model
+context. Providers that do not support it do not advertise this method in
+`meta/capabilities`.
+
+`forget` is not erasure. What becomes of the stored text is the provider's
+to say, and the bundled SQLite store erases nothing: it marks the record
+tombstoned and keeps its title, description, body, tags and provenance in
+the realm's database. The Console's Memory panel still lists the record
+(`meta/memory/panel/records`, without its body) and still returns its body
+(`meta/memory/panel/record`): with access control enforced, to a caller with
+`agent.memory.read` and `agent.view` on the identity (an access file in
+which no rule names a memory action grants, and denies, `agent.memory.read`
+wherever a rule grants, or denies, `agent.view`), and
+`memory.quarantine.review` as well for a record that was ever quarantined;
+otherwise to any Console caller. In both cases the memory of an agent
+private to a person is shown to no other person except an access admin named
+in `admins`. The bundled store has no call that erases one record; see
+[Agent memory injection](/concepts/memory#agent-memory-injection) for what
+stays and how a realm's memory is removed.
 
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
@@ -3355,7 +3432,7 @@ Delete one identity-scoped agent memory record from the configured provider. Pro
 | Field | Type | Description |
 |-------|------|-------------|
 | `memory_id` | `string` | Requested memory id |
-| `deleted` | `boolean` | `true` when a record was removed, `false` when it was already absent |
+| `deleted` | `boolean` | `true` when this call withdrew the record, `false` when there was nothing to withdraw: an unknown id, a record already forgotten, or a record of another identity. With the bundled store `true` means the record was marked tombstoned; its text stays in the store |
 </Accordion>
 
 ---
@@ -4017,6 +4094,16 @@ handlingMode: "steer" })` in TypeScript), and refuse the steer with
 | `meta/dispatch` with `idempotency_key` and `correlation_id` | Within one session's input ledger | A new session starts fresh | Defang, ambient memory | The ticket of a `track_turn` dispatch, with `meta/turn_result` |
 | Scoped `meta/dispatch` (`expected_scope`) | The host-persisted exact scope | Refused: the scope moved | None | `meta/recover_delivery`, from the scope's original session |
 | Keyed `meta/send` | The identity, for good | The same key answers the first receipt | Defang; recall skipped | The receipt's status, then `meta/send_status` on the admitted pair |
+
+A `meta/dispatch` carries `idempotency_key` and `correlation_id` together or
+not at all. One without the other is refused before anything is delivered
+(`-32603`; the message begins `dispatch to <identity> refused before bridge
+admission: invalid delivery identity (idempotency key without a correlation
+id (half-pair))`, or with `(correlation id without an idempotency key
+(half-pair))` in that place). Give the
+correlation id as a canonical UUID; other text can be refused
+(`correlation_id must be a canonical UUID`). `meta/send` takes an
+`idempotency_key` by itself.
 
 Prefer a keyed `meta/send` for host sends that must survive retries over the
 identity's whole life.

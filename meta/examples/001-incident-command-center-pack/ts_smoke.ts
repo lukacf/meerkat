@@ -4,7 +4,12 @@ import path from "node:path";
 import YAML from "yaml";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
-const { parseSseFrames } = await import(path.join(repoRoot, "console", "dist", "index.cjs"));
+// The frame parser comes from the console core, which runs under Node. The
+// built console bundle (console/dist/index.cjs) re-exports it but also holds
+// browser-only code that reads `document` when the file is loaded.
+const { parseSseFrames } = await import(
+  path.join(repoRoot, "packages", "console-core", "src", "network.ts")
+);
 
 type ConsoleFrame = {
   id?: string;

@@ -646,6 +646,12 @@ max_output_tokens = 1024
   operations. There is no default model; without it an R2 operation is
   refused, never run at R1.
 
+The review and the consent happen where `rkat-rpc` serves the realm as a
+governed pipe. `rkat` in a governed realm reads the same rules and installs no
+reviewer and no human route: it refuses an operation that a rule puts above
+R1, an `r2` operation even when a reviewer is configured and an `r3` operation
+always, and the run goes on.
+
 A reviewed MCP or tool-bundle operation shows its reviewer and consenting
 human the account it acts with, as its own owner states it: the MCP
 server's connector binding, its `oauth_account`, or its host's
@@ -654,10 +660,14 @@ server's connector binding, its `oauth_account`, or its host's
 or the account a host declared when it registered the bundle. An operation
 whose owner states none is refused, never reviewed without it.
 
-The stock host reads the rules from the realm's effective configuration when
-the realm opens; a section that cannot be read or is malformed refuses the
-realm's governed work. Unknown or misspelled fields are refused, including
-inside the reviewer's identity.
+`rkat` and `rkat-rpc`, the stock hosts that open a governed realm, each read
+the rules from the realm's effective configuration when the realm opens. A
+section that cannot be read or is malformed refuses the governed work:
+`rkat-rpc` refuses the pipe, and `rkat` fails the command before the realm
+opens (`Error: Failed to load config: ...` or
+`Error: Invalid runtime config: ...`, exit code 1). `rkat-rest` and `rkat-mcp`
+refuse to start on a governed realm. Unknown or misspelled fields are refused,
+including inside the reviewer's identity.
 
 `[governance.decisions]` names the approver ids the operator of an `rkat-rpc`
 stdio connection acts for when the connection presents and decides
@@ -911,6 +921,9 @@ protection does not cover another kind that writes the same place. On macOS
 the `workspace` preset protects `<root>/.rkat` (the CLI's default realm state
 and the project's convention files). The Linux backend has no deny lists, so
 there the host's realm state must live outside the workspace.
+A write grant outside the root takes the macOS protection away: a kind that
+can write the root and a place outside it is judged able to move the root
+away, so the host treats `<root>/.rkat` as changeable by that kind.
 
 A host that runs any launch kind as the trusted host claims none of this: its
 startup report says that a process the agent drives can still change the

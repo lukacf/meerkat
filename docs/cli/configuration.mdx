@@ -119,6 +119,7 @@ comms_enabled = false
 mob_enabled = false
 schedule_enabled = true
 workgraph_enabled = false
+agent_schedules_may_create_sessions = false
 default_timeout = "10m"
 max_concurrent = 10
 
@@ -136,6 +137,14 @@ explicit composition by a trusted embedding host. OS process confinement is the
 for the current supported profiles and [native governed embedding](/rust/native-authorization)
 for Rust setup.
 </Note>
+
+`agent_schedules_may_create_sessions` says whether an agent's schedule may
+create a session when it fires (a `materialize_on_demand_session` target).
+Off, the default, only the host writes such a schedule, and an agent whose
+own session is built as the host builds one by default; any other agent's
+write is refused (`schedule_session_creation_not_allowed`). On, every agent
+that holds the schedule tools may. The host reads it when it starts. See
+[scheduling](/guides/scheduling).
 
 `default_timeout` and each per-tool timeout in `[tools.tool_timeouts]` accept
 humantime strings such as `"30s"`, `"2m"` or `"1h 2m"`. A per-tool timeout

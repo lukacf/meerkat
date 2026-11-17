@@ -4936,8 +4936,18 @@ place (below).
 | `next_due_at_utc` | `string \| null` | Its next planned send while it is active |
 </Accordion>
 
-`meta/schedule/list` answers `{identity, schedules}`, the agent's console
-schedules, oldest first. Create, update, pause and resume answer the
+`meta/schedule/list` answers `{identity, schedules, other_schedules}`.
+`schedules` are the agent's console schedules, oldest first.
+`other_schedules` are the schedules that are not console schedules and whose
+target names the agent, oldest first: the ones an agent's schedule tools or
+the host wrote for it, as a member of the mob (`target: "member"`), by an
+identity (`"identity"`), by one of its sessions (`"session"`), or as the
+source of a fork helper (`"fork_helper"`). Each has `schedule_id`,
+`identity`, `name`, `target`, `content` (the text it sends, when it sends
+text), `trigger`, `phase`, `revision`, `created_at_utc`, `updated_at_utc`
+and `next_due_at_utc`. They are listed to read: the Console's create,
+update, pause, resume and delete act on console schedules only. Create,
+update, pause and resume answer the
 schedule as the change left it (a resume, as Core resumed it: a change
 another caller made between the resume's write and the resume shows in
 the answer); delete answers `{identity, schedule_id, deleted: true}`.

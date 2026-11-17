@@ -4620,6 +4620,11 @@ enum LiveSessionSyncCause {
     TranscriptRewriteCommitted,
     /// Synchronization after a detached model-routing terminal became durable.
     ModelRoutingTerminalCommitted,
+    /// Synchronization at a held turn boundary because the WholeBlob store's
+    /// committed authority differs from the live actor's checkpoint base
+    /// while the authority verdict keeps the actor (equal transcripts): the
+    /// runtime promoted a run's closing save as it is.
+    WholeBlobBaseDiffersFromStore,
 }
 
 impl LiveSessionSyncCause {
@@ -4640,6 +4645,9 @@ impl LiveSessionSyncCause {
             LiveSessionSyncCause::TranscriptRewriteCommitted => "transcript_rewrite_committed",
             LiveSessionSyncCause::ModelRoutingTerminalCommitted => {
                 "model_routing_terminal_committed"
+            }
+            LiveSessionSyncCause::WholeBlobBaseDiffersFromStore => {
+                "whole_blob_base_differs_from_store"
             }
         }
     }
@@ -7862,37 +7870,60 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
-        let LiveSessionAuthority::DurableAuthoritative { reason } =
-            self.live_session_authority(id).await?
-        else {
-            return Ok(false);
-        };
-        // A live actor that continues the store's standing provisional tail
-        // of a run the runtime holds open is ahead of the committed boundary
-        // by construction, never behind it, wherever the caller stands: kept.
-        // An actor whose run compacted can trail the boundary's row count and
-        // classify as diverged rather than uncommitted, so the proof is asked
-        // for either; an archived session is never kept.
-        if reason != LiveSessionAuthorityReason::StoredArchived
-            && self.live_actor_continues_open_run_tail(id).await?
-        {
-            return Ok(false);
-        }
-        match reason {
-            // A run may be between its apply and its boundary commit: its
-            // actor and checkpoint receipt are what that commit promotes.
-            LiveSessionAuthorityReason::LiveUncommittedTranscript
-                if !self.uncommitted_live_transcript_is_stale(id, position) =>
-            {
-                return Ok(false);
+        let cause = match self.live_session_authority(id).await? {
+            LiveSessionAuthority::DurableAuthoritative { reason } => {
+                // A live actor that continues the store's standing provisional
+                // tail of a run the runtime holds open is ahead of the
+                // committed boundary by construction, never behind it,
+                // wherever the caller stands: kept. An actor whose run
+                // compacted can trail the boundary's row count and classify
+                // as diverged rather than uncommitted, so the proof is asked
+                // for either; an archived session is never kept.
+                if reason != LiveSessionAuthorityReason::StoredArchived
+                    && self.live_actor_continues_open_run_tail(id).await?
+                {
+                    return Ok(false);
+                }
+                match reason {
+                    // A run may be between its apply and its boundary commit:
+                    // its actor and checkpoint receipt are what that commit
+                    // promotes.
+                    LiveSessionAuthorityReason::LiveUncommittedTranscript
+                        if !self.uncommitted_live_transcript_is_stale(id, position) =>
+                    {
+                        return Ok(false);
+                    }
+                    LiveSessionAuthorityReason::LiveUncommittedTranscript
+                    | LiveSessionAuthorityReason::StoredArchived
+                    | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged => {}
+                }
+                LiveSessionSyncCause::Authority(reason)
             }
-            LiveSessionAuthorityReason::LiveUncommittedTranscript
-            | LiveSessionAuthorityReason::StoredArchived
-            | LiveSessionAuthorityReason::StoredTranscriptRevisionDiverged => {}
-        }
+            // The verdict compares transcripts. A run's closing save that the
+            // runtime alone promotes as it is (its settle of a cancelled or
+            // settled run) moves the WholeBlob store's committed authority
+            // and leaves the transcript the actor's own, so the verdict keeps
+            // the actor while its checkpoint base names the former authority,
+            // and the next run's first checkpoint would be refused. Holding
+            // the turn boundary, no boundary commit stands between its store
+            // write and its acknowledgement here, so a base that differs is
+            // one this layer was never told of: the actor is rebased on the
+            // committed document, as the runtime's settle relies on. Outside
+            // the boundary a commit and its acknowledgement are legitimately
+            // apart, and nothing is compared.
+            LiveSessionAuthority::LiveAuthoritative { .. } => {
+                if position != LiveStalenessPosition::TurnBoundaryHeld
+                    || !self.live_whole_blob_base_differs_from_store(id).await?
+                {
+                    return Ok(false);
+                }
+                LiveSessionSyncCause::WholeBlobBaseDiffersFromStore
+            }
+            LiveSessionAuthority::NoLive => return Ok(false),
+        };
 
         if self
-            .synchronize_runtime_backed_live_from_durable_authority(id, reason)
+            .synchronize_runtime_backed_live_from_durable_authority(id, cause)
             .await?
         {
             return Ok(false);
@@ -7908,7 +7939,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             session_id = %id,
             live_updated_at = ?live.updated_at(),
             live_message_count = live.messages().len(),
-            reason = ?reason,
+            reason = cause.trace_label(),
             "discarding stale live session in favor of newer RuntimeStore authority"
         );
         // Only the live actor is discarded: a runtime registration of the
@@ -7917,6 +7948,56 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // stops hosting the session here.
         self.discard_live_session_unfenced(id).await?;
         Ok(true)
+    }
+
+    /// Whether this service's live WholeBlob actor of `id` checkpoints from a
+    /// committed base other than the store's committed authority.
+    ///
+    /// Body-free: the actor's base and one authority read. The comparison is
+    /// `!=`, as the checkpoint's own is: it proves a difference, not an
+    /// order. `false` on a HeadCanonical store (its base is the store's head,
+    /// read at each commit), without a live checkpointer, and while either
+    /// side is unknown.
+    async fn live_whole_blob_base_differs_from_store(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        if self.runtime_store.session_persistence_profile()
+            != RuntimeSessionPersistenceProfile::WholeBlobV1
+        {
+            return Ok(false);
+        }
+        // Bound first, so the map lock is not held across the store read.
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        let Some(checkpointer) = checkpointer else {
+            return Ok(false);
+        };
+        let base = checkpointer
+            .whole_blob_base_authority
+            .lock()
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "WholeBlob actor base authority lock is poisoned for session {id}"
+                )))
+            })?
+            .clone();
+        let Some(base) = base else {
+            return Ok(false);
+        };
+        let committed = self
+            .runtime_store
+            .load_whole_blob_store_authority(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                whole_blob_read_error_to_session_error(id, "live session base comparison", error)
+            })?;
+        Ok(committed.is_some_and(|committed| committed != base))
     }
 
     async fn synchronize_live_session_from_durable(
@@ -7989,7 +8070,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn synchronize_runtime_backed_live_from_durable_authority(
         &self,
         id: &SessionId,
-        reason: LiveSessionAuthorityReason,
+        cause: LiveSessionSyncCause,
     ) -> Result<bool, SessionError> {
         if self.session_archived_by_runtime_store_authority(id).await? {
             return Ok(false);
@@ -8003,7 +8084,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(error) if Self::is_transcript_revision_conflict_error(&error) => {
                 tracing::info!(
                     session_id = %id,
-                    ?reason,
+                    reason = cause.trace_label(),
                     "a provisional tail the live actor does not continue stands ahead of the committed body; the actor is not synchronized"
                 );
                 return Ok(false);
@@ -8012,11 +8093,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         match self
-            .synchronize_live_session_from_durable(
-                id,
-                &durable,
-                LiveSessionSyncCause::Authority(reason),
-            )
+            .synchronize_live_session_from_durable(id, &durable, cause)
             .await
         {
             Ok(()) => {}
@@ -8074,8 +8151,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 Ok(false)
             }
             LiveSessionAuthority::DurableAuthoritative { reason } => {
-                self.synchronize_runtime_backed_live_from_durable_authority(id, reason)
-                    .await
+                self.synchronize_runtime_backed_live_from_durable_authority(
+                    id,
+                    LiveSessionSyncCause::Authority(reason),
+                )
+                .await
             }
             LiveSessionAuthority::NoLive | LiveSessionAuthority::LiveAuthoritative { .. } => {
                 Ok(false)

@@ -269,6 +269,48 @@ impl UnifiedRuntime {
         self.module_runtime.lock().await.gating_audit_entries(limit)
     }
 
+    /// The member names under which this runtime keeps a gating record: the
+    /// origin of a pending approval or of a retained audit row, and the
+    /// asking member of a question set, open or ended. Each name as a
+    /// member's memory scope spells it
+    /// (`crate::member_comms_id::logical_memory_identity`). A read of the
+    /// three stores, with no rule in it: what a seating under a name asks
+    /// before it seats.
+    ///
+    /// # Errors
+    /// The decision store's read failure.
+    // Read by the seating of a member under a name, which lands with its
+    // own change.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn names_with_gating_records(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        let snapshot = self.module_runtime.lock().await.gating_state_snapshot();
+        let mut names: std::collections::BTreeSet<String> = snapshot
+            .pending
+            .iter()
+            .filter_map(|entry| entry.origin.as_ref())
+            .map(|origin| origin.identity.as_str())
+            .chain(snapshot.audit.iter().filter_map(|entry| {
+                entry
+                    .detail
+                    .get("origin")
+                    .and_then(|origin| origin.get("identity"))
+                    .and_then(serde_json::Value::as_str)
+            }))
+            .map(crate::member_comms_id::logical_memory_identity)
+            .collect();
+        if let Some(decisions) = self.mob_runtime.ask_user_slot().decisions() {
+            names.extend(
+                crate::ask_user::question_set_askers(&decisions)
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .map(|asker| crate::member_comms_id::logical_memory_identity(asker)),
+            );
+        }
+        Ok(names)
+    }
+
     /// Spawn a module member — runs blocking subprocess I/O via `block_in_place`.
     pub async fn spawn_member(
         &self,

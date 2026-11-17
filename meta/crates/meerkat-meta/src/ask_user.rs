@@ -43,7 +43,14 @@
 //!   set on (an executor claim creates files, so none is made before)
 //!   (`spawn_ask_user_driver`); the end of a set reaches its asker as a
 //!   keyed send (`MemberKeyedNotices`, key [`ask_user_notice_key`]) whose
-//!   body is the typed result ([`ask_user_result_input`]).
+//!   body is the typed result ([`ask_user_result_input`]). The notice is
+//!   its asking member's: it is sent only while that member holds its name
+//!   still.
+//! - **End of the asker.** When a member private to a person ends, the
+//!   open sets it asked are withdrawn through the decision's own lifecycle
+//!   (`EndedPrivateMemberQuestionSets`); a set such a member left open
+//!   while nothing acted on its end is withdrawn when the runtime serves
+//!   its members' questions again.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -67,9 +74,7 @@ use meerkat_runtime::ask_user::{
     AskUserHold, AskUserNotice, AskUserNotices, ask_user_questions_kind, ask_user_result_of,
     attest_ask_user_answers, hold_ask_user,
 };
-use meerkat_runtime::decision::{
-    DecisionClock, DecisionError, DecisionExecutor, DecisionRefusal, SystemDecisionClock,
-};
+use meerkat_runtime::decision::{DecisionClock, DecisionError, DecisionExecutor, DecisionRefusal};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -141,7 +146,8 @@ impl AskUserSurface {
             decisions,
             console,
             mob_id: mob_id.into(),
-            clock: Arc::new(SystemDecisionClock),
+            // The clock the runtime's decisions are stamped by.
+            clock: Arc::new(crate::durable_decisions::EntryTimeClock),
             held: Arc::default(),
         }
     }
@@ -187,8 +193,15 @@ impl AskUserSurface {
 /// empty until the runtime fills it, and again once it shut down.
 #[derive(Clone, Default)]
 pub struct AskUserSlot {
-    surface: Arc<RwLock<Option<Arc<AskUserSurface>>>>,
+    surface: SurfaceCell,
+    /// Who the runtime's members are private to, once the runtime follows
+    /// the ends of its private members with it
+    /// ([`Self::follow_private_member_ends`]).
+    owners: Arc<std::sync::OnceLock<crate::private_owners::PrivateOwners>>,
 }
+
+/// Where a slot keeps its surface.
+type SurfaceCell = Arc<RwLock<Option<Arc<AskUserSurface>>>>;
 
 impl std::fmt::Debug for AskUserSlot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -200,12 +213,43 @@ impl std::fmt::Debug for AskUserSlot {
 }
 
 impl AskUserSlot {
-    /// Fill the slot; it replaces the surface before.
+    /// Fill the slot; it replaces the surface before. A runtime that
+    /// follows the ends of its private members
+    /// ([`Self::follow_private_member_ends`]) then withdraws, in the
+    /// background, the open sets of the private members that ended while
+    /// nothing acted on their end
+    /// ([`EndedPrivateMemberQuestionSets::withdraw_sets_of_ended_members`]).
     pub(crate) fn fill(&self, surface: AskUserSurface) {
         *self
             .surface
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(surface));
+        if let (Some(owners), Ok(runtime)) =
+            (self.owners.get(), tokio::runtime::Handle::try_current())
+        {
+            let sets = EndedPrivateMemberQuestionSets::of(self);
+            let owners = owners.clone();
+            runtime.spawn(async move { sets.withdraw_sets_of_ended_members(&owners).await });
+        }
+    }
+
+    /// Follow the ends of the members private to a person `owners` records:
+    /// from here on the open question sets such a member asked are
+    /// withdrawn when it ends ([`EndedPrivateMemberQuestionSets`]), whatever
+    /// else the launch composes. The follower reads this slot at each end,
+    /// so a runtime that serves no questions follows the ends and withdraws
+    /// nothing.
+    pub(crate) async fn follow_private_member_ends(
+        &self,
+        owners: &crate::private_owners::PrivateOwners,
+    ) {
+        let _ = self.owners.set(owners.clone());
+        owners
+            .follow_member_ends_as(
+                crate::private_owners::MemberEndSeat::QuestionSets,
+                Arc::new(EndedPrivateMemberQuestionSets::of(self)),
+            )
+            .await;
     }
 
     /// Empty the slot: every later call answers `no_human_surface`.
@@ -433,6 +477,15 @@ impl AskUserHost for MemberAskUserHost {
 /// of an idle agent. A member that is no longer an agent of the mob is a
 /// terminal failed receipt; one that cannot take the input now is asked
 /// again at a later pass.
+///
+/// A notice is its asking member's, never a later holder's of its name: it
+/// is sent only while the member that held the name when the set was asked
+/// holds it still ([`crate::private_owners::PrivateOwners::still_held_by`]:
+/// no member under the name ended since, and the name's newest seating is
+/// private to the same person, or like it to no one). For a set whose asker
+/// ended or was replaced the receipt is a terminal failure, and nothing is
+/// sent. While the record of who held the name is still being read, the
+/// notice is asked again at a later pass.
 pub(crate) struct MemberKeyedNotices {
     mob: MobRuntime,
 }
@@ -443,6 +496,37 @@ impl MemberKeyedNotices {
     /// mob, never its public owner.
     pub(crate) fn new(mob: MobRuntime) -> Self {
         Self { mob }
+    }
+
+    /// Whether the member that asked the set of `notice` holds its name
+    /// still: `None` while that cannot be told (the record of who held the
+    /// name is still being read, or the set cannot be read now).
+    fn asker_holds_its_name(&self, notice: &AskUserNotice) -> Option<bool> {
+        let owners = self.mob.private_owners();
+        if owners.first_read_pending() {
+            return None;
+        }
+        let decisions = self.mob.ask_user_slot().decisions()?;
+        // A candidate's read records nothing: the notice's own pass settles
+        // what the decision owes.
+        let asked_at_ms = decisions
+            .owner()
+            .for_candidate_launch()
+            .get(&notice.decision_id)
+            .ok()?
+            .descriptor
+            .created_at_ms;
+        // A name the record knows no seating of is a member of a mob whose
+        // journal it does not see: the send decides, as before.
+        Some(
+            owners
+                .still_held_by(
+                    self.mob.handle().mob_id().as_str(),
+                    &notice.asker,
+                    asked_at_ms,
+                )
+                .unwrap_or(true),
+        )
     }
 }
 
@@ -457,6 +541,9 @@ impl AskUserNotices for MemberKeyedNotices {
         let Ok(identity) = crate::identity_first::AgentIdentity::parse(&notice.asker) else {
             return failed("the asker is not an agent name");
         };
+        if !self.asker_holds_its_name(notice)? {
+            return failed("the asker ended, or another member holds its name");
+        }
         let Ok(text) = ask_user_result_input(&notice.result) else {
             return failed("the result could not be encoded");
         };
@@ -500,6 +587,216 @@ impl AskUserNotices for MemberKeyedNotices {
                 None
             }
         }
+    }
+}
+
+/// The question sets of a runtime's members, as they follow the end of a
+/// member private to a person
+/// ([`crate::private_owners::PrivateMemberEndFollower`]): every open set the
+/// ended member asked is withdrawn, by the decision's own lifecycle (the
+/// host withdraws it), and its asker is owed the notice every withdrawn set
+/// owes. Nobody is left to route an answer to. It keeps no state: it reads
+/// the open sets from the decision store at each end.
+///
+/// An open set asked under the ended member's name is withdrawn when either
+/// holds:
+///
+/// - it was asked at or before the end's time. Its time can be earlier than
+///   the member's seating only because the clock that stamps both was set
+///   back in between, so the seatings are not asked whose it was then; a
+///   set an earlier holder of the name left open is withdrawn with it (that
+///   holder ended before the name was taken, and nothing can be routed to
+///   it);
+/// - the seatings the mob's journal recorded under the name say it is the
+///   member's ([`PrivateOwners::ends_with_a_private_member`]): it was asked
+///   while the member last seated under the name held it, where that
+///   member was seated no later than the end's time (a member seated after
+///   the end is a later one, and its sets stay), whatever time the journal
+///   gave the end against the set's; or while a private member held the
+///   name whose end the journal holds.
+///
+/// A set asked under the name after the end's time, while another member
+/// holds the name or none that the record knows of, stays as it is; so do a
+/// set of any other member, a set that ended some other way, and every set
+/// of a launch that does not speak for its composition.
+///
+/// [`PrivateOwners::ends_with_a_private_member`]: crate::private_owners::PrivateOwners::ends_with_a_private_member
+pub(crate) struct EndedPrivateMemberQuestionSets {
+    /// The slot's surface, held weakly: the record of who is private to
+    /// whom keeps this follower, and the slot keeps that record.
+    surface: std::sync::Weak<RwLock<Option<Arc<AskUserSurface>>>>,
+    /// The record of who is private to whom the slot follows, held weakly
+    /// for the same reason.
+    owners: std::sync::Weak<std::sync::OnceLock<crate::private_owners::PrivateOwners>>,
+}
+
+impl EndedPrivateMemberQuestionSets {
+    /// How often the withdrawals of one pass are tried.
+    const ATTEMPTS: u32 = 3;
+
+    /// The follower over the surface `slot` holds when a member ends.
+    fn of(slot: &AskUserSlot) -> Self {
+        Self {
+            surface: Arc::downgrade(&slot.surface),
+            owners: Arc::downgrade(&slot.owners),
+        }
+    }
+
+    /// The surface the slot holds now, when it holds one whose decisions
+    /// this launch may change.
+    fn surface(&self) -> Option<Arc<AskUserSurface>> {
+        let surface = self
+            .surface
+            .upgrade()?
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        (surface.decisions.is_available() && !surface.decisions.is_candidate()).then_some(surface)
+    }
+
+    /// Withdraw every open set of the runtime's own mob that `theirs` names,
+    /// each through the decision's own lifecycle, and tell the executors
+    /// that decisions changed. A set that ended meanwhile is left as it
+    /// ended. A withdrawal that fails does not end the pass: the sets after
+    /// it are visited all the same, and the pass answers its first failure.
+    fn withdraw_open_sets(
+        surface: &AskUserSurface,
+        why: &'static str,
+        theirs: impl Fn(&HeldQuestionSet) -> bool,
+    ) -> Result<(), DecisionError> {
+        let decisions = &surface.decisions;
+        let mut withdrawn = false;
+        let mut first_failure = None;
+        for set in open_question_sets(decisions)? {
+            if !theirs(&set) {
+                continue;
+            }
+            match decisions.owner().withdraw(
+                set.decision_id(),
+                &meerkat_runtime::decision::DecisionWithdrawer::Host,
+            ) {
+                Ok(_) => {
+                    withdrawn = true;
+                    tracing::info!(
+                        mob_id = %surface.mob_id,
+                        decision_id = %set.decision_id(),
+                        asker = %set.asker(),
+                        why,
+                        "a question set was withdrawn: the member that asked it, private to a \
+                         person, ended"
+                    );
+                }
+                Err(DecisionError::Refused {
+                    refusal: DecisionRefusal::NotOpen | DecisionRefusal::Expired,
+                    ..
+                }) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        mob_id = %surface.mob_id,
+                        decision_id = %set.decision_id(),
+                        "a question set of an ended member private to a person could not be \
+                         withdrawn"
+                    );
+                    if first_failure.is_none() {
+                        first_failure = Some(error);
+                    }
+                }
+            }
+        }
+        if withdrawn {
+            decisions.notify_work();
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
+    /// `pass`, tried again after a wait while it fails, [`Self::ATTEMPTS`]
+    /// times in all; the sets a last failure leaves stay as they are, until
+    /// their deadline.
+    async fn withdrawing(
+        &self,
+        mut pass: impl FnMut(&AskUserSurface) -> Result<(), DecisionError> + Send,
+    ) {
+        let mut wait = Duration::from_millis(250);
+        for attempt in 1..=Self::ATTEMPTS {
+            let Some(surface) = self.surface() else {
+                return;
+            };
+            let Err(error) = pass(&surface) else {
+                return;
+            };
+            if attempt == Self::ATTEMPTS {
+                tracing::warn!(
+                    %error,
+                    mob_id = %surface.mob_id,
+                    "the question sets of an ended member private to a person could not all be \
+                     withdrawn: the ones left stay open until their deadline"
+                );
+                return;
+            }
+            tokio::time::sleep(wait).await;
+            wait *= 4;
+        }
+    }
+
+    /// Withdraw the open sets of the private members that ended while
+    /// nothing acted on their end: the runtime served no questions then, or
+    /// an earlier process, or an earlier release, left the set open. Once
+    /// the journals are read ([`PrivateOwners::journals_read`]), an open set
+    /// is withdrawn when the member that held its asker's name when it was
+    /// asked was an ephemeral member private to a person and has ended. The
+    /// set of a long-term agent that is not seated now is never one: such
+    /// an agent is woken by its answer. The decision store is read only
+    /// when the journals hold such an end.
+    ///
+    /// [`PrivateOwners::journals_read`]: crate::private_owners::PrivateOwners::journals_read
+    pub(crate) async fn withdraw_sets_of_ended_members(
+        &self,
+        owners: &crate::private_owners::PrivateOwners,
+    ) {
+        owners.journals_read().await;
+        if !owners.knows_an_ended_private_member() {
+            return;
+        }
+        self.withdrawing(|surface| {
+            Self::withdraw_open_sets(surface, "its end was found in the journal", |set| {
+                owners
+                    .private_holder_ended(&surface.mob_id, set.asker(), set.created_at_ms())
+                    .is_some()
+            })
+        })
+        .await;
+    }
+}
+
+#[async_trait]
+impl crate::private_owners::PrivateMemberEndFollower for EndedPrivateMemberQuestionSets {
+    async fn member_ended(&self, ended: &crate::private_owners::EndedPrivateMember) {
+        let asker = crate::member_comms_id::logical_memory_identity(&ended.member);
+        let ended_at_ms = u64::try_from(ended.ended_at.timestamp_millis()).unwrap_or(0);
+        self.withdrawing(|surface| {
+            // The sets are of members of the runtime's own mob.
+            if surface.mob_id != ended.mob_id {
+                return Ok(());
+            }
+            let owners = self.owners.upgrade();
+            let owners = owners.as_ref().and_then(|owners| owners.get());
+            Self::withdraw_open_sets(surface, "its end was followed", |set| {
+                set.asker() == asker
+                    && (set.created_at_ms() <= ended_at_ms
+                        || owners
+                            .and_then(|owners| {
+                                owners.ends_with_a_private_member(
+                                    &surface.mob_id,
+                                    &asker,
+                                    set.created_at_ms(),
+                                    ended_at_ms,
+                                )
+                            })
+                            .unwrap_or(false))
+            })
+        })
+        .await;
     }
 }
 
@@ -696,6 +993,12 @@ impl HeldQuestionSet {
         &self.row.decision_id
     }
 
+    /// When the set was asked: the clock reading of its hold, in UNIX
+    /// milliseconds.
+    pub(crate) fn created_at_ms(&self) -> u64 {
+        self.row.descriptor.created_at_ms
+    }
+
     /// Why the set, as this read found it, would not take `verdict` on the
     /// digest `presented`: the refusal the decision itself gives a decide
     /// of a set that is no longer open (`not_open`: a read that finds a set
@@ -797,6 +1100,41 @@ pub(crate) fn open_question_sets(
             })
     });
     Ok(sets)
+}
+
+/// The asking member of every question set `decisions` hold, open or ended,
+/// each as its set names it. A row this version cannot read names none. A
+/// runtime that keeps no durable decisions has none. A read, with no rule
+/// in it.
+///
+/// # Errors
+/// The decision store's read failures.
+// Read through `UnifiedRuntime::names_with_gating_records`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn question_set_askers(
+    decisions: &RuntimeDecisions,
+) -> Result<std::collections::BTreeSet<String>, DecisionError> {
+    let mut askers = std::collections::BTreeSet::new();
+    if !decisions.is_available() {
+        return Ok(askers);
+    }
+    let filter = DecisionListFilter::default().with_kind(ask_user_questions_kind()?);
+    // A candidate's read records nothing.
+    let owner = decisions.owner().for_candidate_launch();
+    let mut after: Option<String> = None;
+    loop {
+        let listing = owner.list(&filter, after.as_deref(), DECISION_PAGE_MAX)?;
+        for row in listing.decisions {
+            if let Ok(set) = HeldQuestionSet::of(row) {
+                askers.insert(set.body.asker);
+            }
+        }
+        match listing.next_after {
+            Some(next) if after.as_deref() != Some(next.as_str()) => after = Some(next),
+            _ => break,
+        }
+    }
+    Ok(askers)
 }
 
 /// The question set the pending id `pending_id` names in `decisions`, open

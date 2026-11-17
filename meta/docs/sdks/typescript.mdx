@@ -26,7 +26,15 @@ npm install @rkat/meta-sdk
 
 ## Quick start
 
-In a fresh project directory, create `config/mob.toml`:
+In a fresh project directory, install the SDK and make the project an ES
+module (the program below uses top-level `await`):
+
+```bash
+npm install @rkat/meta-sdk
+npm pkg set type=module
+```
+
+Then create `config/mob.toml`:
 
 ```toml
 [mob]
@@ -44,9 +52,9 @@ comms = true
 Set `OPENAI_API_KEY` in your environment for the model above, or choose a
 supported model and its matching provider credentials. Save the following
 as `main.ts` in that directory, replacing `/path/to/rpc_gateway` with the
-binary you installed, and run it (for example with `npx tsx main.ts`; the
-program is an ES module with top-level `await`). Profiles are templates, not
-pre-created members: the roster names the agent the program sends to.
+binary you installed, and run it, for example with `npx tsx main.ts`.
+Profiles are templates, not pre-created members: the roster names the agent
+the program sends to.
 
 ```typescript
 import { Meta } from "@rkat/meta-sdk";

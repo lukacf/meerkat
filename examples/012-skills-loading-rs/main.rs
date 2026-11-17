@@ -218,7 +218,7 @@ async fn run() -> Result<(), ExampleError> {
     let store_dir = scratch.path().join("sessions");
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-5-5").await;
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
@@ -249,7 +249,7 @@ async fn run() -> Result<(), ExampleError> {
     let skill_runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .system_prompt(
             "You are a code review assistant. Apply the explicitly activated review skill.",
         )

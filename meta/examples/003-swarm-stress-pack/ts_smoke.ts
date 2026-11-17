@@ -43,7 +43,7 @@ assert.equal(all.length, 540);
 assert.equal(MAX_SESSIONS >= all.length, true);
 assert.equal(SPAWN_CONCURRENCY >= 80, true);
 assert.equal(SEND_CONCURRENCY >= 24, true);
-assert.equal(SWARM_STRESS_MODEL, "gemini-3.1-flash-lite-preview");
+assert.equal(SWARM_STRESS_MODEL, "gemini-3.5-flash-lite");
 
 const identities = new Set(all.map((agent) => agent.identity));
 assert.equal(identities.size, all.length);

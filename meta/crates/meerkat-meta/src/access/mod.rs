@@ -45,6 +45,7 @@
 mod controller;
 mod engine;
 mod model;
+pub(crate) mod unknown_keys;
 
 pub use controller::{
     AccessController, AccessPublicationAlreadyJoined, AccessView, AgentResourceAttributes,

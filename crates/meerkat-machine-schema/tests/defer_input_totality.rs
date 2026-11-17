@@ -19,7 +19,23 @@
 //! After exact run cancellation, terminal publication may also archive an
 //! input before the defer sweep. The archived no-op requires that exact
 //! cancelled terminal run and absence from every live input index.
-//! This test pins all three arms: removing a no-op, absorbing corruption, or
+//!
+//! Archived admission was widened once, on purpose, for a refused request:
+//! a run whose request was refused with nothing applied ends its inputs
+//! with the run (they are not returned to a work lane), and a persistent
+//! driver archives them with their receipt before the defer sweep, so the
+//! sweep meets inputs the machine no longer tracks. The
+//! `DeferInputBehindBacklogEndedWithRefusedRun` no-op accepts such an input
+//! only while the machine's own run terminal is that refused request (the
+//! run failed, its cause kind is a failed apply, its apply failure cause is
+//! `RequestRefused`), for a sweep that is not a cancellation's, and only
+//! when the input is absent from every live input index. An untracked input
+//! of any other failed batch stays a loud rejection. The arm names no run:
+//! a sweep that is not a cancellation's carries none. It is bound to the run
+//! terminal the machine holds, which is sound because each sweep directly
+//! follows its own run's persisted terminal, before any other run starts.
+//!
+//! This test pins all four arms: removing a no-op, absorbing corruption, or
 //! widening archived admission must remain a deliberate, reviewed change.
 
 use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine;
@@ -83,6 +99,72 @@ fn assert_archived_guards(guards: &[Guard]) -> Result<(), IdentityError> {
     Ok(())
 }
 
+fn assert_absent_from_every_live_index(guards: &[Guard]) -> Result<(), IdentityError> {
+    for index in [
+        "input_phases",
+        "input_lane",
+        "input_recovery_lanes",
+        "input_run_associations",
+    ] {
+        let expected = Expr::Not(Box::new(Expr::MapContainsKey {
+            map: Box::new(Expr::Field(FieldId::parse(index)?)),
+            key: Box::new(Expr::Binding("input_id".into())),
+        }));
+        assert!(
+            guards
+                .iter()
+                .any(|guard| has_conjunct(&guard.expr, &expected)),
+            "archived deferral must require absence from {index}, got {guards:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The guards of the no-op for an input that ended with a refused run: the
+/// sweep is not a cancellation's, the machine's run terminal is a refused
+/// request, and the input is absent from every live input index.
+fn assert_refused_run_guards(guards: &[Guard]) -> Result<(), IdentityError> {
+    let some_variant = |enum_name: &str, variant: &str| -> Result<Expr, IdentityError> {
+        Ok(Expr::Some(Box::new(Expr::NamedVariant {
+            enum_name: EnumTypeId::parse(enum_name)?,
+            variant: EnumVariantId::parse(variant)?,
+        })))
+    };
+    let required = [
+        Expr::Eq(
+            Box::new(Expr::Binding("cancelled_run_id".into())),
+            Box::new(Expr::None),
+        ),
+        Expr::Eq(
+            Box::new(Expr::Field(FieldId::parse("terminal_outcome")?)),
+            Box::new(some_variant("TurnTerminalOutcome", "Failed")?),
+        ),
+        Expr::Eq(
+            Box::new(Expr::Field(FieldId::parse("terminal_cause_kind")?)),
+            Box::new(some_variant(
+                "TurnTerminalCauseKind",
+                "RuntimeApplyFailure",
+            )?),
+        ),
+        Expr::Eq(
+            Box::new(Expr::Field(FieldId::parse(
+                "last_runtime_apply_failure_cause",
+            )?)),
+            Box::new(some_variant("RuntimeApplyFailureCause", "RequestRefused")?),
+        ),
+    ];
+    for expected in required {
+        assert!(
+            guards
+                .iter()
+                .any(|guard| has_conjunct(&guard.expr, &expected)),
+            "deferral of an input that ended with a refused run must require {expected:?}, \
+             got {guards:?}"
+        );
+    }
+    assert_absent_from_every_live_index(guards)
+}
+
 #[test]
 fn defer_input_behind_backlog_is_total_over_resolved_members() -> Result<(), IdentityError> {
     let schema = dsl_meerkat_machine();
@@ -104,6 +186,7 @@ fn defer_input_behind_backlog_is_total_over_resolved_members() -> Result<(), Ide
                 format!("{DEFER_INPUT}{phase}"),
                 format!("{DEFER_INPUT}AlreadyResolved{phase}"),
                 format!("{DEFER_INPUT}AlreadyArchived{phase}"),
+                format!("{DEFER_INPUT}EndedWithRefusedRun{phase}"),
             ]
         })
         .collect();
@@ -112,7 +195,8 @@ fn defer_input_behind_backlog_is_total_over_resolved_members() -> Result<(), Ide
     assert_eq!(
         names, expected,
         "the DeferInputBehindBacklog input must have exactly the defer, \
-         already-resolved, and exact-cancelled already-archived arms"
+         already-resolved, exact-cancelled already-archived and \
+         ended-with-refused-run arms"
     );
 
     for arm in arms {
@@ -132,6 +216,13 @@ fn defer_input_behind_backlog_is_total_over_resolved_members() -> Result<(), Ide
             assert!(
                 arm.updates.is_empty() && arm.emit.is_empty(),
                 "{name}: archived deferral cannot mutate state or fabricate effects"
+            );
+        } else if name.contains("EndedWithRefusedRun") {
+            assert_refused_run_guards(&arm.guards)?;
+            assert!(
+                arm.updates.is_empty() && arm.emit.is_empty(),
+                "{name}: deferral of an input that ended with a refused run cannot mutate \
+                 state or fabricate effects"
             );
         } else if name.contains("AlreadyResolved") {
             assert!(

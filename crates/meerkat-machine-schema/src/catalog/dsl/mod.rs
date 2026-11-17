@@ -405,6 +405,7 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
         "ResolveRuntimeCompletionResultCallbackPending",
         "ResolveRuntimeCompletionResultCancelled",
         "ResolveRuntimeCompletionResultRuntimeApplyFailed",
+        "ResolveRuntimeCompletionResultRuntimeApplyRefused",
         "ResolveRuntimeCompletionResultMachineFailed",
         "ResolveRuntimeCompletionResultFinalizationFailureWithResult",
         "ResolveRuntimeCompletionResultFinalizationFailureWithoutResult",
@@ -413,6 +414,7 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
         "ResolveCheckpointCompletionResultSucceeded",
         "ResolveCheckpointCompletionResultFailed",
         "ResolveAbandonedCompletionResultRuntimeApplyFailed",
+        "ResolveAbandonedCompletionResultRuntimeApplyRefused",
     ];
     let mut completion_result_transitions = completion_result_families
         .iter()
@@ -2770,6 +2772,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ExecutorStopped",
                     "ExecutorControlFailed",
                     "ExecutorInternal",
+                    "RequestRefused",
                 ],
             ),
             NamedTypeBinding::string_enum(

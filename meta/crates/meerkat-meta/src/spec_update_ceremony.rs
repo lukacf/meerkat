@@ -50,8 +50,10 @@ pub enum SpecUpdateError {
     /// Committing would be a no-op; the caller asked to move a pin that is not
     /// blocking anything, which usually means the divergence was elsewhere.
     AlreadyMatching { mob_id: String, revision: u64 },
-    /// The revision moved between proposing and committing. Fail closed: the
-    /// operator declared agreement with a definition that is no longer current.
+    /// The canonical definition is at `found`, not at the revision this update
+    /// expected (`proposed_at`): a declaration that names another revision, or
+    /// a definition that moved while the update was read or committed. Fail
+    /// closed: the declaration does not change the definition.
     RevisionMoved {
         mob_id: String,
         proposed_at: u64,
@@ -103,9 +105,9 @@ impl std::fmt::Display for SpecUpdateError {
                 found,
             } => write!(
                 f,
-                "the canonical definition for mob {mob_id} moved from revision {proposed_at} to \
-                 {found} while the update was being declared, so the declaration refers to a \
-                 definition that is no longer current; re-read and declare again"
+                "the canonical definition for mob {mob_id} is at revision {found}, not the \
+                 expected revision {proposed_at}; this declaration did not change it; declare \
+                 again with the current revision"
             ),
             Self::DefinitionProjectionDisagreement {
                 mob_id,

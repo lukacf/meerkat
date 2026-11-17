@@ -1263,9 +1263,11 @@ impl AccessView {
     /// link of its lineage, is private to another person
     /// ([`super::PRIVATE_TO_LABEL`]) and the caller is not an admin. Every
     /// agent action on it is denied, configuration or not, and a console
-    /// answers the caller as for an unknown agent, never as access denied. A
-    /// runtime alias is judged as the member it names, current or not. An
-    /// agent the attribute cache does not know names no owner.
+    /// answers the caller as for a name no agent holds: with the method's
+    /// own answer for such a name, which is the access rules' refusal where
+    /// they refuse the caller the action on a name no agent holds. A runtime
+    /// alias is judged as the member it names, current or not. An agent the
+    /// attribute cache does not know names no owner.
     pub fn hides_agent(&self, identity: &str) -> bool {
         let alias = self.runtime_alias_member(identity);
         self.private_owner_hides(&self.lineage_for(alias.member_key(identity)))

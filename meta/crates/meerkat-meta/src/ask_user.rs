@@ -21,6 +21,13 @@
 //!   build's prepared surface whole) gets none either: it carries only the
 //!   tools it was asked for. Nothing is opened, read or started for the
 //!   mount.
+//! - **Deny.** A member's tool restriction may deny the stock tool by name
+//!   (a profile's `tools.deny`) on every member build, whether or not the
+//!   build carries it: the same hook declares the stock names
+//!   (`STOCK_MEMBER_TOOLS`) to the build's declared tool restriction as
+//!   names of its host tools, the vocabulary Core's deny check reads. On a
+//!   build without the stock tool the entry is inert, or hides and refuses
+//!   the build's own tool of that name, as a deny does to every tool.
 //! - **Surface.** The slot is late-bound: the runtime fills it
 //!   (`AskUserSurface`) once it keeps durable decisions and serves its
 //!   long-term agents. A call answers `no_human_surface` at once, holding
@@ -79,6 +86,30 @@ use crate::mob_handle_runtime::{MobRuntime, PreBuildHook};
 
 /// The `kind` of a decided question set in a `meta/gating/decide` result.
 pub const QUESTION_SET_RESULT_KIND: &str = "question_set";
+
+/// The stock tools Meta puts on member builds as host tools, by name. Every
+/// member build is told these names (`declare_stock_tools`), whether or
+/// not `AskUserSlot::mount` puts the tool on it, so a deny list may name a
+/// stock tool in a profile used for any member.
+pub(crate) const STOCK_MEMBER_TOOLS: [&str; 1] = [ASK_USER_TOOL];
+
+/// Declare `STOCK_MEMBER_TOOLS` to a member build's declared tool
+/// restriction as names of its host tools
+/// ([`meerkat_core::ToolVocabularySource::HostTools`]): names its deny list
+/// may name on this build, mounted here or not. A build without a declared
+/// restriction denies nothing, so it has nothing to tell.
+fn declare_stock_tools(restriction: Option<&mut meerkat_core::ops::DeclaredToolRestriction>) {
+    let Some(restriction) = restriction else {
+        return;
+    };
+    let names = restriction
+        .vocabulary
+        .entry(meerkat_core::ToolVocabularySource::HostTools)
+        .or_default();
+    for name in STOCK_MEMBER_TOOLS {
+        names.insert(name);
+    }
+}
 
 /// The ingress and channel of an answer given on the Console.
 pub(crate) const CONSOLE_CHANNEL: &str = "console";
@@ -273,6 +304,10 @@ impl AskUserSlot {
     /// installed the gate decides the build's prepared surface whole, it can
     /// accept or refuse it but take no tool out of it, so the build carries
     /// only the tools it was asked for and Meta adds none of its own.
+    ///
+    /// Every member build, with the tool or without it, is first told the
+    /// stock names (`declare_stock_tools`): a deny of `ask_user` is a deny
+    /// of a known name on each of them.
     pub(crate) fn mount(&self, req: &mut CreateSessionRequest) {
         let Some(build) = req.build.as_mut() else {
             return;
@@ -280,6 +315,7 @@ impl AskUserSlot {
         let Some(binding) = build.mob_member_binding.as_ref() else {
             return;
         };
+        declare_stock_tools(build.declared_tool_restriction.as_mut());
         if crate::native_realm::built_through_surface_gate(build) {
             tracing::debug!(
                 member = %binding.member,

@@ -36,7 +36,7 @@ id = "research_team"
 orchestrator = "lead"
 
 [profiles.lead]
-model = "claude-opus-4-8"
+model = "claude-opus-5-5"
 skills = ["orchestrator"]
 peer_description = "Orchestrator"
 external_addressable = true
@@ -47,7 +47,7 @@ comms = true
 mob = true
 
 [profiles.worker]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["worker"]
 peer_description = "Worker"
 external_addressable = false
@@ -126,7 +126,7 @@ id = "market-research"
 orchestrator = "lead-analyst"
 
 [profiles.lead-analyst]
-model = "claude-opus-4-8"
+model = "claude-opus-5-5"
 skills = ["research-lead"]
 peer_description = "Lead analyst -- defines research questions, synthesizes findings"
 external_addressable = true
@@ -137,7 +137,7 @@ comms = true
 mob = true
 
 [profiles.market-researcher]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["market-analysis"]
 peer_description = "Market researcher -- competitive analysis, market sizing"
 
@@ -146,7 +146,7 @@ builtins = true
 comms = true
 
 [profiles.tech-researcher]
-model = "claude-sonnet-4-6"
+model = "claude-sonnet-5-5"
 skills = ["tech-analysis"]
 peer_description = "Technology researcher -- technical feasibility, architecture"
 

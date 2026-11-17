@@ -146,13 +146,21 @@ restart_policy = "always"
 struct AskingModel {
     requests: Arc<Mutex<Vec<String>>>,
     tools: Arc<Mutex<Vec<String>>>,
+    /// The id the model's provider gives its tool call.
+    call_id: Arc<str>,
 }
 
 impl AskingModel {
     fn new() -> Self {
+        Self::issuing(CALL_ID)
+    }
+
+    /// The model whose provider issues `call_id` for its tool call.
+    fn issuing(call_id: &str) -> Self {
         Self {
             requests: Arc::default(),
             tools: Arc::default(),
+            call_id: Arc::from(call_id),
         }
     }
 
@@ -211,9 +219,10 @@ impl LlmClient for AskingModel {
             .unwrap()
             .push(serde_json::to_string(&request.messages).expect("request messages serialize"));
         if asks {
+            let call_id = self.call_id.to_string();
             return Box::pin(async_stream::stream! {
                 yield Ok(LlmEvent::ToolCallComplete {
-                    id: CALL_ID.to_string(),
+                    id: call_id,
                     name: "ask_user".to_string(),
                     args: json!({
                         "title": "Release plan",
@@ -709,6 +718,81 @@ async fn the_host_answers_a_members_set_through_the_stdio_dispatcher() {
         listed_after["result"],
         json!({ "question_sets": [] }),
         "{listed_after}"
+    );
+}
+
+/// A member whose provider issues a 2,000-byte tool-call id asks as any
+/// member does: the call answers `asked`, the set is listed on the Console
+/// with its asker and its questions, a person answers it, and the member's
+/// next turn reads the answer under the request id the call was given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_whose_provider_issues_a_long_tool_call_id_asks_and_reads_the_answer() {
+    let state = tempfile::tempdir().unwrap();
+    let call_id = format!("call-{}", "x".repeat(1_995));
+    assert_eq!(call_id.len(), 2_000);
+    let model = AskingModel::issuing(&call_id);
+    let runtime = runtime(state.path(), &model).await;
+    let app = runtime.build_console_json_router(decision_state());
+
+    send_ask(&runtime).await;
+    // The request that carries the call's result, whatever it is: judged
+    // here, so a refused call is named and not waited for.
+    let result = model.request_with(&[&call_id]).await;
+    if !result.contains(r#"\"outcome\":\"asked\""#) {
+        runtime.shutdown().await;
+        let shown = result.replace(&call_id, "<the 2,000-byte call id>");
+        let results = shown
+            .rfind("tool_results")
+            .map_or(shown.as_str(), |at| &shown[at..]);
+        panic!("a call with a long tool-call id answers asked: {results}");
+    }
+    let listed = console_rpc(&app, "meta/gating/questions", json!({})).await;
+    let set = listed["result"]["question_sets"][0].clone();
+    let pending_id = set["pending_id"].as_str().expect("pending id").to_string();
+    let decided = console_rpc(
+        &app,
+        "meta/gating/decide",
+        json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "presented_digest": set["subject_digest"],
+            "answers": [{"question_id": "day", "answer": {"kind": "choice", "choice_id": "fri"}}],
+        }),
+    )
+    .await;
+    if decided["result"]["kind"] != json!("question_set") {
+        runtime.shutdown().await;
+        panic!("the decide of the set's id is the question set's: {decided}");
+    }
+    let told = model
+        .request_with(&[
+            "ask_user_result\\n",
+            r#"\"outcome\":\"answered\""#,
+            r#"\"choice_id\":\"fri\""#,
+        ])
+        .await;
+    let listed_after = console_rpc(&app, "meta/gating/questions", json!({})).await;
+    runtime.shutdown().await;
+
+    assert!(result.contains(&pending_id), "the call was given the id");
+    assert_eq!(
+        listed["result"]["question_sets"].as_array().map(Vec::len),
+        Some(1),
+        "{listed}"
+    );
+    assert_eq!(set["origin"], json!({ "identity": IDENTITY }), "{listed}");
+    assert_eq!(set["title"], json!("Release plan"), "{listed}");
+    assert_eq!(set["questions"][0]["id"], json!("day"), "{listed}");
+    assert_eq!(decided["result"]["pending_id"], json!(pending_id));
+    assert_eq!(decided["result"]["outcome"], json!("answered"));
+    assert!(
+        told.contains(&pending_id),
+        "the member reads the request id"
+    );
+    assert_eq!(
+        listed_after["result"],
+        json!({ "question_sets": [] }),
+        "an answered set is no longer listed"
     );
 }
 

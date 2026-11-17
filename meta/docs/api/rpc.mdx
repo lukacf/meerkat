@@ -1409,7 +1409,11 @@ error type for all of them.
 | `agents` | `array` | yes | 1 to 256 agents, each `{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?, addressability?, runtime_mode_override?}` |
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
-`name` is unique in the mob. On the Console, a create under the name of an
+`name` is unique in the mob. A create under a taken name is refused
+`name_taken`: when it is asked for, or, where a person decides the create
+and the caller is not shown what holds the name, when the approved create
+is carried out.
+On the Console, a create under the name of an
 agent private to another person answers `-32001` (unknown identity), not
 `name_taken`, to a caller who is neither that person nor an access
 administrator. A name that begins `approval-branch-` and holds only ASCII
@@ -1817,8 +1821,12 @@ for it: such an operation was never asked or was refused, and asking it
 commits it at most once. An operation whose decision ended without its
 change (rejected, expired, withdrawn, or refused when it was carried out)
 answers a result too: `{"outcome": "refused", "kind", "retryable",
-"detail"}` with the kind's members and no `operation_id`. Such an operation
-is closed for good: ask the change again under a new `request_id`.
+"detail"}` with the kind's members and no `operation_id`.
+Such an operation is closed for good. Where it was rejected, expired or
+was withdrawn, the change may be asked again under a new `request_id`;
+where it was refused when it was carried out, asking again is refused in
+the same way while the cause holds (for `name_taken`: choose another
+name).
 
 The entry of an agent whose create answered `pending_preparation` says what
 became of the agent since: `pending_preparation` while it waits for its
@@ -1911,8 +1919,12 @@ schedules?}`. `outcome` is `allow` or
 `rendering` the whole text a decider would be shown. The rendering names a
 person who asked, and a person a host names as the proposer, by the id
 their principal key carries, never by the key. A change the rules
-deny is refused as the change itself would be. Nothing is held and nothing
-is written.
+deny is refused as the change itself would be. The plan of a create the
+rules would hold for a person is refused `name_taken` where the create
+itself would be refused before the hold; under any other taken name, and
+for a create the rules allow at once, it answers as for a name no agent
+holds (the create is then refused when it is asked for or carried out).
+Nothing is held and nothing is written.
 
 ### On the Console
 
@@ -3002,6 +3014,31 @@ With `attestation`, the person a declared ingress authenticated decides:
 | `observed_at_ms` | When the ingress observed the event; at most the ingress's `max_clock_skew_ms` ahead of the gateway's clock |
 | `presentation` | What the ingress showed the person, in the `meta/decisions/present` shape, when it showed the decision itself |
 
+An attested decide is accepted only for a decision that was presented to its
+approver: by the `presentation` the attestation carries; by one recorded
+before with `meta/decisions/present` (`{decision_id, presentation}`); or by
+the gateway's own showing to the stdio operator (the `presented` notice of
+`meta/decisions/list`), where the approver map lists the operator for that
+approver id. With none of these, the decide is refused
+`presentation_incomplete`. No decision kind and no ingress is exempt. A
+presentation is:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `audience` | yes | Who was shown the decision: `{"kind": "approver", "approver_id": "<the decision's approver_id>"}`. A presentation to another approver id does not count. A reviewer audience (`{"kind": "reviewer", "reviewer": ...}`) is for a decision's review stage and never counts for an attested decide |
+| `subject_digest` | yes | The digest of the rendering that was shown (the decision's `subject_digest`) |
+| `parts_shown` | yes | The parts of the rendering that were shown, each `{index, count, part_digest}`: exactly the `parts` that `meta/decisions/rendering` answers for the same `max_part_bytes`, all of them, in that order. The call answers the rendering's text (`rendering`) and its `parts`; a host that showed the whole text passes `parts` as they are |
+| `channel_ref` | yes | Where it was shown, in the ingress's own terms |
+| `message_ref` | yes | The message that showed it |
+| `at_ms` | yes | When it was shown, by the host's clock, in UNIX milliseconds. `0` is refused. The attestation's `observed_at_ms` must not be earlier: a decide observed before the presentation is refused `decided_before_presentation` and the decision stays open |
+| `max_part_bytes` | no | The part size given to the `meta/decisions/rendering` call whose parts were shown; left out when that call named none. Parts read with one size and presented under another do not count. `0` is refused invalid params |
+| `link` | no | For a summary shown on a surface with a size limit: `{reference, served_digest}`, the link the summary carried to the full presentation and the digest of the rendering that link served. It counts, in place of the parts, when `served_digest` is the decision's `subject_digest` |
+
+A presentation with a required field missing is refused invalid params
+(`-32602`); one that does not count (another audience, another
+`subject_digest`, parts that are not exactly the rendering's, a link that
+served another digest, `at_ms` of `0`) is refused `presentation_incomplete`.
+
 The approver map must list that person for the decision's approver id, read
 again when the decision commits. An attestation the launch does not accept (an
 undeclared ingress, the `operator` ingress, an event used for another decision,
@@ -3122,7 +3159,10 @@ A decision nobody decided by its deadline ends `expired`, a rejected one
 decision refused when it was carried out answers the kind it was refused
 with where that kind carries nothing but its name (`subject_widened`,
 `grant_revoked`), and `decision_closed` with the state `execution_refused`
-otherwise. An agent that asked is told the outcome by a message to its own
+otherwise. Its `detail` then names the refusal (for example `name_taken`);
+the refusal stands, so the same change asked again under a new
+`request_id` is refused the same way while its cause holds.
+An agent that asked is told the outcome by a message to its own
 name once the decision ended.
 
 Limits of this release:

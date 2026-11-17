@@ -65,7 +65,7 @@ npm --prefix sdks/typescript run build
 ```
 
 Setting an API key does not select its provider. The CLI examples 004 and 010
-pass `--model claude-sonnet-4-6` on every command that starts a session, so
+pass `--model claude-sonnet-5-5` on every command that starts a session, so
 they need the Anthropic key. A `rkat run` without `--model` on a fresh
 configuration selects `gpt-6-astra` and needs an OpenAI key. Both scripts keep
 their state, context and user-config roots under their own `.work/`

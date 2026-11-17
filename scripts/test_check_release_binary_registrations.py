@@ -24,7 +24,15 @@ every file the check reads: the check runs on a tree made of exactly the
 files a list selects, and every source file the check reads in this checkout
 is matched against the list. A list that lacks a path the check reads (the
 member assertion's skill body lives outside `src/`) fails here, not in a
-release run. No network beyond loopback, no Rust build.
+release run.
+
+The last cases are about the scratch profile the check gives a binary. A
+Windows binary asks the operating system for its application data folders,
+which follow the profile directory and must exist: with the check's platform
+switch answered "Windows" the scratch home holds both folders, and with it
+answered otherwise the home stays empty. The environment is the same in both
+cases, and it is the one the check gave before. No network beyond loopback,
+no Rust build.
 """
 
 from __future__ import annotations
@@ -506,6 +514,75 @@ def files_the_check_reads(checker, root: Path) -> list[str]:
     return sorted(path.resolve().relative_to(root.resolve()).as_posix() for path in read)
 
 
+def scratch_profile(checker, scratch: Path, windows: bool) -> subprocess.CompletedProcess:
+    """The environment the check gives a binary for `scratch`, with the
+    check's platform switch (`on_windows`) answering `windows`, and what that
+    left in the scratch home, as a result `expect` reads.
+
+    On Windows the scratch home must hold the two application data folders
+    of a profile before a binary starts; on every other platform the home
+    stays empty. The environment is the same on both: the six names the
+    check sets, pointing into the scratch home, and what it keeps of its own
+    environment. The folders are not named in it (the operating system finds
+    them through the profile directory). Each environment is asked for
+    twice: every start of a binary asks for it again.
+    """
+    home = scratch / "home"
+    home.mkdir(parents=True)
+
+    def environment(answer: bool) -> dict[str, str]:
+        missing = object()
+        saved = getattr(checker, "on_windows", missing)
+        checker.on_windows = lambda: answer
+        try:
+            checker.clean_env(scratch)
+            return checker.clean_env(scratch)
+        finally:
+            if saved is missing:
+                del checker.on_windows
+            else:
+                checker.on_windows = saved
+
+    def entries() -> list[str]:
+        return sorted(
+            path.relative_to(home).as_posix() + ("/" if path.is_dir() else "") for path in home.rglob("*")
+        )
+
+    plain = environment(False)
+    left_by_plain = entries()
+    env = environment(windows)
+    made = entries()
+    expected_made = ["AppData/", "AppData/Local/", "AppData/Roaming/"] if windows else []
+    set_by_the_check = {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+    }
+    not_as_set = sorted(key for key, value in set_by_the_check.items() if plain.get(key) != value)
+    not_inherited = sorted(
+        key for key, value in plain.items() if key not in set_by_the_check and os.environ.get(key) != value
+    )
+    gained = sorted(set(env) - set(plain))
+    differing = sorted(key for key, value in plain.items() if env.get(key) != value)
+    holds = (
+        left_by_plain == []
+        and made == expected_made
+        and not (not_as_set or not_inherited or gained or differing)
+    )
+    return subprocess.CompletedProcess(
+        [],
+        0 if holds else 1,
+        f"with the switch off the scratch home holds {left_by_plain}, expected []; with it answered "
+        f"{windows} the home holds {made}, expected {expected_made}, and the environment gained {gained} "
+        f"and differs in {differing}, expected neither; of the names the check sets, {not_as_set} are not "
+        f"as expected; kept names that are not this process's own: {not_inherited}",
+        "",
+    )
+
+
 FAILURES: list[str] = []
 
 
@@ -807,6 +884,34 @@ def main() -> int:
                 covered,
                 0,
             )
+
+        # A Windows binary asks the operating system for its roaming
+        # application data folder. That folder follows the profile directory
+        # and is refused when it does not exist, so in a scratch profile
+        # without it the REST server and a spawned mob member found no
+        # configuration directory and did not start. No Windows is needed to
+        # hold the check to its part: the platform switch is answered here.
+        expect(
+            "on Windows the scratch profile holds its application data folders, in the environment every platform gets",
+            scratch_profile(reading, work / "profile-windows", True),
+            0,
+        )
+        expect(
+            "on every other platform the scratch home stays empty and the environment is what it was",
+            scratch_profile(reading, work / "profile-other", False),
+            0,
+        )
+        switch = getattr(reading, "on_windows", None)
+        expect(
+            "the platform switch is the interpreter's own answer",
+            subprocess.CompletedProcess(
+                [],
+                0 if callable(switch) and switch() == (os.name == "nt") else 1,
+                f"on_windows is {switch!r} and os.name is {os.name!r}",
+                "",
+            ),
+            0,
+        )
 
     if FAILURES:
         print("\n" + "\n".join(FAILURES), file=sys.stderr)

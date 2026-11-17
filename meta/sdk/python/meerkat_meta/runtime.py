@@ -1702,6 +1702,8 @@ class MetaRuntime:
             runtime_options["implicit_delegate_idle_retire_secs"] = (
                 self._config.implicit_delegate_idle_retire_secs
             )
+        if self._config.max_sessions is not None:
+            runtime_options["max_sessions"] = self._config.max_sessions
         if self._config.identity_bootstrap_mode is not None:
             runtime_options["identity_bootstrap_mode"] = (
                 self._config.identity_bootstrap_mode.to_dict()

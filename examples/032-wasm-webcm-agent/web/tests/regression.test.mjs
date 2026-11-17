@@ -252,11 +252,11 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
       });
       const control = await page.evaluate(async ({ repoPath, origin }) => {
         const wasm = await import(`/@fs/${repoPath}/sdks/web/wasm/meerkat_web_runtime.js`);
-        await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: `${origin}/fixtures/anthropic`, model: "claude-sonnet-4-6" }));
+        await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: `${origin}/fixtures/anthropic`, model: "claude-sonnet-5-5" }));
         let sub;
         try {
           const id = await wasm.mob_create(JSON.stringify({
-            id: "offline-control", profiles: { worker: { model: "claude-sonnet-4-6", runtime_mode: "autonomous_host", tools: { comms: true }, external_addressable: true } },
+            id: "offline-control", profiles: { worker: { model: "claude-sonnet-5-5", runtime_mode: "autonomous_host", tools: { comms: true }, external_addressable: true } },
           }));
           await wasm.mob_spawn(id, JSON.stringify([{ profile: "worker", agent_identity: "worker", runtime_mode: "autonomous_host" }]));
           sub = await wasm.mob_member_subscribe(id, "worker");

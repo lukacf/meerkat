@@ -1,37 +1,33 @@
 # Meerkat Connect
 
-Give your agents the tools they need. Meerkat Connect combines more than 100
+Give your agents the tools they need. Meerkat Connect combines 100
 adopted OSS integrations with agent-led discovery and installation beyond the
 catalog. Describe a task, review the proposed access and let Connect guide setup.
 
 ## Install and use
 
-Connect 0.9.14 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
-macOS archives (macOS 13.5 or later) are not built yet and follow later.
-Install [Meerkat Core 0.9.14](https://github.com/lukacf/meerkat/releases/tag/v0.9.14),
-the Core release Connect 0.9.14 was built and released with,
+Connect 0.9.15 is released for Linux x86_64 with glibc 2.39: its two programs
+need glibc 2.39 symbols (read from the released binaries, not run on other
+hosts), and it was built and checked on a glibc 2.39 host. No macOS arm64
+products are part of this release.
+Install [Meerkat Core 0.9.15](https://github.com/lukacf/meerkat/releases/tag/v0.9.15),
+the Core release Connect 0.9.15 was built and released with,
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
-Until Connect 0.9.15 is published, the Connect release to
-use with Core 0.9.15 and Meta 0.9.15 is Connect 0.9.14. A Python environment
-with the `native-host` extra of Connect 0.9.14's `meerkat-toolkit` cannot
-take `meerkat-meta` 0.9.15 until Connect 0.9.15 is published: the extra
-requires `meerkat-meta==0.9.14`. That pairing was not run as a whole, in
-either direction: it rests on the version requirements Connect 0.9.14
-published. Connect 0.9.14's archives are built with Core 0.9.14 and Meta
-0.9.14; see the [upgrade guide](../docs/guides/upgrading.mdx) for the limits
-of that pairing.
+Connect 0.9.15 was built and released with Core 0.9.15 and Meta 0.9.15, all
+three from one source commit. The `native-host` extra of its `meerkat-toolkit`
+wheel requires `meerkat-meta==0.9.15`.
 
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=linux-x86_64 # 0.9.14 has no macos-arm64 archive yet.
-archive="meerkat-connect-0.9.14-$platform.tar.gz"
-release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14
+platform=linux-x86_64 # 0.9.15 has no macos-arm64 archive.
+archive="meerkat-connect-0.9.15-$platform.tar.gz"
+release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
-sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
+sha256sum -c "$archive.sha256"
 tar -xpf "$archive"
 export PATH="$PWD/meerkat-connect-$platform/bin:$PATH"
 ```
@@ -68,11 +64,14 @@ the original task in the same conversation. The application supplies login and
 a persistent host. The gateway archive and Rust, JSON-RPC, Python and TypeScript
 interfaces support this composition; the gateway alone does not install an app.
 
-The [0.9.10 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10)
-includes ordinary CLI and Console setup. Connect 0.9.10 does not support
+The [0.9.15 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15)
+carries the complete CLI archive and the gateway archive, for ordinary CLI and
+Console setup. Connect 0.9.15 does not support
 in-place updates that change an application's tool policy, definition,
 instructions or runtime; Forge's Stage refuses them, so keep the existing
-installation and state. Shared multi-caller setup is an unqualified opt-in,
+installation and state. This limit is read from the 0.9.15 source, where the
+refusal and its tests are unchanged since 0.9.14; it was not run against the
+released archives. Shared multi-caller setup is an unqualified opt-in,
 available only when an application starts the gateway with
 `--private-workflow-launch`; ordinary CLI and Console setup stay single-caller.
 Do not install over an existing installation to update it.
@@ -91,8 +90,8 @@ qualify the published release or a deployed provider flow.
 
 ## Scope
 
-- The adopted library contains 101 integration identities on macOS and 100 on
-  Linux, which excludes Playwright. Support covers the declared operations and
+- The adopted library contains 100 integration identities in this release, which
+  has Linux products only and excludes Playwright. Support covers the declared operations and
   setup profiles; the counts do not claim live authentication with every provider.
 - Agents can research integrations outside the catalog and propose supported
   packages. Installation, credentials and access are validated before use.
@@ -101,7 +100,7 @@ qualify the published release or a deployed provider flow.
 - REST and an outer MCP Connect entry point are deferred. MCP servers used as
   integrations are included.
 
-See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.14) for platform assets and compatibility,
+See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15) for platform assets and compatibility,
 [BUILDING.md](BUILDING.md) to build from source, and
 [source provenance](SOURCE-PROVENANCE.md) for upstream attribution and catalog
 identity. The [documentation source](docs/site) contains the full contracts.

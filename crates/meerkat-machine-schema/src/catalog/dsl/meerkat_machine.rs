@@ -1183,6 +1183,11 @@ pub enum RuntimeApplyFailureCause {
     ExecutorStopped,
     ExecutorControlFailed,
     ExecutorInternal,
+    /// The request was refused and nothing was applied: the executor
+    /// answered before it changed the session. The run's contributors end
+    /// as never executed, and the run is resolved as an abandoned turn, not
+    /// as a failed apply, so the runtime that refused it is kept.
+    RequestRefused,
 }
 
 /// Typed pre-run phase marker. Closed set: `idle`, `attached`, `retired`.
@@ -17052,6 +17057,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 )
             }
             update {
+                // The stored apply failure cause is the cause of the run
+                // whose result is held open (`RunFailed` writes both). A
+                // result adopted while none is held is another run's: its
+                // cause is not stored, so the cause of the run before it is
+                // dropped and never answers for the recovered run.
+                if self.runtime_completion_result_run_id == None {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.runtime_completion_result_run_id = Some(run_id);
                 // Recovery only ever surfaces PENDING durable batches, so the
                 // rehydrated correlation is by construction an open obligation.
@@ -17203,6 +17217,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "machine_runtime_apply_failed" {
                 self.terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
             }
+            guard "runtime_apply_not_refused" {
+                self.last_runtime_apply_failure_cause != Some(RuntimeApplyFailureCause::RequestRefused)
+            }
             update {
                 if self.runtime_completion_result_run_id == run_id {
                     self.runtime_completion_result_resolved = true;
@@ -17218,6 +17235,57 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id: run_id,
                 result_class: RuntimeCompletionResultClass::AbandonedWithError,
                 cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeApplyFailed
+            }
+        }
+
+        // The run's apply failed because the request was refused with
+        // nothing applied (`run_correlated` binds the stored cause to this
+        // run: `RunFailed` writes both). The waiter gets the failed turn's
+        // error like every failed apply, but the outcome handed to the
+        // cleanup rule is `Abandoned`: the turn ended, the runtime that
+        // refused it did not fail, so the rule keeps it while the live
+        // session is present.
+        transition ResolveRuntimeCompletionResultRuntimeApplyRefused {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveRuntimeCompletionResult { run_id, terminal, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "run_correlated" {
+                run_id != None
+                && self.runtime_completion_result_run_id == run_id
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "terminal_machine" { terminal == RuntimeCompletionTerminalObservation::MachineTerminal }
+            guard "machine_failed" {
+                self.terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::BudgetExhausted)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::TimeBudgetExceeded)
+                || self.terminal_outcome == Some(TurnTerminalOutcome::StructuredOutputValidationFailed)
+            }
+            guard "machine_failure_cause_known" {
+                self.terminal_cause_kind != None
+                && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
+            guard "machine_runtime_apply_failed" {
+                self.terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+            }
+            guard "runtime_apply_refused" {
+                self.last_runtime_apply_failure_cause == Some(RuntimeApplyFailureCause::RequestRefused)
+            }
+            update {
+                if self.runtime_completion_result_run_id == run_id {
+                    self.runtime_completion_result_resolved = true;
+                }
+            }
+            to Idle
+            emit RuntimeCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::Abandoned
             }
         }
 
@@ -22959,8 +23027,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23020,8 +23096,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23081,8 +23165,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23142,8 +23234,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = max_extraction_retries;
@@ -23191,8 +23291,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = 0;
@@ -23248,8 +23356,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = 0;
@@ -23304,8 +23420,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = None;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
+                // The stored cause is the cause of the run whose result is held
+                // open. While an earlier run's result is still unresolved the
+                // cause stays, so that result is answered on its own cause; it
+                // is dropped when no result is held open.
+                if self.runtime_completion_result_run_id == None
+                    || self.runtime_completion_result_resolved == true
+                {
+                    self.last_runtime_apply_failure_cause = None;
+                    self.last_runtime_apply_failure_message = None;
+                }
                 self.extraction_attempts = 0;
                 self.extraction_active = false;
                 self.max_extraction_retries = 0;
@@ -23912,6 +24036,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.turn_terminal_run_id = Some(run_id);
                 self.runtime_completion_result_run_id = Some(run_id);
+                // This run's result is now the one held open, and this run has
+                // no apply failure cause: the stored cause of an earlier run is
+                // dropped with that run's place.
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 // The same terminal commit stages this run's durable
                 // terminal-completion batch, so the correlation is now an OPEN
                 // obligation until a ResolveRuntimeCompletionResult* arm gives
@@ -24123,6 +24252,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_terminal_run_id = Some(run_id);
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
                 self.runtime_completion_result_run_id = Some(run_id);
+                // This run's result is now the one held open, and this run has
+                // no apply failure cause: the stored cause of an earlier run is
+                // dropped with that run's place.
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 // Open obligation, as in RunCompleted. Cancellation stages the
                 // batch and abandons the same contributors inside ONE terminal
                 // commit and publishes later, so abandoned-plus-pending is the
@@ -26690,6 +26824,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 cancelled_run_id != None
                 && self.turn_terminal_run_id == cancelled_run_id
                 && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
+            }
+            guard "input_not_live" {
+                !self.input_phases.contains_key(input_id)
+                && !self.input_lane.contains_key(input_id)
+                && !self.input_recovery_lanes.contains_key(input_id)
+                && !self.input_run_associations.contains_key(input_id)
+            }
+            update {}
+            to Idle
+        }
+
+        // A run whose request was refused with nothing applied ends its
+        // inputs with the run: they are not returned to a work lane, and a
+        // persistent driver archives them with their receipt before the
+        // defer sweep of the failed run. Absence is a no-op for exactly
+        // that sweep: one that is not a cancellation's, while the run
+        // terminal the machine holds is a refused request. An untracked
+        // input of any other failed run stays a rejection.
+        transition DeferInputBehindBacklogEndedWithRefusedRun {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
+            guard "refused_run_sweep" {
+                cancelled_run_id == None
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                && self.terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                && self.last_runtime_apply_failure_cause == Some(RuntimeApplyFailureCause::RequestRefused)
             }
             guard "input_not_live" {
                 !self.input_phases.contains_key(input_id)
@@ -41182,6 +41342,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && self.input_run_associations.get(recipient).get("value") == run_id)
             }
             guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "runtime_apply_not_refused" {
+                self.runtime_completion_result_run_id != Some(run_id)
+                || self.last_runtime_apply_failure_cause != Some(RuntimeApplyFailureCause::RequestRefused)
+            }
             update {
                 if self.runtime_completion_result_run_id == Some(run_id) {
                     self.runtime_completion_result_resolved = true;
@@ -41202,6 +41366,66 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_session_checkpoint: requires_session_checkpoint,
                 result_class: RuntimeCompletionResultClass::AbandonedWithError,
                 cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeApplyFailed
+            }
+        }
+
+        // The inputs were abandoned by a run whose request was refused with
+        // nothing applied. The stored cause is that run's only while the
+        // run is still the one whose result is being resolved (`RunFailed`
+        // writes the cause and that correlation together), so the guard
+        // requires both. As for the run itself, the waiter gets the failed
+        // turn's error and the cleanup rule is handed `Abandoned`.
+        transition ResolveAbandonedCompletionResultRuntimeApplyRefused {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveAbandonedCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "exact_abandoned_batch" {
+                recipient_input_ids.len() > 0
+                && recipient_input_ids.len() <= 256
+                && recipient_input_ids.contains(owner_input_id)
+                && candidate_digest != ""
+                && completion_input_ids_digest != ""
+                && !requires_session_checkpoint
+                && !has_interaction_terminal_outbox
+            }
+            guard "exact_runtime_apply_failure" {
+                terminal_outcome == TurnTerminalOutcome::Failed
+                && terminal_cause_kind == TurnTerminalCauseKind::RuntimeApplyFailure
+            }
+            guard "all_recipients_abandoned_by_run" {
+                for_all(recipient in recipient_input_ids,
+                    self.input_phases.contains_key(recipient)
+                    && self.input_phases.get(recipient).get("value") == InputPhase::Abandoned
+                    && self.input_terminal_kind.contains_key(recipient)
+                    && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Abandoned
+                    && self.input_run_associations.contains_key(recipient)
+                    && self.input_run_associations.get(recipient).get("value") == run_id)
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            guard "runtime_apply_refused" {
+                self.runtime_completion_result_run_id == Some(run_id)
+                && self.last_runtime_apply_failure_cause == Some(RuntimeApplyFailureCause::RequestRefused)
+            }
+            update {
+                if self.runtime_completion_result_run_id == Some(run_id) {
+                    self.runtime_completion_result_resolved = true;
+                }
+            }
+            to Idle
+            emit AbandonedCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                owner_input_id: owner_input_id,
+                candidate_digest: candidate_digest,
+                completion_input_ids_digest: completion_input_ids_digest,
+                recipient_input_ids: recipient_input_ids,
+                requires_session_checkpoint: requires_session_checkpoint,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::Abandoned
             }
         }
 

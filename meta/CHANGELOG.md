@@ -129,6 +129,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `parts` are those of the rendering without it, the stdio answer does not
   carry it, and a set that ended and a decision of another kind are
   answered as before.
+- A gateway opens a console log at schema version 4, the form a later
+  release writes, in which each frame names its mob. A host that returns
+  to this release after such a release has moved the log starts over
+  `meta_console.sqlite3` as it lies. Its Console then shows and serves the
+  frames of the gateway's own mob only: every read, every send and its
+  recovery, the log's cursor, the removal of a streamed block's parts and
+  a clear leave the frames a later release stored for another mob where
+  they are, unread and uncounted. This release never moves a log itself:
+  a fresh log is created at version 3 and a log at version 1 to 3 is
+  opened as before. A log that is moved to version 4 while the gateway
+  has it open is served in the same way from its next operation on. A log
+  stamped above version 4 is refused with the schema error of the
+  `meta-console` domain, at the start and at every operation of a gateway
+  that has it open. A log stamped version 4 whose tables and indexes are
+  not that version's is refused at the start. Do not run two releases
+  over one state directory at once.
 
 ### Changed
 

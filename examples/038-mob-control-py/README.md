@@ -66,9 +66,9 @@ Three things to know before copying this:
   refused.
 - On 0.9.5 through 0.9.14, `mob/cancel_all_work` could destroy the mobs owned
   by the session of the member when a turn sent straight to that session was
-  waiting. 0.9.15 fixed it; see the
-  [0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
-  and [Cancel work](https://docs.rkat.ai/guides/mobs#cancel-work) in the mobs guide.
+  waiting. 0.9.15 fixed it; see
+  [Cancel work](https://docs.rkat.ai/guides/mobs#cancel-work) in the mobs
+  guide, which links the known issue.
 - From 0.9.15 one limit remains, listed under Known limitations in the
   [changelog](../../CHANGELOG.md) of 0.9.15: after a cancel, the first turn a
   client starts on the session of the member (`turn/start`) is answered an

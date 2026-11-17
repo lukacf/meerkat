@@ -2224,8 +2224,10 @@ ConsolePolicy {
 
 For standalone `meta_gateway` launches, pass `console_read_only: true` in the
 `meta/init` params or set `META_CONSOLE_READ_ONLY=true`. This setting is
-part of the gateway resume fingerprint, so toggling it creates or resumes the
-matching runtime instead of reusing a runtime launched with the opposite policy.
+part of the gateway resume fingerprint, so toggling it creates the matching
+runtime, or with the start flag `--resume-from-registry` (from 0.9.17)
+resumes a live one, instead of reusing a runtime launched with the opposite
+policy.
 
 `meta_gateway` takes the HTTP exposure knobs as top-level `meta/init`
 params rather than `runtime_options`: `http_listen` (`HOST:PORT`, default
@@ -2265,6 +2267,16 @@ allows them for every caller the route admits. It is launch-only, and on
 `meta_gateway` it joins the resume fingerprint. Rust hosts use
 `allow_flow_editor_host_deploy(true)` on `UnifiedRuntimeBuilder` or
 `UnifiedRuntime`. See [Flow Editor](/guides/flow-editor).
+
+`meta_gateway` also takes `--resume-from-registry` (from 0.9.17), a bare
+start flag with no init parameter and no environment variable. Only a launch
+started with it is answered `launch_state: "resumed"`: when the runtime
+registry lists an entry under the launch's resume key whose address answers
+`GET /healthz` with success, the launch reports that entry's runtime id and
+addresses and starts nothing. The flag is launch-only and does not join the
+resume fingerprint. Without it every launch binds and starts, or is refused;
+see [Deployment](/guides/deployment) and Breaking under 0.9.17 in Meta's
+changelog. `rpc_gateway` has no runtime registry.
 
 ### Console auth by surface
 

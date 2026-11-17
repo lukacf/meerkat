@@ -15454,6 +15454,333 @@ async fn a_runtime_source_runner_gets_its_schedule_too() {
     );
 }
 
+/// The label of Meta's runner schedules, with `value`.
+fn runner_label(value: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([(
+        crate::schedule_wiring::SOURCE_RUNNER_LABEL.to_string(),
+        value.to_string(),
+    )])
+}
+
+/// An interval every `every_seconds` that started now.
+fn started_interval(every_seconds: u64) -> meerkat::TriggerSpec {
+    meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+        start_at_utc: chrono::Utc::now(),
+        every_seconds,
+        end_at_utc: None,
+    })
+}
+
+/// Store a schedule of the collector `runnable` for the source `source_id`
+/// (with the source as params, unless `params` is false), carrying `labels`
+/// and firing on `trigger`.
+async fn seed_runner_schedule(
+    schedules: &meerkat::ScheduleService,
+    runnable: &str,
+    source_id: &str,
+    params: bool,
+    labels: BTreeMap<String, String>,
+    trigger: meerkat::TriggerSpec,
+) -> meerkat::Schedule {
+    let params = params.then(|| {
+        meerkat::HostRunnableParams::try_from(serde_json::json!({
+            "mob_id": OWN_MOB,
+            "source_id": source_id,
+        }))
+        .unwrap()
+    });
+    schedules
+        .create(meerkat::CreateScheduleRequest {
+            name: Some(format!("seeded for {source_id}")),
+            description: None,
+            trigger,
+            target: meerkat::TargetBinding::host_runnable(meerkat::HostRunnableTargetBinding {
+                runnable: meerkat::HostRunnableName::parse(runnable).unwrap(),
+                params,
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels,
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .await
+        .unwrap()
+}
+
+/// Give the stored schedule `schedule` the trigger `trigger`.
+async fn retime(
+    schedules: &meerkat::ScheduleService,
+    schedule: &meerkat::Schedule,
+    trigger: meerkat::TriggerSpec,
+) {
+    schedules
+        .update(
+            &schedule.schedule_id,
+            meerkat::UpdateScheduleRequest {
+                trigger: Some(trigger),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A harness whose source `inbox` names the collector `inbox-collector`
+/// every 60 seconds, declared before any schedule authority is installed,
+/// and an empty schedule service.
+async fn a_source_with_a_runner_before_the_start() -> (Harness, meerkat::ScheduleService) {
+    let harness = harness_with(ScriptedNative::new());
+    try_host_call(
+        &harness.service,
+        SOURCES_PUT,
+        with_runner(
+            source_params("o1", "inbox", "subject-1", &["mail.received"]),
+            "inbox-collector",
+            60,
+        ),
+    )
+    .await
+    .unwrap();
+    let schedules =
+        meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+    (harness, schedules)
+}
+
+/// A start: the gateway installs its schedule authority over `schedules`.
+async fn start_over(harness: &Harness, schedules: &meerkat::ScheduleService) {
+    harness
+        .service
+        .install_source_runners(Arc::new(
+            crate::schedule_wiring::ScheduleSourceRunners::new(schedules.clone()),
+        ))
+        .await;
+}
+
+/// That `schedule` runs the inbox's collector as the source declares it:
+/// active, carrying this version's mark, an interval of 60 seconds with no
+/// end that has started.
+fn assert_runs_as_declared(schedule: &meerkat::Schedule, case: &str) {
+    assert_eq!(schedule.phase, meerkat::SchedulePhase::Active, "{case}");
+    assert_eq!(
+        schedule
+            .config
+            .labels
+            .get(crate::schedule_wiring::SOURCE_RUNNER_LABEL)
+            .map(String::as_str),
+        Some("2"),
+        "{case}: this version's mark"
+    );
+    let meerkat::TriggerSpec::Interval(spec) = &schedule.trigger else {
+        panic!("{case}: an interval trigger: {:?}", schedule.trigger);
+    };
+    assert_eq!(spec.every_seconds, 60, "{case}");
+    assert_eq!(spec.end_at_utc, None, "{case}: no end");
+    assert!(
+        spec.start_at_utc <= chrono::Utc::now(),
+        "{case}: it has started: {}",
+        spec.start_at_utc
+    );
+}
+
+/// A runner schedule an earlier version made carries the label with
+/// another value. Whatever was done to it since (paused, given another
+/// interval, an end or a late start), a start ends it and makes the
+/// source's schedule anew: one schedule, another id, running as the source
+/// declares it.
+#[tokio::test]
+async fn a_start_rebuilds_a_runner_schedule_an_earlier_version_made() {
+    let far = chrono::Utc::now() + chrono::Duration::days(36_500);
+    for case in [
+        "as it was made",
+        "paused",
+        "another interval",
+        "an end time",
+        "a late start",
+    ] {
+        let (harness, schedules) = a_source_with_a_runner_before_the_start().await;
+        let earlier = seed_runner_schedule(
+            &schedules,
+            "inbox-collector",
+            "inbox",
+            true,
+            runner_label("1"),
+            started_interval(60),
+        )
+        .await;
+        match case {
+            "paused" => {
+                schedules.pause(&earlier.schedule_id).await.unwrap();
+            }
+            "another interval" => retime(&schedules, &earlier, started_interval(86_400)).await,
+            "an end time" => {
+                let trigger = meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                    start_at_utc: chrono::Utc::now(),
+                    every_seconds: 60,
+                    end_at_utc: Some(far),
+                });
+                retime(&schedules, &earlier, trigger).await;
+            }
+            "a late start" => {
+                let trigger = meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                    start_at_utc: far,
+                    every_seconds: 60,
+                    end_at_utc: None,
+                });
+                retime(&schedules, &earlier, trigger).await;
+            }
+            _ => {}
+        }
+
+        start_over(&harness, &schedules).await;
+        let all = schedules.list().await.unwrap();
+        assert_eq!(all.len(), 1, "{case}: one schedule: {all:#?}");
+        assert_ne!(
+            all[0].schedule_id, earlier.schedule_id,
+            "{case}: the earlier version's schedule is not kept"
+        );
+        assert_runs_as_declared(&all[0], case);
+    }
+}
+
+/// A runner schedule this version made is kept across a start: left as it
+/// is when it runs as the source declares, resumed when it was paused, and
+/// retimed when its trigger is not the source's (another interval, an end
+/// time, a late start). Of two for one source, one stays.
+#[tokio::test]
+async fn a_start_keeps_its_own_runner_schedule_and_sets_it_right() {
+    let far = chrono::Utc::now() + chrono::Duration::days(36_500);
+    for case in [
+        "as it was made",
+        "paused",
+        "another interval",
+        "an end time",
+        "a late start",
+        "two for one source",
+    ] {
+        let (harness, schedules) = a_source_with_a_runner_before_the_start().await;
+        let own = seed_runner_schedule(
+            &schedules,
+            "inbox-collector",
+            "inbox",
+            true,
+            runner_label("2"),
+            started_interval(60),
+        )
+        .await;
+        match case {
+            "paused" => {
+                schedules.pause(&own.schedule_id).await.unwrap();
+            }
+            "another interval" => retime(&schedules, &own, started_interval(86_400)).await,
+            "an end time" => {
+                let trigger = meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                    start_at_utc: chrono::Utc::now(),
+                    every_seconds: 60,
+                    end_at_utc: Some(far),
+                });
+                retime(&schedules, &own, trigger).await;
+            }
+            "a late start" => {
+                let trigger = meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                    start_at_utc: far,
+                    every_seconds: 60,
+                    end_at_utc: None,
+                });
+                retime(&schedules, &own, trigger).await;
+            }
+            "two for one source" => {
+                let second = seed_runner_schedule(
+                    &schedules,
+                    "inbox-collector",
+                    "inbox",
+                    true,
+                    runner_label("2"),
+                    started_interval(60),
+                )
+                .await;
+                schedules.pause(&second.schedule_id).await.unwrap();
+            }
+            _ => {}
+        }
+        let before = schedules.get(&own.schedule_id).await.unwrap();
+
+        start_over(&harness, &schedules).await;
+        let all = schedules.list().await.unwrap();
+        assert_eq!(all.len(), 1, "{case}: one schedule: {all:#?}");
+        assert_eq!(
+            all[0].schedule_id, own.schedule_id,
+            "{case}: the gateway's own schedule is kept"
+        );
+        assert_runs_as_declared(&all[0], case);
+        if case == "as it was made" || case == "two for one source" {
+            assert_eq!(all[0], before, "{case}: it is left as it is");
+        }
+    }
+}
+
+/// A schedule that carries the label and that the gateway cannot read as a
+/// runner schedule (no source as params, or no host runnable at all) ends
+/// at a start, at either value of the label; a schedule without the label
+/// stays, as before.
+#[tokio::test]
+async fn a_start_ends_a_labelled_schedule_it_cannot_read() {
+    let (harness, schedules) = a_source_with_a_runner_before_the_start().await;
+    for value in ["1", "2"] {
+        seed_runner_schedule(
+            &schedules,
+            "inbox-collector",
+            "inbox",
+            false,
+            runner_label(value),
+            started_interval(60),
+        )
+        .await;
+        let request = meerkat::CreateScheduleRequest {
+            name: Some("a labelled note".to_string()),
+            description: None,
+            trigger: started_interval(60),
+            target: serde_json::from_value(serde_json::json!({
+                "target_kind": "session",
+                "type": "resumable_session",
+                "session_id": meerkat_core::types::SessionId::new().to_string(),
+                "action": { "type": "prompt", "prompt": "Run the report." },
+            }))
+            .unwrap(),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: runner_label(value),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        };
+        schedules.create(request).await.unwrap();
+    }
+    let hosts_own = seed_runner_schedule(
+        &schedules,
+        "inbox-collector",
+        "inbox",
+        false,
+        BTreeMap::new(),
+        started_interval(60),
+    )
+    .await;
+
+    start_over(&harness, &schedules).await;
+    let all = schedules.list().await.unwrap();
+    let (kept, runner): (Vec<_>, Vec<_>) = all
+        .iter()
+        .partition(|schedule| schedule.schedule_id == hosts_own.schedule_id);
+    assert_eq!(kept.len(), 1, "the unlabelled schedule stays: {all:#?}");
+    assert_eq!(
+        runner.len(),
+        1,
+        "the source's own schedule is the only other one left: {all:#?}"
+    );
+    assert_runs_as_declared(runner[0], "the source's own");
+}
+
 // ---------------------------------------------------------------------------
 // Announcement sources: holds. What a member is owed and may no longer
 // receive is held at its next seal and at the last check before every

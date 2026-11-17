@@ -2908,6 +2908,57 @@ oauth_account_selection = "unverified"
         }
     }
 
+    /// A variable that is not set is the failure of the one `mcp.toml`
+    /// server that names it: another server still resolves as an auth
+    /// target, and the unresolved one is an unreadable configuration (the
+    /// wire reason `configuration_invalid`), whose text does not echo the
+    /// host's configuration.
+    #[tokio::test]
+    async fn an_unset_variable_fails_only_the_auth_target_that_names_it() {
+        const ABSENT: &str = "RKAT_ROW_MCP_AUTH_TARGET_ABSENT_PATH";
+        let roots = tempfile::tempdir().unwrap();
+        write_project_mcp(
+            roots.path(),
+            &format!(
+                "[[servers]]\nname = \"alpha\"\nurl = \"https://alpha.example/${{{ABSENT}}}/mcp\"\n\n\
+                 [[servers]]\nname = \"beta\"\nurl = \"https://beta.example/mcp\"\n"
+            ),
+        );
+        let resolve = |name: &'static str, url: &'static str| {
+            let root = roots.path().to_path_buf();
+            async move {
+                resolve_configured_mcp_target_in_realm_trusting(
+                    &wire_target(name, url, None),
+                    &[],
+                    Some(&root),
+                    None,
+                    &|_| false,
+                )
+                .await
+            }
+        };
+
+        let other = resolve("beta", "https://beta.example/mcp")
+            .await
+            .expect("a target beside a server naming an unset variable resolves");
+        assert_eq!(other.server_url(), "https://beta.example/mcp");
+
+        match resolve("alpha", "https://alpha.example/mcp").await {
+            Err(error @ HostAuthError::McpTarget(HostMcpTargetRefusal::ConfigUnavailable(_))) => {
+                assert_eq!(
+                    error.reason(),
+                    meerkat_contracts::WireAuthErrorReason::ConfigurationInvalid
+                );
+                let text = error.to_string();
+                assert!(
+                    !text.contains(ABSENT) && !text.contains("alpha.example"),
+                    "{text}"
+                );
+            }
+            other => panic!("expected an unreadable configuration, got {other:?}"),
+        }
+    }
+
     mod redirect_fixture {
         #![allow(clippy::unwrap_used)]
         /// A credential endpoint that answers every request with a `302` to a

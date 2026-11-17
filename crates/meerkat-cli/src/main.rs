@@ -34814,6 +34814,132 @@ url = "https://user.example/mcp"
         adapter.shutdown().await;
     }
 
+    /// A user `mcp.toml` whose one server, `alpha`, names a variable that is
+    /// not set, and the scope that reads it. Running `alpha` would create
+    /// the returned marker file.
+    #[cfg(all(feature = "mcp", unix))]
+    async fn scope_with_an_unresolved_mcp_server(
+        root: &Path,
+        realm: &str,
+        absent: &str,
+    ) -> (RuntimeScope, PathBuf) {
+        let marker = root.join("unresolved-launch-marker");
+        let user_root = root.join("user");
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            user_root.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"/bin/sh\"\n\
+                 args = [\"-c\", \"printf entered > {}\"]\n\
+                 env = {{ TOKEN = \"${{{absent}}}\" }}\n",
+                marker.display()
+            ),
+        )
+        .await
+        .unwrap();
+        let mut scope = test_scope(root.join("realms"), realm);
+        scope.user_config_root = Some(user_root);
+        (scope, marker)
+    }
+
+    /// A variable that is not set fails the one `mcp.toml` server that names
+    /// it, not the run: the loader stages that server as a failed add at
+    /// once, with or without a wait for MCP, and nothing of it is expanded,
+    /// connected or spawned.
+    #[cfg(all(feature = "mcp", unix))]
+    #[tokio::test]
+    async fn test_cli_mcp_loader_fails_only_the_server_naming_an_unset_variable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_LOADER_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (scope, marker) =
+            scope_with_an_unresolved_mcp_server(&root, "loader-realm", ABSENT).await;
+        let factory = AgentFactory::new(root.join("sessions"));
+
+        for wait_for_mcp in [true, false] {
+            let adapter = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                create_mcp_tools(
+                    &scope,
+                    &[],
+                    wait_for_mcp,
+                    CliMcpAuthMode::Stored,
+                    Some(Arc::new(
+                        meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+                    )),
+                    cli_mcp_stdio_profile(&factory),
+                    Some(&CliMcpRouterOwner::fresh(&SessionId::new())),
+                ),
+            )
+            .await
+            .expect("an unresolved server is failed at once, never pending")
+            .expect("the run starts beside a server naming an unset variable")
+            .expect("one configured server");
+            if !wait_for_mcp {
+                let deltas = adapter
+                    .wait_until_ready(std::time::Duration::from_secs(15))
+                    .await
+                    .unwrap();
+                assert!(
+                    deltas.iter().any(|delta| {
+                        delta.target == "alpha"
+                            && delta.phase == meerkat_core::ExternalToolDeltaPhase::Failed
+                            && delta.detail.as_deref().is_some_and(|detail| {
+                                detail.contains("env.TOKEN") && detail.contains(ABSENT)
+                            })
+                    }),
+                    "the server is reported failed with its field and variable: {deltas:?}"
+                );
+            }
+            adapter.shutdown().await;
+        }
+        assert!(
+            !marker.exists(),
+            "an unresolved server never starts its process"
+        );
+    }
+
+    /// On a governed realm the configured set goes to the factory whole, so
+    /// a server naming a variable that is not set still refuses the run; the
+    /// refusal names the server, the field and the variable.
+    #[cfg(all(feature = "local-authorization", feature = "mcp", unix))]
+    #[tokio::test]
+    async fn a_governed_run_refuses_an_unset_variable_naming_its_server() {
+        use meerkat::governed_realm::{
+            RealmGovernance, open_governed_realm_persistence_with_provider,
+        };
+        const ABSENT: &str = "RKAT_ROW_MCP_GOVERNED_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (scope, _marker) =
+            scope_with_an_unresolved_mcp_server(&root, "ws-unresolved", ABSENT).await;
+        let (_, governed) = open_governed_realm_persistence_with_provider(
+            &meerkat::DiskStorageProvider,
+            &root.join("realms"),
+            "ws-unresolved",
+            None,
+            None,
+            None,
+            RealmGovernance::GovernedWithoutOwners,
+        )
+        .await
+        .expect("governed without owners");
+        assert!(persistence_is_governed(&governed));
+
+        let Err(error) = governed_configured_mcp_servers(&governed, &scope, &[], None).await else {
+            panic!("a governed run refuses a server naming an unset variable");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("'alpha'")
+                && message.contains("env.TOKEN")
+                && message.contains(ABSENT),
+            "the refusal names the server, the field and the variable: {message}"
+        );
+    }
+
     /// Run the CLI loader for one stdio server under a factory whose MCP
     /// attempt guard refuses everything, for `owner`; assert the server was
     /// refused before its process started and return what the guard was

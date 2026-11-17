@@ -2933,6 +2933,100 @@ headers = { Authorization = "Bearer ${RKAT_TEST_API_KEY}" }
         }
     }
 
+    /// Two `mcp.toml` servers, one naming a variable that is not set and one
+    /// naming a variable that is.
+    const ONE_UNSET_VARIABLE: &str = "# kept\n[[servers]]\nname = \"alpha\"\nurl = \"https://alpha.example/mcp\"\nheaders = { Authorization = \"Bearer ${ALPHA_TOKEN}\" }\n\n[[servers]]\nname = \"beta\"\ncommand = \"${BETA_HOME}/bin/beta\"\nenv = { BETA_MODE = \"${BETA_MODE}\" }\n";
+
+    async fn write_user_mcp(temp: &TempDir, text: &str) -> PathBuf {
+        let path = temp.path().join("user").join(".rkat").join("mcp.toml");
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, text).await.unwrap();
+        path
+    }
+
+    /// A variable that is not set is the failure of the one server that
+    /// names it: the set still resolves, and the other server is admitted
+    /// with its own variables expanded.
+    #[tokio::test]
+    async fn an_unset_variable_fails_only_the_server_that_names_it() {
+        let temp = TempDir::new().unwrap();
+        let user = write_user_mcp(&temp, ONE_UNSET_VARIABLE).await;
+        let env = |key: &str| match key {
+            "BETA_HOME" => Some("/opt/beta".to_owned()),
+            "BETA_MODE" => Some("fast".to_owned()),
+            _ => None,
+        };
+        let effective =
+            effective_servers_trusting_with_env(&[], None, Some(&user), &|_| false, &env)
+                .await
+                .expect("one server's unset variable does not fail the set");
+
+        let admitted: Vec<&str> = effective
+            .admitted
+            .iter()
+            .map(|server| server.server.name.as_str())
+            .collect();
+        assert_eq!(admitted, ["beta"], "{effective:?}");
+        let McpTransportConfig::Stdio(beta) = &effective.admitted[0].server.transport else {
+            unreachable!("beta is a stdio server");
+        };
+        assert_eq!(beta.command, "/opt/beta/bin/beta");
+        assert_eq!(beta.env.get("BETA_MODE").map(String::as_str), Some("fast"));
+    }
+
+    /// Adding and removing a server writes every other entry back as it was
+    /// written: a `${VAR}` reference is neither expanded nor dropped, whether
+    /// or not its variable is set.
+    #[tokio::test]
+    async fn adding_and_removing_a_server_keeps_variable_references_as_written() {
+        let temp = TempDir::new().unwrap();
+        let path = write_user_mcp(&temp, ONE_UNSET_VARIABLE).await;
+        let authority = McpConfigMutationAuthority::for_scope(
+            McpScope::User,
+            None,
+            Some(temp.path().join("user")),
+        );
+        let as_written = [
+            "headers = { Authorization = \"Bearer ${ALPHA_TOKEN}\" }\n",
+            "command = \"${BETA_HOME}/bin/beta\"\n",
+            "env = { BETA_MODE = \"${BETA_MODE}\" }\n",
+        ];
+
+        McpConfig::persist_add_with_rollback(
+            &authority,
+            McpServerConfig::stdio("gamma", "echo", vec!["hi".into()], HashMap::new()),
+        )
+        .await
+        .expect("a server is added beside one naming an unset variable");
+        let added = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            added.starts_with(ONE_UNSET_VARIABLE),
+            "the earlier entries are byte-equal: {added}"
+        );
+        assert!(added.contains("name = \"gamma\""), "{added}");
+
+        McpConfig::persist_remove_with_rollback(&authority, "gamma")
+            .await
+            .expect("a server is removed beside one naming an unset variable");
+        let removed = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!removed.contains("gamma"), "{removed}");
+        for line in as_written {
+            assert!(
+                removed.contains(line),
+                "`{line}` is byte-equal after the remove: {removed}"
+            );
+        }
+
+        McpConfig::persist_remove_with_rollback(&authority, "beta")
+            .await
+            .expect("a server naming a variable is removed");
+        let removed = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!removed.contains("beta"), "{removed}");
+        assert!(removed.contains(as_written[0]), "{removed}");
+    }
+
     #[tokio::test]
     async fn test_load_with_scopes_from_roots_precedence_and_dedup() {
         let temp = TempDir::new().unwrap();

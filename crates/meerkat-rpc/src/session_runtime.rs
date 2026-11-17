@@ -39856,6 +39856,39 @@ mod tests {
         );
     }
 
+    /// A variable that is not set is the failure of the one `mcp.toml`
+    /// server that names it: the runtime's other installations stay
+    /// readable, so their attachments are not refused as unavailable.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn an_unset_variable_leaves_the_other_mcp_installations_readable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_RPC_INSTALLED_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".rkat")).unwrap();
+        std::fs::write(
+            project.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"echo\"\n\
+                 env = {{ TOKEN = \"${{{ABSENT}}}\" }}\n\n\
+                 [[servers]]\nname = \"beta\"\ncommand = \"echo\"\n"
+            ),
+        )
+        .unwrap();
+        runtime.set_skill_identity_roots(Some(project), None);
+
+        let installed = runtime
+            .current_mcp_installations()
+            .await
+            .expect("one server's unset variable does not make the installations unreadable");
+        let names: Vec<&str> = installed
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect();
+        assert_eq!(names, ["beta"]);
+    }
+
     /// A session with one parked governed restore entry (`restored`), whose
     /// current installation the restore does not find: settling the batch
     /// reports it once on the session's lifecycle stream.

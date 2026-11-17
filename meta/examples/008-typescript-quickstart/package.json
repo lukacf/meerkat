@@ -1,0 +1,17 @@
+{
+  "name": "meta-typescript-quickstart",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx main.ts",
+    "check": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext main.ts"
+  },
+  "dependencies": {
+    "@rkat/meta-sdk": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

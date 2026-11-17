@@ -568,3 +568,236 @@ async fn a_dropped_router_releases_the_tail() {
     let failure = attempt.setup_failure().await.expect("the class stays");
     assert!(!failure.stderr_tail_retained);
 }
+
+/// The detail of `name`'s `Failed` notice.
+fn failed_detail(notices: &[ExternalToolDelta], name: &str) -> String {
+    notices
+        .iter()
+        .find(|notice| notice.target == name && notice.phase == ExternalToolDeltaPhase::Failed)
+        .and_then(|notice| notice.detail.clone())
+        .unwrap_or_else(|| panic!("no failed detail for {name}: {notices:?}"))
+}
+
+/// What the transport's own error text is followed by in a classified
+/// failure's detail.
+const SETUP_FAILED: &str = "; stdio setup failed during ";
+
+/// The failed setup's lifecycle detail keeps the transport's error text and
+/// names, after it, the phase and the server's own exit status: fixed words
+/// and numbers, never server output.
+#[tokio::test]
+async fn a_failed_setup_names_its_phase_and_exit_status_in_the_detail() {
+    let adapter = adapter();
+    let notices = add_until(
+        &adapter,
+        exits_before_initialize("exits-3"),
+        ExternalToolDeltaPhase::Failed,
+    )
+    .await;
+    assert_no_stderr_leak(&notices);
+    let detail = failed_detail(&notices, "exits-3");
+    assert!(
+        detail.starts_with("Connection failed: Failed to establish MCP connection: "),
+        "the transport's text stays first: {detail}"
+    );
+    assert!(
+        detail.contains(&format!("{SETUP_FAILED}initialize: ")),
+        "the phase is named: {detail}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        detail.ends_with("initialize: the server process ended, exit status 3"),
+        "the exit status is named: {detail}"
+    );
+    adapter.shutdown().await;
+}
+
+/// A server ended by a signal has the signal named, by number and name.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_server_killed_by_a_signal_names_the_signal_in_the_detail() {
+    let adapter = adapter();
+    let script = format!("printf 'dying {SENTINEL}\\n' >&2\nkill -KILL $$\n");
+    let notices = add_until(
+        &adapter,
+        shell_server("killed", &script),
+        ExternalToolDeltaPhase::Failed,
+    )
+    .await;
+    assert_no_stderr_leak(&notices);
+    let failure = adapter
+        .stdio_setup_failure("killed")
+        .await
+        .expect("retained");
+    assert_eq!(
+        failure.class,
+        McpStdioSetupFailureClass::Closed {
+            exit: Some(meerkat_core::mcp_attachment::McpStdioExit::Signal(9))
+        }
+    );
+    let detail = failed_detail(&notices, "killed");
+    assert!(
+        detail.ends_with("initialize: the server process ended, killed by signal 9 (SIGKILL)"),
+        "the signal is named: {detail}"
+    );
+    adapter.shutdown().await;
+}
+
+/// Every class the transport establishes has its own sentence, in its
+/// phase.
+#[tokio::test]
+async fn each_classified_failure_has_its_sentence_in_the_detail() {
+    let adapter = adapter();
+    let missing = McpServerConfig::stdio(
+        "no-command",
+        "/nonexistent/never-run-stdio-diagnostics",
+        vec![],
+        HashMap::new(),
+    );
+    let rejects = format!(
+        "{}{DRAIN_STDIN}",
+        answer_initialize(
+            r#"{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}"#
+        )
+    );
+    let malformed = format!(
+        "{}{DRAIN_STDIN}",
+        answer_initialize(r#"{"jsonrpc":"2.0","id":%s,"result":{}}"#)
+    );
+    let lists = format!("{}{DRAIN_STDIN}", answer_initialize(INITIALIZED));
+    let cases = [
+        (missing, "launch: the server process could not be started"),
+        (
+            shell_server("answers-error", &rejects),
+            "initialize: the server answered with JSON-RPC error -32601",
+        ),
+        (
+            shell_server("answers-nothing-valid", &malformed),
+            "initialize: the server's answer was not a valid response",
+        ),
+        (
+            with_timeout(shell_server("never-lists", &lists), 3),
+            "tool discovery: the setup deadline expired",
+        ),
+    ];
+    for (config, sentence) in cases {
+        let name = config.name.clone();
+        let notices = add_until(&adapter, config, ExternalToolDeltaPhase::Failed).await;
+        assert_no_stderr_leak(&notices);
+        let detail = failed_detail(&notices, &name);
+        assert!(
+            detail.ends_with(&format!("{SETUP_FAILED}{sentence}")),
+            "{name}: {detail}"
+        );
+    }
+    adapter.shutdown().await;
+}
+
+/// A healthy server's notices carry no setup failure text, and it leaves
+/// nothing to report.
+#[tokio::test]
+async fn a_healthy_server_has_no_setup_failure_text_and_nothing_to_claim() {
+    let adapter = adapter();
+    let script = format!("printf 'serving {SENTINEL}\\n' >&2\n{SERVE}");
+    let notices = add_until(
+        &adapter,
+        shell_server("healthy", &script),
+        ExternalToolDeltaPhase::Applied,
+    )
+    .await;
+    assert_no_stderr_leak(&notices);
+    for notice in &notices {
+        assert!(
+            !notice
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("stdio setup failed")),
+            "{notice:?}"
+        );
+    }
+    assert!(adapter.claim_stdio_failure_reports().await.is_empty());
+    adapter.shutdown().await;
+}
+
+/// The host claims each retained failure once for its operator, with the
+/// whole captured tail: the claim waits (bounded) for the capture's end, so
+/// the last lines a crashing server wrote are in it.
+#[tokio::test]
+async fn a_retained_failure_is_claimed_once_with_its_tail() {
+    let adapter = adapter();
+    let script =
+        format!("printf 'first line\\n' >&2\nprintf 'second line {SENTINEL}\\n' >&2\nexit 3\n");
+    let config = shell_server("claimed", &script);
+    add_until(&adapter, config.clone(), ExternalToolDeltaPhase::Failed).await;
+
+    let reports = adapter.claim_stdio_failure_reports().await;
+    assert_eq!(reports.len(), 1, "one retained failure");
+    let (failure, tail) = &reports[0];
+    assert_eq!(failure.server, "claimed");
+    assert_eq!(failure.phase, McpStdioSetupPhase::Initialize);
+    assert!(
+        matches!(failure.class, McpStdioSetupFailureClass::Closed { .. }),
+        "{failure:?}"
+    );
+    let tail = tail.as_ref().expect("the captured tail");
+    assert_eq!(
+        tail.text,
+        format!("first line\nsecond line {SENTINEL}\n"),
+        "both lines, in order"
+    );
+    assert!(tail.complete && !tail.truncated, "{tail:?}");
+
+    assert!(
+        adapter.claim_stdio_failure_reports().await.is_empty(),
+        "a claimed failure is not claimed again"
+    );
+    assert!(
+        adapter.stdio_setup_failure("claimed").await.is_some(),
+        "the claim releases nothing"
+    );
+
+    // The next failed attempt of the same server is a new report.
+    adapter.stage_remove("claimed").await.expect("stage remove");
+    adapter.apply_staged().await.expect("apply remove");
+    add_until(&adapter, config, ExternalToolDeltaPhase::Failed).await;
+    assert_eq!(adapter.claim_stdio_failure_reports().await.len(), 1);
+    adapter.shutdown().await;
+}
+
+/// A server that never started is claimed with its class and no tail; a
+/// flooded tail is claimed as cut.
+#[tokio::test]
+async fn a_claim_carries_no_tail_for_a_spawn_failure_and_a_cut_tail_for_a_flood() {
+    let adapter = adapter();
+    let missing = McpServerConfig::stdio(
+        "never-started",
+        "/nonexistent/never-run-stdio-diagnostics",
+        vec![],
+        HashMap::new(),
+    );
+    add_until(&adapter, missing, ExternalToolDeltaPhase::Failed).await;
+    let flood = format!(
+        "head -c 40000 /dev/zero | tr '\\0' 'x' >&2\nprintf '\\nlast line {SENTINEL}\\n' >&2\nexit 5\n"
+    );
+    add_until(
+        &adapter,
+        shell_server("flooded", &flood),
+        ExternalToolDeltaPhase::Failed,
+    )
+    .await;
+
+    let reports = adapter.claim_stdio_failure_reports().await;
+    let names: Vec<&str> = reports
+        .iter()
+        .map(|(failure, _)| failure.server.as_str())
+        .collect();
+    assert_eq!(names, ["flooded", "never-started"], "by server name");
+    let (_, flooded) = &reports[0];
+    let flooded = flooded.as_ref().expect("the flooded tail");
+    assert!(flooded.truncated, "{flooded:?}");
+    assert_eq!(flooded.text, format!("last line {SENTINEL}\n"));
+    let (never_started, tail) = &reports[1];
+    assert_eq!(never_started.class, McpStdioSetupFailureClass::SpawnFailed);
+    assert!(tail.is_none(), "nothing was captured");
+    adapter.shutdown().await;
+}

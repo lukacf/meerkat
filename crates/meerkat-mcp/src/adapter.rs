@@ -1008,6 +1008,25 @@ impl McpRouterAdapter {
             .stdio_stderr_tail(server, None)
     }
 
+    /// Host report: every retained failed stdio attempt this router has not
+    /// handed out yet, by server name, each with its typed failure and its
+    /// retained stderr tail. Each retained failure is returned by one call
+    /// only, so a host that reports at several points tells its operator
+    /// once. The claim releases nothing: [`Self::stdio_setup_failure`] and
+    /// [`Self::stdio_stderr_tail`] keep answering under their retention.
+    ///
+    /// SENSITIVE: the tail is host and operator only, never model context,
+    /// events or untrusted clients; redaction is defence in depth only
+    /// ([`meerkat_core::mcp_attachment::McpStdioStderrTail`]).
+    pub async fn claim_stdio_failure_reports(
+        &self,
+    ) -> Vec<(
+        meerkat_core::mcp_attachment::McpStdioSetupFailure,
+        Option<meerkat_core::mcp_attachment::McpStdioStderrTail>,
+    )> {
+        Vec::new()
+    }
+
     /// The retained stderr tail of `server`'s exact failed `attempt`, for
     /// that attempt's observer; `None` once released or the router is gone.
     pub(crate) async fn stdio_stderr_tail_of(

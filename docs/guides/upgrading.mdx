@@ -94,6 +94,29 @@ need not be sent again; if you do repeat it, use the same key, not a new
 one: the repeat makes no second input and answers the ids, with which its
 status can be asked.
 
+### A catalog model you had defined yourself: `gpt-6.2-astra`, `gpt-6.2-sol`
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and 0.9.17 adds `gpt-6.2-astra` and `gpt-6.2-sol` to the
+catalog. A realm or project configuration, or a mob definition, that has
+`[models."gpt-6.2-astra"]` or `[models."gpt-6.2-sol"]` (quoted, as the ids
+contain dots) is refused with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`:
+a configuration by configuration validation, a mob definition when one of
+its members is built. You have such an entry if you ran one of the models
+before the catalog listed it. (Read from the source, not run on 0.9.17. On
+the published 0.9.16, in one run each: `gpt-6.2-sol` ran with such an
+entry, and `rkat config patch` refused an entry for an id its catalog
+lists, `gpt-6.1-sol`, with this message.)
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and reasoning effort levels (see [Providers](/concepts/providers)).
+After going back to 0.9.16 the catalog has no such row again: there
+`--model gpt-6.2-sol` is refused (`cannot infer provider from model
+'gpt-6.2-sol'`, or, with the provider named, `model 'openai:gpt-6.2-sol' is
+absent from the effective model registry`) until the entry is back (run on
+the published 0.9.16).
+
 ## Upgrading to 0.9.16
 
 This section is for systems running 0.9.15. The full list of changes is in

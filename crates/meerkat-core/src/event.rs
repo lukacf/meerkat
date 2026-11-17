@@ -2574,8 +2574,13 @@ pub enum AgentEvent {
         identity: crate::types::TranscriptMessageIdentity,
         result: String,
         /// Structured output from the completed run, when schema extraction
-        /// produced a typed value.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// produced a typed value. JSON null is such a value and reads back
+        /// as present.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::types::deserialize_present_json_value"
+        )]
         structured_output: Option<Value>,
         /// Whether a separate extraction terminal event is expected after this
         /// completed main run.
@@ -2951,8 +2956,13 @@ pub enum AgentEvent {
         interaction_id: crate::interaction::InteractionId,
         result: String,
         /// Structured output from the completed interaction, when schema
-        /// extraction produced a typed value.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// extraction produced a typed value. JSON null is such a value and
+        /// reads back as present.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::types::deserialize_present_json_value"
+        )]
         structured_output: Option<Value>,
     },
 

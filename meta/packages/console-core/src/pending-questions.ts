@@ -108,7 +108,9 @@ export interface ClosedQuestionSet {
 /** Why a card left the screen: the read no longer lists its set (`gone`),
  * it did so after a send this console could not confirm
  * (`sent_unconfirmed`), or the gateway refused this console's decide
- * because the set is no longer open (`not_open`) or expired (`expired`). */
+ * because the set is no longer open (`not_open`) or timed out (`expired`:
+ * the gateway said so, or it said `not_open` after the set's own
+ * deadline). */
 export type QuestionSetNoticeKind = "gone" | "sent_unconfirmed" | "not_open" | "expired";
 /** One neutral line for a card that left. It holds nothing of the set: the
  * card's own place on this page (`slot`), why it left, and when. */
@@ -679,7 +681,16 @@ export function createQuestionSetResource(input: {
           setDecision(pendingId, { phase: "failed", action, ...sent, error: errorText(error) });
         } else if (refusal.kind === "not_open" || refusal.kind === "expired") {
           // The gateway says the set is no longer answerable: its card goes.
-          remove(pendingId, refusal.kind);
+          // A reply after the deadline is refused `not_open` too (the
+          // gateway's read finds the set ended), and the refusal does not
+          // say how the set ended. The set's own deadline does: past it, by
+          // this page's clock, the line is the one of a set that timed out;
+          // before it, or for a set that names none, someone closed the set.
+          // Two edges, where the line can be the wrong one of the two: a set
+          // another person closed whose deadline also passed before this
+          // reply, and a page whose clock is not the gateway's.
+          const timedOut = refusal.kind === "not_open" && set.deadlineAtMs !== undefined && env.now() >= set.deadlineAtMs;
+          remove(pendingId, timedOut ? "expired" : refusal.kind);
         } else if (refusal.kind === "not_accepted") {
           // The set reads as sending until a read has said whether it is
           // still listed; it is never shown as refused before that.

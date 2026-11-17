@@ -1470,6 +1470,7 @@ pub async fn console_json_handler(
             &|name| changed_at_run_time.contains(name),
         );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
+        attach_console_bundle(&mut response.body);
         if let Some(runtimes) = panel_runtimes {
             response.body["panel_runtimes"] = json!(
                 runtimes
@@ -1512,6 +1513,33 @@ fn attach_console_send_dedupe(experience: &mut Value, aggregator: Option<&MetaCo
             json!({ "durable": aggregator.send_dedupe_durability().is_durable() }),
         );
     }
+}
+
+/// Name the console bundle this gateway serves: the version its page gives
+/// its app script (`console-app.js?v=`). A page that runs another bundle (a
+/// page opened before an upgrade, or an application that mounts another
+/// console than this gateway's) compares it with its own and says that it
+/// is out of date. Absent when the embedded page names no version.
+fn attach_console_bundle(experience: &mut Value) {
+    let Some(bundle) = console_bundle_of(CONSOLE_FRONTEND_INDEX_HTML) else {
+        return;
+    };
+    if let Some(object) = experience.as_object_mut() {
+        object.insert("console_bundle".to_string(), json!(bundle));
+    }
+}
+
+/// The version a console page gives its app script, if it names one. The
+/// console's build writes it in one form, lowercase hex digits, and fails
+/// otherwise (`console/build.cjs`), so this reader and the page's own
+/// (`console/src/lib/console-bundle.ts`) cut the same text.
+fn console_bundle_of(index_html: &str) -> Option<&str> {
+    const APP_SCRIPT: &str = "console-app.js?v=";
+    let version = &index_html[index_html.find(APP_SCRIPT)? + APP_SCRIPT.len()..];
+    let end = version
+        .find(|character: char| !character.is_ascii_alphanumeric())
+        .unwrap_or(version.len());
+    (end > 0).then(|| &version[..end])
 }
 
 /// `meta/console/whoami`: who the Console acts as for this request. Only

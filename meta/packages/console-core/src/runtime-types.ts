@@ -306,6 +306,12 @@ export interface ConsoleExperience {
    * resends an uncertain message (same idempotency key) only when true.
    */
   send_dedupe?: { durable?: boolean };
+  /**
+   * The console bundle the gateway serves: the version in its page's
+   * `console-app.js?v=`. Absent on older gateways. A page that runs another
+   * bundle says that it is out of date.
+   */
+  console_bundle?: string;
   contract_version?: string;
   runtime_id?: string;
   console_config?: ConsoleUiConfig;

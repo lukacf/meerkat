@@ -33,7 +33,15 @@ export interface DecisionCardView {
   presentations?: readonly DecisionPresentationView[];
   /** The caller may read the decision's status, not what it holds. */
   statusOnly: boolean;
+  /** For the card of a question set that stands in for the card a person
+   *  answers: why that card is not here. `not_listed`: the list of question
+   *  sets was read and does not hold the set. `not_read`: the question sets
+   *  are not read here at all. */
+  unanswerable?: QuestionSetUnanswerable;
 }
+
+/** Why a question set has no card a person answers. */
+export type QuestionSetUnanswerable = "not_listed" | "not_read";
 
 type RawRecord = Record<string, unknown>;
 
@@ -189,13 +197,37 @@ export function decisionCardsBesideQuestions(
   questions: QuestionListView | undefined,
 ): readonly DecisionCardView[] {
   const status = questions?.status;
-  if (!questions || (status !== "loading" && status !== "ready" && status !== "stale")) return cards;
+  // A question set's card that stays says why nobody can answer it there.
+  const standingIn = (why: QuestionSetUnanswerable) => (card: DecisionCardView): DecisionCardView =>
+    (card.kind === QUESTION_SET_DECISION_KIND && card.unanswerable !== why ? { ...card, unanswerable: why } : card);
+  if (!questions || (status !== "loading" && status !== "ready" && status !== "stale")) return cards.map(standingIn("not_read"));
   if (status === "loading") return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND);
   const held = new Set([
     ...questions.sets.map((set) => set.pendingId),
     ...questions.closed.map((closed) => closed.set.pendingId),
   ]);
-  return cards.filter((card) => card.kind !== QUESTION_SET_DECISION_KIND || !held.has(card.decisionId));
+  return cards
+    .filter((card) => card.kind !== QUESTION_SET_DECISION_KIND || !held.has(card.decisionId))
+    .map(standingIn("not_listed"));
+}
+
+/** What the card of a question set says in place of an answer form: why the
+ *  form is not here, and where the set is answered. `askedBy` is the name of
+ *  the agent that asked, where the decision says it. The conversation draws
+ *  its card from the same list as the Approvals view, so the one condition
+ *  stands for both places.
+ *
+ *  Two cases the words do not fit exactly. In the instant before the read of
+ *  the question list has started (the console does not know its caller yet)
+ *  the card says "could not be read" of a read that was not tried yet; the
+ *  first read replaces it. And a set this console can never list (one whose
+ *  body it cannot read) is never held by the list, so "once the list holds
+ *  it" does not come for it on this console. */
+export function questionSetStandInHint(why: QuestionSetUnanswerable, askedBy: string | undefined): string {
+  const where = askedBy?.trim() ? `${askedBy.trim()}'s conversation` : "the asking agent's conversation";
+  return why === "not_listed"
+    ? `This card has no answer form: the list of questions agents asked does not hold this set. It is answered in ${where} or here, once the list holds it.`
+    : `This card has no answer form: the questions agents asked could not be read here. This set is answered in ${where} or here, once they can be read.`;
 }
 
 /** The params of one `meta/decisions/list` page of open decisions: at most
@@ -221,10 +253,20 @@ export function mergeDecisionCards(
   return [...byId.values()].sort(byDeadline);
 }
 
-/** The rendering of one `meta/decisions/rendering` answer. */
+/** The rendering of one `meta/decisions/rendering` answer, as the decision
+ *  holds it. For an open question set the gateway ends the text with a
+ *  closing note for a page that cannot answer the set, and names what it
+ *  added in `rendering_suffix`. This console says in its own words where a
+ *  set is answered (`questionSetStandInHint`), so it cuts exactly that
+ *  added text; an answer that names none is taken whole. */
 export function renderingOf(answer: unknown): string | undefined {
-  const rendering = recordOf(answer)?.rendering;
-  return typeof rendering === "string" ? rendering : undefined;
+  const record = recordOf(answer);
+  const rendering = record?.rendering;
+  if (typeof rendering !== "string") return undefined;
+  const added = record?.rendering_suffix;
+  return typeof added === "string" && added !== "" && rendering.endsWith(added)
+    ? rendering.slice(0, rendering.length - added.length)
+    : rendering;
 }
 
 /** A phase in words: "Open", "Execution refused". */

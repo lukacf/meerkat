@@ -3220,7 +3220,14 @@ question set whose asking agent it may not view, and any
 other caller reads the decisions of the approver ids it holds and its own
 requests, and learns of no other decision. `meta/decisions/rendering` for a
 caller that may see only the status is refused `-32030`
-(`data.kind = "content_not_visible"`). From 0.9.15 rows the store cannot
+(`data.kind = "content_not_visible"`). For an open question set, the
+Console's answer carries a closing note in `rendering_suffix`; the note is
+not part of the rendering whose digest a decide compares, and the stdio
+answer does not carry it. The note stands at the end of the Console
+answer's `rendering` (a blank line, then the note), and `rendering_suffix`
+holds exactly what was added, so a reader takes it off again;
+`subject_digest` and `parts` are those of the rendering without it.
+From 0.9.15 rows the store cannot
 decode are listed only to an access administrator: a caller allowed
 `decisions.admin` who is a person listed under `admins`, or any caller
 allowed `decisions.admin` on a Console that identifies no person. To any

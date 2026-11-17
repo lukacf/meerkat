@@ -12784,6 +12784,15 @@ mod account_model_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod auth_clear_default_hot_swap_tests;
+#[cfg(all(
+    test,
+    feature = "session-store",
+    feature = "openai",
+    feature = "anthropic",
+    not(target_arch = "wasm32")
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod auth_lease_neighbour_session_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod brain_swap_runtime_loop_ab_tests;

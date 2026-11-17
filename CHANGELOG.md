@@ -62,9 +62,9 @@ them.
     `meerkat_runtime::UnsettledRun`.
 
   These are reports only: nothing is retried, ended or refused because of
-  them, and no member status value changes. Limits: the report covers runs
-  committed by the running process (what an earlier process left unsettled is
-  for recovery to settle and is not reported by this); the line that names
+  them, and no member status value changes. Limits: the host's line covers
+  runs committed by the running process, while the check also counts a
+  completion a restart recovered and has not yet settled; the line that names
   the member is written when the member's status is read, while the host's
   own line, which names the session, needs no reader; and a session whose
   state stays locked for good shows in the host's line, not in the check.

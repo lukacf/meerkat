@@ -16,7 +16,7 @@ import types
 import pytest
 
 from meerkat_meta.agent_builder import CallbackDispatcher
-from meerkat_meta.builder import MetaBuilder
+from meerkat_meta.builder import MetaBuilder, MetaBuilderConfig
 from meerkat_meta.runtime import MetaRuntime
 
 from .test_init_protocol import _gateway, _records
@@ -284,20 +284,51 @@ class TestFireDuringTheFirstInit:
     window that remains for a handler registered there: that fire is
     answered before the runtime exists for the program."""
 
+    FIRES_DURING_INIT = """
+        accepted()
+        emit({"jsonrpc": "2.0", "id": "fire-1", "method": "callback/schedule_fire",
+              "params": {"runnable": "digest", "occurrence": {
+                  "schedule_id": "sch-1", "occurrence_id": "occ-1",
+                  "due_at": "2026-07-10T07:00:00+00:00"}}})
+        log({"fire_answer": json.loads(sys.stdin.readline())})
+        settled(outcome="ready", http_base_url="http://127.0.0.1:9",
+                stdio_shutdown_handshake=True)
+        serve_shutdown()
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_runtime_made_by_hand_has_its_handler_before_connect(self, tmp_path):
+        # A host that fills the config and makes the runtime itself, as the
+        # bundled installer's generated host does, registers before
+        # connect(): no builder is involved, and the handler is there for a
+        # fire during the start.
+        script = _gateway(tmp_path, "fires_during_init_by_hand", self.FIRES_DURING_INIT)
+        order = []
+
+        def handler(occurrence):
+            order.append("the handler ran")
+            return {"digest": "sent"}
+
+        runtime = MetaRuntime(
+            MetaBuilderConfig(gateway_bin=str(script), host_runnables=["digest"])
+        )
+        runtime.on_schedule_fire("digest", handler)
+        try:
+            await runtime.connect()
+            order.append("connect() returned")
+        finally:
+            await runtime.shutdown()
+        answer = next(
+            entry["fire_answer"] for entry in _records(script) if "fire_answer" in entry
+        )
+        assert answer["id"] == "fire-1"
+        assert answer.get("result") == {"digest": "sent"}, answer
+        assert order == ["the handler ran", "connect() returned"]
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("registered", ["on the builder", "on the runtime after build"])
     async def test_only_a_builder_handler_is_there_for_it(self, tmp_path, registered):
-        script = _gateway(tmp_path, "fires_during_init", """
-            accepted()
-            emit({"jsonrpc": "2.0", "id": "fire-1", "method": "callback/schedule_fire",
-                  "params": {"runnable": "digest", "occurrence": {
-                      "schedule_id": "sch-1", "occurrence_id": "occ-1",
-                      "due_at": "2026-07-10T07:00:00+00:00"}}})
-            log({"fire_answer": json.loads(sys.stdin.readline())})
-            settled(outcome="ready", http_base_url="http://127.0.0.1:9",
-                    stdio_shutdown_handshake=True)
-            serve_shutdown()
-        """)
+        script = _gateway(tmp_path, "fires_during_init", self.FIRES_DURING_INIT)
         seen = []
         order = []
 

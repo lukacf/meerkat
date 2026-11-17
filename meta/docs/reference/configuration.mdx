@@ -508,6 +508,12 @@ declarations stay layered on top: `member_comms_address` and `compaction` on
 `rpc_gateway`, `compaction` on `meta_gateway`, and a profile's own
 `auto_compact_threshold` still wins per member.
 
+A Meta gateway reads and parses the `[confinement]` table of the host config
+(an unknown mode is refused at init) but does not apply it to anything it
+launches for a member: do not rely on `[confinement]` for the members of a
+Meta gateway (see "Confinement under a Meta gateway" under Known limitations
+of Meta 0.9.16 in the Meta changelog).
+
 ### The init model check
 
 `rpc_gateway` checks every inline profile's `model` before the mob exists, by

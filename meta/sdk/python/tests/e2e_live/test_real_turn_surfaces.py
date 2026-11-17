@@ -344,8 +344,11 @@ async def test_resolved_tools_after_a_completed_real_turn(live_preconditions, st
         tools = await _poll(resolved, TURN_BUDGET_S, "a non-empty resolved tool set")
         # Positive, exact: the profile declares `comms = true` and nothing else,
         # so the live tool scope must be exactly meerkat's comms surface. A
-        # superset or subset is a finding, not a pass.
+        # superset or subset is a finding, not a pass. The stock question tool
+        # `ask_user` is in the set too: it is offered to every member unless a
+        # profile denies it or the host decides the tool surface.
         assert set(tools) == {
+            "ask_user",
             "peers",
             "reply_to_peer",
             "send_message",

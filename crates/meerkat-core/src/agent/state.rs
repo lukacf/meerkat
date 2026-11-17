@@ -10080,7 +10080,7 @@ where
         if llm_response_exhausted_during_thinking(&result) {
             let error = AgentError::MaxTokensReached {
                 turn: ctx.turn_count,
-                partial: "turn exhausted max_tokens during thinking; raise max_tokens or set a thinking budget"
+                partial: "turn exhausted max_tokens while thinking, before any answer; raise max_tokens, or lower the reasoning effort or the thinking budget where the model takes one"
                     .to_string(),
             };
             // Usage above is intentionally retained, but no empty assistant
@@ -30605,14 +30605,16 @@ mod tests {
             .run("Use a tool".to_string().into())
             .await
             .expect_err("thinking-only max-token exhaustion must not complete silently");
+        // The whole sentence is pinned: it is what a developer acts on, so it
+        // may name only steps that work. A model that takes no thinking
+        // budget answers "set a thinking budget" with a second error.
+        const HINT: &str = "turn exhausted max_tokens while thinking, before any answer; raise max_tokens, or lower the reasoning effort or the thinking budget where the model takes one";
         assert!(
             matches!(
                 &error,
-                AgentError::MaxTokensReached { partial, .. }
-                    if partial.contains("raise max_tokens")
-                        && partial.contains("thinking budget")
+                AgentError::MaxTokensReached { partial, .. } if partial == HINT
             ),
-            "typed failure must carry an actionable recovery hint: {error}"
+            "typed failure must carry the whole recovery hint: {error}"
         );
         assert_eq!(agent.session.total_usage().output_tokens, 7);
         assert!(

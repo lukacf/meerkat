@@ -35,6 +35,300 @@ them.
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-11-16
+
+### Breaking
+
+- Rust API of `meerkat-runtime`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: two enums gain variants,
+  `RuntimeApplyFailureCause` and the kernel's
+  `generated::meerkat::TransitionId`. Rust hosts only: a host that
+  matches these enums exhaustively adds arms; no wire form changes. The
+  cause of a failed apply,
+  `RuntimeApplyFailureCause` (meerkat-runtime `meerkat_machine::dsl`,
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`, and the kernel's
+  copy `generated::meerkat::RuntimeApplyFailureCause`), gains
+  `RequestRefused`, appended last: the request was refused and nothing was
+  applied (see Fixed). The kernel `generated::meerkat::TransitionId` gains
+  seventeen variants, appended last:
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedInitializing`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedIdle`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedAttached`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedRunning`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedRetired`,
+  `ResolveRuntimeCompletionResultRuntimeApplyRefusedStopped`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedInitializing`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedIdle`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedAttached`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedRunning`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedRetired`,
+  `ResolveAbandonedCompletionResultRuntimeApplyRefusedStopped`,
+  `DeferInputBehindBacklogEndedWithRefusedRunIdle`,
+  `DeferInputBehindBacklogEndedWithRefusedRunAttached`,
+  `DeferInputBehindBacklogEndedWithRefusedRunRunning`,
+  `DeferInputBehindBacklogEndedWithRefusedRunRetired` and
+  `DeferInputBehindBacklogEndedWithRefusedRunStopped`. The result
+  of a run whose apply failed is now answered by two arms, split on that
+  cause, both for the run and for the inputs the run abandoned: the arms
+  `ResolveRuntimeCompletionResultRuntimeApplyFailed` and
+  `ResolveAbandonedCompletionResultRuntimeApplyFailed` answer every other
+  cause as before, and the new arms
+  `ResolveRuntimeCompletionResultRuntimeApplyRefused` and
+  `ResolveAbandonedCompletionResultRuntimeApplyRefused` answer a refused
+  request with the existing outcome `Abandoned`. The new arm
+  `DeferInputBehindBacklogEndedWithRefusedRun` (Idle, Attached, Running,
+  Retired, Stopped) lets the sweep that puts a failed run's inputs behind
+  the queued work pass over an input the machine no longer tracks, only
+  while the machine's run terminal is a refused request; an untracked input
+  of any other failed run is refused as before.
+  `RecoverRuntimeCompletionResultCorrelation` now also clears the stored
+  cause and its message when it adopts a run's result while the machine
+  holds none. The stored cause and its message
+  (`last_runtime_apply_failure_cause`, `last_runtime_apply_failure_message`)
+  now stay with the run result the machine holds open: the arms that start
+  a run (`StartConversationRun`, `StartImmediateAppend`) clear them only
+  when no run's result is held open, where they cleared them always, and
+  `RunCompleted` and `RunCancelled` now clear them. No input, effect, state
+  field or outcome value of the machine changes, the machine's version
+  stays `1`, and no existing variant's implicit discriminant moves. Every
+  enum named here is exhaustive, so a downstream exhaustive match needs the
+  new arms, or a wildcard arm. The kernel's copy of
+  `RuntimeApplyFailureCause` derives serde, as before, and is a closed set:
+  nothing Meerkat ships serializes it and the kernel never produces the
+  value itself, but an embedder that serializes its own kernel state after
+  passing the new value in writes a value an older kernel refuses to read.
+
+- Behaviour-only (not measured by the gate): `meerkat_mob_profile_create` and
+  `meerkat_mob_profile_update` refuse a profile that carries
+  `tools.mcp_servers`, `tools.rust_bundles`, `tools.bundles` or any key other
+  than those of the public profile input and `auth_binding` (JSON-RPC error
+  `-32602`, invalid params; the message names the field). A client that set
+  them through these tools uses the host methods instead.
+
+- Behaviour-only (not measured by the gate): `meerkat_mob_spawn`,
+  `meerkat_mob_spawn_many` and `meerkat_run` refuse a reserved key in `labels`
+  or in the context with JSON-RPC error `-32602` and no `data`. The message
+  names the key: "metadata label key '<key>' is reserved for Meerkat-owned
+  runtime facts", or "app_context key '<key>' is reserved for Meerkat-owned
+  runtime facts". The raw mob dispatcher refuses it as invalid arguments. A
+  client that sent such a key stops sending it.
+
+### Added
+
+- `meerkat-core`: `ToolVocabularySource::HostTools`, one more source of
+  names a declared deny list (`DeclaredToolRestriction::deny`) may name:
+  the stock tools the host of a build puts on its builds as host tools
+  (`SessionBuildOptions::host_tools`), named whether or not this build
+  carries them. A host lists them in `DeclaredToolRestriction::vocabulary`
+  under that source, and the factory's deny check treats each as it treats
+  a name of every other vocabulary: an inert entry on a build no tool of
+  which has the name, and on a build where another part of the surface has
+  it, an external tool included, the deny hides that tool and refuses its
+  calls, by name. `DeclaredToolUnknown` lists the source as `host tools`.
+  A name declared under this source is known to the grant gate too, as a
+  name of every other vocabulary is: a grant-gated one that the build does
+  not mount is refused as `tool_not_mounted`, not as `unknown_tool`.
+  The enum is `#[non_exhaustive]`, and no existing variant, field or
+  signature changes. Meerkat Meta declares its stock `ask_user` this way
+  (see the Meta changelog).
+
+### Changed
+
+- `meerkat-core`: a turn that uses up `max_tokens` while thinking, before
+  any answer, now fails with a hint that works on every model (raise
+  `max_tokens`, or lower the reasoning effort or the thinking budget where
+  the model takes one) in place of the advice to set a thinking budget,
+  which a model that takes none answers with a second error.
+
+### Fixed
+
+- `meerkat-runtime`: an `ask_user` call is held whatever the length of its
+  tool-call id. In 0.9.15 a call whose asking agent's key and tool-call id
+  were together longer than 986 bytes (a model provider that issues very
+  long tool-call ids, or a long agent key), or held a control character,
+  was refused before its questions were held, although its arguments were
+  valid: the agent read an invalid-arguments error (`invalid subject key`),
+  nothing was held and no person was asked. The cause: the decision that
+  holds a question set is keyed by `{asker}/{run id}/{call id}`, and a
+  decision's subject key is at most 1,024 bytes without control characters.
+  Such a call is now held under a bounded key,
+  `ask_user.call:{run id}:sha256:{digest}` (122 bytes; the digest is the
+  SHA-256 of the asker, the run id and the call id, each preceded by its
+  length in bytes as an 8-byte big-endian integer), and is listed, answered,
+  replayed and told its result as any other. What still bounds the asking
+  agent's key: the held request carries the key and the questions and is at
+  most 256 KiB, and a call whose request is larger is still refused. A
+  control character in the asking agent's key is held by the hold of
+  `meerkat-runtime` only: a host that names the asking agent as a principal
+  (Meta does) still refuses such a key before the hold, as in 0.9.15,
+  because a principal id takes no control character; on such a host, of the
+  control characters, only one in the tool-call id is newly held. Every call
+  0.9.15 held keeps its key and its decision id byte for byte, so the
+  question sets of a 0.9.15 store are found, listed, answered and settled as
+  before, and nothing is migrated. What a reader of decisions sees: for such
+  a call `subject_key` (`decision/list`, `decision/get`) reads the bounded
+  form, which names the run and not the asker or the call id; the asker
+  stays in the held request. The limit of a subject key is unchanged.
+  Affected: 0.9.15 (the tool is new in 0.9.15). Measured by tests of this
+  change, with a 2,000-byte tool-call id, a 2,000-byte agent key, and a
+  request of exactly 256 KiB and of one byte more. Not measured, read from
+  0.9.15's reader code, which this change does not touch (no 0.9.15 host
+  was run on such a store): after a downgrade to 0.9.15, a set held for such
+  a call is still listed and answerable there, and a replay of that call is
+  refused there, as every such call is in 0.9.15.
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: a
+  turn refused for its reasoning effort level at its start no longer ends
+  the session's other queued requests. A turn that had been accepted and
+  was then refused when it started was answered the typed refusal, and the
+  session's runtime registration was retired as after a start that failed:
+  every other request queued on the session ended without a run. Now the
+  refused turn ends alone. It is answered the typed
+  `reasoning_effort_refused` refusal, every input of the refused run ends
+  once as never executed and is not started again, the requests queued
+  behind it run in their order, and the session keeps its runtime
+  registration and what is attached to it while its live session is
+  present. When no live session is present at the refusal, the
+  registration is cleaned up as before; so is a refused turn whose answer
+  is resolved after a restart, or while another run's result is the one
+  the session's runtime holds open. Every reason of the refusal ends the
+  turn once, the transient one (`supported_levels_unavailable`) included:
+  before, an input that no request waited on was started again up to its
+  retry cap. The
+  machine now answers such a turn as an abandoned turn, not as a failed
+  apply (see Breaking for the cause value and the kernel's transition
+  names); what is stored for a refused input is the existing
+  never-executed record and the turn's typed error. Affected: 0.9.15, the
+  release that brought the reasoning effort controls (its Known limitations
+  and Upgrade notes describe the earlier behaviour); no earlier release
+  refuses a level.
+
+- `rkat-rest`: the first session no longer fails where the default context
+  directory does not exist. Started without `--context-root`, with its default
+  context directory absent (on Linux `~/.local/share/meerkat/rest`, or
+  `$XDG_DATA_HOME/meerkat/rest`), `rkat-rest` answered a `POST /sessions` that
+  carries no `system_prompt` with HTTP 500
+  (`agent error: Build error: Config error: project AGENTS.md '<path>' is not readable: No such file or directory (os error 2)`),
+  in 0.7.9 through 0.9.15. The session is now created, with no project
+  instructions. The server still does not create the directory; it looks at it
+  for each session it builds, so an `AGENTS.md` placed there later is read by
+  the next session created, without a restart. Unchanged, and still refused
+  with the same text: a `--context-root` that does not exist, an `AGENTS.md`
+  that exists and cannot be read, and a default directory whose existence
+  cannot be established. One edge changes: a default directory that is a
+  dangling symbolic link was refused and is now treated as absent. `rkat-rpc`,
+  `rkat-mcp` and the `rkat` command were not affected. Rust hosts: a
+  `project_root` that does not exist no longer fails prompt assembly: the
+  session builds without project instructions; a `context_root` that does not
+  exist is still an error. (Rows on Linux x86_64; the look at the directory
+  for each session, the symbolic link edge and that the other servers were not
+  affected are by reading; macOS and Windows were not run.)
+
+### Security
+
+- The shell job tools answered for jobs of other sessions (0.8.8 through
+  0.9.15). `shell_job_status` and `shell_job_cancel` looked a background job
+  up by its id alone, and a realm's job store is shared by all its sessions,
+  mob members included. An agent that had these tools and held the id of
+  another session's job could read that job's status, command and output, and
+  cancel it. A job id (`job_` and a UUID) is given by the tools to the session
+  that started the job; a fork receives its source's conversation and can hold
+  one. From this release both tools answer only for the shell jobs and
+  monitors that the calling session started. Any other id is answered exactly
+  as an id that does not exist.
+
+- The MCP profile tools stored host-only profile fields (0.5.2 through 0.9.15;
+  a stored server from 0.7.19). `meerkat_mob_profile_create` and
+  `meerkat_mob_profile_update`, served by `rkat-mcp` and `rkat-mob-mcp`,
+  accepted a profile in its raw form. A caller of these tools, which can be a
+  model, could store `tools.mcp_servers` and `tools.rust_bundles` in a
+  profile, and the read-back did not show them. On `rkat-mcp`, when a mob's
+  role named the profile, a stored stdio server was started as a process on
+  the host at the member's spawn. The released Linux and macOS archives start
+  such a server (Linux x86_64 by a run, the others by their build records);
+  the released Windows archive, by its build record, has no MCP client support
+  and refuses the spawn. A Meta gateway, the Console and the REST server do
+  not serve these tools. From this release the tools take the public profile
+  input and `auth_binding`, and refuse these fields, `tools.bundles` and any
+  other key; nothing is stored, and on an update the stored profile is
+  unchanged. The host methods `mob/profile/create` and `mob/profile/update`
+  are unchanged.
+
+  Profiles stored before the upgrade keep such fields. Read each realm profile
+  back through the profile tools (with its revision) and update it with
+  exactly what was read: the stored profile then holds no server and no
+  bundle. This step also removes a stored `auth_binding` (the tools have taken
+  one since 0.9.11), which the read-back does not show: a profile that is
+  meant to carry one needs it sent again in the same update. The same holds
+  for every later update through the tools. Respawn every member of the roles
+  that use the profile.
+
+  Handing `rkat-mcp` to a model. An MCP client that lets a model call this
+  server's tools should not offer it the following tools, unless that model
+  may start processes on the host and change the server's configuration:
+  `meerkat_mob_profile_create`, `meerkat_mob_profile_update`,
+  `meerkat_mob_create`, `meerkat_mob_spawn`, `meerkat_mob_spawn_many`,
+  `meerkat_mob_respawn`, `meerkat_mob_member_send`, `meerkat_config`,
+  `meerkat_schedule_create`, `meerkat_schedule_update`. The server has no
+  setting of its own that withholds a tool; the filter is the client's. This
+  list is what is known at this release. Independently of the tool list, start
+  the server with the confinement flags (`--confinement workspace`; see OS
+  process confinement): they apply to every process the server launches, and
+  where the platform cannot enforce them the launch is refused.
+
+- The MCP spawn tools and `meerkat_run` accepted keys the runtime reserves.
+  `meerkat_mob_spawn` and `meerkat_mob_spawn_many`, served by `rkat-mcp` and
+  `rkat-mob-mcp`, passed a member's `labels` and context on as sent (v0.5.1
+  through v0.9.15). The reserved label keys are `mob_id`, `role`,
+  `meerkat_id`, `agent_identity` and those under `meerkat.`; in a context, the
+  keys of the `meerkat` namespace. The JSON-RPC spawn methods have refused
+  them since v0.6.0. `meerkat_run` passed a session's `labels` and application
+  context on in the same way (v0.4.1 through v0.9.15), where the JSON-RPC and
+  REST session create refuse them. From this release the spawn tools refuse a
+  reserved key and spawn nothing, a batch whole, and `meerkat_run` refuses one
+  and creates no session. Affected: a caller of those tools, and a Rust
+  embedder that composes the raw mob dispatcher, which passed the fields on
+  since v0.4.6 and now applies the same rule.
+
+### Upgrade notes
+
+- Rollback to 0.9.15: an input that 0.9.16 ended as never executed
+  because its turn was refused for its reasoning-effort level is read by
+  0.9.15 as the abandoned outcome 0.9.15 itself writes for a run that
+  never began executing. Nothing is refused. Where a Meta notice names
+  the reason, it says 'without running' where 0.9.15 would have said
+  'stopped'.
+
+### Known limitations
+
+- Shell jobs after a respawn or reset. A member's new session does not reach
+  the jobs its earlier session started: they are not cancelled, and their ids
+  are answered as unknown. A fork does not reach its source's jobs. A monitor
+  that the host started is answered as unknown to a member whose build carries
+  another realm tag.
+
+- `rkat realm govern` can fail on the realm's manifest lock shortly after the
+  realm was made. `rkat realm create`, and the first command that opens a new
+  realm, take a lock file and now and then leave it behind when the command
+  ends. `rkat realm govern` on that realm then waits five seconds and fails
+  with `Error: timed out acquiring realm manifest lock for '<realm>'`, exit
+  code 1, until the leftover file is more than 30 seconds old, and the realm
+  is not governed (`rkat realm show` reads `governance: ungoverned`). Seen
+  with `rkat realm govern` run within 30 seconds of the `rkat realm create`
+  that made the realm. In a script, check each command's exit code; a script
+  that goes on after a failed `realm govern` works on a realm that is not
+  governed. Run again at once, the command fails the same way; after a failed
+  command, wait until more than 30 seconds have passed since it was started,
+  and run it again. The same cause has two other faces, each for up to 30
+  seconds: a realm's first start can fail with
+  `first-start reservation is contended` after an earlier first start that
+  failed or was cancelled, and after a server that held a lease on the realm
+  has ended, `rkat realm delete` can refuse it and `rkat realm prune` can skip
+  it without `--force`. (The failure, its exit code, the ungoverned realm and
+  the retry by runs on the released 0.9.15 `rkat`; the cause and its two other
+  faces by reading, in the same lines in every release from 0.9.0, where
+  `realm govern` first shipped.)
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking
@@ -3052,6 +3346,32 @@ them.
   a record still destroys a mob with no members that took the id.
   Affected: 0.8.42 through 0.9.14.
 
+- Windows: `rkat-rpc`, `rkat-rest`, `rkat-mcp` and `rkat` failed with "IO
+  error: Access is denied. (os error 5)" the first time a realm was used.
+  After writing a new realm's manifest the store opened the realm directory
+  as a file to sync it, which Windows refuses. `rkat-rpc` started without
+  `--realm` uses a new realm at every start, so it failed at every start
+  (by runs on a Windows runner). By the source the same holds for
+  `rkat-rest` and `rkat-mcp`, and `rkat` failed in the commands that open a
+  realm (`run`, `resume`, sessions, mobs, `realm create`) the first time in
+  a new workspace. The same step after each write of a session's event-log
+  head failed too: the head was written, a warning was logged at every
+  append, and a transcript rewrite reported an error. Both directory syncs
+  now run on Unix only, as the store's other ones already did. On Windows
+  no directory sync follows these renames: after a power loss right after
+  the write, a new realm's manifest or the newest head can be missing; the
+  realm is then created again at the next start and the head is rebuilt
+  from the event log (read from the source). Linux and macOS are unchanged.
+  Found by a check added to this release's build, the first to start a
+  Windows binary against a state directory. A first use of the same new
+  realm by several processes at once can still fail once: see Known
+  limitations. Affected: every Windows binary from 0.3.4 through 0.9.14.
+  Added 2026-11-16, after the release: runs on a Windows runner also showed
+  `rkat-mcp` failing at every start without `--realm` before the fix; with
+  the fix `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` all pass the
+  release's start check on Windows. That `rkat-rest` failed before the fix
+  remains read from the source.
+
 ### Security
 
 - Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
@@ -4509,6 +4829,101 @@ them.
   run that a restart of the host recovered while its step was owed by a
   member placed on another host is such a run until that member's turn is
   settled.
+
+- `ask_user`: a call whose subject key (the asking agent's key, the run id
+  and the tool-call id, joined by two slashes) exceeds 1,024 bytes is
+  refused as invalid before the question set is held; this can meet a custom
+  model provider that issues very long tool-call ids (read from the source).
+
+- Windows: when several processes or tasks use the same new realm for the
+  first time at the same moment (for example two `rkat-rpc --realm <name>`
+  started together, or parallel `rkat` commands in a new workspace), one of
+  them can fail once with "IO error: Access is denied. (os error 5)". Start
+  it again: the realm then exists and the start works (read from the
+  source). A single start is not affected. Seen in a test on a Windows
+  runner that creates one realm from 32 tasks at once. A fix is planned for
+  the next release.
+
+- Added 2026-11-16, after the release. External events admitted without a
+  wake (REST `POST /sessions/{id}/external-events`, JSON-RPC
+  `session/external_event`): such an event waits queued for the session's
+  next turn only while the session is idle. Admitted over REST while a turn
+  is running, it is queued behind that turn, and the runtime takes it at
+  once when the turn ends, as a new turn: at least one model call, in a run
+  that the caller did not start. The same happens in the instant after a
+  turn's call has answered: after a run ends the runtime looks once more for
+  queued input before it comes to rest, and the caller's answer is released
+  before that look. The admission answers that the event is queued in every
+  case (REST `202`). Nothing is lost: the event is taken once and reaches
+  one terminal state; a run that fails before completing retries it, as for
+  any queued input. To keep an event for the next turn, post it while the
+  session is idle; how long after a turn's answer a session counts as idle
+  is not established. The running turn and the idle session are by a run on
+  the released 0.9.15 `rkat-rest`; the instant after a turn's answer is read
+  from the source and seen as one `meerkat-rest` test that fails in some
+  runs on a machine with one to four CPUs. On JSON-RPC the event is admitted
+  only after the running turn has ended; whether it is then taken at once
+  was not run. The same lines stand at every tag from 0.9.11 to 0.9.15;
+  earlier releases were not read.
+- Added 2026-11-16, after the release. `rkat-rest`: where the server's
+  default context directory does not exist yet (on Linux by default
+  `~/.local/share/meerkat/rest`, or `$XDG_DATA_HOME/meerkat/rest` when that
+  is set; a new machine or a new account), a `POST /sessions` that carries
+  no `system_prompt` is answered HTTP 500, every time: `agent error: Build
+  error: Config error: project AGENTS.md '<path>' is not readable: No such
+  file or directory (os error 2)`, where `<path>` is that directory. The
+  server does not create it; the directory the server is started from does
+  not matter, and setting XDG_DATA_HOME only moves the directory to
+  `$XDG_DATA_HOME/meerkat/rest`. Create the directory the message names (on
+  Linux by default `mkdir -p ~/.local/share/meerkat/rest`; a running server
+  need not be restarted), or start the server with
+  `--context-root <an existing directory>`. A request that carries a
+  `system_prompt` is not affected. Affects 0.7.9 through 0.9.15: the lines
+  that cause it came with 0.7.9 and stand at every tag from 0.8.0 (read from
+  the source); run on the released Linux x86_64 `rkat-rest` with an empty
+  home directory for 0.8.28, 0.8.52, 0.9.0, 0.9.13, 0.9.14 and 0.9.15.
+  `rkat-rpc`, the server the Python and TypeScript SDKs start, is not
+  affected (run on 0.9.14 and 0.9.15); `rkat-mcp`, the `rkat` command and
+  the Meta gateway take their context directory from elsewhere and are not
+  affected, by a reading of the source. macOS and Windows were not run.
+  Fixed in 0.9.16: a default context directory that does not exist then holds
+  no project instructions and the session is created; a `--context-root` that
+  does not exist is still refused.
+- Known limitation (added 2026-11-16). Mob: an adoption into store custody
+  (`MobHandle::adopt_identity`, 0.9.11 through 0.9.15) from a roster spec
+  whose labels are not the labels its member was seated with leaves the seat
+  as it was and records no owed label restamp. On 0.9.15 a host that composes
+  that member's seat from its row
+  (`MemberBuildPreparer::prepare_store_owned_seat`) or sets labels in its
+  spawn customizer is refused the member's next build for good, naming the
+  label keys that differ; a member that is live goes on serving until its next
+  build. `IdentityRecordCensus::seats_stale` counts such a seat. Way out: one
+  update of the identity (`MobHandle::update_store_owned_identity`, any
+  field), which records the restamp and seats a broken member again on its
+  session, or a respawn with the row's labels (`MobHandle::respawn_member`
+  with `MemberRespawn::new().with_labels(..)`). By reading; not run for an
+  adopted identity.
+- `rkat realm govern` can fail on the realm's manifest lock shortly after the
+  realm was made. (added 2026-11-16) `rkat realm create`, and the first
+  command that opens a new realm, take a lock file and now and then leave it
+  behind when the command ends. `rkat realm govern` on that realm then waits
+  five seconds and fails with
+  `Error: timed out acquiring realm manifest lock for '<realm>'`, exit code 1,
+  until the leftover file is more than 30 seconds old, and the realm is not
+  governed (`rkat realm show` reads `governance: ungoverned`). Seen with
+  `rkat realm govern` run within 30 seconds of the `rkat realm create` that
+  made the realm. In a script, check each command's exit code; a script that
+  goes on after a failed `realm govern` works on a realm that is not governed.
+  Run again at once, the command fails the same way; after a failed command,
+  wait until more than 30 seconds have passed since it was started, and run it
+  again. The same cause has two other faces, each for up to 30 seconds: a
+  realm's first start can fail with `first-start reservation is contended`
+  after an earlier first start that failed or was cancelled, and after a
+  server that held a lease on the realm has ended, `rkat realm delete` can
+  refuse it and `rkat realm prune` can skip it without `--force`. (The
+  failure, its exit code, the ungoverned realm and the retry by runs on the
+  released 0.9.15 `rkat`; the cause and its two other faces by reading, in the
+  same lines in every release from 0.9.0, where `realm govern` first shipped.)
 
 ## [0.9.14] - 2026-11-11
 
@@ -52634,7 +53049,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.15...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.16...HEAD
+[0.9.16]: https://github.com/lukacf/meerkat/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13

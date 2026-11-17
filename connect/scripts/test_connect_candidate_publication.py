@@ -11,16 +11,56 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
+import tracemalloc
 
 import pytest
 
 SPEC = importlib.util.spec_from_file_location("connect_candidate_publication", Path(__file__).with_name("connect-candidate.py"))
 p = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(p)
+
+# The process runner as it is before any row replaces it: the upload rows start the stand-in
+# upload host through it.
+REAL_CHECK_OUTPUT = subprocess.check_output
+UPLOAD_HOST = Path(__file__).with_name("fixtures") / "upload_host_gh.py"
+
+
+class UploadHost:
+    """A `gh` first on PATH that answers the upload call the way the installed GitHub CLI and the
+    upload host do (fixtures/upload_host_gh.py): a request that does not carry the length of its
+    body is refused with `gh: Bad Content-Length (HTTP 400)`. Never GitHub, no network."""
+
+    def __init__(self, directory, monkeypatch, keep_bodies=True):
+        self.directory = directory
+        directory.mkdir()
+        if not keep_bodies:
+            (directory / "no-bodies").write_bytes(b"")
+        commands = directory / "bin"
+        commands.mkdir()
+        (commands / "gh").write_text('#!/bin/sh\nexec %s -I %s %s "$@"\n' % tuple(
+            shlex.quote(str(word)) for word in (sys.executable, UPLOAD_HOST, directory)))
+        (commands / "gh").chmod(0o755)
+        monkeypatch.setenv("PATH", str(commands) + os.pathsep + os.environ["PATH"])
+        # Two guards: the `gh` a row starts is this stand-in, and every proxy variable names a
+        # closed local port, so a request to a real address would fail at once.
+        assert shutil.which("gh") == str(commands / "gh")
+        for name in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, "http://127.0.0.1:9")
+        for name in ("no_proxy", "NO_PROXY"):
+            monkeypatch.delenv(name, raising=False)
+
+    def requests(self):
+        log = self.directory / "requests.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def body(self, name):
+        return self.directory / ("body-" + name)
 
 # The publishing environment supplies the private names (CONNECT_PUBLICATION_PRIVATE_NAMES).
 # Here the neutral renames that stand in for the original private names in these
@@ -1262,11 +1302,91 @@ def test_upload_command_reads_retained_stdin_not_a_path(tmp_path,monkeypatch):
         result=p.publication_api('https://uploads.github.com/controlled',upload=retained)
         assert not retained.closed
     assert result=={'controlled':'upload receipt'}
-    assert commands[0][0][-2:]==['--input','-']
+    # The body is the open file on standard input, and the request states its length: gh has no
+    # length for a body it reads from standard input, and the upload host refuses a request
+    # without one. The length is the open file's own, so the child is still given no pathname.
+    assert commands[0][0][-4:]==['--header','Content-Length: 20','--input','-']
+    assert [word for word in commands[0][0] if str(tmp_path) in word]==[]
     assert commands[0][1]==b'exact accepted bytes'
     # The upload of a file has a time bound of its own, longer than the one a read keeps.
     p.publication_api('repos/controlled')
     assert commands[0][2]=={'timeout':p.UPLOAD_SECONDS} and p.UPLOAD_SECONDS>=3600 and commands[1][1:]==(None,{})
+
+
+def test_upload_request_carries_the_length_the_upload_host_requires(tmp_path,monkeypatch):
+    # The tool's own upload function and its own `gh` call, answered by the stand-in upload host.
+    host=UploadHost(tmp_path/'host',monkeypatch)
+    data=b'exact accepted bytes'*4096
+    with p.tempfile.TemporaryFile('w+b',dir=tmp_path) as retained:
+        retained.write(data);retained.seek(0)
+        result=p.release_asset_upload(456,'made-up.bin',retained)
+        # The length is that of what the child reads: the open file from its position.
+        retained.seek(7)
+        p.release_asset_upload(456,'made-up-tail.bin',retained)
+    assert result=={'id':1,'name':'made-up.bin','size':len(data),'state':'uploaded'}
+    whole,tail=host.requests()
+    assert (whole['outcome'],whole['length'],whole['size'],whole['sha256'])==('stored',len(data),len(data),hashlib.sha256(data).hexdigest())
+    assert (tail['outcome'],tail['length'],tail['sha256'])==('stored',len(data)-7,hashlib.sha256(data[7:]).hexdigest())
+    assert host.body('made-up.bin').read_bytes()==data
+    # Standard input still: the child that holds the write credential is given no pathname.
+    assert whole['argv'][-2:]==['--input','-'] and [word for word in whole['argv'] if str(tmp_path) in word]==[]
+
+
+def test_publication_uploads_reach_an_upload_host_that_requires_a_length(fixture,monkeypatch):
+    # publish_accepted with its own upload request: release_asset_upload, the API runner and the
+    # `gh` call are the tool's; the stand-in upload host answers the call, and what it stored is
+    # what the controlled release then holds. Reads stay with the controlled transport.
+    c=fixture;host=UploadHost(c.root/'upload-host',monkeypatch)
+    real_api,controlled_output=p.publication_api,p.subprocess.check_output
+    t,publish=prepare_publish(c,monkeypatch)
+    def api(endpoint,*,upload=None):
+        if upload is None:return t.api(endpoint)
+        name=p.urllib.parse.parse_qs(p.urllib.parse.urlsplit(endpoint).query)['name'][0]
+        real_api(endpoint,upload=upload)
+        with host.body(name).open('rb') as stored:return t.api(endpoint,upload=stored)
+    def output(argv,**kwargs):
+        args=[str(x) for x in argv]
+        if args[:2]==['gh','api'] and args[2].startswith('https://uploads.github.com/'):return REAL_CHECK_OUTPUT(argv,**kwargs)
+        return controlled_output(argv,**kwargs)
+    monkeypatch.setattr(p,'publication_api',api);monkeypatch.setattr(p.subprocess,'check_output',output)
+    result=publish()
+    assert result['status']=='verified_public_inventory' and t.uploads==list(c.files)
+    requests=host.requests()
+    assert [(r['outcome'],r['name'],r['length'],r['size'],r['sha256']) for r in requests]==[
+        ('stored',name,(c.candidate/name).stat().st_size,(c.candidate/name).stat().st_size,p.digest(c.candidate/name)) for name in c.files]
+    for name in c.files:assert t.files[name]==(c.candidate/name).read_bytes()
+    assert all(r['argv'][-2:]==['--input','-'] and not [word for word in r['argv'] if str(c.root) in word] for r in requests)
+
+
+def test_an_empty_file_is_refused_before_any_request(tmp_path,monkeypatch):
+    # No request for an empty body carries a length, so the upload host could only refuse it:
+    # the tool refuses first, and `gh` is not started.
+    host=UploadHost(tmp_path/'host',monkeypatch)
+    with p.tempfile.TemporaryFile('w+b',dir=tmp_path) as retained:
+        with pytest.raises(ValueError,match='empty file'):p.release_asset_upload(456,'made-up-empty.bin',retained)
+        retained.write(b'read to its end');retained.flush()
+        with pytest.raises(ValueError,match='empty file'):p.release_asset_upload(456,'made-up-at-end.bin',retained)
+    assert host.requests()==[]
+
+
+def test_a_large_upload_is_not_read_into_this_process(tmp_path,monkeypatch):
+    # 400 MiB (a file with no data blocks): the tool hands the open file to the child and states
+    # its length from the file itself. Nothing of the size of the file is allocated here.
+    host=UploadHost(tmp_path/'host',monkeypatch,keep_bodies=False)
+    size=400*1024*1024
+    expected=hashlib.sha256()
+    for _ in range(400):expected.update(bytes(1024*1024))
+    with p.tempfile.TemporaryFile('w+b',dir=tmp_path) as retained:
+        retained.truncate(size)
+        tracemalloc.start()
+        try:
+            p.release_asset_upload(456,'made-up-large.bin',retained)
+            peak=tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    [request]=host.requests()
+    assert (request['outcome'],request['length'],request['size'],request['sha256'])==('stored',size,size,expected.hexdigest())
+    assert peak<16*1024*1024,peak
 
 
 def test_private_repository_refuses_before_any_upload(fixture,monkeypatch):

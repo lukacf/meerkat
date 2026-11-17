@@ -34,7 +34,9 @@ use meerkat_meta::mob_composition_manifest::{
     MobStorageProvenance, manifest_path, persistent_mob_storage,
 };
 use meerkat_meta::mob_handle_runtime::{MobRuntimeError, auto_mark_declared_resume_overrides};
-use meerkat_meta::spec_update_ceremony::{SpecUpdateError, declare_spec_update};
+use meerkat_meta::spec_update_ceremony::{
+    SpecUpdateError, commit_spec_update, declare_spec_update, propose_spec_update,
+};
 use meerkat_meta::storage_health::{BlobDurability, ResolvedStorageSummary, StorageSlotSummary};
 use meerkat_meta::unified_runtime::edge_reconcile::DefinitionWiringEdgeDiscovery;
 use meerkat_meta::{
@@ -2134,6 +2136,90 @@ async fn stale_definition_update_refuses_and_exact_retry_converges() {
         .shutdown()
         .await
         .expect("shutdown resumed runtime");
+}
+
+/// A definition update refused for its revision reads the same wherever it is
+/// refused: the stored revision and the expected one as numbers, that the
+/// declaration did not change the definition, and what to do next. The text
+/// claims no more than that: before the store refuses the new revision, an
+/// update may bring a missing or stale spec projection in line with the
+/// current definition.
+#[tokio::test]
+async fn a_refused_definition_revision_names_both_revisions_and_what_to_do() {
+    const MOB_ID: &str = "definition-epoch-refusal-text";
+    fn assert_refusal_text(error: &SpecUpdateError, stored: u64, expected: u64) {
+        assert!(
+            matches!(error, SpecUpdateError::RevisionMoved { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the canonical definition for mob {MOB_ID} is at revision {stored}, not the \
+                 expected revision {expected}; this declaration did not change it; declare \
+                 again with the current revision"
+            )
+        );
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mob_path = temp.path().join("mob.sqlite3");
+    let session_root = temp.path().join("sessions");
+    let updated = diverged_definition_for(MOB_ID);
+    let mut successor = updated.clone();
+    let lead = successor
+        .profiles
+        .get(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .clone();
+    successor
+        .profiles
+        .insert(ProfileName::from("reviewer"), lead);
+
+    let first = boot(&mob_path, &session_root, base_definition_for(MOB_ID))
+        .await
+        .expect("create initial runtime");
+    first
+        .handle()
+        .shutdown()
+        .await
+        .expect("shutdown initial runtime");
+    drop(first);
+    let storage = MobStorage::persistent(&mob_path).expect("reopen persistent mob storage");
+
+    // A declaration that names a revision the store is not at.
+    let declared_wrong = declare_spec_update(&storage, MOB_ID, &updated, 7)
+        .await
+        .expect_err("a declaration at another revision must refuse");
+    assert_refusal_text(&declared_wrong, 1, 7);
+
+    // A proposal read at revision 1, committed after another update took it.
+    let proposal = propose_spec_update(&storage, &successor)
+        .await
+        .expect("propose at revision 1");
+    assert_eq!(proposal.observed_revision(), 1);
+    declare_spec_update(&storage, MOB_ID, &updated, 1)
+        .await
+        .expect("the refused declaration left revision 1 current, so it commits");
+    let committed_late = commit_spec_update(&storage, proposal)
+        .await
+        .expect_err("a commit against a revision that was taken must refuse");
+    assert_refusal_text(&committed_late, 2, 1);
+
+    // The same refusal when the revision changes between the two reads of
+    // one observation: nothing here can place a writer between them, so the
+    // value that refusal carries is rendered.
+    let moved_while_read = SpecUpdateError::RevisionMoved {
+        mob_id: MOB_ID.to_string(),
+        proposed_at: 2,
+        found: 3,
+    };
+    assert_refusal_text(&moved_while_read, 3, 2);
+
+    // Neither refusal changed the definition: revision 2 is still current.
+    declare_spec_update(&storage, MOB_ID, &successor, 2)
+        .await
+        .expect("revision 2 is current and commits");
 }
 
 #[tokio::test]

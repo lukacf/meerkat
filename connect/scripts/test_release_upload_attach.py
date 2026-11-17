@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -54,6 +55,7 @@ HERE = Path(__file__).resolve().parent
 TOOL = HERE / "release-upload-attach.py"
 CANDIDATE = HERE / "connect-candidate.py"
 REAL_CHECK = HERE / "release-upload-receipt-check.py"
+UPLOAD_HOST = HERE / "fixtures" / "upload_host_gh.py"
 RELEASE_FILES = HERE.parent / "release"
 VERSION = "0.0.0"
 TAG = "connect-v" + VERSION
@@ -321,6 +323,29 @@ class FakeRelease:
             self.after_download(asset_id)
 
 
+class OwnUpload:
+    """The fake release for every read and read-back, and the tool's own adapter for the upload: the
+    candidate tool's upload function and its `gh` call, answered by a stand-in upload host
+    (fixtures/upload_host_gh.py) that, like the real one, refuses a request that does not carry the
+    length of its body. What the host stored is what the fake release then holds. Never GitHub."""
+
+    def __init__(self, adapter, release, host):
+        self.adapter, self.release, self.host = adapter, release, host
+
+    def read(self, endpoint):
+        return self.release.read(endpoint)
+
+    def download(self, asset_id, stream):
+        return self.release.download(asset_id, stream)
+
+    def upload(self, release_id, name, stream):
+        # The `gh` the tool starts is the stand-in (and the proxy variables name a closed port).
+        assert shutil.which("gh") == str(self.host / "bin" / "gh"), "the stand-in gh is not first on PATH"
+        self.adapter.upload(release_id, name, stream)
+        with (self.host / ("body-" + name)).open("rb") as stored:
+            self.release.upload(release_id, name, stored)
+
+
 class Fixture(unittest.TestCase):
     check = STAND_IN_CHECK
     files = ()
@@ -365,14 +390,26 @@ class Fixture(unittest.TestCase):
         self.count += 1
         return load(f"attach_tool_{id(self)}_{self.count}", (checkout or self.checkout) / "connect/scripts" / TOOL.name)
 
+    def upload_host(self):
+        """A stand-in upload host: (its record directory, a PATH on which its `gh` comes first)."""
+        directory = self.root / "upload-host"
+        (directory / "bin").mkdir(parents=True)
+        (directory / "bin" / "gh").write_text('#!/bin/sh\nexec %s -I %s %s "$@"\n' % tuple(
+            shlex.quote(str(word)) for word in (sys.executable, UPLOAD_HOST, directory)))
+        (directory / "bin" / "gh").chmod(0o755)
+        return directory, str(directory / "bin") + os.pathsep + os.environ["PATH"]
+
     def run_tool(self, receipts=None, *extra, checkout=None, release=None, tag=TAG, staging=None, module=None,
-                 repository=None, variables=None, temporary=None):
+                 repository=None, variables=None, temporary=None, upload_host=None):
         """Run the tool's command in this process, from a checkout, against the fake release and with a
         scratch repository as the release repository. Returns (exit status, the lines it printed, its
-        error text). With temporary, that directory is the temporary directory while the tool runs."""
+        error text). With temporary, that directory is the temporary directory while the tool runs.
+        With upload_host (a stand-in's record directory), the upload is the tool's own adapter's."""
         module = self.tool(checkout) if module is None else module
         release = self.release if release is None else release
-        module.GitHub = lambda _candidate: release
+        own = module.GitHub
+        module.GitHub = ((lambda _candidate: release) if upload_host is None
+                         else (lambda candidate: OwnUpload(own(candidate), release, upload_host)))
         module.REPOSITORY = address(self.repository if repository is None else repository)
         sys.modules.pop("release_upload_attach_check", None)
         arguments = ["--staging", str(self.staging if staging is None else staging), "--tag", tag]
@@ -886,6 +923,25 @@ class AttachAndReadBack(Fixture):
         self.assertEqual({path.name: path.read_bytes() for path in self.staging.iterdir()}, staged_before)
         self.assert_no_custody_left()
 
+    def test_every_upload_reaches_an_upload_host_that_requires_a_length(self):
+        # The tool's own upload path: its adapter, the candidate tool's upload function and that
+        # tool's `gh` call. The upload host refuses a request that does not carry the length of its
+        # body; every row arrives with its size and digest, from standard input and by no pathname.
+        host, path = self.upload_host()
+        code, lines, error = self.run_tool(upload_host=host, variables={"PATH": path})
+        requests = [json.loads(line) for line in (host / "requests.jsonl").read_text().splitlines()]
+        self.assertEqual([(request["outcome"], request.get("name"), request["length"], request.get("size"), request.get("sha256"))
+                          for request in requests],
+                         [("stored", name, len(data), len(data), sha256(data)) for name, data in self.expected().items()])
+        self.assertEqual((code, error), (0, ""), lines)
+        self.assertEqual(self.stored(), self.expected())
+        self.assertEqual(lines[-1], f"RELEASE-ATTACH PASS tag={TAG} files=11 attached=11 present=0 "
+                                    f"release_commit={self.head} tool_commit={self.head} default_branch=main")
+        for request in requests:
+            self.assertEqual(request["argv"][-2:], ["--input", "-"])
+            self.assertEqual([word for word in request["argv"] if str(self.root) in word], [])
+        self.assert_no_custody_left()
+
     def test_the_bytes_that_leave_are_the_checked_copies_not_the_staged_paths(self):
         # The first read of GitHub comes after the check. From then on the staged files are replaced.
         def replace_staged(_endpoint):
@@ -1074,6 +1130,8 @@ class AttachAndReadBack(Fixture):
             adapter = module.GitHub(candidate)
             self.assertEqual(adapter.read("repos/made-up/endpoint"), {"made-up": True})
             with tempfile.TemporaryFile() as stream:
+                stream.write(b"made-up file bytes")
+                stream.seek(0)
                 adapter.upload(77, "madeup-file.bin", stream)
                 self.assertIs(commands[1][1], stream)
             received = io.BytesIO()
@@ -1081,9 +1139,12 @@ class AttachAndReadBack(Fixture):
         finally:
             candidate.command_json = kept
         self.assertEqual(commands[0], (["gh", "api", "repos/made-up/endpoint", "--hostname", "github.com"], None, {}))
+        # The upload: the open file on standard input, and its length stated in the request (gh has
+        # none for a body from standard input, and the upload host refuses a request without one).
         self.assertEqual(commands[1][0], [
             "gh", "api", f"https://uploads.github.com/repos/{candidate.PUBLICATION_REPO}/releases/77/assets?name=madeup-file.bin",
-            "--hostname", "github.com", "--method", "POST", "--header", "Content-Type: application/octet-stream", "--input", "-"])
+            "--hostname", "github.com", "--method", "POST", "--header", "Content-Type: application/octet-stream",
+            "--header", "Content-Length: 18", "--input", "-"])
         self.assertEqual(commands[2][0], ["gh", "api", f"repos/{candidate.PUBLICATION_REPO}/releases/assets/123",
                                           "--hostname", "github.com", "--header", "Accept: application/octet-stream"])
         self.assertEqual(commands[2][1]["stdin"], subprocess.DEVNULL)

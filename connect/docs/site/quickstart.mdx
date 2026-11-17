@@ -6,17 +6,17 @@ icon: "rocket"
 
 <Note>
 Download the complete CLI archive from the
-[Connect 0.9.14 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.14).
-Platform: Linux x86_64 with glibc 2.39. The Apple Silicon macOS archive
-(macOS 13.5 or later) is not published for 0.9.14. Verify the
+[Connect 0.9.15 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15).
+Platform: Linux x86_64 with glibc 2.39, the floor read from the released
+binaries. No macOS arm64 products are part of this release. Verify the
 accompanying checksum before running it.
 See [platforms and installation options](/availability) for application integration.
 </Note>
 
 ## Standalone CLI
 
-Install [Meerkat Core 0.9.14](https://github.com/lukacf/meerkat/releases/tag/v0.9.14),
-the Core release Connect 0.9.14 was built and released with,
+Install [Meerkat Core 0.9.15](https://github.com/lukacf/meerkat/releases/tag/v0.9.15),
+the Core release Connect 0.9.15 was built and released with,
 for ordinary `rkat` agent work after setup. The Connect archive supplies its own Python, Node/npm, integration
 library and setup resources; you do not need to install those separately.
 
@@ -25,15 +25,14 @@ library and setup resources; you do not need to install those separately.
     Download the CLI archive and its `.sha256` companion:
 
     ```sh
-    platform=linux-x86_64 # 0.9.14 has no macos-arm64 archive.
-    archive="meerkat-connect-0.9.14-$platform.tar.gz"
-    release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14
+    platform=linux-x86_64 # 0.9.15 has no macos-arm64 archive.
+    archive="meerkat-connect-0.9.15-$platform.tar.gz"
+    release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
     curl -fLO "$release/$archive"
     curl -fLO "$release/$archive.sha256"
     ```
 
-    On macOS, verify it with `shasum -a 256 -c "$archive.sha256"`; on Linux,
-    use `sha256sum -c "$archive.sha256"`. Continue only when it reports success:
+    Verify it with `sha256sum -c "$archive.sha256"`. Continue only when it reports success:
 
     ```sh
     tar -xpf "$archive"
@@ -48,11 +47,6 @@ library and setup resources; you do not need to install those separately.
       <Tab title="Linux x86_64">
         ```sh
         ./meerkat-connect-linux-x86_64/bin/meerkat-connect
-        ```
-      </Tab>
-      <Tab title="Apple Silicon macOS">
-        ```sh
-        ./meerkat-connect-macos-arm64/bin/meerkat-connect
         ```
       </Tab>
     </Tabs>
@@ -114,7 +108,7 @@ The application retains the original conversation and setup progress, so you can
 
 ## Updating an existing application
 
-Connect 0.9.14 does not support in-place updates that change an application's
+Connect 0.9.15 does not support in-place updates that change an application's
 tool policy, definition, instructions or runtime; Forge's Stage refuses them,
 so keep the existing installation and state. Do not extract a new archive over
 it. See [platforms and installation options](/availability) for the released

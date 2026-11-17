@@ -263,8 +263,58 @@ struct ManifestLockGuard {
     path: PathBuf,
 }
 
+/// What an error on a lock file's own name means to a caller that wants the
+/// lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockFileError {
+    /// Somebody else has the lock: wait and try again, inside the caller's
+    /// deadline.
+    Held,
+    /// The lock cannot be taken: the error is returned.
+    Fatal,
+}
+
+/// Classify an error from creating or probing a lock file. `windows` is the
+/// platform the answer is for (`cfg!(windows)` in the product).
+///
+/// A holder gives a lock back by removing its file. On Windows the file
+/// keeps its name until the removal completes, and a create or an open of
+/// the name is refused with "Access is denied" in that moment: the lock is
+/// still held. A lock file that really cannot be created gives the same
+/// answer there, so the caller's deadline is what ends that wait. On every
+/// other platform a refused permission is a real one.
+fn classify_lock_file_error(kind: std::io::ErrorKind, windows: bool) -> LockFileError {
+    match kind {
+        std::io::ErrorKind::AlreadyExists => LockFileError::Held,
+        std::io::ErrorKind::PermissionDenied if windows => LockFileError::Held,
+        _ => LockFileError::Fatal,
+    }
+}
+
 impl ManifestLockGuard {
     async fn acquire(path: &Path, realm_id: &str) -> Result<Self, StoreError> {
+        Self::acquire_with(path, realm_id, cfg!(windows), || async move {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .await
+        })
+        .await
+    }
+
+    /// [`Self::acquire`] with the step that creates the lock file, and the
+    /// platform its errors are read for, passed in.
+    async fn acquire_with<F, Fut>(
+        path: &Path,
+        realm_id: &str,
+        windows: bool,
+        mut create: F,
+    ) -> Result<Self, StoreError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = std::io::Result<tokio::fs::File>>,
+    {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -279,12 +329,7 @@ impl ManifestLockGuard {
                 });
             }
 
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-                .await
-            {
+            match create().await {
                 Ok(file) => {
                     // A lock file whose write failed is removed again: left
                     // behind, it would hold the lock for nobody until it
@@ -296,18 +341,20 @@ impl ManifestLockGuard {
                         path: path.to_path_buf(),
                     });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Self::is_stale(path).await? {
-                        let _ = tokio::fs::remove_file(path).await;
+                Err(err) => match classify_lock_file_error(err.kind(), windows) {
+                    LockFileError::Held => {
+                        if Self::is_stale(path, windows).await? {
+                            let _ = tokio::fs::remove_file(path).await;
+                        }
+                        tokio::time::sleep(MANIFEST_LOCK_RETRY_DELAY).await;
                     }
-                    tokio::time::sleep(MANIFEST_LOCK_RETRY_DELAY).await;
-                }
-                Err(err) => return Err(StoreError::Io(err)),
+                    LockFileError::Fatal => return Err(StoreError::Io(err)),
+                },
             }
         }
     }
 
-    async fn is_stale(path: &Path) -> Result<bool, StoreError> {
+    async fn is_stale(path: &Path, windows: bool) -> Result<bool, StoreError> {
         match tokio::fs::metadata(path).await {
             Ok(metadata) => {
                 let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -317,6 +364,11 @@ impl ManifestLockGuard {
                 Ok(age > MANIFEST_LOCK_STALE_AFTER)
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            // A probe refused because somebody else has the lock found no
+            // stale lock.
+            Err(err) if classify_lock_file_error(err.kind(), windows) == LockFileError::Held => {
+                Ok(false)
+            }
             Err(err) => Err(StoreError::Io(err)),
         }
     }
@@ -925,7 +977,11 @@ async fn create_first_start_marker(path: &Path, realm_id: &str) -> Result<(), st
 
 /// Age-based takeover check so a crashed first start cannot brick the
 /// realm: payload timestamp first, mtime as the fallback for a torn write.
-async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
+async fn first_start_marker_is_stale(path: &Path, windows: bool) -> Result<bool, StoreError> {
+    // A read or a probe refused because somebody else has the marker (see
+    // `classify_lock_file_error`) found no stale marker.
+    let held =
+        |err: &std::io::Error| classify_lock_file_error(err.kind(), windows) == LockFileError::Held;
     match tokio::fs::read(path).await {
         Ok(bytes) => {
             if let Ok(marker) = serde_json::from_slice::<FirstStartMarker>(&bytes) {
@@ -934,6 +990,7 @@ async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if held(&err) => return Ok(false),
         Err(err) => return Err(StoreError::Io(err)),
     }
     match tokio::fs::metadata(path).await {
@@ -945,6 +1002,7 @@ async fn first_start_marker_is_stale(path: &Path) -> Result<bool, StoreError> {
             Ok(age > MANIFEST_LOCK_STALE_AFTER)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) if held(&err) => Ok(false),
         Err(err) => Err(StoreError::Io(err)),
     }
 }
@@ -964,6 +1022,27 @@ impl FirstStartReservation {
         candidates: &[PathBuf],
         realm_id: &str,
     ) -> Result<Option<Self>, StoreError> {
+        Self::try_acquire_with(
+            candidates,
+            realm_id,
+            cfg!(windows),
+            |marker_path| async move { create_first_start_marker(&marker_path, realm_id).await },
+        )
+        .await
+    }
+
+    /// [`Self::try_acquire`] with the step that creates a marker, and the
+    /// platform its errors are read for, passed in.
+    async fn try_acquire_with<F, Fut>(
+        candidates: &[PathBuf],
+        realm_id: &str,
+        windows: bool,
+        mut create: F,
+    ) -> Result<Option<Self>, StoreError>
+    where
+        F: FnMut(PathBuf) -> Fut,
+        Fut: Future<Output = std::io::Result<()>>,
+    {
         let mut acquired = Self {
             markers: Vec::new(),
         };
@@ -976,24 +1055,28 @@ impl FirstStartReservation {
             // crashed first start must not brick the realm.
             let mut takeover_attempted = false;
             loop {
-                match create_first_start_marker(&marker_path, realm_id).await {
+                match create(marker_path.clone()).await {
                     Ok(()) => {
                         acquired.markers.push(marker_path);
                         break;
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                        if !takeover_attempted && first_start_marker_is_stale(&marker_path).await? {
-                            takeover_attempted = true;
-                            let _ = tokio::fs::remove_file(&marker_path).await;
-                            continue;
+                    Err(err) => match classify_lock_file_error(err.kind(), windows) {
+                        LockFileError::Held => {
+                            if !takeover_attempted
+                                && first_start_marker_is_stale(&marker_path, windows).await?
+                            {
+                                takeover_attempted = true;
+                                let _ = tokio::fs::remove_file(&marker_path).await;
+                                continue;
+                            }
+                            acquired.release().await;
+                            return Ok(None);
                         }
-                        acquired.release().await;
-                        return Ok(None);
-                    }
-                    Err(err) => {
-                        acquired.release().await;
-                        return Err(StoreError::Io(err));
-                    }
+                        LockFileError::Fatal => {
+                            acquired.release().await;
+                            return Err(StoreError::Io(err));
+                        }
+                    },
                 }
             }
         }
@@ -1295,15 +1378,26 @@ async fn write_manifest_payload_atomically(
     Ok(())
 }
 
+/// Fsync the directory `path` so a completed rename into it survives a crash
+/// (unix; directory handles are not fsyncable elsewhere, and Windows refuses
+/// to open a directory as a file at all).
 async fn sync_dir(path: &Path) -> Result<(), StoreError> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        let file = std::fs::File::open(path)?;
-        file.sync_all()
-    })
-    .await
-    .map_err(StoreError::Join)?
-    .map_err(StoreError::Io)
+    #[cfg(unix)]
+    {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            let file = std::fs::File::open(path)?;
+            file.sync_all()
+        })
+        .await
+        .map_err(StoreError::Join)?
+        .map_err(StoreError::Io)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError> {
@@ -1820,6 +1914,311 @@ mod tests {
         assert_eq!(parsed.backend, first_backend);
     }
 
+    /// What an error on a lock file's own name means to a caller that wants
+    /// the lock, and what taking the manifest lock does with it. The platform
+    /// is a parameter of the code under test, so both platforms' answers are
+    /// checked on every host.
+    mod lock_file_errors {
+        use super::*;
+        use std::io::ErrorKind;
+
+        const WINDOWS: bool = true;
+        const NOT_WINDOWS: bool = false;
+
+        #[test]
+        fn a_refused_permission_is_a_holder_on_windows() {
+            assert_eq!(
+                classify_lock_file_error(ErrorKind::PermissionDenied, WINDOWS),
+                LockFileError::Held,
+                "a lock file that is being removed refuses a create or an open of its name"
+            );
+        }
+
+        #[test]
+        fn a_refused_permission_is_an_error_off_windows() {
+            assert_eq!(
+                classify_lock_file_error(ErrorKind::PermissionDenied, NOT_WINDOWS),
+                LockFileError::Fatal
+            );
+        }
+
+        #[test]
+        fn an_existing_lock_file_is_a_holder_on_every_platform() {
+            for windows in [WINDOWS, NOT_WINDOWS] {
+                assert_eq!(
+                    classify_lock_file_error(ErrorKind::AlreadyExists, windows),
+                    LockFileError::Held,
+                    "windows: {windows}"
+                );
+            }
+        }
+
+        #[test]
+        fn any_other_error_is_an_error_on_every_platform() {
+            for kind in [
+                ErrorKind::NotFound,
+                ErrorKind::InvalidInput,
+                ErrorKind::StorageFull,
+                ErrorKind::ReadOnlyFilesystem,
+                ErrorKind::ResourceBusy,
+                ErrorKind::TimedOut,
+                ErrorKind::Interrupted,
+                ErrorKind::Other,
+            ] {
+                for windows in [WINDOWS, NOT_WINDOWS] {
+                    assert_eq!(
+                        classify_lock_file_error(kind, windows),
+                        LockFileError::Fatal,
+                        "{kind:?}, windows: {windows}"
+                    );
+                }
+            }
+        }
+
+        fn refused() -> std::io::Error {
+            std::io::Error::from(ErrorKind::PermissionDenied)
+        }
+
+        async fn create_lock_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .await
+        }
+
+        // Paused clock in the three rows below: the waits between two takes
+        // elapse virtually.
+
+        #[tokio::test(start_paused = true)]
+        async fn taking_the_lock_on_windows_waits_out_refused_creates_and_then_takes_it() {
+            let temp = tempfile::tempdir().unwrap();
+            let lock_path = temp.path().join(".realm_manifest.lock");
+            let lock_path = lock_path.as_path();
+            let started = Instant::now();
+            let mut creates = 0u32;
+            let taken = ManifestLockGuard::acquire_with(lock_path, "team", WINDOWS, || {
+                creates += 1;
+                let refuse = creates <= 3;
+                async move {
+                    if refuse {
+                        Err(refused())
+                    } else {
+                        create_lock_file(lock_path).await
+                    }
+                }
+            })
+            .await;
+            assert!(
+                taken.is_ok(),
+                "creates refused while the lock is given back are waited out: {:?}",
+                taken.as_ref().err()
+            );
+            assert_eq!(creates, 4, "three refused creates, then the one that took");
+            assert!(lock_path.exists(), "the lock is held: its file exists");
+            let waited = started.elapsed();
+            assert!(
+                waited >= MANIFEST_LOCK_RETRY_DELAY * 3 && waited < MANIFEST_LOCK_TIMEOUT,
+                "one retry delay per refused create, inside the deadline: {waited:?}"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn taking_the_lock_on_windows_times_out_when_creates_stay_refused() {
+            let temp = tempfile::tempdir().unwrap();
+            let lock_path = temp.path().join(".realm_manifest.lock");
+            let started = Instant::now();
+            let mut creates = 0u32;
+            let taken = ManifestLockGuard::acquire_with(&lock_path, "team", WINDOWS, || {
+                creates += 1;
+                async { Err(refused()) }
+            })
+            .await;
+            assert!(
+                matches!(
+                    taken.as_ref().err(),
+                    Some(StoreError::RealmManifestLockTimeout { realm_id }) if realm_id == "team"
+                ),
+                "a permission that stays refused ends in the lock timeout: {:?}",
+                taken.as_ref().err()
+            );
+            assert!(creates > 1, "the create was tried again: {creates}");
+            let waited = started.elapsed();
+            assert!(
+                waited >= MANIFEST_LOCK_TIMEOUT
+                    && waited < MANIFEST_LOCK_TIMEOUT + MANIFEST_LOCK_RETRY_DELAY * 2,
+                "the wait ends at the existing deadline: {waited:?}"
+            );
+            assert!(!lock_path.exists(), "no lock file is left behind");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn taking_the_lock_off_windows_fails_at_once_on_a_refused_create() {
+            let temp = tempfile::tempdir().unwrap();
+            let lock_path = temp.path().join(".realm_manifest.lock");
+            let started = Instant::now();
+            let mut creates = 0u32;
+            let taken = ManifestLockGuard::acquire_with(&lock_path, "team", NOT_WINDOWS, || {
+                creates += 1;
+                async { Err(refused()) }
+            })
+            .await;
+            assert!(
+                matches!(
+                    taken.as_ref().err(),
+                    Some(StoreError::Io(err)) if err.kind() == ErrorKind::PermissionDenied
+                ),
+                "a refused permission is returned as it is: {:?}",
+                taken.as_ref().err()
+            );
+            assert_eq!(creates, 1, "the create is not tried again");
+            assert_eq!(started.elapsed(), Duration::ZERO, "nothing is waited for");
+        }
+    }
+
+    /// The first open of a realm nobody has opened before creates it: the
+    /// call succeeds, the manifest on disk is the one it returned, and no
+    /// temporary file is left. It runs on every platform; where a directory
+    /// cannot be opened as a file (Windows answers "Access is denied"), it
+    /// is the proof that writing the manifest does not try to.
+    #[tokio::test]
+    async fn the_first_open_of_a_fresh_realm_succeeds_and_writes_the_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "first-open";
+        let paths = realm_paths_in(&realms_root, realm_id);
+        assert!(!paths.root.exists(), "the realm does not exist yet");
+
+        let created = ensure_realm_manifest_in(
+            &realms_root,
+            realm_id,
+            Some(supported_backend()),
+            Some(RealmOrigin::Generated),
+        )
+        .await
+        .expect("the first open of a fresh realm succeeds");
+
+        let on_disk = tokio::fs::read(&paths.manifest_path)
+            .await
+            .expect("the manifest is written");
+        let written = parse_manifest_bytes(&on_disk).expect("the written manifest parses");
+        assert_eq!(written.realm.as_str(), realm_id);
+        assert_eq!(written.realm, created.realm);
+        assert_eq!(written.backend, created.backend);
+        assert_eq!(written.created_at, created.created_at);
+        let leftovers: Vec<String> = std::fs::read_dir(&paths.root)
+            .expect("the realm directory")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(".realm_manifest.tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "no temporary manifest: {leftovers:?}");
+
+        let reopened = ensure_realm_manifest_in(&realms_root, realm_id, None, None)
+            .await
+            .expect("the second open reads the manifest");
+        assert_eq!(reopened.created_at, created.created_at);
+    }
+
+    /// The lines that open a file inside the functions of `source` whose
+    /// first line starts with `signature`: each line's number and whether it
+    /// stands under `#[cfg(unix)]`. Rustfmt's indentation is the structure
+    /// read here: what encloses a line is the nearest line above it with
+    /// less indentation, and an attribute is the line above what it governs.
+    fn file_opens_in(source: &str, signature: &str) -> Vec<(usize, bool)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let is_code = |line: &str| {
+            let text = line.trim_start();
+            !text.is_empty() && !text.starts_with("//")
+        };
+        let mut opens = Vec::new();
+        for (start, first) in lines.iter().enumerate() {
+            // A declaration without a body (a trait's) opens nothing.
+            if !first.trim_start().starts_with(signature) || first.trim_end().ends_with(';') {
+                continue;
+            }
+            let closing = format!("{}}}", &first[..indent(first)]);
+            let end = lines[start..]
+                .iter()
+                .position(|line| *line == closing)
+                .map_or(lines.len(), |offset| start + offset);
+            for at in start..end {
+                if !is_code(lines[at]) || !lines[at].contains("File::open(") {
+                    continue;
+                }
+                let mut level = indent(lines[at]);
+                let mut under_unix = false;
+                for above in (0..=at).rev() {
+                    let line = lines[above];
+                    if !is_code(line) || (above != at && indent(line) >= level) {
+                        continue;
+                    }
+                    level = indent(line);
+                    if above > 0 && lines[above - 1].trim() == "#[cfg(unix)]" {
+                        under_unix = true;
+                        break;
+                    }
+                }
+                opens.push((at + 1, under_unix));
+            }
+        }
+        opens
+    }
+
+    /// Making a rename durable means opening the directory and syncing it,
+    /// which only Unix offers: Windows refuses to open a directory as a file
+    /// ("Access is denied"). Every helper of this crate that does it opens
+    /// the directory under `#[cfg(unix)]` only, so no other platform fails a
+    /// write it has already made. A helper added here is added to this list.
+    #[test]
+    fn directory_sync_helpers_open_a_directory_only_under_a_unix_cfg() {
+        let helpers = [
+            (
+                "realm.rs",
+                include_str!("realm.rs"),
+                "async fn sync_dir(path: &Path)",
+            ),
+            (
+                "blob.rs",
+                include_str!("blob.rs"),
+                "async fn sync_parent_dir(&self, path: &Path)",
+            ),
+            (
+                "migrate.rs",
+                include_str!("migrate.rs"),
+                "fn sync_parent_dir_reported(path: &Path",
+            ),
+            (
+                "approval_file_store.rs",
+                include_str!("approval_file_store.rs"),
+                "fn sync_dir(&self, dir: &Path)",
+            ),
+        ];
+        for (file, source, signature) in helpers {
+            let opens = file_opens_in(source, signature);
+            assert!(
+                !opens.is_empty(),
+                "{file}: `{signature}` opens no directory; has the helper moved?"
+            );
+            let unguarded: Vec<usize> = opens
+                .iter()
+                .filter(|(_, under_unix)| !under_unix)
+                .map(|(line, _)| *line)
+                .collect();
+            assert!(
+                unguarded.is_empty(),
+                "{file}: `{signature}` opens a directory outside `#[cfg(unix)]` at line(s) \
+                 {unguarded:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn backend_hint_conflict_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
@@ -2104,6 +2503,85 @@ mod tests {
 
         fn candidates(a: &Path, b: &Path) -> Vec<PathBuf> {
             vec![a.to_path_buf(), b.to_path_buf()]
+        }
+
+        fn refused() -> std::io::Error {
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        }
+
+        fn marker_files(root: &Path) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return Vec::new();
+            };
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        /// A marker that is being removed refuses a create of its name on
+        /// Windows: that is a first start still under way, so the caller
+        /// waits for the manifest as it does when the marker exists. The
+        /// platform is a parameter, so the row runs on every host.
+        #[tokio::test]
+        async fn a_refused_marker_create_on_windows_is_contention_and_releases_what_was_taken() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let mut creates = 0u32;
+            let reserved = FirstStartReservation::try_acquire_with(
+                &candidates(&root_a, &root_b),
+                "team",
+                true,
+                |marker_path| {
+                    creates += 1;
+                    let refuse = creates > 1;
+                    async move {
+                        if refuse {
+                            Err(refused())
+                        } else {
+                            create_first_start_marker(&marker_path, "team").await
+                        }
+                    }
+                },
+            )
+            .await;
+            assert!(
+                matches!(reserved, Ok(None)),
+                "a refused create is contention: {:?}",
+                reserved.as_ref().err()
+            );
+            assert_eq!(
+                creates, 2,
+                "the first root's marker was taken, the second refused"
+            );
+            assert_eq!(
+                marker_files(&root_a),
+                Vec::<String>::new(),
+                "the marker taken in the first root is released"
+            );
+            assert_eq!(marker_files(&root_b), Vec::<String>::new());
+        }
+
+        #[tokio::test]
+        async fn a_refused_marker_create_off_windows_is_an_error() {
+            let temp = tempfile::tempdir().unwrap();
+            let root_a = temp.path().join("a");
+            let root_b = temp.path().join("b");
+            let reserved = FirstStartReservation::try_acquire_with(
+                &candidates(&root_a, &root_b),
+                "team",
+                false,
+                |_marker_path| async { Err(refused()) },
+            )
+            .await;
+            assert!(
+                matches!(
+                    reserved.as_ref().err(),
+                    Some(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::PermissionDenied
+                ),
+                "a refused permission is returned as it is: {:?}",
+                reserved.as_ref().err()
+            );
         }
 
         #[tokio::test]

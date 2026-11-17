@@ -7291,14 +7291,22 @@ pub(crate) enum FailedRunContributorDisposition {
     /// machine terminalizes the contributors instead: refuse the release
     /// rather than risk it.
     Terminalized,
+    /// The executor refused the request and applied nothing. The refusal is
+    /// the request's own answer, so a replay would be refused the same way
+    /// up to the retry cap. The machine ends the contributors once, with the
+    /// stored reason of a run that never executed, and the run's failure is
+    /// their answer. It is realized exactly as [`Self::Terminalized`]; it is
+    /// a variant of its own only to keep that class's error line out of the
+    /// log for a refused request.
+    Refused,
 }
 
 impl FailedRunContributorDisposition {
     /// Whether the failed-run realization still owes its contributors a staged
     /// terminal outbox. The machine-terminal path staged one before this point;
-    /// the other two did not.
+    /// the others did not.
     pub(crate) fn owes_terminal_outboxes(self) -> bool {
-        matches!(self, Self::Replayed | Self::Terminalized)
+        matches!(self, Self::Replayed | Self::Terminalized | Self::Refused)
     }
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -7306,6 +7314,7 @@ impl FailedRunContributorDisposition {
             Self::Consumed => "Consumed",
             Self::Replayed => "Replayed",
             Self::Terminalized => "Terminalized",
+            Self::Refused => "Refused",
         }
     }
 }
@@ -8089,6 +8098,17 @@ fn machine_apply_turn_run_failed(
             "failed to apply runtime turn failure for run {run_id}: {err}"
         ))
     })
+}
+
+/// Whether the apply failure cause the machine holds is a refused request.
+/// Read right after `RunFailed`, it is the failed run's own cause.
+fn machine_recorded_refused_request(driver: &DriverEntry) -> bool {
+    let authority = driver.shared_dsl_authority();
+    let auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    auth.state().last_runtime_apply_failure_cause
+        == Some(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RequestRefused)
 }
 
 fn machine_apply_turn_run_cancelled(
@@ -11758,12 +11778,15 @@ pub(crate) async fn machine_resolve_runtime_terminated_completion_result(
 }
 
 /// Terminalize a failed runtime-loop run, disposing of its staged contributors
-/// as the caller's typed disposition says.
+/// as the caller's typed disposition says, with one exception the machine
+/// decides: a caller's `Replayed` is realized as `Refused` when the cause the
+/// machine recorded with `RunFailed` is a refused request (see
+/// `fail_runtime_loop_run_inner`).
 ///
-/// The disposition is the caller's because only the runtime loop knows whether
-/// the executor answered (nothing in flight, replay repeats nothing) or whether
-/// the loop concluded non-progress and dropped an `apply` whose fate it cannot
-/// observe (replay could execute the instruction twice).
+/// Apart from that the disposition is the caller's because only the runtime
+/// loop knows whether the executor answered (nothing in flight, replay repeats
+/// nothing) or whether the loop concluded non-progress and dropped an `apply`
+/// whose fate it cannot observe (replay could execute the instruction twice).
 pub(crate) async fn fail_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
@@ -12290,6 +12313,20 @@ async fn fail_runtime_loop_run_inner(
             );
             return Err(RuntimeLoopRunFailError::Rejected(error));
         }
+    };
+    // A refused request's end is the machine's fact, not the caller's.
+    // `RunFailed` has just recorded this run's apply failure cause: when it
+    // is `RequestRefused` (the request was refused with nothing applied),
+    // the contributors the caller handed over as replayable end with the
+    // run instead, because a replay would only be refused again. No caller
+    // chooses this from the error.
+    let contributor_disposition = if contributor_disposition
+        == FailedRunContributorDisposition::Replayed
+        && machine_recorded_refused_request(&driver)
+    {
+        FailedRunContributorDisposition::Refused
+    } else {
+        contributor_disposition
     };
     let replay_plan = machine_build_replay_plan(&driver, &contributing_input_ids, "RunFailed");
     if let Err(err) = machine_apply_run_return_projection(

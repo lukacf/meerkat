@@ -153,7 +153,7 @@ sys.exit(subprocess.call([os.environ["REAL_RKAT"], *args], stdin=subprocess.DEVN
                 self.assertNotIn("--model", args)
                 self.assertNotIn("--provider", args)
             else:
-                self.assertEqual(args[args.index("--model") + 1], "claude-sonnet-4-6")
+                self.assertEqual(args[args.index("--model") + 1], "claude-sonnet-5-5")
 
     def test_004_every_call_accepts_literal_executable_path(self):
         example = self.copy_example("004-cli-one-liners-sh")
@@ -349,7 +349,7 @@ auth_profile = "offline"
             self.assertEqual(len(loaded["accepted_names"] + loaded["noop_names"]), 2)
         else:
             self.assertEqual(len(mcp_requests), 2)  # inline actual tools, answer
-        self.assertTrue(all(body["model"] == "claude-sonnet-4-6" for body in requests))
+        self.assertTrue(all(body["model"] == "claude-sonnet-5-5" for body in requests))
         tool_results = [block for name, block in final_results.items()
                         if name.endswith(("incident_digest", "release_readiness"))]
         self.assertEqual(len(tool_results), 2)

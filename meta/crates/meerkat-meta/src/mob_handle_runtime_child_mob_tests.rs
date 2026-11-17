@@ -2995,12 +2995,23 @@ async fn a_spawn_refused_at_its_build_reaches_the_caller_typed() {
 #[derive(Default)]
 struct SurfaceRecordingHook {
     prepared: Mutex<Vec<Vec<String>>>,
+    projected: Mutex<Vec<Vec<String>>>,
 }
 
 impl SurfaceRecordingHook {
     /// The tool names of each prepared surface the hook decided, in order.
     fn prepared(&self) -> Vec<Vec<String>> {
         self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Of each prepared surface the hook decided, in order, the tool names
+    /// its static visibility filters leave: the tools the member's model can
+    /// be offered.
+    fn projected(&self) -> Vec<Vec<String>> {
+        self.projected
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -3045,6 +3056,16 @@ impl meerkat_mob::MemberRuntimeRegistrationHook for SurfaceRecordingHook {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(tools);
+        self.projected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(
+                surface
+                    .projected
+                    .iter()
+                    .map(|tool| tool.name.as_str().to_string())
+                    .collect(),
+            );
         Ok(meerkat_core::ToolSurfaceSelection {
             binding: host_policy(),
             compiled_against: surface.clone(),
@@ -3067,6 +3088,20 @@ async fn governed_bound_lifetime(
     binding: meerkat_core::AuthBindingRef,
     hook: Option<Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>>,
 ) -> MobRuntime {
+    let model: Arc<dyn LlmClient> = host.model.clone();
+    governed_bound_lifetime_of(dir, root_definition(mob_id), model, config, binding, hook).await
+}
+
+/// [`governed_bound_lifetime`] over the root mob `definition`, with `model`
+/// as every member's model.
+async fn governed_bound_lifetime_of(
+    dir: &Path,
+    definition: MobDefinition,
+    model: Arc<dyn LlmClient>,
+    config: Config,
+    binding: meerkat_core::AuthBindingRef,
+    hook: Option<Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>>,
+) -> MobRuntime {
     let (storage, provenance) =
         crate::mob_composition_manifest::persistent_mob_storage(dir.join("mob.sqlite3"))
             .expect("root mob storage");
@@ -3075,7 +3110,7 @@ async fn governed_bound_lifetime(
         .expect("the state directory's meerkat-level realm")
         .clone();
     let mut spec = MobBootstrapSpec::persistent_inner_with_provider_stores(
-        root_definition(mob_id),
+        definition,
         storage,
         provenance,
         dir.to_path_buf(),
@@ -3107,7 +3142,6 @@ async fn governed_bound_lifetime(
     if let Some(hook) = hook {
         spec = spec.with_member_runtime_registration_hook(hook);
     }
-    let model: Arc<dyn LlmClient> = host.model.clone();
     spec.options.default_llm_client = Some(model);
     Box::pin(MobRuntime::bootstrap(spec))
         .await
@@ -3720,4 +3754,427 @@ async fn a_socket_composition_serves_one_member_across_the_root_and_the_child_mo
         "second",
         &["worker-a".to_string(), child_id.to_string()],
     );
+}
+
+// ---------------------------------------------------------------------------
+// A profile's deny of the stock tool `ask_user`, on every member build
+// ---------------------------------------------------------------------------
+//
+// The rows below build one member each on the governed composition of the
+// rows above, with the host's registration hook (the member is built through
+// its registration's tool-surface gate, so Meta mounts no `ask_user` on it)
+// or without it and otherwise the same. That composition admits no turn that
+// is not governed work, so these rows judge the build: whether it is refused,
+// the surface its host decided, the tools the member's session lists for its
+// model, and the tool policy its session records. What a model's call is
+// answered is run in `tests/ask_user_denied.rs`.
+
+/// The stock tool the rows below deny.
+const ASK_USER: &str = "ask_user";
+/// The comms tools every member of the rows' mob has, and the tool catalog's
+/// control tools, which every member has but one whose spawn carries
+/// external tools of its own.
+const DENY_NAME_COMMS_TOOLS: [&str; 5] = [
+    "peers",
+    "reply_to_peer",
+    "send_message",
+    "send_request",
+    "send_response",
+];
+const DENY_NAME_CATALOG_TOOLS: [&str; 2] = ["tool_catalog_load", "tool_catalog_search"];
+
+/// A host's own tool named `ask_user`, as a host puts one among a member
+/// build's external tools.
+struct HostsOwnAskUser;
+
+#[async_trait]
+impl AgentToolDispatcher for HostsOwnAskUser {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef::new(
+            ASK_USER,
+            "The host's own tool of this name.",
+            json!({"type": "object", "properties": {}}),
+        ))]
+        .into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
+            call.id.to_string(),
+            "answered by the host's own tool".to_string(),
+            false,
+        )))
+    }
+
+    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+        meerkat_core::agent::DispatcherCapabilities::default()
+    }
+}
+
+/// The rows' root mob: three profiles that differ only in `tools.deny`.
+/// `plain` denies nothing, `denier` denies the stock tool `ask_user`, and
+/// `mistyped` denies `ask_usr`, a name no tool of any build has.
+fn deny_name_definition(mob_id: &str) -> MobDefinition {
+    let profile = |name: &str, deny: &str| {
+        format!(
+            "[profiles.{name}]\nmodel = \"gpt-5.5\"\nruntime_mode = \"turn_driven\"\n\
+             [profiles.{name}.tools]\ncomms = true\n{deny}\n"
+        )
+    };
+    MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"{mob_id}\"\n\n{}{}{}",
+        profile("plain", ""),
+        profile("denier", "deny = [\"ask_user\"]\n"),
+        profile("mistyped", "deny = [\"ask_usr\"]\n"),
+    ))
+    .expect("the deny rows' definition")
+}
+
+/// How a row's one member is built.
+#[derive(Clone, Copy)]
+struct DenyNameCase {
+    /// The host installs a member registration hook, so the member is built
+    /// through its registration's tool-surface gate and Meta mounts no
+    /// `ask_user` on it.
+    host_decides_surface: bool,
+    /// The member's profile: `plain`, `denier` or `mistyped`.
+    profile: &'static str,
+    /// The host supplies its own tool named `ask_user` among the member
+    /// build's external tools.
+    hosts_own_tool: bool,
+}
+
+/// What a row observed of a member that was built.
+struct DenyNameBuilt {
+    /// The member's spawn carried the host's own tool named `ask_user`.
+    hosts_own_tool: bool,
+    /// The tools the member's session lists for its model, sorted.
+    listed: Vec<String>,
+    /// The tool names of each prepared surface the host's hook decided:
+    /// every tool the build composed.
+    host_decided: Vec<Vec<String>>,
+    /// Of each of those surfaces, the tool names its static visibility
+    /// filters leave: the tools the member's model can be offered.
+    host_offered: Vec<Vec<String>>,
+    /// The tool access policy the member's session records as the one its
+    /// calls are judged by; none when it records none, or when the store
+    /// holds no record of the member's session.
+    recorded_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+}
+
+/// The tool access policy the session of `member` records in the lifetime's
+/// session store, read from the session's own record; none when the session
+/// records none, or when the store holds no record of it.
+async fn recorded_tool_access_policy(
+    dir: &Path,
+    member: &str,
+) -> Option<meerkat_core::ops::ToolAccessPolicy> {
+    use meerkat::SessionStore as _;
+    let store = meerkat_store::SqliteSessionStore::open(
+        MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None).runtime_db(),
+    )
+    .expect("open the session store");
+    for meta in store
+        .list(meerkat::SessionFilter::default())
+        .await
+        .expect("list the sessions")
+    {
+        let Some(session) = store.load(&meta.id).await.expect("load a session") else {
+            continue;
+        };
+        let Some(metadata) = session
+            .try_session_metadata()
+            .expect("decode the session metadata")
+        else {
+            continue;
+        };
+        if metadata
+            .mob_member_binding
+            .as_ref()
+            .is_some_and(|binding| binding.member == member)
+        {
+            return metadata.tooling.tool_access_policy;
+        }
+    }
+    None
+}
+
+/// Build the member of `case`. A refused build answers its error, after the
+/// row checked that nothing was built.
+async fn build_deny_name_member(case: DenyNameCase) -> Result<DenyNameBuilt, String> {
+    let dir = tempfile::tempdir().expect("state dir");
+    let native = tempfile::tempdir().expect("native realm root");
+    let host = Host::new();
+    let model: Arc<dyn LlmClient> = host.model.clone();
+    let hook = Arc::new(SurfaceRecordingHook::default());
+    let runtime = governed_bound_lifetime_of(
+        dir.path(),
+        deny_name_definition(&unique("deny-name")),
+        model,
+        native_team_config_with_default_credential(native.path()).await,
+        native_team_binding("b"),
+        case.host_decides_surface
+            .then(|| Arc::clone(&hook) as Arc<dyn meerkat_mob::MemberRuntimeRegistrationHook>),
+    )
+    .await;
+    let member = AgentIdentity::from("member");
+    let mut spawn = SpawnMemberSpec::new(ProfileName::from(case.profile), member.clone());
+    if case.hosts_own_tool {
+        spawn.external_tools = Some(Arc::new(HostsOwnAskUser));
+    }
+    if let Err(refused) = Box::pin(runtime.handle().spawn_spec(spawn)).await {
+        assert!(
+            runtime
+                .handle()
+                .resolve_bridge_session_id(&member)
+                .await
+                .is_none(),
+            "a refused build leaves no member"
+        );
+        stand_down_released(runtime, 0).await;
+        return Err(refused.to_string());
+    }
+    let session_id = runtime
+        .handle()
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("the member's session");
+    let mut listed = resolved_tools_for_session(runtime.session_service(), "member", session_id)
+        .await
+        .expect("the member's tools")
+        .tools;
+    listed.sort();
+    let host_decided = hook.prepared();
+    let host_offered = hook.projected();
+    stand_down_released(runtime, 0).await;
+    Ok(DenyNameBuilt {
+        hosts_own_tool: case.hosts_own_tool,
+        listed,
+        host_decided,
+        host_offered,
+        recorded_policy: recorded_tool_access_policy(dir.path(), "member").await,
+    })
+}
+
+/// The tools the built member has beside any tool named `ask_user`, with
+/// `ask_user` when `with_ask_user`, sorted.
+fn deny_name_tools(built: &DenyNameBuilt, with_ask_user: bool) -> Vec<String> {
+    let mut tools: Vec<String> = DENY_NAME_COMMS_TOOLS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if !built.hosts_own_tool {
+        tools.extend(DENY_NAME_CATALOG_TOOLS.iter().map(ToString::to_string));
+    }
+    if with_ask_user {
+        tools.push(ASK_USER.to_string());
+    }
+    tools.sort();
+    tools
+}
+
+/// The member built on the profile that denies `ask_user`. Its session
+/// lists its own tools for its model and no tool named `ask_user`, and
+/// records a policy that denies the name: the policy every call of the
+/// member is judged by, which refuses a call to whichever tool of the build
+/// carries a denied name (a call to a name no tool of the build has is
+/// answered as not found, with the deny or without it).
+fn assert_built_with_ask_user_denied(
+    built: Result<DenyNameBuilt, String>,
+    case: &str,
+) -> DenyNameBuilt {
+    let built = match built {
+        Ok(built) => built,
+        Err(refused) => panic!("{case}: the member builds, but its build was refused: {refused}"),
+    };
+    assert_eq!(
+        built.listed,
+        deny_name_tools(&built, false),
+        "{case}: the member's session lists its own tools and not ask_user"
+    );
+    assert!(
+        matches!(
+            &built.recorded_policy,
+            Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names))
+                if names.contains(ASK_USER)
+        ),
+        "{case}: the member's session records a policy that denies ask_user: {:?}",
+        built.recorded_policy
+    );
+    built
+}
+
+/// Whether any of `surfaces` names `ask_user`.
+fn names_ask_user(surfaces: &[Vec<String>]) -> bool {
+    surfaces
+        .iter()
+        .any(|surface| surface.iter().any(|tool| tool == ASK_USER))
+}
+
+/// The host decided its member's surface, and the tools of that surface the
+/// member's model can be offered name no `ask_user`.
+fn assert_host_offered_no_ask_user(built: &DenyNameBuilt, case: &str) {
+    assert!(
+        !built.host_offered.is_empty() && !names_ask_user(&built.host_offered),
+        "{case}: the host decided the member's surface, and the tools of it the member's \
+         model can be offered name no ask_user: {:?}",
+        built.host_offered
+    );
+}
+
+/// A member whose host decides its tool surface (a host with a member
+/// registration hook) carries no stock `ask_user`. A profile that denies
+/// the stock tool is still a profile such a member builds on: the stock
+/// name is one a deny list may name on every member build, mounted there or
+/// not. The member is not offered the tool, the surface its host decided
+/// names none, and its session's policy denies the name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_its_surface_builds_on_a_profile_that_denies_ask_user() {
+    let case = "not mounted (the host decides the surface) and denied";
+    let built = assert_built_with_ask_user_denied(
+        build_deny_name_member(DenyNameCase {
+            host_decides_surface: true,
+            profile: "denier",
+            hosts_own_tool: false,
+        })
+        .await,
+        case,
+    );
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        !names_ask_user(&built.host_decided),
+        "{case}: the build composed no tool named ask_user: {:?}",
+        built.host_decided
+    );
+}
+
+/// The same member without the deny builds as it did and is not offered the
+/// tool: Meta mounts none on a build whose surface its host decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_its_surface_is_not_offered_ask_user() {
+    let case = "not mounted (the host decides the surface) and not denied";
+    let built = build_deny_name_member(DenyNameCase {
+        host_decides_surface: true,
+        profile: "plain",
+        hosts_own_tool: false,
+    })
+    .await
+    .expect("the member builds");
+    assert_eq!(built.listed, deny_name_tools(&built, false), "{case}");
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        !names_ask_user(&built.host_decided),
+        "{case}: the build composed no tool named ask_user: {:?}",
+        built.host_decided
+    );
+}
+
+/// The control of the two rows above, on the same composition without the
+/// host's hook: Meta mounts the stock tool, and a profile that denies it
+/// keeps it from the member's model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_no_surface_builds_on_a_profile_that_denies_ask_user() {
+    assert_built_with_ask_user_denied(
+        build_deny_name_member(DenyNameCase {
+            host_decides_surface: false,
+            profile: "denier",
+            hosts_own_tool: false,
+        })
+        .await,
+        "mounted and denied",
+    );
+}
+
+/// And without the deny that member is offered the stock tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_whose_host_decides_no_surface_is_offered_ask_user() {
+    let built = build_deny_name_member(DenyNameCase {
+        host_decides_surface: false,
+        profile: "plain",
+        hosts_own_tool: false,
+    })
+    .await
+    .expect("the member builds");
+    assert_eq!(
+        built.listed,
+        deny_name_tools(&built, true),
+        "mounted and not denied"
+    );
+}
+
+/// A host that decides its member's surface also supplies its own tool
+/// named `ask_user` among the build's external tools. A profile that denies
+/// the name is still a profile the member builds on, and the deny does to
+/// the host's own tool what a deny does to every tool. The tool stays one
+/// the build composed, so the surface its host decides names it; the tools
+/// of that surface the member's model can be offered do not, the member's
+/// session does not list it, and the session's policy denies the name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_builds_on_a_profile_that_denies_it() {
+    let case = "the host's own ask_user on a surface the host decides, denied";
+    let built = assert_built_with_ask_user_denied(
+        build_deny_name_member(DenyNameCase {
+            host_decides_surface: true,
+            profile: "denier",
+            hosts_own_tool: true,
+        })
+        .await,
+        case,
+    );
+    assert_host_offered_no_ask_user(&built, case);
+    assert!(
+        names_ask_user(&built.host_decided),
+        "{case}: the host's own tool is one the build composed: {:?}",
+        built.host_decided
+    );
+}
+
+/// The same member without the deny is offered the host's own tool under
+/// the name `ask_user`: its host decided a surface that offers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_own_ask_user_on_a_surface_its_host_decides_is_offered_without_a_deny() {
+    let built = build_deny_name_member(DenyNameCase {
+        host_decides_surface: true,
+        profile: "plain",
+        hosts_own_tool: true,
+    })
+    .await
+    .expect("the member builds");
+    assert_eq!(built.listed, deny_name_tools(&built, true));
+    assert!(
+        names_ask_user(&built.host_offered),
+        "the host decided a surface that offers its own ask_user: {:?}",
+        built.host_offered
+    );
+}
+
+/// A mistyped name in `tools.deny` (`ask_usr`: in no tool vocabulary of the
+/// build, and no stock tool's name) still refuses the member's build, typed,
+/// naming the profile and the name, whether or not the host decides the
+/// member's surface and whether or not the host supplies its own tool named
+/// `ask_user`. Nothing is built.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mistyped_deny_name_still_refuses_the_members_build() {
+    for (case, host_decides_surface, hosts_own_tool) in [
+        ("mounted", false, false),
+        ("the host decides the surface", true, false),
+        ("the host's own ask_user", true, true),
+    ] {
+        let refused = build_deny_name_member(DenyNameCase {
+            host_decides_surface,
+            profile: "mistyped",
+            hosts_own_tool,
+        })
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{case}: a mistyped deny name refuses the build"));
+        println!("MISTYPED DENY NAME ({case}): {refused}");
+        assert!(
+            refused.contains(
+                "profile 'mistyped' denies tool 'ask_usr', which is in none of its tool \
+                 vocabularies"
+            ),
+            "{case}: {refused}"
+        );
+    }
 }

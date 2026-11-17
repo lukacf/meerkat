@@ -38,7 +38,7 @@ impl AgentLlmClient for CaptureClient {
         Provider::Anthropic
     }
     fn model(&self) -> &str {
-        "claude-sonnet-4-6"
+        "claude-sonnet-5-5"
     }
 }
 
@@ -159,7 +159,7 @@ async fn typed_activation_reaches_model_with_canonical_key_and_event() {
     let store = Arc::new(JsonlStore::new(root.path().join("sessions")));
     store.init().await.unwrap();
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-6")
+        .model("claude-sonnet-5-5")
         .with_skill_engine(Arc::new(SkillRuntime::new(Arc::new(engine))))
         .build(
             client.clone(),
@@ -244,7 +244,7 @@ async fn documented_builtin_preload_survives_cli_precreated_session_shape() {
         Session::new(),
         meerkat::CreateSessionRequest {
             injected_context: vec![],
-            model: "claude-sonnet-4-6".into(),
+            model: "claude-sonnet-5-5".into(),
             prompt: "Explain the builtin utility workflow.".into(),
             system_prompt: meerkat::SystemPromptOverride::Inherit,
             max_tokens: Some(256),

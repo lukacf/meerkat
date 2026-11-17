@@ -53,9 +53,33 @@ fn allocate_port() -> u16 {
         .port()
 }
 
+/// The built binary creates a session and continues it, with the binary's
+/// test client in the place of a provider: once started as a first start is
+/// (no `--context-root`, on a home that holds nothing of the server's yet),
+/// and once with a context root the operator names.
 #[tokio::test]
 #[ignore = "lane:e2e-build"]
 async fn http_e2e_create_and_continue_with_test_client() -> Result<(), Box<dyn std::error::Error>> {
+    create_and_continue(ContextRoot::NotPassed)
+        .await
+        .map_err(|err| format!("without --context-root: {err}"))?;
+    create_and_continue(ContextRoot::Passed)
+        .await
+        .map_err(|err| format!("with --context-root: {err}"))?;
+    Ok(())
+}
+
+/// Whether the server is started with `--context-root`.
+#[derive(Clone, Copy)]
+enum ContextRoot {
+    /// The flag names the project directory.
+    Passed,
+    /// No flag: the server uses its own instance directory under the data
+    /// directory, which a first start does not find.
+    NotPassed,
+}
+
+async fn create_and_continue(context_root: ContextRoot) -> Result<(), Box<dyn std::error::Error>> {
     let binary = rest_binary_path();
 
     let realm_id = "rest-binary-e2e";
@@ -87,9 +111,14 @@ async fn http_e2e_create_and_continue_with_test_client() -> Result<(), Box<dyn s
                 realm_id,
                 "--state-root",
                 state_root.to_str().ok_or("invalid state root")?,
-                "--context-root",
-                project_dir.to_str().ok_or("invalid project dir")?,
             ])
+            .args(match context_root {
+                ContextRoot::Passed => vec![
+                    "--context-root",
+                    project_dir.to_str().ok_or("invalid project dir")?,
+                ],
+                ContextRoot::NotPassed => Vec::new(),
+            })
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -136,8 +165,13 @@ async fn http_e2e_create_and_continue_with_test_client() -> Result<(), Box<dyn s
             .send(),
     )
     .await??;
-    assert!(created.status().is_success(), "create failed: {created:?}");
-    let created_json: serde_json::Value = created.json().await?;
+    let created_status = created.status();
+    let created_body = created.text().await?;
+    if !created_status.is_success() {
+        let _ = child.kill().await;
+        return Err(format!("create answered {created_status}: {created_body}").into());
+    }
+    let created_json: serde_json::Value = serde_json::from_str(&created_body)?;
     let session_id = created_json["session_id"]
         .as_str()
         .ok_or("missing session_id")?

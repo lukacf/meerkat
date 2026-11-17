@@ -2733,6 +2733,121 @@ async fn abandoned_completion_requires_whole_batch_and_exact_run() {
     assert_live_run_unchanged(&before, shared.lock().unwrap().state());
 }
 
+/// A run whose request was refused is answered as a refused request, with
+/// the outcome `Abandoned`, also when its inputs' result is resolved after
+/// the next run was prepared and started while that result was still held
+/// open. The machine keeps the cause of the refused run for as long as it
+/// holds that run's result, so the answer does not rest on the order in
+/// which the runtime loop resolves a result and starts the next run. The
+/// run that started in between stays the machine's current run. (The loop
+/// itself resolves a refused run's result before it takes the next input,
+/// so this order is driven here on the driver's own machine.)
+#[tokio::test]
+async fn a_refused_run_answered_after_the_next_run_started_is_still_answered_as_refused() {
+    let refusal: meerkat_core::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+        "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+        "route": {"backend": "anthropic_api", "api": "messages"},
+        "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+        "facts": "catalog",
+    }))
+    .expect("a reasoning effort refusal");
+    let refused = CoreApplyFailureCause::runtime_turn(refusal.to_string()).with_reason(
+        meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        },
+    );
+    // The refused run: its inputs ended with it, and their result is held
+    // open.
+    let fixture = Fixture::failed_attempts(refused, false, 1).await;
+    fixture.pending().await;
+    let refused_run = mm::RunId::from_domain(&fixture.run_id);
+
+    // Two more inputs, and their run prepared and started while the refused
+    // run's result is still held open.
+    let queued = Fixture::accept_independent_inputs(&fixture.driver).await;
+    let next_run = Fixture::start_run(&fixture.driver, queued.len()).await;
+    let next_run = mm::RunId::from_domain(&next_run);
+    let entry = fixture.driver.lock().await;
+    let shared = entry.shared_dsl_authority();
+    {
+        let mut machine = shared.lock().unwrap();
+        assert_eq!(
+            (
+                machine.state().runtime_completion_result_run_id.clone(),
+                machine.state().runtime_completion_result_resolved,
+                machine.state().current_run_id.clone(),
+            ),
+            (Some(refused_run.clone()), false, Some(next_run.clone())),
+            "(the run whose result is held open, whether it is resolved, the current run) \
+             after the next run was prepared"
+        );
+        mm::MeerkatMachineMutator::apply(
+            &mut *machine,
+            mm::MeerkatMachineInput::StartConversationRun {
+                run_id: next_run.clone(),
+                primitive_kind: mm::TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: mm::ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            },
+        )
+        .expect("the next run starts");
+        assert_eq!(
+            machine.state().runtime_completion_result_run_id,
+            Some(refused_run.clone()),
+            "the refused run's result is still the one held open"
+        );
+    }
+
+    // The run-level answer is not asked for a run that is no longer the
+    // machine's terminal: it is refused, as before this run started.
+    assert!(
+        owner::machine_resolve_runtime_completion_result(
+            &entry,
+            Some(&fixture.run_id),
+            mm::RuntimeCompletionTerminalObservation::MachineTerminal,
+            mm::RuntimeCompletionFinalizationObservation::Succeeded,
+        )
+        .is_err(),
+        "the run-level arms answer the machine's own terminal only"
+    );
+
+    // The refused run's inputs are answered now.
+    let witness = entry
+        .input_terminal_completion_authorization_witness(&fixture.inputs)
+        .unwrap();
+    let answered = owner::machine_resolve_runtime_completion_result_for_batch(
+        &entry,
+        &witness,
+        Some(&fixture.run_id),
+        mm::RuntimeCompletionTerminalObservation::MachineTerminal,
+        mm::RuntimeCompletionFinalizationObservation::Succeeded,
+    )
+    .expect("the refused run's inputs are answered");
+    let attempt = answered.begin_surface_resolution();
+    let class = attempt.class();
+    let realized = attempt.realize();
+    assert_eq!(
+        (class, realized.cleanup_observation()),
+        (
+            mm::RuntimeCompletionResultClass::AbandonedWithError,
+            mm::RuntimeCompletionObservedOutcome::Abandoned,
+        ),
+        "(the answer's class, the outcome handed to the cleanup rule) for a refused run \
+         answered after the next run started"
+    );
+    let machine = shared.lock().unwrap();
+    assert_eq!(
+        (
+            machine.state().lifecycle_phase,
+            machine.state().current_run_id.clone(),
+        ),
+        (mm::MeerkatPhase::Running, Some(next_run)),
+        "the run that started in between is still the machine's current run"
+    );
+}
+
 #[tokio::test]
 async fn abandoned_completion_generated_authority_rejects_wrong_facts() {
     let fixture = Fixture::failed_batch().await;

@@ -256,6 +256,25 @@ test("HTTP caller disconnect closes a late successful live/open on the server", 
   assert.equal(vm.runInContext("activeLive", context), undefined);
 });
 
+test("closing a channel the runtime already closed counts as closed; other close failures surface", async () => {
+  const source = ts.createSourceFile("server.ts",
+    fs.readFileSync(path.join(__dirname, "../src/server.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const text = ["isChannelNotFound", "liveControl"].map((name) => source.statements
+    .find((node) => ts.isFunctionDeclaration(node) && node.name.text === name).getText(source)).join("\n");
+  const { outputText } = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+  const run = (message) => {
+    const context = vm.createContext({ ensureRuntime: async () => ({ client: {} }) });
+    vm.runInContext(`let activeLive = { channelId: "abc", channel: { close: async () => { throw new Error(${JSON.stringify(message)}); } } };\n${outputText}`, context);
+    return { context, call: vm.runInContext(`liveControl("abc", "close", {})`, context) };
+  };
+  const gone = run("channel abc not found");
+  assert.equal((await gone.call).ok, true);
+  assert.equal(vm.runInContext("activeLive", gone.context), undefined);
+  const other = run("channel abc has no adapter attached");
+  await assert.rejects(other.call, /no adapter attached/);
+  assert.equal(vm.runInContext("activeLive.channelId", other.context), "abc");
+});
+
 test("smoke outer owner writes failure evidence and explicitly closes its browser", async () => {
   assert.ok(TEST_TIMEOUT_MS > OPERATION_TIMEOUT_MS + 5_000);
   const spec = fs.readFileSync(path.join(__dirname, "../.smoke/webrtc-smoke.spec.cjs"), "utf8");

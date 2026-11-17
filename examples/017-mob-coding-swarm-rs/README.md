@@ -26,11 +26,11 @@ Mob lifecycle events are displayed only as diagnostics, never as response proof.
 
 ## Mob Architecture
 ```
-User prompt -> lead-1 (claude-opus-4-8)
+User prompt -> lead-1 (claude-opus-5-5)
                    |
                    | explicit wire
                    v
-              worker-1 (claude-sonnet-4-6)
+              worker-1 (claude-sonnet-5-5)
 ```
 
 ## Run

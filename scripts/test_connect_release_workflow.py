@@ -634,8 +634,10 @@ ATTACH_SITES = {
     ATTACH_TOOL: {"the candidate tool's upload function"},                             # the upload tool for lane files
     # The Connect release object: created for the tag, with no file.
     ".github/workflows/connect-release.yml": {"gh release create"},
-    # Rows that name the forms and run none (fakes and patterns).
-    "connect/scripts/test_connect_candidate_publication.py": {"the upload host"},
+    # Rows that name the forms (fakes and patterns). The publication rows also run the candidate
+    # tool's upload function, with a stand-in `gh` first on PATH that answers as the upload host
+    # does; the upload tool's rows run it through that tool's adapter. No row reaches GitHub.
+    "connect/scripts/test_connect_candidate_publication.py": {"the upload host", "the candidate tool's upload function"},
     "connect/scripts/test_release_upload_attach.py": {"the upload host"},
     "scripts/test_connect_release_workflow.py": set(ATTACH_FORMS),
     # Core's release workflow, bound to its own tag, and the checker of that workflow with its fixtures.

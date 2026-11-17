@@ -9980,9 +9980,12 @@ impl SessionRuntime {
         let runtime_registration_lock = self.runtime_registration_lock(session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         // AN ADMISSION RESTRICTION, NOT THE DESIGN. A level is judged before
-        // admission and again when the turn starts. Today a level refused
-        // at a turn's start is a failed start, and a failed start retires
-        // the session's runtime registration with every input queued on it.
+        // admission and again when the turn starts. A level refused at a
+        // turn's start ends that turn alone while the session is live, but
+        // it is then refused only after the turn was stored and queued, on
+        // an identity its sender did not see; and on a session that is not
+        // live at the refusal the runtime registration is still retired
+        // with every input queued on it.
         // So a turn whose start could be judged on another identity than
         // its admission (anything queued ahead of it can change the
         // session's model) must not be queued: on a session that holds a
@@ -9993,9 +9996,8 @@ impl SessionRuntime {
         // admitted (`TurnLevelAdmission`). The emptiness
         // is the runtime's own answer, read under this lock, under which no
         // other turn request is admitted, and the level is judged again
-        // here against the identity as it is now. This restriction goes
-        // when the machine can refuse such a turn at its start without
-        // ending the session's other inputs.
+        // here against the identity as it is now. The restriction stands
+        // until such a turn can be queued and judged where it starts.
         if overrides
             .as_ref()
             .is_some_and(Self::turn_overrides_name_llm_identity)
@@ -43545,9 +43547,9 @@ mod tests {
     /// another turn of the session runs, is not queued behind that turn: it
     /// is answered that the session is busy, while the turn runs, and admits
     /// nothing. The same request sent again when the session is idle runs.
-    /// (Until a level refused at a turn's start no longer ends the session's
-    /// other inputs, a turn that changes the level is admitted only on a
-    /// session with no unfinished input.) The level is named in the field
+    /// (A turn that changes the level is admitted only on a session with no
+    /// unfinished input, so that it is never refused at its start behind
+    /// other work.) The level is named in the field
     /// itself and inside `provider_params`: both are answered the same.
     #[tokio::test]
     async fn a_turn_that_sets_a_level_on_a_busy_session_is_answered_busy_and_runs_when_sent_again()
@@ -46815,6 +46817,112 @@ mod tests {
             "(the model change with a clear, the running turn, the repeat of the level, the \
              plain request, the input sent through the runtime, (child mob, its members, its \
              member's session, implicit mob, MCP adapter, runtime registration, stored session))"
+        );
+    }
+
+    /// A turn that names a reasoning effort level is judged before its
+    /// input is admitted and again when it starts. When the route's answer
+    /// changes in between (here the route stops stating the level while the
+    /// turn's run is staged and has not started), the turn is refused at
+    /// its start, after its input was admitted. That is a refusal of that
+    /// one request: it is answered the typed refusal, the session's live
+    /// runtime stays (its registration and its MCP adapter), the input
+    /// queued behind the turn through the runtime (as a peer message or a
+    /// scheduled delivery is queued, with no turn request waiting on it)
+    /// runs, and the next turn runs.
+    ///
+    /// The turn's run is parked where the runtime has staged it and has not
+    /// yet handed it to the session, so every state the row reads before it
+    /// lets the turn start stands until then: the turn's input is admitted,
+    /// the queued input is admitted behind it, and neither can end.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_level_refused_at_the_start_of_an_admitted_turn_costs_no_queued_input() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input::{Input, PromptInput};
+
+        let session = FailedStartSession::materialized().await;
+        // The route states `high`: the turn's level is taken at admission.
+        session
+            .client
+            .route_states_level
+            .store(1, AtomicOrdering::SeqCst);
+        let requests = session.client.calls.load(AtomicOrdering::SeqCst);
+        let (staged, start) = session
+            .runtime
+            .runtime_adapter
+            .arm_runtime_loop_before_executor_apply_test_hook(session.session_id.clone());
+        let refused = session.spawn_turn(
+            "names a level the route states",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        );
+        tokio::time::timeout(Duration::from_mins(1), staged)
+            .await
+            .expect("the turn's run is staged")
+            .expect("the turn's run reaches its start");
+        assert_eq!(
+            session.active_inputs().await,
+            1,
+            "the turn's input was admitted, and its run has not started"
+        );
+        // The route stops stating `high` before the turn starts, and an
+        // input queues behind the turn.
+        session
+            .client
+            .route_states_level
+            .store(2, AtomicOrdering::SeqCst);
+        let (_, queued) = tokio::time::timeout(
+            Duration::from_mins(1),
+            session
+                .runtime
+                .runtime_adapter
+                .accept_input_with_completion(
+                    &session.session_id,
+                    Input::Prompt(PromptInput::from_content_input(
+                        FAILED_START_QUEUED_INPUT.into(),
+                        SessionRuntime::typed_text_turn(None),
+                    )),
+                ),
+        )
+        .await
+        .expect("the runtime answers the queued input's admission")
+        .expect("the runtime admits the queued input");
+        let queued = queued.expect("an admitted prompt has a completion waiter");
+        assert_eq!(
+            session.active_inputs().await,
+            2,
+            "the input is queued behind the turn, whose run has not started"
+        );
+        start.send(()).expect("the staged run is waiting to start");
+        let refused = refused
+            .await
+            .unwrap()
+            .expect_err("the route no longer states the level when the turn starts");
+        assert_eq!(
+            refusal_answer_shape(&refused),
+            (
+                error::INVALID_PARAMS,
+                Some(serde_json::json!("reasoning_effort_refused")),
+                Some(serde_json::json!("unsupported_level")),
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            session.facts_after_the_failed_turn(queued).await,
+            FailedStartFacts::nothing_lost(),
+            "the refused turn was answered {refused:?}"
+        );
+        // Counted once the queued input and the next turn have both been
+        // answered, so nothing of the session is still running and the
+        // count is final: each of the two made one model request, and a
+        // third would be the refused turn's.
+        assert_eq!(
+            session.client.calls.load(AtomicOrdering::SeqCst),
+            requests + 2,
+            "the refused turn made no model request"
         );
     }
 

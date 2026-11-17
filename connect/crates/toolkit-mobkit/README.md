@@ -1,4 +1,4 @@
-# Optional MobKit tool adapters
+# Optional Meta tool adapters
 
 The crate supplies separate read-only discovery tools and the retained
 `find_and_install` admission protocol. Applications explicitly register the

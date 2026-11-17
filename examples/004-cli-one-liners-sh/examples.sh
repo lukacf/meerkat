@@ -58,7 +58,7 @@ BASE_ARGS=(
   --context-root "$WORK/project"
   --user-config-root "$WORK/user"
 )
-MODEL="claude-sonnet-4-6"
+MODEL="claude-sonnet-5-5"
 
 echo "=== 1. Single-turn prompt ==="
 "$RKAT" "${BASE_ARGS[@]}" run --model "$MODEL" "List three benefits of Rust. Be concise."

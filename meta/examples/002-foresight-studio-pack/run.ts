@@ -360,7 +360,10 @@ async function main() {
     throw new Error("OPENAI_API_KEY is required for --real-llm");
   }
 
-  const stateDir = join(here, ".state");
+  // The gateway roots the file tools of the agents at the parent of its state
+  // directory. One level down keeps what they write inside the ignored
+  // `.state/` instead of beside the files of this pack.
+  const stateDir = join(here, ".state", "gateway");
   mkdirSync(stateDir, { recursive: true });
 
   if (useDemoLlm) {

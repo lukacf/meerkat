@@ -132,7 +132,7 @@ echo "--- 5. Run a live prompt that should use MCP tools ---"
 echo "Prompt asks the agent to call incident tools and quote exact fields."
 echo
 run_in_project run \
-  --model claude-sonnet-4-6 \
+  --model claude-sonnet-5-5 \
   --wait-for-mcp \
   --verbose \
   "You are the on-call incident coordinator.

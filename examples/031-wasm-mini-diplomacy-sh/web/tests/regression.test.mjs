@@ -290,15 +290,15 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
         };
         let sub;
         try {
-          await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: "http://127.0.0.1:1/anthropic", model: "claude-sonnet-4-6" }));
+          await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: "http://127.0.0.1:1/anthropic", model: "claude-sonnet-5-5" }));
           for (const team of ["france", "prussia", "russia"]) {
-            const definition = buildFactionDefinition(team, "claude-sonnet-4-6");
+            const definition = buildFactionDefinition(team, "claude-sonnet-5-5");
             for (const skill of Object.values(definition.skills)) {
               if (!skill.content.includes("peer_id") || skill.content.includes("Do not call peers") || skill.content.includes("exact addresses")) throw Error("obsolete comms instructions");
             }
             await wasm.mob_create(JSON.stringify(definition));
           }
-          await wasm.mob_create(JSON.stringify(buildNarratorDefinition("claude-sonnet-4-6")));
+          await wasm.mob_create(JSON.stringify(buildNarratorDefinition("claude-sonnet-5-5")));
           await wasm.mob_spawn("diplomacy-france", JSON.stringify([{ profile: "planner", agent_identity: "france-planner", runtime_mode: "autonomous_host" }]));
           const peer = JSON.parse(await wasm.mob_member_peer_target("diplomacy-france", "france-planner"));
           if (typeof peer.external?.peer_id !== "string") throw Error("unexpected canonical peer target");
@@ -358,7 +358,7 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
         if (new URL(url).pathname === "/") return route.fulfill({ contentType: "text/html", body: "<div id='app'></div>" });
         return route.continue();
       });
-      const params = new URLSearchParams({ proxy: `${origin}/fixtures`, france: "claude-sonnet-4-6", prussia: "claude-sonnet-4-6", russia: "claude-sonnet-4-6", narrator: "claude-sonnet-4-6" });
+      const params = new URLSearchParams({ proxy: `${origin}/fixtures`, france: "claude-sonnet-5-5", prussia: "claude-sonnet-5-5", russia: "claude-sonnet-5-5", narrator: "claude-sonnet-5-5" });
       try {
         await appPage.goto(`${origin}/?${params}`);
         await appPage.evaluate(() => import("/src/main.ts"));

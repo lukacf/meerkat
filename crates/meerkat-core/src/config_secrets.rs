@@ -400,6 +400,7 @@ impl<'c> SecretSections<'c> {
             comms_enabled: _,
             mob_enabled: _,
             schedule_enabled: _,
+            agent_schedules_may_create_sessions: _,
             workgraph_enabled: _,
         } = tools;
         let HooksConfig {

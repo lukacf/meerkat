@@ -35,6 +35,41 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `meerkat-comms`: a listener on a socket path no longer takes the path from
+  a listener that answers a dial or refuses it for permission. With
+  `[comms] mode = "uds"` a member's signed listener removed whatever file lay
+  at `address` and bound there. When another process's member already
+  listened on that path, that member could no longer be dialled and a peer
+  that dialled the address reached the new one, with no error in either
+  process. The listener now dials an existing socket file before it removes
+  it. When a listener answers the dial, the path is kept and the start is
+  refused: the error has the kind a taken TCP address gives
+  (`std::io::ErrorKind::AddrInUse`) and reads
+  `socket path <path> is held by a live listener`. When the dial is refused
+  for permission while a file lies at the path (for example the file is
+  another user's), the path is kept too and the error reads
+  `socket path <path> may not be dialled by this user and is not removed`;
+  with no file there the start goes on to the bind as before and reports
+  what the bind reports. The member's build then fails with
+  `Comms runtime failed: Failed to start comms listeners: Listener error: socket path <path> ...`;
+  a session create or resume answers it as
+  `agent error: Build error: Comms runtime failed: ...`, and a mob member
+  that is restored is recorded broken with that reason while Core's mob
+  start goes on (a Meerkat Meta gateway's start goes on too, with that
+  member's wake refused). A socket file that a listener which has ended left
+  at the path is removed and bound as before, so a restarted host starts as
+  before; the dial's other failures leave the path free as before. A
+  listener of the same process is replaced as before. The dial is bounded at
+  two seconds; a connection, a listener whose backlog is full and a dial
+  that does not end within the bound all count as held. The listener that
+  holds the path sees one connection that closes without a byte. The
+  crate's plain event listener on a socket path and
+  `meerkat_comms::transport::uds::UdsListener::bind` follow the same rule.
+  The TCP listeners are unchanged: a second bind of a taken fixed address
+  already failed.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

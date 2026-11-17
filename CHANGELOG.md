@@ -53,6 +53,17 @@ them.
 
 - `meerkat-core` (Rust): `local_realms_candidates`, `RealmConfig::resolve_locator_among_roots` and its `_with` form, `RealmRootResolution` (non-exhaustive) and `StorageLayout::unreadable_realm_roots`, for a host that resolves a realm among several state roots.
 
+### Changed
+
+- `meerkat-mob`: the error of a member left Broken by a resume that could not
+  certify the cleanup of its own attempt, and the log line of its parked
+  custody, now say what to do by cause. When the cause is a Recovery
+  corruption: leave the member as it is (a retire, respawn or rotation is
+  refused in that state and can leave the mob unable to start), send it
+  nothing, keep a copy of the state directory, and see Known limitations in
+  the release notes. For any other cause the repair stays retire or respawn.
+  Before, the message named retire or respawn as the repair of every cause.
+
 ### Fixed
 
 - `apply_patch`: the tool's description, which the model reads, said that absolute paths are rejected; the tool applies an absolute path that lies inside the project root (on Unix). The description now reads "Paths are relative to the project root; a path that leaves the root, absolute or via '..', is rejected." No behaviour changes.

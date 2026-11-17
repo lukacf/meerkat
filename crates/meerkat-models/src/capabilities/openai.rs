@@ -14,6 +14,12 @@ use meerkat_core::model_profile::catalog::{ModelReleaseStage, ModelTier};
 
 /// Astra is reasoning-only; `none` and `minimal` are not supported.
 /// Source: https://developers.openai.com/api/docs/models/gpt-6-astra
+///
+/// GPT-6.1 Sol, GPT-6.2 Astra and GPT-6.2 Sol list the same levels. For the
+/// two GPT-6.2 models OpenAI documents only that the API rejects `none`
+/// (their model pages and https://developers.openai.com/api/docs/guides/reasoning);
+/// live calls to the Responses API on 17 Nov 2026 accepted `low`, `medium`,
+/// `high`, `xhigh` and `max` and refused `none` and `minimal` on both.
 const GPT6_ASTRA_EFFORT: &[EffortLevel] = &[
     EffortLevel::Low,
     EffortLevel::Medium,
@@ -359,6 +365,137 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
         supports_reasoning: true,
         effort_levels: GPT6_SOL_LUNA_EFFORT,
+        openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+        stream_inactivity_timeout_secs: None,
+        supports_forced_tool_choice: true,
+    },
+    // Sources:
+    //   - https://developers.openai.com/api/docs/models/gpt-6.2-astra (as
+    //     read on 17 Nov 2026): the limits, modalities, knowledge cutoff,
+    //     prices, endpoints and features below
+    //   - https://developers.openai.com/api/docs/guides/reasoning (the API
+    //     rejects reasoning effort `none`)
+    //   - live calls to the Responses API on 17 Nov 2026, 21:40 UTC: the
+    //     effort levels
+    //
+    // The most capable model for the hardest projects, from start to finish:
+    // it can build and revise software, use a computer and work with
+    // documents. From the model page: 1,050,000 context window, 922,000 max
+    // input tokens, 128,000 max output tokens, text/image input, text
+    // output, knowledge cutoff 2026-05-18. Pricing at catalog time, from the
+    // same page: $8 input / $0.40 cached input / $40 output per MTok, cache
+    // writes $10; above 272K input tokens the input and cache rates double
+    // and output is 1.5x. Endpoints on the page: Responses, Chat Completions
+    // and Batch; it lists the Realtime endpoint as not supported. Its
+    // features include streaming, function calling, structured outputs, web
+    // search and prompt caching. Effort levels: the page and the guide say
+    // only that `none` is rejected; live calls accepted `low`, `medium`,
+    // `high`, `xhigh` and `max` and refused `none` and `minimal` (HTTP 400,
+    // `unsupported_value`). With no level set the provider answered at
+    // `medium`. The OpenAI default stays `gpt-6-astra`.
+    ModelCapabilities {
+        id: "gpt-6.2-astra",
+        provider: Provider::OpenAI,
+        display_name: "GPT-6.2 Astra",
+        tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-6",
+        context_window: Some(1_050_000),
+        max_input_tokens: Some(922_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
+        supports_reasoning: true,
+        effort_levels: GPT6_ASTRA_EFFORT,
+        openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+        stream_inactivity_timeout_secs: None,
+        supports_forced_tool_choice: true,
+    },
+    // Sources:
+    //   - https://developers.openai.com/api/docs/models/gpt-6.2-sol (as read
+    //     on 17 Nov 2026): the limits, modalities, knowledge cutoff, prices,
+    //     endpoints and features below
+    //   - https://developers.openai.com/api/docs/guides/reasoning (the API
+    //     rejects reasoning effort `none`)
+    //   - live calls to the Responses API on 17 Nov 2026, 21:40 UTC: the
+    //     effort levels
+    //
+    // The go-to model for everyday work, from coding to powering agents at
+    // scale. From the model page: 1,050,000 context window, 922,000 max
+    // input tokens, 128,000 max output tokens, text/image input, text
+    // output, knowledge cutoff 2026-06-01. Pricing at catalog time, from the
+    // same page: $2 input / $0.10 cached input / $10 output per MTok, cache
+    // writes $2.50; above 272K input tokens the input and cache rates double
+    // and output is 1.5x. Endpoints on the page: Responses, Chat Completions
+    // and Batch; it lists the Realtime endpoint as not supported. Its
+    // features include streaming, function calling, structured outputs, web
+    // search and prompt caching. Effort levels: the page and the guide say
+    // only that `none` is rejected; live calls accepted `low`, `medium`,
+    // `high`, `xhigh` and `max` and refused `none` and `minimal` (HTTP 400,
+    // `unsupported_value`). With no level set the provider answered at
+    // `medium`.
+    ModelCapabilities {
+        id: "gpt-6.2-sol",
+        provider: Provider::OpenAI,
+        display_name: "GPT-6.2 Sol",
+        tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-6",
+        context_window: Some(1_050_000),
+        max_input_tokens: Some(922_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
+        supports_reasoning: true,
+        effort_levels: GPT6_ASTRA_EFFORT,
         openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
         supports_web_search: true,
         supports_mid_conversation_system_messages: true,

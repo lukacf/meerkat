@@ -123,6 +123,8 @@ Use `rkat models` for every supported ID and its current limits.
     | `gpt-6-sol` | 1.05M | 128K | GPT-6 coding and agentic tier; separate 922K input ceiling |
     | `gpt-6.1-sol` | 1.05M | 128K | Near-Astra performance at lower cost; separate 922K input ceiling |
     | `gpt-6.1-terra` | 1.05M | 128K | Fast, efficient visual reasoning, computer use and writing; separate 922K input ceiling |
+    | `gpt-6.2-astra` | 1.05M | 128K | OpenAI's most capable model for the hardest projects, in the catalog from 0.9.17; separate 922K input ceiling |
+    | `gpt-6.2-sol` | 1.05M | 128K | OpenAI's go-to model for everyday work, from coding to agents at scale, in the catalog from 0.9.17; separate 922K input ceiling |
     | `gpt-6-luna` | 1.05M | 128K | GPT-6 efficient high-volume tier; separate 922K input ceiling |
     | `gpt-5.6-sol` | 1.05M | 128K | GPT-5.6 catalog variant |
     | `gpt-5.6-terra` | 1.05M | 128K | GPT-5.6 catalog variant |
@@ -208,16 +210,17 @@ Use `rkat models` for every supported ID and its current limits.
 
 ## GPT-6 Astra: Initial Responses Support
 
-Meerkat supports ordinary Astra Responses requests: text/image input, text
-output, application function calls, and the existing provider-native web-search
-path. Its 1,050,000-token context has a distinct 922,000-token input ceiling
+This section is about `gpt-6-astra`. Meerkat supports ordinary `gpt-6-astra`
+Responses requests: text/image input, text output, application function
+calls, and the existing provider-native web-search path. Its 1,050,000-token
+context has a distinct 922,000-token input ceiling
 and a 128,000-token output ceiling (including reasoning). Context-budget
 projections apply the input ceiling in addition to the output reserve;
 estimated context pressure is not exact provider token accounting.
 
 Supported reasoning efforts are `low`, `medium`, `high`, `xhigh`, and `max`.
 `none`, `temperature`, `top_p`, and log-probability controls are unsupported.
-Astra does not support the Realtime endpoint; it cannot back `live/*`.
+`gpt-6-astra` does not support the Realtime endpoint; it cannot back `live/*`.
 For compatibility, existing OpenAI `temperature` and generic `top_p` settings
 remain omitted from provider requests rather than gaining a new rejection
 policy. Unsupported reasoning efforts and log-probability fields fail the
@@ -243,12 +246,28 @@ programmatic calling, new hosted tools/MCP/connectors, provider multi-agent
 orchestration, provider compaction/conversations, or background responses.
 Unsupported output execution semantics fail explicitly; additive inert
 metadata does not disable established behavior. Direct OpenAI support does not
-establish Astra availability on Azure, Copilot, ChatGPT OAuth, or a custom
-endpoint.
+establish `gpt-6-astra` availability on Azure, Copilot, ChatGPT OAuth, or a
+custom endpoint.
+
+Four statements of this section also hold for `gpt-6.2-astra` and
+`gpt-6.2-sol`, in the catalog from 0.9.17; the rest is stated for
+`gpt-6-astra` only:
+
+- **Ceilings.** The same 1,050,000-token context, 922,000-token input ceiling
+  and 128,000-token output ceiling, with text/image input and text output.
+- **Reasoning efforts.** `low`, `medium`, `high`, `xhigh`, and `max`. `none`
+  is refused before the provider is asked, and OpenAI rejects it for both
+  models.
+- **No Realtime endpoint.** OpenAI lists the Realtime endpoint as not
+  supported for both, so neither can back `live/*`.
+- **Availability elsewhere.** Direct OpenAI support does not establish their
+  availability on Azure, Copilot, ChatGPT OAuth, or a custom endpoint.
 
 See OpenAI's [model contract](https://developers.openai.com/api/docs/models/gpt-6-astra),
 [reasoning and phase guidance](https://developers.openai.com/api/docs/guides/reasoning),
-and [misalignment monitoring](https://developers.openai.com/api/docs/guides/safety-checks/misalignment-monitoring).
+[misalignment monitoring](https://developers.openai.com/api/docs/guides/safety-checks/misalignment-monitoring),
+and the model pages of [`gpt-6.2-astra`](https://developers.openai.com/api/docs/models/gpt-6.2-astra)
+and [`gpt-6.2-sol`](https://developers.openai.com/api/docs/models/gpt-6.2-sol).
 
 ## Environment Credential Precedence
 

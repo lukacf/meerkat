@@ -753,6 +753,8 @@ fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6.1-sol", "GPT-6.1 Sol"),
         ("gpt-6.1-terra", "GPT-6.1 Terra"),
+        ("gpt-6.2-astra", "GPT-6.2 Astra"),
+        ("gpt-6.2-sol", "GPT-6.2 Sol"),
         ("gpt-6-luna", "GPT-6 Luna"),
     ] {
         let entry = entry_for(Provider::OpenAI, id)
@@ -2311,6 +2313,8 @@ mod schema {
             "gpt-6-sol",
             "gpt-6.1-sol",
             "gpt-6.1-terra",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -2587,4 +2591,57 @@ fn gpt_6_1_terra_uses_the_sol_luna_effort_ladder() {
     assert!(!caps.inline_video && !caps.realtime && !caps.image_generation);
     assert!(caps.supports_web_search && caps.supports_structured_output);
     assert!(caps.openai_responses_params.is_some());
+}
+
+/// GPT-6.2 Astra and GPT-6.2 Sol: OpenAI documents that the API rejects
+/// requests that set reasoning effort to `none` and lists no other level.
+/// Live calls to the Responses API on 17 Nov 2026 accepted `low`, `medium`,
+/// `high`, `xhigh` and `max` and refused `none` and `minimal` on both, so the
+/// rows list exactly `low` through `max`. Text/image input, text output; the
+/// model pages list the Realtime endpoint as not supported. Adding them
+/// moves no default.
+/// Sources:
+///   - https://developers.openai.com/api/docs/models/gpt-6.2-astra
+///   - https://developers.openai.com/api/docs/models/gpt-6.2-sol
+///   - https://developers.openai.com/api/docs/guides/reasoning
+#[test]
+fn gpt_6_2_astra_and_sol_never_offer_effort_none() {
+    for id in ["gpt-6.2-astra", "gpt-6.2-sol"] {
+        let caps =
+            capabilities_for(Provider::OpenAI, id).unwrap_or_else(|| panic!("{id} capabilities"));
+        assert_eq!(
+            caps.effort_levels,
+            &[
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+                EffortLevel::Xhigh,
+                EffortLevel::Max,
+            ],
+            "{id}"
+        );
+        assert!(
+            !caps.effort_levels.contains(&EffortLevel::None)
+                && !caps.effort_levels.contains(&EffortLevel::Minimal),
+            "{id} must not offer `none` or `minimal`"
+        );
+        assert!(caps.supports_reasoning, "{id}");
+        assert_eq!(caps.tier, ModelTier::Supported, "{id}");
+        assert_eq!(caps.model_family, "gpt-6", "{id}");
+        assert_eq!(caps.context_window, Some(1_050_000), "{id}");
+        assert_eq!(caps.max_input_tokens, Some(922_000), "{id}");
+        assert_eq!(caps.max_output_tokens, Some(128_000), "{id}");
+        assert!(caps.vision && caps.image_tool_results, "{id}");
+        assert!(
+            !caps.inline_video && !caps.realtime && !caps.image_generation,
+            "{id}"
+        );
+        assert!(
+            caps.supports_web_search && caps.supports_structured_output,
+            "{id}"
+        );
+        assert!(caps.openai_responses_params.is_some(), "{id}");
+    }
+    assert_eq!(default_model(Provider::OpenAI), Some("gpt-6-astra"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
 }

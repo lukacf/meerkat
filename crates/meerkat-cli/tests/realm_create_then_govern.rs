@@ -1,6 +1,6 @@
 //! `rkat realm create` and then, at once, `rkat realm govern`, on the real
-//! binary: the second command never meets a manifest lock file that the
-//! first one left behind.
+//! binary: every round of the pair succeeds, and no `realm govern` meets a
+//! manifest lock file that a `realm create` left behind.
 //!
 //! A realm's manifest lock is one file in the realm's directory. `realm
 //! create` takes it to write the manifest and `realm govern` takes it to
@@ -9,14 +9,22 @@
 //! fail with "timed out acquiring realm manifest lock", and the realm stays
 //! ungoverned.
 //!
-//! Whether the file is left is decided at the end of the first process, so
-//! a build with that defect loses only some rounds. The row therefore runs
-//! [`ROUNDS`] rounds, each on a realm of its own, as a setup script that
-//! makes and governs realms one after the other does, and counts every
-//! round that met the leftover.
+//! This row is a guard of the command pair, not the proof that the lock is
+//! released. Whether the file is left is decided by a race at the end of
+//! the first process, which a test of the real binary cannot force: on a
+//! build whose release could be lost that way, measured on a development
+//! host, none of sixty rounds lost the race and this row passed. The proof
+//! is deterministic and lives with the lock: the store crate's
+//! `manifest_lock` rows. What this row holds is that, over [`ROUNDS`]
+//! rounds, each on a realm of its own, as a setup script that makes and
+//! governs realms one after the other does, every `realm create` and every
+//! `realm govern` succeeds and the last realm reads governed; a round that
+//! does meet a leftover lock is counted and fails the row.
 //!
 //! Hermeticity: `HOME`, the XDG roots, the context root and the state root
-//! are in a temporary directory, and no provider key is passed on.
+//! are in a temporary directory. The three providers' key variables, with
+//! and without the `RKAT_` prefix, are not passed on; the commands call no
+//! provider.
 
 #![cfg(feature = "local-authorization")]
 #![allow(
@@ -29,8 +37,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-/// Rounds of create-then-govern. Measured on a build whose lock release
-/// could be lost at the end of the process: see the commit that set it.
+/// Rounds of create-then-govern. A choice, not a number derived from a
+/// measurement: see the module text.
 const ROUNDS: usize = 60;
 
 const LOCK_TIMEOUT: &str = "timed out acquiring realm manifest lock";

@@ -2574,8 +2574,7 @@ pub enum AgentEvent {
         identity: crate::types::TranscriptMessageIdentity,
         result: String,
         /// Structured output from the completed run, when schema extraction
-        /// produced a typed value. JSON null is such a value and reads back
-        /// as present.
+        /// produced a typed value.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -2956,8 +2955,7 @@ pub enum AgentEvent {
         interaction_id: crate::interaction::InteractionId,
         result: String,
         /// Structured output from the completed interaction, when schema
-        /// extraction produced a typed value. JSON null is such a value and
-        /// reads back as present.
+        /// extraction produced a typed value.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

@@ -85,6 +85,30 @@ pub(crate) fn clear_prompt_cache_fields(tag: &mut OpenAiProviderTag) {
     tag.prompt_cache_options = None;
 }
 
+/// Whether a request failed because its established connection broke: an
+/// I/O error of kind connection reset, connection aborted, broken pipe or
+/// unexpected end of file anywhere in the error's source chain. A peer that
+/// closes the connection without a reset leaves no I/O error and is not one.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn connection_broke(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 /// Project only the final wire target and provider-hosted capabilities. Policy
 /// remains with the work owner; ordinary function tools are client-dispatched.
 pub(crate) fn prepare_wire_authorization(
@@ -2017,7 +2041,7 @@ impl OpenAiClient {
                     LlmError::NetworkTimeout { duration_ms: 30000 }
                 } else {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if e.is_connect() {
+                    if e.is_connect() || connection_broke(&e) {
                         return LlmError::ConnectionReset;
                     }
 
@@ -2717,7 +2741,7 @@ impl OpenAiClient {
                 LlmError::NetworkTimeout { duration_ms: 30000 }
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
-                if e.is_connect() {
+                if e.is_connect() || connection_broke(&e) {
                     return LlmError::ConnectionReset;
                 }
                 LlmError::Unknown {

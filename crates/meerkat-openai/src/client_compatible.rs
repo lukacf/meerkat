@@ -408,7 +408,7 @@ impl OpenAiCompatibleClient {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn is_connection_error(error: &reqwest::Error) -> bool {
-        error.is_connect()
+        error.is_connect() || crate::client::connection_broke(error)
     }
 
     #[cfg(target_arch = "wasm32")]

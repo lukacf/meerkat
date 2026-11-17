@@ -275,7 +275,9 @@ impl CopilotTokenExchangeError {
             CopilotHttpTransportError::Request(request) if request.is_timeout() => {
                 exchange_timeout()
             }
-            CopilotHttpTransportError::Request(request) if request.is_connect() => {
+            CopilotHttpTransportError::Request(request)
+                if request.is_connect() || connection_broke(request) =>
+            {
                 meerkat_llm_core::LlmError::ConnectionReset
             }
             CopilotHttpTransportError::Request(_) => meerkat_llm_core::LlmError::Unknown {
@@ -298,6 +300,29 @@ impl CopilotTokenExchangeError {
             not_before: None,
         })
     }
+}
+
+/// Whether a request failed because its established connection broke: an
+/// I/O error of kind connection reset, connection aborted, broken pipe or
+/// unexpected end of file anywhere in the error's source chain. A peer that
+/// closes the connection without a reset leaves no I/O error and is not one.
+fn connection_broke(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// The class of a token exchange that timed out: on its request bound, or

@@ -436,7 +436,8 @@ async function main() {
         const button = page.getByTestId(`gating-action:${pendingId}:${action}`);
         if (await button.count()) assert.equal(await button.isDisabled(), true, `${action} should be read-only without a signed-in person`);
       }
-      await waitForText(page.getByTestId(`gating-pending:${pendingId}`), "Read-only access");
+      // The card says why: the notice for a console nobody is signed in to.
+      await waitForText(page.getByTestId(`gating-pending:${pendingId}`), "Sign in as yourself to decide");
     } else {
       await waitForText(page.getByTestId("gating-panel"), "No pending items.");
     }

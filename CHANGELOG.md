@@ -93,6 +93,40 @@ them.
   `monitors/start` route records `v1`, as every earlier release did for
   both. No wire type changes.
 
+- **A session whose committed run never settles is reported instead of
+  standing silent.** After a run's terminal commit the runtime still records
+  the completion of the run's inputs and, for a directed run, publishes its
+  terminals; until it has, the session starts nothing further, so input it is
+  handed is accepted and never run. That state used to show nowhere: no log
+  line, and a healthy status. When the work has stayed unsettled for one
+  minute:
+  - the host logs an error that names the session, the run and its inputs,
+    and repeats it every minute for as long as it lasts, also after the
+    session's runtime loop has ended;
+  - `runtime/health` (JSON-RPC) and `GET /runtime/health` (REST) publish a
+    new check, `session_run_settlement`: `degraded` while any registered
+    session is in that state, whether or not its runtime loop is alive. It
+    is an addition to the open `checks` map, beside the declared dimensions:
+    no schema or SDK change, and `meerkat::surface::RUNTIME_HEALTH_DIMENSIONS`
+    is unchanged. A session that is busy at the moment of a read is not a
+    failed read: the check then keeps its last complete reading;
+  - a mob names the member: reading a member's status logs an error with the
+    mob, the member, its session and the run;
+  - Rust hosts read the same through
+    `MeerkatMachine::unsettled_run_session_count()` and
+    `MeerkatMachine::unsettled_run(session_id)`, which returns the new
+    `meerkat_runtime::UnsettledRun`.
+
+  These are reports only: nothing is retried, ended or refused because of
+  them, and no member status value changes. Limits: the host's line covers
+  runs committed by the running process, while the check also counts a
+  completion a restart recovered and has not yet settled; the line that names
+  the member is written when the member's status is read, while the host's
+  own line, which names the session, needs no reader; and a session whose
+  state stays locked for good shows in the host's line, not in the check.
+- **The runtime's "runtime run finalization ended" log line carries the
+  session id** beside the run id, so the log says whose run settled.
+
 ### Changed
 
 - `meerkat-mob`: the error of a member left Broken by a resume that could not

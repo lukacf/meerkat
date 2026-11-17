@@ -29996,8 +29996,11 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         /// without a wake as a turn of its own, so an event queued right
         /// after the create's answer may not stay queued. The park is a
         /// positive event, published only while nothing is buffered for the
-        /// loop, and the lap that ran the first turn cleared it: a park seen
-        /// after the create's answer is after that last look.
+        /// loop, and the pass that ran the first turn cleared it: a park seen
+        /// after the create's answer is after that last look. This holds for
+        /// a fixture without background hooks, as this module's is: the park
+        /// says nothing about a pending hook completion, which can wake a
+        /// parked loop into another look.
         async fn session_at_rest(router: &MethodRouter, session_id: &str) {
             let sid = meerkat_core::SessionId::parse(session_id).expect("session id");
             let mut parked = router.runtime_adapter.runtime_loop_parked();
@@ -30012,7 +30015,12 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 if router.runtime_adapter.current_run(&sid).await.is_none() {
                     break;
                 }
-                router.runtime_adapter.wait_current_run_settled(&sid).await;
+                tokio::time::timeout(
+                    Duration::from_mins(1),
+                    router.runtime_adapter.wait_current_run_settled(&sid),
+                )
+                .await
+                .expect("the session's current run settles");
             }
         }
 

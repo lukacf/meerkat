@@ -104,6 +104,11 @@ without a roster provider refuses it with
 `identity-first runtime not configured`. Run again, the program reuses
 the state under `.meta/state`.
 
+The same program as a project to copy is
+[`008-typescript-quickstart`](https://github.com/lukacf/meerkat/tree/main/meta/examples/008-typescript-quickstart).
+It sends twice, the second time with `sendAndWaitOutcome`, and run twice it
+shows that the agent kept what the first run told it.
+
 ### Knowledge memory and a Console config
 
 The builder also takes the knowledge memory backend and the path of a Console

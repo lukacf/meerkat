@@ -35,6 +35,14 @@ them.
 
 ## [Unreleased]
 
+### Security
+
+- `rkat-mcp`'s configuration tool (`meerkat_config`, actions `set` and `patch`): a caller of the tool, which can be a model connected to the server, could change the served realm's own listener settings with no further right than calling the tool: every key of `[rest]` (the address the REST server binds), of `[comms]` (the comms listeners' mode and addresses and the peer authentication settings `auth` and `require_peer_auth`) and of `[mob_host]` (the host acceptor's and the live WebSocket's addresses and bounds). A change of the realm's own parent edge could do the same without naming a key, by putting another realm's table into force. `[rest]` and `[mob_host]` are read at the next start of the host that uses them, `[comms]` by the next session built in the same running server (read from the source; what each written key then changed in a running host was not run). Now the tool refuses such a write and writes nothing: JSON-RPC invalid params (`-32602`) with data `{"type": "confinement_administration_required"}` and a message that names the table. The rule is on the table's path, so a key this version does not know is refused too; a write that carries the three tables unchanged commits. The operator's doors still write these tables: the configuration file, `rkat config set` and `rkat config patch`, and the REST and JSON-RPC config methods. Limits: where the server serves the `global` realm, a change of the user document's realm sections can still change what another realm composes for these tables, if that realm has no document of its own and the table already stands in some realm's document: no new value can be written that way; a full replace rewrites the document from its typed form, so a key of `[rest]` or `[comms]` in the file that this version does not know is dropped. Affected: `[rest]` and `[comms]`, 0.3.0 through 0.9.16; `[mob_host]`, 0.8.0 through 0.9.16 (by the source at the release tags; not run on a published binary). (Shown by rows in the MCP server's crate.)
+
+### Breaking (behaviour)
+
+- `meerkat_config` on `rkat-mcp`: a `set` or a `patch` that changes `[rest]`, `[comms]` or `[mob_host]`, or that changes the realm's parent so that another realm's tables come into force, is refused with `-32602` and the data type `confinement_administration_required`. A model-driven flow that wrote these tables through the tool stops working: set them in the configuration file or with `rkat config set` and `rkat config patch`.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

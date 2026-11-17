@@ -748,8 +748,10 @@ export class PersistentTransport {
 
   /**
    * The child's stdin or stdout failed: nothing can be asked of this child,
-   * or read from it, any more. The first failure of a child stands, and a
-   * child this transport has let go of or replaced is never touched.
+   * or read from it, any more. A failure this child already has is never
+   * replaced by a stream's; a later close of the reader or the exit grace
+   * still records its own. A child this transport has let go of or replaced
+   * is never touched.
    */
   private _onStreamFailed(reason: string, child: ChildProcess): void {
     if (this._process !== child || this._readerFailure !== null) return;

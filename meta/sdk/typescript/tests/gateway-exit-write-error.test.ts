@@ -258,6 +258,7 @@ describe("a gateway whose input is gone", () => {
           (error: unknown) => error,
         );
         assert.ok(failure instanceof TransportReaderFailedError, String(failure));
+        assert.match(failure.reason, /a write to the gateway's stdin failed/);
         assert.equal(
           transport.isRunning(),
           true,

@@ -281,11 +281,17 @@ An approver, `[approvers."<approver id>"]`, has `subjects`, `groups`,
 Check the spelling of a key in the file. When the file is loaded, a key that is
 not in these tables is dropped and the rest of its table applies: the gateway
 starts and says nothing about it. A rule written with `role` or `subject` in
-place of `roles` or `subjects` therefore has no such selector, and applies to
-every agent or to every caller. Only an unknown key in an entry of `people` or
-of `ingress_subjects` refuses the file. The Console's access methods
-(`meta/access/set`, `meta/access/rules/upsert`, `meta/access/groups/set`)
-refuse an unknown key from 0.9.16.
+place of `roles` or `subjects` therefore has no such selector: if it names no
+other agent selector (`agents`, `match_labels`) it applies to every agent, and
+if it names no `groups` it applies to every caller. A rule whose `effect` is
+misspelt is loaded as an allow rule, and a misspelt `enabled` leaves every rule
+unenforced. Only an unknown key in an entry of `people` or of
+`ingress_subjects` refuses the file (since 0.9.11). The Console's access
+methods (`meta/access/set`, `meta/access/rules/upsert`,
+`meta/access/groups/set`) refuse an unknown key from 0.9.16. How to check a
+running gateway's file against what it loaded: the Known limitation on the
+access file's loader in the
+[Meta 0.9.16 release notes](https://github.com/lukacf/meerkat/blob/meta-v0.9.16/meta/CHANGELOG.md).
 
 ### Approver identities
 

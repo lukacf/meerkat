@@ -29,9 +29,9 @@ pub enum ProviderKind {
     Gemini,
 }
 
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.5";
-pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.1-flash-lite-preview";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.5-flash-lite";
 
 /// Probe env vars in priority order and return `(model, provider, api_key)`.
 ///

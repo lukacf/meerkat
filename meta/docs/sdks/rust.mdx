@@ -163,8 +163,10 @@ markdown files from the same agent-memory directory. Markdown is not a live
 provider. To supply another storage or retrieval authority, pass any
 `Arc<dyn AgentMemoryProvider>` with `.agent_memory(provider, config)`.
 
-Rust callers can write, read, and delete durable records through the unified
-runtime:
+Rust callers can write, read, and forget durable records through the unified
+runtime. A forget withdraws a record from the agent; with the bundled store
+it is not an erasure (see
+[`meta/agent_memory/forget`](/api/rpc#meta%2Fagent_memory%2Fforget)):
 
 ```rust
 use meerkat_meta::{AgentMemoryRecallRequest, AgentMemorySelection, NewAgentMemory};

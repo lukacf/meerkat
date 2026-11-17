@@ -635,6 +635,10 @@ Direct `MeerkatClient` helper names mirror the RPC methods:
 - `live_truncate(channel_id, item_id, content_index, audio_played_ms)`
 - `live_refresh(channel_id)`
 
+Send no input before the channel reports `ready`: input sent earlier is
+refused and is not held for later. See
+[Wait for ready before the first input](/guides/realtime#wait-for-ready-before-the-first-input).
+
 `live_send_input_image` requires a caller-stable, session-scoped key. Its
 return value proves queue acceptance only; durable success is the later
 `user_content_committed` observation carrying that same key.

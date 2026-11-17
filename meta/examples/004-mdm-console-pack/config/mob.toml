@@ -31,7 +31,7 @@ fleet-wide questions and summarize per-target replies.
 """
 
 [profiles.hive]
-model = "gpt-5.5"
+model = "gpt-6-astra"
 external_addressable = true
 runtime_mode = "autonomous_host"
 skills = ["mdm_protocol", "hive_role"]
@@ -43,7 +43,7 @@ comms = true
 memory = true
 
 [profiles.target]
-model = "gpt-5.5"
+model = "gpt-6-astra"
 external_addressable = true
 runtime_mode = "turn_driven"
 skills = ["mdm_protocol", "target_role"]

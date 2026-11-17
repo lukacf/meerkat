@@ -493,7 +493,7 @@ mod tests {
         agents.insert(
             "lead".to_string(),
             UserAgentConfig {
-                model: "gpt-5.5".to_string(),
+                model: "gpt-6-astra".to_string(),
                 skill: "You lead the mob.".to_string(),
                 peer_description: "Lead".to_string(),
             },
@@ -501,7 +501,7 @@ mod tests {
         agents.insert(
             "critic".to_string(),
             UserAgentConfig {
-                model: "claude-sonnet-4-6".to_string(),
+                model: "claude-sonnet-5-5".to_string(),
                 skill: "You critique plans.".to_string(),
                 peer_description: "Critic".to_string(),
             },

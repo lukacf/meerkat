@@ -137,6 +137,28 @@ which accommodates the documented 20 MiB decoded-image ceiling plus base64
 and envelope overhead.
 </Note>
 
+### Wait for ready before the first input
+
+A channel that `live/open` has returned is still opening. Send no input until
+the channel reports `ready`. On a WebSocket channel, connect the WebSocket
+from the `live/open` bootstrap and wait for the observation frame
+`{"observation": "ready"}`; `live/status` then answers with
+`"status": {"status": "ready"}`.
+
+<Warning>
+Input sent before the channel reports `ready` is refused as not ready and is
+not held for later: `live/send_input` answers with an error, and an input
+frame on the WebSocket is answered with an error frame whose `reason` is
+`channel_not_ready`. A `live/commit_input` that follows with nothing staged is
+an invalid request and ends the channel; the client sees only the socket
+close, without the reason.
+
+This holds for 0.9.15 and 0.9.16; earlier releases were not read. It is read
+from the source of both releases; the close was seen in runs of a live example
+whose first input went out before `ready`, on the published 0.9.15 and on a
+build of 0.9.16.
+</Warning>
+
 ### WebRTC SDP exchange
 
 WebRTC is a feature-gated runtime transport. A binary without the
@@ -568,14 +590,18 @@ try:
     # result["capabilities"] describes supported input/output modalities,
     # including model-gated image_in
 
-    # 3. Send audio input and commit at turn boundaries.
+    # 3. Connect the WebSocket from result["transport"] and wait for the
+    #    {"observation": "ready"} frame before the first input (see "Wait
+    #    for ready before the first input"; transport code is omitted here).
+
+    # 4. Send audio input and commit at turn boundaries.
     await client.live_send_input_audio(channel_id, audio_data, 24000, 1)
     await client.live_commit_input(channel_id)
 
-    # 4. Close the channel when done.
+    # 5. Close the channel when done.
     await client.live_close(channel_id)
 
-    # 5. The session's history accumulates committed turns — same as a text session.
+    # 6. The session's history accumulates committed turns — same as a text session.
     history = await client.read_session_history(session.id)
 finally:
     await client.close()

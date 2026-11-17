@@ -6,7 +6,7 @@ icon: "rocket"
 
 <Note>
 Download the complete CLI archive from the
-[Connect 0.9.15 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.15).
+[Connect 0.9.16 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.16).
 Platform: Linux x86_64 with glibc 2.39, the floor read from the released
 binaries. No macOS arm64 products are part of this release. Verify the
 accompanying checksum before running it.
@@ -15,8 +15,8 @@ See [platforms and installation options](/availability) for application integrat
 
 ## Standalone CLI
 
-Install [Meerkat Core 0.9.15](https://github.com/lukacf/meerkat/releases/tag/v0.9.15),
-the Core release Connect 0.9.15 was built and released with,
+Install [Meerkat Core 0.9.16](https://github.com/lukacf/meerkat/releases/tag/v0.9.16),
+the Core release Connect 0.9.16 was built and released with,
 for ordinary `rkat` agent work after setup. The Connect archive supplies its own Python, Node/npm, integration
 library and setup resources; you do not need to install those separately.
 
@@ -25,9 +25,9 @@ library and setup resources; you do not need to install those separately.
     Download the CLI archive and its `.sha256` companion:
 
     ```sh
-    platform=linux-x86_64 # 0.9.15 has no macos-arm64 archive.
-    archive="meerkat-connect-0.9.15-$platform.tar.gz"
-    release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.15
+    platform=linux-x86_64 # 0.9.16 has no macos-arm64 archive.
+    archive="meerkat-connect-0.9.16-$platform.tar.gz"
+    release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.16
     curl -fLO "$release/$archive"
     curl -fLO "$release/$archive.sha256"
     ```
@@ -108,7 +108,7 @@ The application retains the original conversation and setup progress, so you can
 
 ## Updating an existing application
 
-Connect 0.9.15 does not support in-place updates that change an application's
+Connect 0.9.16 does not support in-place updates that change an application's
 tool policy, definition, instructions or runtime; Forge's Stage refuses them,
 so keep the existing installation and state. Do not extract a new archive over
 it. See [platforms and installation options](/availability) for the released

@@ -6,7 +6,7 @@ PACK_DIR="$ROOT/examples/001-incident-command-center-pack"
 SCENARIO="$PACK_DIR/scenario.yaml"
 
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY to run the live incident command center pack}"
-export RKAT_INCIDENT_MODEL="${RKAT_INCIDENT_MODEL:-gpt-5.5}"
+export RKAT_INCIDENT_MODEL="${RKAT_INCIDENT_MODEL:-gpt-6-astra}"
 # Meerkat 0.7's machine-authority code allocates huge debug-build stack
 # frames. The example binary sizes its own threads, and the workspace
 # .cargo/config.toml covers cargo-invoked flows; this export is belt and
@@ -73,14 +73,22 @@ start_server() {
   (cd "$ROOT" && INCIDENT_COMMAND_CENTER_LISTEN_ADDR="127.0.0.1:0" cargo run -p meerkat-meta --example incident_command_center > "$SERVER_LOG" 2>&1) &
   SERVER_PID=$!
   set +m
-  SERVER_ADDR="$(wait_for_server)"
+  # A server that never became ready ends the leg here. Without the check the
+  # smoke would run against an empty address and report a misleading error.
+  if ! SERVER_ADDR="$(wait_for_server)"; then
+    echo "[incident-pack] the incident example server did not become ready; see ${SERVER_LOG}" >&2
+    return 1
+  fi
   echo "[incident-pack] incident example server listening at http://${SERVER_ADDR}"
 }
 
 run_leg() {
   local label="$1"
   shift
-  start_server
+  if ! start_server; then
+    cleanup
+    return 1
+  fi
   echo "[incident-pack] running ${label}"
   if ! "$@" "http://${SERVER_ADDR}"; then
     cleanup
@@ -94,6 +102,12 @@ echo "[incident-pack] building console assets"
 
 echo "[incident-pack] ensuring example JS deps"
 (cd "$ROOT/examples" && npm install --silent --no-fund --no-audit)
+
+# Build the server once, before the first leg. It embeds the console assets
+# built above, so it is rebuilt after them; done here, the wait for the
+# server of each leg covers its start and not a compile.
+echo "[incident-pack] building the incident example server"
+(cd "$ROOT" && cargo build -p meerkat-meta --example incident_command_center)
 
 echo "[incident-pack] using live model ${RKAT_INCIDENT_MODEL}"
 

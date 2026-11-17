@@ -10,8 +10,9 @@ use meerkat::{
 };
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
+    CoreApplyOutput, CoreDurabilityReloadCleanupCapability, CoreExecutor,
+    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
+    CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
     CoreExecutorTurnFinalizationBoundaryHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
@@ -87,21 +88,65 @@ struct TargetCoreExecutor {
     publication_actor_witness: LiveSessionActorWitness,
 }
 
+/// The persistent session cleanup of the runtime, followed by the cleanup
+/// of this target: the mobs it created for the session.
 struct TargetCorePostStopCleanupHandle {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    /// One handle for the whole registration. The runtime prepares it once
+    /// when it registers the executor and expects the same handle at cleanup,
+    /// so it is built once and every hook below goes through it.
+    persistent: Arc<dyn CoreExecutorPostStopCleanupHandle>,
     mob_state: Arc<MobMcpState>,
     session_id: SessionId,
 }
 
+impl TargetCorePostStopCleanupHandle {
+    fn new(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        mob_state: Arc<MobMcpState>,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            persistent: meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+                service,
+                session_id.clone(),
+            ),
+            mob_state,
+            session_id,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl CoreExecutorPostStopCleanupHandle for TargetCorePostStopCleanupHandle {
+    // A store-backed runtime registers an executor only when its cleanup
+    // handle states this capability and can prepare it; the trait defaults
+    // are `Unsupported` and an error, and registration is then refused with
+    // "requires explicit non-terminal durability-reload cleanup capability".
+    // The persistent handle has both, so they are passed through.
+    fn durability_reload_cleanup_capability(&self) -> CoreDurabilityReloadCleanupCapability {
+        self.persistent.durability_reload_cleanup_capability()
+    }
+
+    async fn prepare_durability_reload_cleanup(&self) -> Result<(), CoreExecutorError> {
+        self.persistent.prepare_durability_reload_cleanup().await
+    }
+
+    // A reload-required cleanup is process-local and ends nothing: the
+    // session and its mobs stay, so only the persistent handle acts.
+    async fn cleanup_after_durability_reload_required(&self) -> Result<(), CoreExecutorError> {
+        self.persistent
+            .cleanup_after_durability_reload_required()
+            .await
+    }
+
+    async fn await_removed_actor_exit(&self) {
+        self.persistent.await_removed_actor_exit().await;
+    }
+
     async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
-        meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
-            Arc::clone(&self.service),
-            self.session_id.clone(),
-        )
-        .cleanup_after_runtime_stop_terminalized()
-        .await?;
+        self.persistent
+            .cleanup_after_runtime_stop_terminalized()
+            .await?;
         self.mob_state
             .destroy_bridge_session_mobs(&self.session_id.to_string())
             .await
@@ -117,12 +162,9 @@ impl CoreExecutorPostStopCleanupHandle for TargetCorePostStopCleanupHandle {
     async fn cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary(
         &self,
     ) -> Result<(), CoreExecutorError> {
-        meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
-            Arc::clone(&self.service),
-            self.session_id.clone(),
-        )
-        .cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary()
-        .await?;
+        self.persistent
+            .cleanup_after_runtime_stop_terminalized_under_turn_finalization_boundary()
+            .await?;
         self.mob_state
             .destroy_bridge_session_mobs(&self.session_id.to_string())
             .await
@@ -264,11 +306,11 @@ impl CoreExecutor for TargetCoreExecutor {
     }
 
     fn post_stop_cleanup_handle(&self) -> Option<Arc<dyn CoreExecutorPostStopCleanupHandle>> {
-        Some(Arc::new(TargetCorePostStopCleanupHandle {
-            service: Arc::clone(&self.service),
-            mob_state: Arc::clone(&self.mob_state),
-            session_id: self.session_id.clone(),
-        }))
+        Some(Arc::new(TargetCorePostStopCleanupHandle::new(
+            Arc::clone(&self.service),
+            Arc::clone(&self.mob_state),
+            self.session_id.clone(),
+        )))
     }
 
     fn turn_finalization_boundary_handle(
@@ -433,11 +475,11 @@ impl CoreExecutor for TargetCoreExecutor {
     }
 
     async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
-        TargetCorePostStopCleanupHandle {
-            service: Arc::clone(&self.service),
-            mob_state: Arc::clone(&self.mob_state),
-            session_id: self.session_id.clone(),
-        }
+        TargetCorePostStopCleanupHandle::new(
+            Arc::clone(&self.service),
+            Arc::clone(&self.mob_state),
+            self.session_id.clone(),
+        )
         .cleanup_after_runtime_stop_terminalized()
         .await
     }
@@ -469,7 +511,7 @@ fn parse_args() -> anyhow::Result<Args> {
         advertise: value("--advertise"),
         data_dir,
         binding_out: value("--binding-out").map(PathBuf::from),
-        model: value("--model").unwrap_or_else(|| "gpt-5.5".to_string()),
+        model: value("--model").unwrap_or_else(|| "gpt-6-astra".to_string()),
         provider: value("--provider").unwrap_or_else(|| "openai".to_string()),
         site: value("--site").unwrap_or_else(|| "local".to_string()),
         platform: value("--platform").unwrap_or_else(|| std::env::consts::OS.to_string()),

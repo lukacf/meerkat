@@ -69,12 +69,14 @@ Three things to know before copying this:
   waiting. 0.9.15 fixed it; see
   [Cancel work](https://docs.rkat.ai/guides/mobs#cancel-work) in the mobs
   guide, which links the known issue.
-- From 0.9.15 one limit remains, listed under Known limitations in the
-  [changelog](../../CHANGELOG.md) of 0.9.15: after a cancel, the first turn a
-  client starts on the session of the member (`turn/start`) is answered an
-  internal error and is not run; the turn after it runs. This example starts
-  no turn on the session of a member: it sends through the mob
-  (`member.send`), and that send runs.
+- After a cancel, the next piece of work of the member can fail once. The
+  [changelog](../../CHANGELOG.md) of 0.9.15 lists this under Known limitations
+  for a turn a client starts on the session of the member (`turn/start`). On
+  the default realm, which this example uses, the send after the cancel ran
+  in every run. On a realm created with the `jsonl` backend the first
+  `member.send` after a cancel ended in `run_failed` and the one after it
+  ran (one run each on 0.9.15 and on the 0.9.16 release build): on such a
+  realm, watch for that failure and send again.
 
 ## Run
 

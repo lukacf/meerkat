@@ -257,6 +257,13 @@ them.
   covered: a credential inside a stdio server's argument (the command line is
   shown as before) and a token used as a URL path segment.
 
+- `meerkat-core` (behaviour, Rust hosts):
+  `meerkat_core::Agent::hot_swap_llm_identity` and
+  `meerkat_core::Agent::rotate_auth_lease_auth_binding` no longer release the
+  lease of the credential a session leaves, and so no longer cancel that
+  credential's sign-in flows in flight; a host that relied on this to
+  withdraw a credential calls the logout or the credential's clear instead.
+
 ### Fixed
 
 - `apply_patch`: the tool's description, which the model reads, said that absolute paths are rejected; the tool applies an absolute path that lies inside the project root (on Unix). The description now reads "Paths are relative to the project root; a path that leaves the root, absolute or via '..', is rejected." No behaviour changes.
@@ -457,6 +464,17 @@ them.
 - `rkat`, and every host's first open of a new realm (`meerkat-store`): a command that takes a realm's manifest lock (`rkat realm create`, the first open of a new realm, `rkat realm govern`) now releases it before it returns; before, the lock file could outlive the command, and the next such command in that realm, typically `rkat realm govern` right after `rkat realm create`, failed with `timed out acquiring realm manifest lock` for up to 30 seconds, and the realm was not governed. Affected: 0.9.0, where `realm govern` first shipped, to 0.9.16; this closes 0.9.16's Known limitation on the realm's manifest lock. A process that is killed while it holds the lock still leaves the file; the next command that takes the lock removes it once it is more than 30 seconds old, as before.
 - `rkat`, and every host that looks for a realm under two or more state roots (`meerkat-store`): a first start of a realm that failed or was cancelled now removes its first-start markers before it returns; before, such a marker could stay and the next first start of that realm failed with `first-start reservation is contended` for up to 30 seconds. Affected: 0.8.4 to 0.9.16. A process that is killed during a first start still leaves its markers; they are taken over once they are more than 30 seconds old, as before.
 - `rkat-rest`, `rkat-mcp` (`meerkat-store`): a server that held a lease on a realm now removes its lease record at an ordinary end; before, the record could go on reading as a live lease for up to 30 seconds after the server had ended, and for that long `rkat realm delete` refused the realm and `rkat realm prune` skipped it unless forced. Affected: 0.8.0 to 0.9.16. A server that is killed still leaves its record, which reads as a live lease until 30 seconds after its last heartbeat, as before.
+
+- `meerkat-core`: one session's fallback or live model switch onto another
+  credential no longer takes the credential it leaves away from the host's
+  other sessions (0.7.0 and later): sessions on that sign-in go on, new ones
+  can be started, and a session that runs on, or falls back to, the
+  credential another session left is no longer held. A sign-out, or the
+  removal of a credential, still withdraws it for every session.
+
+- `meerkat-core`: a fallback or live switch onto another credential no
+  longer ends with `failed to release previous auth lease ... credential
+  lifecycle owner is busy` (0.8.52 and later).
 
 ### Security
 

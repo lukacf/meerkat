@@ -1123,6 +1123,7 @@ test_suite(
         "//crates/meerkat-cli:e2e_system_cli_realm_mcp_installation_does_not_grant_every_agent_bazel_test",
         "//crates/meerkat-cli:e2e_system_cli_realm_mcp_missing_tool_call_local_bazel_test",
         "//crates/meerkat-cli:e2e_system_cli_realm_mcp_original_session_across_restart_bazel_test",
+        "//crates/meerkat-cli:e2e_system_cli_realm_mcp_review_rule_bazel_test",
         "//crates/meerkat-cli:e2e_system_cli_realm_mcp_servers_bazel_test",
         "//crates/meerkat-cli:e2e_system_cli_resume_tools_bazel_test",
         "//crates/meerkat-cli:e2e_system_cli_run_output_fidelity_bazel_test",

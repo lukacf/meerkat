@@ -9697,23 +9697,29 @@ ORDER BY runtime_id";
         serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
     }
 
-    /// The durable input row as this binary encodes it, for the exact batch
-    /// CAS.
+    /// The durable input row as this binary's typed decoder reads it,
+    /// re-encoded, for the exact batch CAS; `None` for a row at the current
+    /// version and for a row that does not decode.
     ///
     /// The batch CAS compares a stored row with this binary's encoding of the
     /// expected and replacement rows. A row an earlier release wrote keeps that
     /// release's older `stored_input_state_version` stamp, so its bytes never
     /// equal this binary's image of the very same typed row, and every CAS on
     /// it would report a stale row for good: a terminal completion an earlier
-    /// release left pending could never be finalized. Such a row is compared as
-    /// the current typed decoder reads it, re-encoded. A row at the current
-    /// version is compared exactly as stored, and a row that does not decode
-    /// stays as stored, so any other difference is still stale. A row this
+    /// release left pending could never be finalized. Such a row is also
+    /// compared as the current typed decoder reads it, re-encoded. A row this
     /// binary writes without a requeue fact keeps the baseline stamp, below
-    /// the current version, and is re-encoded too: the stamp cannot tell it
-    /// from an earlier release's row of that version, whose bytes may differ,
-    /// and its own re-encoding is the same bytes.
-    fn input_row_in_current_encoding(stored: Vec<u8>) -> Vec<u8> {
+    /// the current version, and has a re-encoding too: the stamp cannot tell
+    /// it from an earlier release's row of that version, whose bytes may
+    /// differ.
+    ///
+    /// The re-encoding is a second reading, never the only one (see
+    /// [`stored_input_row_holds`]): a row's typed reading does not always
+    /// re-encode to the row's own bytes. An optional JSON value that holds
+    /// JSON null is written as `null` and read back as absent, so the
+    /// re-encoding of a row its writer still holds in memory differs from the
+    /// bytes that writer stored.
+    fn input_row_in_current_encoding(stored: &[u8]) -> Option<Vec<u8>> {
         use meerkat_core::generated::session_persistence_version_authority as version_authority;
 
         #[derive(serde::Deserialize)]
@@ -9721,15 +9727,26 @@ ORDER BY runtime_id";
             stored_input_state_version: u32,
         }
         let current_version = version_authority::stored_input_state_version();
-        let earlier_release = serde_json::from_slice::<StoredVersion>(&stored)
+        let earlier_release = serde_json::from_slice::<StoredVersion>(stored)
             .is_ok_and(|row| row.stored_input_state_version < current_version);
         if !earlier_release {
-            return stored;
+            return None;
         }
-        deserialize_persisted_input_state(&stored)
+        deserialize_persisted_input_state(stored)
             .ok()
             .and_then(|row| serde_json::to_vec(&row).ok())
-            .unwrap_or(stored)
+    }
+
+    /// Whether a stored input row holds `image`, for the exact batch CAS.
+    ///
+    /// The stored bytes are compared first, exactly: an image that equals
+    /// them is the row, whatever a decoder would make of it. Only when they
+    /// differ is the row's typed re-encoding (`reencoded`, from
+    /// [`input_row_in_current_encoding`]) compared, which lets a row with an
+    /// older version stamp hold this binary's image of the same typed row.
+    /// Any other difference is stale.
+    fn stored_input_row_holds(stored: &[u8], reencoded: Option<&[u8]>, image: &[u8]) -> bool {
+        stored == image || reencoded == Some(image)
     }
 
     /// Encode a `u64` boundary-receipt sequence into the durable `INTEGER`
@@ -18624,11 +18641,15 @@ ORDER BY runtime_id";
                     let Some(current) = current else {
                         return Ok(InputStateBatchCasOutcome::Stale);
                     };
-                    let current = input_row_in_current_encoding(current);
-                    if current != row.expected_json {
+                    let reencoded = input_row_in_current_encoding(&current);
+                    if !stored_input_row_holds(&current, reencoded.as_deref(), &row.expected_json) {
                         all_expected = false;
                     }
-                    if current != row.replacement_json {
+                    if !stored_input_row_holds(
+                        &current,
+                        reencoded.as_deref(),
+                        &row.replacement_json,
+                    ) {
                         all_replacements = false;
                     }
                 }
@@ -18704,11 +18725,15 @@ ORDER BY runtime_id";
                     let Some(current) = current else {
                         return Ok(FencedInputStateBatchCasOutcome::Stale);
                     };
-                    let current = input_row_in_current_encoding(current);
-                    if current != row.expected_json {
+                    let reencoded = input_row_in_current_encoding(&current);
+                    if !stored_input_row_holds(&current, reencoded.as_deref(), &row.expected_json) {
                         all_expected = false;
                     }
-                    if current != row.replacement_json {
+                    if !stored_input_row_holds(
+                        &current,
+                        reencoded.as_deref(),
+                        &row.replacement_json,
+                    ) {
                         all_replacements = false;
                     }
                 }

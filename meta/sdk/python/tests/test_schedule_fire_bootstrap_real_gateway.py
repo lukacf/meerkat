@@ -23,7 +23,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "schedule_fire_bootstrap_native_h
 
 
 @pytest.mark.skipif(not GATEWAY, reason="META_GATEWAY_BIN is not set to a real rpc_gateway")
-@pytest.mark.timeout(180)
+# Above the sum of the row's own bounds (two phases of 100 s and a wait of at
+# most 60 s for the stored occurrence), so that a slow host is stopped by a
+# phase's bound and its message, not by this one.
+@pytest.mark.timeout(280)
 def test_stored_schedule_completes_before_public_build_returns(tmp_path, record_property):
     evidence_root = os.environ.get("META_SCHEDULE_TEST_EVIDENCE_DIR")
     if evidence_root:

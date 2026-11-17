@@ -35,6 +35,31 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-auth-core` (`rkat mcp login`, and every host's MCP OAuth login): a
+  remote MCP server that publishes only OAuth authorization-server metadata
+  at its own origin can be logged in to. Such a server follows the 2025-03-26
+  MCP authorization revision: its `401` challenge names no
+  `resource_metadata`, it has no protected resource metadata (RFC 9728), and
+  `/.well-known/oauth-authorization-server` at its origin names its
+  endpoints. From 0.6.34 through 0.9.16 the login failed with `MCP OAuth
+  discovery failed for '<server>': no oauth-protected-resource metadata
+  found`, and such a server could be used only through a bridge outside
+  Meerkat. The server is now taken to be its own authorization server: the
+  metadata is read from the origin of the configured server URL (RFC 8414,
+  then OpenID Connect discovery) and the configured URL is the resource.
+  Every existing check applies unchanged: the `issuer` must be that origin
+  (as written, or with one trailing slash), PKCE `S256`, a registration
+  endpoint, `https` or loopback endpoints, no redirects. A metadata document
+  is required (no default endpoint paths are assumed), protected resource
+  metadata a server does publish is always the one followed (a defect of it
+  still fails the login), and a host-registered client is never discovered
+  this way. A server with neither document is refused with both named. A
+  server of this kind without an OpenID Connect UserInfo endpoint needs
+  `--oauth-account-selection unverified`, as before for any such
+  authorization server.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

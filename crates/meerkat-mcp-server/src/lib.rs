@@ -3546,9 +3546,190 @@ async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value,
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
+/// The config document's tables that hold a host's own listener settings:
+/// the address a server binds, the origins and hosts it answers, and how it
+/// admits a peer. `rest` is the REST server's listener, `mob_host` the host
+/// acceptor's and its live WebSocket's, `comms` the comms listeners' with
+/// their transport mode and peer authentication. Every member of these
+/// tables is such a setting, so the rule is on the table's path: a member
+/// this build's schema does not know is judged like the ones it knows.
+const LISTENER_SETTINGS_TABLES: [&str; 3] = ["rest", "mob_host", "comms"];
+
+/// A `meerkat_config` write as the caller sent it.
+enum ConfigToolWrite<'a> {
+    /// `action=set`: the whole document.
+    Set(&'a Value),
+    /// `action=patch`: an RFC 7396 merge patch.
+    Patch(&'a Value),
+}
+
+/// Whether the merge patch `patch`, applied where the committed document
+/// holds `committed`, leaves that value as it is. A patch object is judged
+/// member by member against a committed object; any other patch value
+/// replaces what is there, so it has to equal it. A member the committed
+/// document does not hold is a change even as `null`: the document on disk
+/// may hold a member that this build's schema does not serialize.
+fn merge_patch_restates(committed: Option<&Value>, patch: &Value) -> bool {
+    match (committed, patch) {
+        (Some(Value::Object(committed)), Value::Object(patch)) => patch
+            .iter()
+            .all(|(member, value)| merge_patch_restates(committed.get(member), value)),
+        (Some(committed), patch) => committed == patch,
+        (None, _) => false,
+    }
+}
+
+/// The first listener-settings table that `write`, as sent, would change in
+/// the realm's own committed document. `committed` is that document as
+/// serialized and `default` the default document.
+///
+/// A patch is judged by the members it names under a table. A full replace
+/// is judged by its table as a whole, and a table it does not state takes
+/// the default, as the typed document would; so is a patch that is not an
+/// object, which replaces the document as a whole.
+fn listener_table_changed_by(
+    write: &ConfigToolWrite<'_>,
+    committed: &Value,
+    default: &Value,
+) -> Option<&'static str> {
+    LISTENER_SETTINGS_TABLES.into_iter().find(|table| {
+        let committed_table = committed.get(*table);
+        match write {
+            ConfigToolWrite::Patch(patch) if patch.is_object() => patch
+                .get(*table)
+                .is_some_and(|members| !merge_patch_restates(committed_table, members)),
+            ConfigToolWrite::Set(document) | ConfigToolWrite::Patch(document) => {
+                document.get(*table).or_else(|| default.get(*table)) != committed_table
+            }
+        }
+    })
+}
+
+/// The first listener-settings table two composed configs state differently.
+fn listener_table_composed_differently(
+    before: &Config,
+    after: &Config,
+) -> Result<Option<&'static str>, serde_json::Error> {
+    let before = serde_json::to_value(before)?;
+    let after = serde_json::to_value(after)?;
+    Ok(LISTENER_SETTINGS_TABLES
+        .into_iter()
+        .find(|table| before.get(*table) != after.get(*table)))
+}
+
+/// The typed refusal of a `meerkat_config` write that would change a
+/// host's own listener settings: invalid params with the documented
+/// `confinement_administration_required` data; nothing was written.
+fn listener_settings_refusal(change: &str, table: &str) -> ToolCallError {
+    let message = format!(
+        "Invalid config: {change} `[{table}]`, which holds a host's own listener settings (the \
+         address a server binds, the origins and hosts it answers, how it admits a peer); this \
+         tool does not change them. Set them in the configuration file or through the \
+         operator's commands; nothing was written"
+    );
+    match serde_json::to_value(WireConfigWriteRefusal::ConfinementAdministrationRequired) {
+        Ok(data) => ToolCallError::new(-32602, message, Some(data)),
+        Err(serialize_error) => ToolCallError::new(
+            -32603,
+            format!("failed to serialize config refusal data: {serialize_error}"),
+            None,
+        ),
+    }
+}
+
+/// Refuse a `meerkat_config` write that would change a host's own listener
+/// settings ([`LISTENER_SETTINGS_TABLES`]), judged in two ways against the
+/// committed document:
+///
+/// - on the request as sent, against the realm's own document: a patch that
+///   names a member of such a table with another value than the committed
+///   one, or a full replace whose table differs from the committed one. A
+///   write that carries the tables unchanged passes, and one that restates
+///   a parent's value in the realm's own document does not.
+/// - on what the realm composes along its parent chain, before and after
+///   the write: `rest` and `comms` compose whole and `mob_host` member by
+///   member, so a change of the realm's own parent edge can bring another
+///   realm's table into force without naming a member of it. A write is
+///   refused as well when the chain does not compose before it, or would
+///   not after it.
+///
+/// Returns the generation the write commits at, the one of the document it
+/// was judged against, so a write that lands in between is a generation
+/// conflict and not a commit of an unjudged document. A caller's
+/// `expected_generation` other than that one is a generation conflict here,
+/// before anything is judged. (An edit of the configuration file does not
+/// move the generation.)
+async fn refuse_listener_settings_change(
+    state: &MeerkatMcpState,
+    write: ConfigToolWrite<'_>,
+    expected_generation: Option<u64>,
+) -> Result<Option<u64>, ToolCallError> {
+    let committed = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(map_config_runtime_error)?;
+    if let Some(expected) = expected_generation
+        && expected != committed.generation
+    {
+        return Err(map_config_runtime_error(
+            ConfigRuntimeError::GenerationConflict {
+                expected,
+                current: committed.generation,
+            },
+        ));
+    }
+    let serialize_error = |error: serde_json::Error| {
+        ToolCallError::new(
+            -32603,
+            format!("failed to compare the config's listener settings: {error}"),
+            None,
+        )
+    };
+    let committed_document = serde_json::to_value(&committed.config).map_err(serialize_error)?;
+    let default_document = serde_json::to_value(Config::default()).map_err(serialize_error)?;
+    if let Some(table) = listener_table_changed_by(&write, &committed_document, &default_document) {
+        return Err(listener_settings_refusal("the write would change", table));
+    }
+
+    let candidate = match write {
+        ConfigToolWrite::Set(document) => serde_json::from_value::<Config>(document.clone())
+            .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?,
+        ConfigToolWrite::Patch(patch) => apply_patch_preview(&state.config_runtime, patch).await?,
+    };
+    let reader = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source));
+    let composed_committed = reader
+        .effective_config_over_head(&state.realm_id, committed.config)
+        .await
+        .map_err(|error| {
+            ToolCallError::internal(format!(
+                "failed to compose the realm's config chain: {error}"
+            ))
+        })?;
+    let composed_candidate = reader
+        .effective_config_over_head(&state.realm_id, candidate)
+        .await
+        .map_err(|error| {
+            ToolCallError::invalid_params(format!(
+                "Invalid config: the document does not compose along the realm's parent chain: \
+                 {error}; nothing was written"
+            ))
+        })?;
+    if let Some(table) =
+        listener_table_composed_differently(&composed_committed, &composed_candidate)
+            .map_err(serialize_error)?
+    {
+        return Err(listener_settings_refusal(
+            "the write would make the realm compose another",
+            table,
+        ));
+    }
+    Ok(Some(committed.generation))
+}
+
 async fn handle_meerkat_config(
     state: &MeerkatMcpState,
-    input: MeerkatConfigInput,
+    mut input: MeerkatConfigInput,
 ) -> Result<Value, ToolCallError> {
     match input.action {
         ConfigAction::Get => {
@@ -3563,6 +3744,14 @@ async fn handle_meerkat_config(
             let config_value = input.config.ok_or_else(|| {
                 ToolCallError::invalid_params("config is required for action=set")
             })?;
+            // A host's own listener settings are not this tool's to change;
+            // the write commits at the generation it was judged at.
+            input.expected_generation = refuse_listener_settings_change(
+                state,
+                ConfigToolWrite::Set(&config_value),
+                input.expected_generation,
+            )
+            .await?;
             let config: Config = serde_json::from_value(config_value.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
             reject_config_payload_defaulting(&config_value, &config)?;
@@ -3579,6 +3768,13 @@ async fn handle_meerkat_config(
             let patch = input.patch.ok_or_else(|| {
                 ToolCallError::invalid_params("patch is required for action=patch")
             })?;
+            // As for a full replace: judged first, on the patch as sent.
+            input.expected_generation = refuse_listener_settings_change(
+                state,
+                ConfigToolWrite::Patch(&patch),
+                input.expected_generation,
+            )
+            .await?;
             let preview = apply_patch_preview(&state.config_runtime, &patch).await?;
             refuse_launching_entries(state, &preview).await?;
             validate_config_for_commit(&preview)?;

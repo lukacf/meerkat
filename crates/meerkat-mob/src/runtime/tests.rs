@@ -72990,6 +72990,145 @@ async fn cold_resume_cleanup_held_member_is_isolated() {
     assert_eq!(resumed.status().await.expect("status"), MobState::Running);
 }
 
+/// The repair advice of a member left Broken by a resume whose own attempt
+/// could not be certified: for a Recovery corruption cause the member is left
+/// as it is (a retire, respawn or rotation is refused in that state), and the
+/// retire or respawn repair is named for every other cause only.
+#[cfg(feature = "runtime-adapter")]
+fn assert_uncertified_resume_repair_advice(text: &str, context: &str) {
+    for clause in [
+        "if the cause above is a Recovery corruption, leave the member as it is: do not retire, respawn or rotate it (all are refused in this state and leave the mob unable to start)",
+        "send it nothing",
+        "keep a copy of the state directory",
+        "see Known limitations in the release notes",
+        "for any other cause, repair required: retire or respawn the member (not for a Recovery corruption)",
+    ] {
+        assert!(
+            text.contains(clause),
+            "{context}: the advice must carry '{clause}': {text}"
+        );
+    }
+    assert!(
+        !text.contains("until retired or respawned"),
+        "{context}: the advice must not name retire or respawn as the repair of every cause: {text}"
+    );
+}
+
+/// A member parked as unproven carries the repair advice that leaves a
+/// Recovery corruption member as it is, in its Broken error.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_unproven_member_advice_leaves_a_recovery_corruption_member_as_it_is() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["advice-a", "advice-b"]).await;
+    let (parked_identity, parked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        parked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("an unproven member must not stall the mob-wide resume")
+        .expect("resume completes with the unproven member parked");
+    let parked = assert_member_status_for_test(
+        &resumed,
+        parked_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "unproven member",
+    )
+    .await;
+    assert_uncertified_resume_repair_advice(
+        parked.error.as_deref().unwrap_or_default(),
+        "the Broken error of the unproven member",
+    );
+}
+
+/// The actor's log line of a custody parked for a member left Broken carries
+/// the same repair advice.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_unproven_member_log_line_carries_the_repair_advice() {
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let (captured, _capture) = capture_warnings();
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["log-advice-a", "log-advice-b"]).await;
+    let (parked_identity, parked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        parked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("an unproven member must not stall the mob-wide resume")
+        .expect("resume completes with the unproven member parked");
+    assert_member_status_for_test(
+        &resumed,
+        parked_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "unproven member",
+    )
+    .await;
+    let log_line = captured
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .find(|fields| {
+            field(fields, "agent_identity") == Some(parked_identity.as_str())
+                && field(fields, "message").is_some_and(|message| {
+                    message.starts_with(
+                        "explicit resume cannot certify member cleanup; custody remains parked",
+                    )
+                })
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no parked-custody log line for '{parked_identity}'"));
+    let message = field(&log_line, "message").unwrap_or_default();
+    assert_uncertified_resume_repair_advice(message, "the log line of the parked custody");
+    // "The cause above" must have a cause above it in the line itself.
+    let cause = message.find("(settlement: Unproven)");
+    let advice = message.find("if the cause above is a Recovery corruption");
+    assert!(
+        matches!((cause, advice), (Some(cause), Some(advice)) if cause < advice),
+        "the log line names the cause before its advice: {message}"
+    );
+}
+
+/// A member whose retained cleanup custody is held by the actor carries the
+/// same repair advice in its Broken error.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_cleanup_held_member_advice_leaves_a_recovery_corruption_member_as_it_is() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["held-advice-a", "held-advice-b"]).await;
+    let (held_identity, held_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        held_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+    super::actor::explicit_resume::CLEANUP_HELD_TEST_SESSIONS
+        .lock()
+        .expect("cleanup held hook")
+        .insert(held_session.clone());
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("held cleanup must not stall the mob-wide resume")
+        .expect("resume completes with the held member isolated");
+    let held = assert_member_status_for_test(
+        &resumed,
+        held_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "held cleanup member",
+    )
+    .await;
+    assert_uncertified_resume_repair_advice(
+        held.error.as_deref().unwrap_or_default(),
+        "the Broken error of the held cleanup member",
+    );
+}
+
 /// #1251 isolation: a member settled Broken whose failed attempt left a
 /// claimed runtime registration behind is skipped by post-commit operation
 /// binding restoration, so its residue cannot fail the whole resume.

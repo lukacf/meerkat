@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import time
+from http.client import HTTPException
 from typing import Any, Callable, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin
@@ -19,45 +21,49 @@ PYPI_NAME = "meerkat-meta"
 NPM_NAME = "@rkat/meta-sdk"
 
 
-class WrongDigest(NamedTuple):
-    """A registry that serves the version with other bytes than expected."""
+class WrongAnswer(NamedTuple):
+    """A registry that serves the version, and serves something else than
+    expected: other bytes, another package or version, a yanked release."""
 
     registry: str
-    subject: str
-    algorithm: str
-    expected: str
     served: str
+    expected: str
 
 
 class RegistryVerificationError(RuntimeError):
     """One or more public registries do not expose the requested release.
 
     `registries` names the registries whose check failed; it is empty when
-    the failure is not a registry's answer. `wrong_digests` lists the checks
-    that failed because the registry serves the version with other bytes.
+    the failure is not a registry's answer. `wrong_answers` lists the checks
+    that failed because the registry serves the version, and serves it wrong.
     """
 
     def __init__(
         self,
         message: str,
         registries: tuple[str, ...] = (),
-        wrong_digests: tuple[WrongDigest, ...] = (),
+        wrong_answers: tuple[WrongAnswer, ...] = (),
     ) -> None:
         super().__init__(message)
         self.registries = registries
-        self.wrong_digests = wrong_digests
+        self.wrong_answers = wrong_answers
 
 
-class DigestMismatchError(RegistryVerificationError):
-    """A served version whose digest is not the expected one."""
+class WrongAnswerError(RegistryVerificationError):
+    """A version that is served, with something else than expected.
 
-    def __init__(self, message: str, *, subject: str, algorithm: str,
-                 expected: str, served: str) -> None:
+    `served` and `expected` say what, for the refusal: an answer that only
+    lacks a field (no version, no yank state) is not one of these.
+    """
+
+    def __init__(self, message: str, *, served: str, expected: str) -> None:
         super().__init__(message)
-        self.subject = subject
-        self.algorithm = algorithm
-        self.expected = expected.lower()
-        self.served = served.lower()
+        self.served = served
+        self.expected = expected
+
+
+def _named(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 class PublishedArtifact(NamedTuple):
@@ -109,22 +115,35 @@ def _verify_crates_payload(
     published = payload.get("version")
     if not isinstance(published, dict):
         raise RegistryVerificationError("crates.io response is missing version metadata")
-    if published.get("crate") != crate_name or published.get("num") != version:
-        raise RegistryVerificationError(
-            "crates.io returned unexpected package/version metadata"
-        )
+    served_crate, served_version = published.get("crate"), published.get("num")
+    if served_crate != crate_name or served_version != version:
+        message = "crates.io returned unexpected package/version metadata"
+        if _named(served_crate) and _named(served_version):
+            raise WrongAnswerError(
+                message,
+                served=f"crate {json.dumps(served_crate)} version {json.dumps(served_version)}",
+                expected=f"crate {json.dumps(crate_name)} version {json.dumps(version)}",
+            )
+        raise RegistryVerificationError(message)
     if published.get("yanked") is not False:
-        raise RegistryVerificationError("crates.io release is yanked or lacks yank state")
+        message = "crates.io release is yanked or lacks yank state"
+        if published.get("yanked") is None:
+            raise RegistryVerificationError(message)
+        raise WrongAnswerError(
+            message,
+            served=f"{crate_name} {version} with yank state {json.dumps(published.get('yanked'))}",
+            expected="false",
+        )
     download_path = _required_text(published.get("dl_path"), field="crate download path")
     checksum = _required_text(published.get("checksum"), field="crate checksum")
     # The release verified one exact .crate per crate; crates.io must serve
     # those bytes, whichever attempt uploaded them.
     if verified_sha256 is not None and checksum.lower() != verified_sha256.lower():
-        raise DigestMismatchError(
+        raise WrongAnswerError(
             f"crates.io serves {crate_name} {version} with checksum {checksum}, "
             f"not the verified {verified_sha256}",
-            subject=f"{crate_name} {version}", algorithm="sha256",
-            expected=verified_sha256, served=checksum,
+            served=f"{crate_name} {version} with sha256 {checksum.lower()}",
+            expected=verified_sha256.lower(),
         )
     return [
         PublishedArtifact(
@@ -141,7 +160,14 @@ def _verify_pypi_payload(
 ) -> list[PublishedArtifact]:
     info = payload.get("info")
     if not isinstance(info, dict) or info.get("version") != version:
-        raise RegistryVerificationError("PyPI returned an unexpected package version")
+        message = "PyPI returned an unexpected package version"
+        if isinstance(info, dict) and _named(info.get("version")):
+            raise WrongAnswerError(
+                message,
+                served=f"version {json.dumps(info.get('version'))}",
+                expected=f"version {json.dumps(version)}",
+            )
+        raise RegistryVerificationError(message)
 
     files = payload.get("urls")
     if not isinstance(files, list):
@@ -152,9 +178,16 @@ def _verify_pypi_payload(
         for item in files
         if isinstance(item, dict) and item.get("packagetype") in expected_types
     ]
-    if any(item.get("yanked") is not False for item in relevant):
-        raise RegistryVerificationError(
-            "PyPI wheel or source distribution is yanked or lacks yank state"
+    for item in relevant:
+        if item.get("yanked") is False:
+            continue
+        message = "PyPI wheel or source distribution is yanked or lacks yank state"
+        if item.get("yanked") is None or not _named(item.get("filename")):
+            raise RegistryVerificationError(message)
+        raise WrongAnswerError(
+            message,
+            served=f"{item['filename']} with yank state {json.dumps(item.get('yanked'))}",
+            expected="false",
         )
     package_types = {item.get("packagetype") for item in relevant}
     missing = expected_types - package_types
@@ -184,8 +217,16 @@ def _verify_pypi_payload(
 def _verify_npm_payload(
     payload: dict[str, Any], version: str
 ) -> list[PublishedArtifact]:
-    if payload.get("name") != NPM_NAME or payload.get("version") != version:
-        raise RegistryVerificationError("npm returned unexpected package/version metadata")
+    served_name, served_version = payload.get("name"), payload.get("version")
+    if served_name != NPM_NAME or served_version != version:
+        message = "npm returned unexpected package/version metadata"
+        if _named(served_name) and _named(served_version):
+            raise WrongAnswerError(
+                message,
+                served=f"package {json.dumps(served_name)} version {json.dumps(served_version)}",
+                expected=f"package {json.dumps(NPM_NAME)} version {json.dumps(version)}",
+            )
+        raise RegistryVerificationError(message)
     dist = payload.get("dist")
     if not isinstance(dist, dict):
         raise RegistryVerificationError("npm response is missing distribution metadata")
@@ -285,7 +326,7 @@ def verify_once(
     """Check the release on each registry; return the registries checked."""
     failures: list[str] = []
     failed: list[str] = []
-    wrong: list[WrongDigest] = []
+    wrong: list[WrongAnswer] = []
     checked: list[str] = []
     for registry, url, validator in _selected_checks(
         version, crate_sha256, only_crates, only_registries
@@ -299,11 +340,12 @@ def verify_once(
                     artifact.digest_algorithm, payload
                 ).hexdigest()
                 if actual_digest.lower() != artifact.expected_digest.lower():
-                    raise DigestMismatchError(
+                    raise WrongAnswerError(
                         f"{artifact.label} checksum mismatch: "
                         f"expected {artifact.expected_digest}, got {actual_digest}",
-                        subject=artifact.label, algorithm=artifact.digest_algorithm,
-                        expected=artifact.expected_digest, served=actual_digest,
+                        served=(f"{artifact.label} with {artifact.digest_algorithm} "
+                                f"{actual_digest.lower()}"),
+                        expected=artifact.expected_digest.lower(),
                     )
         except (
             RegistryVerificationError,
@@ -311,13 +353,15 @@ def verify_once(
             URLError,
             TimeoutError,
             OSError,
+            # An answer that ends in the middle (IncompleteRead) is no OSError.
+            HTTPException,
             ValueError,
         ) as error:
-            failures.append(f"{registry}: {error}")
+            failures.append(f"{registry}: {error!r}" if isinstance(error, HTTPException)
+                            else f"{registry}: {error}")
             failed.append(registry)
-            if isinstance(error, DigestMismatchError):
-                wrong.append(WrongDigest(registry, error.subject, error.algorithm,
-                                         error.expected, error.served))
+            if isinstance(error, WrongAnswerError):
+                wrong.append(WrongAnswer(registry, error.served, error.expected))
     if failures:
         raise RegistryVerificationError("; ".join(failures), tuple(failed), tuple(wrong))
     return checked
@@ -380,25 +424,33 @@ def verify_with_retries(
     would fall after the deadline. `attempts`, when given, also caps the
     number of reads.
 
-    A registry that serves the version with other bytes is refused, not
-    waited for: when two reads in a row give the same wrong digest for the
-    same artifact, the run fails at the second, naming the registry, the
-    expected and the served digest. A wrong digest that changes between
-    reads (a mirror catching up) keeps waiting, and so does every other
-    answer: an absent version, a transport error, a missing artifact kind.
+    A registry that serves the version, and serves it wrong, is refused,
+    not waited for: other bytes than the expected digest, another package
+    or version, a yanked release. When two reads in a row give the same
+    wrong answer, the run fails at the second, naming the registry, what it
+    serves and what was expected. A wrong answer that changes between reads
+    (a mirror catching up) keeps waiting, and so does every other answer:
+    an absent version, a transport error, a missing artifact kind, an
+    answer without the expected fields.
     """
+    if not math.isfinite(deadline_seconds):
+        raise ValueError("deadline_seconds must be a finite number")
+    if not math.isfinite(delay_seconds):
+        raise ValueError("delay_seconds must be a finite number")
     if deadline_seconds < 0:
         raise ValueError("deadline_seconds must not be negative")
     if delay_seconds < 0:
         raise ValueError("delay_seconds must not be negative")
     if attempts is not None and attempts < 1:
         raise ValueError("attempts must be at least 1")
+    if delay_seconds == 0 and attempts is None:
+        raise ValueError("delay_seconds of 0 needs an attempts cap")
     # A selection that checks nothing is not a registry's answer: no wait.
     _selected_checks(version, crate_sha256, only_crates, only_registries)
 
     started = clock()
     attempt = 0
-    wrong_at_last_read: tuple[WrongDigest, ...] = ()
+    wrong_at_last_read: tuple[WrongAnswer, ...] = ()
     while True:
         attempt += 1
         try:
@@ -406,20 +458,19 @@ def verify_with_retries(
                                   crate_sha256=crate_sha256, only_crates=only_crates,
                                   only_registries=only_registries)
         except RegistryVerificationError as error:
-            repeated = [wrong for wrong in error.wrong_digests if wrong in wrong_at_last_read]
+            repeated = [wrong for wrong in error.wrong_answers if wrong in wrong_at_last_read]
             if repeated:
                 refusals = "; ".join(
-                    f"{wrong.registry} serves {wrong.subject} with {wrong.algorithm} "
-                    f"{wrong.served}, not the expected {wrong.expected}"
+                    f"{wrong.registry} serves {wrong.served}, not the expected {wrong.expected}"
                     for wrong in repeated
                 )
                 raise RegistryVerificationError(
                     f"release {version} refused: {refusals} "
-                    "(the same answer at two reads in a row)",
+                    f"(the same answer at two reads in a row); last answer: {error}",
                     tuple(wrong.registry for wrong in repeated),
                     tuple(repeated),
                 ) from error
-            wrong_at_last_read = error.wrong_digests
+            wrong_at_last_read = error.wrong_answers
             elapsed = clock() - started
             out_of_attempts = attempts is not None and attempt >= attempts
             if out_of_attempts or elapsed + delay_seconds > deadline_seconds:
@@ -470,6 +521,8 @@ def main() -> int:
         parser.error("--only-crates needs at least one --crate-sha256")
     if args.only_crates and args.only_registry:
         parser.error("--only-registry and --only-crates select different registries; pass one")
+    if args.only_registry and crate_sha256:
+        parser.error("--only-registry reads no crate, so --crate-sha256 would bind nothing")
 
     version = args.version.strip().removeprefix("v")
     if not version:

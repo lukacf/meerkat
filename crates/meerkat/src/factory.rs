@@ -13192,6 +13192,15 @@ mod account_model_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod auth_clear_default_hot_swap_tests;
+#[cfg(all(
+    test,
+    feature = "session-store",
+    feature = "openai",
+    feature = "anthropic",
+    not(target_arch = "wasm32")
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod auth_lease_neighbour_session_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod brain_swap_runtime_loop_ab_tests;
@@ -19349,10 +19358,9 @@ mod tests {
     }
 
     /// Each test that resolves a sticky-fallback binding has a realm of its
-    /// own. A fallback rotation releases the primary binding's lease, which
-    /// refuses with `release_lease::Busy` while another test of the process
-    /// holds that binding's credential lifecycle, and plain `cargo test` runs
-    /// these tests at once in one process.
+    /// own: a binding's lease and credential lifecycle are shared by every
+    /// test of the process that names it, and plain `cargo test` runs these
+    /// tests at once in one process.
     const FALLBACK_REALM_SESSION_OWNED: &str = "fallback_session_owned";
     const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
     const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
@@ -21475,8 +21483,9 @@ mod tests {
 
         // A sibling test (the reload test, which plain `cargo test` runs at
         // once in this process) holds its primary binding's credential
-        // lifecycle while this turn falls back. The rotation releases this
-        // test's own primary lease, never a sibling's binding.
+        // lifecycle while this turn falls back. The rotation asks for no
+        // binding's credential lifecycle, so the sibling's hold does not
+        // stop it.
         let _sibling = meerkat_core::auth::acquire_auth_login_lifecycle_guard(
             &meerkat_core::handles::LeaseKey::from_auth_binding(&configured_auth_binding(
                 FALLBACK_REALM_RELOAD,

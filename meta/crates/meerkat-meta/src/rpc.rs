@@ -507,13 +507,14 @@ pub const STORAGE_RESOLUTION_CODE: i64 = -32014;
 /// TypeScript SDKs.
 pub const INIT_IN_PROGRESS_CODE: i64 = -32018;
 
-/// JSON-RPC error code for the mob composition provenance refusals
-/// `rpc_gateway` emits at `meta/init`: a persistent mob storage whose
-/// recorded composition the launch cannot be proven to match (a diverged
-/// definition, a rehearsal-created store, a candidate whose definition
-/// differs from the stored one, an unreadable, malformed or unsupported
-/// manifest, or undeclared non-empty storage; an absent manifest is adopted
-/// by an authoritative launch rather than refused). The error `data` is a
+/// JSON-RPC error code for the mob composition provenance refusals the
+/// gateways (`rpc_gateway` and `meta_gateway`) emit at `meta/init`: a
+/// persistent mob storage whose recorded composition the launch cannot be
+/// proven to match (a diverged definition, a rehearsal-created store, a
+/// candidate whose definition differs from the stored one, an unreadable,
+/// malformed or unsupported manifest, or undeclared non-empty storage; an
+/// absent manifest is adopted by an authoritative launch whose definition
+/// matches the stored one rather than refused). The error `data` is a
 /// [`crate::mob_composition_manifest::CompositionProvenanceRefusal`]: its
 /// `kind` and, where the variant has them, the diverged `fields`. Distinct
 /// from `-32603` so SDKs can reify a deliberate composition refusal instead of

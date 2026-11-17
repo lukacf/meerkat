@@ -35,6 +35,18 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Schedules: a session that is no mob member and is not built as the host builds a session by default (a tool family switched on or off, a tool access policy, filter or grant gate, a replaced dispatcher, per-run hooks, a budget or a credential binding of its own), or whose tools are narrowed while it runs, is refused when it schedules a prompt or an event into another session by id, unless the host allows it by name. Scheduling into its own session is unchanged.
+
+### Added
+
+- Hosts get a judge for their agents' schedule writes: the public trait `ScheduleWriteJudge`, attached with `ScheduleService::attach_write_judge`, answers `ScheduleWriteVerdict` (`Accepted`, `OutOfReach`, `Unavailable`, `NotAMember`). A host's own judge answers `NotAMember` for a writer that is no member of a mob it holds; the schedule tools then hold that writer's schedule into another session to the host's statements or allowance. A judge that answers `Accepted` for such a writer has that write taken.
+
+### Security
+
+- Schedules: a session that is no mob member and holds the schedule tools could schedule a prompt or an event into any other session of its host by that session's id. Now a create, every update and the resume of a schedule whose session target (`exact_session`, `resumable_session`) names a session other than the writer's own is refused with `policy_denied`, code `schedule_session_creation_not_allowed`, when the writer is no member of a mob its host holds, unless the host states that the writer's build is its default build and nothing narrows its tools, or the host sets `agent_schedules_may_create_sessions` under `[tools]`. A session's schedule into its own session is unchanged. That key now allows three things together: sessions created on demand, helpers, and schedules into another session. Limits: a schedule that a session outside a mob writes for a mob member is not judged by this change: on a gateway a plain resumable prompt into a member's session is written as that member's target and is accepted (the exact form and an event are refused); where a host's judge holds no mob at all, every writer is answered as no member, a member included; a schedule stored before the upgrade keeps firing; a resume by a writer the two statements do not cover is answered as temporarily unavailable while the judge cannot answer. Affected: 0.5.2 through 0.9.16 (by the source at the release tags; not run on a published binary). (Shown by rows.)
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

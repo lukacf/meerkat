@@ -8960,6 +8960,13 @@ impl AgentFactory {
             prepared_controller: _,
             host_prompt_sections: _,
         } = build;
+        #[cfg(feature = "comms")]
+        let comms_as_the_factory = as_the_factory(*override_comms, self.enable_comms);
+        // Built without the `comms` feature the factory has no comms switch
+        // and composes no comms tools, which is what a switch that is off
+        // builds: the build's switch is compared with "off".
+        #[cfg(not(feature = "comms"))]
+        let comms_as_the_factory = as_the_factory(*override_comms, false);
         mob_member_binding.is_none()
             && mob_incarnation.is_none()
             && as_the_factory(*override_builtins, self.enable_builtins)
@@ -8968,7 +8975,7 @@ impl AgentFactory {
             && as_the_factory(*override_schedule, self.enable_schedule)
             && as_the_factory(*override_workgraph, self.enable_workgraph)
             && as_the_factory(*override_mob, self.enable_mob)
-            && as_the_factory(*override_comms, self.enable_comms)
+            && comms_as_the_factory
             && unset(*override_image_generation)
             && unset(*override_web_search)
             && tool_access_policy.is_none()

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Agent memory: a member name that lies under `private/` or `set-aside/` is refused at creation with `member id '<name>' lies under a name agent memory reserves` (JSON-RPC `-32602` on `meta/ensure_member`; the same text from the Console's doors and from a member's spawn). While a host cannot yet tell whether a private member is a registered agent's, that member's `memory` tool answers `memory is not ready yet` and stores nothing; a temporary council participant forked from a side chat or from a private member answers `a council participant keeps no memory of its own`. A private member no longer recalls the notes it stored under its plain name before the upgrade.
+
+### Security
+
+- Agent memory of private members: a private member (a private Console side chat, and the members it forks or spawns) kept its agent memory under its plain member name, with nothing of its owner in the key. A member created later under the same name in the same memory realm, private to another person or to nobody, was bound to that memory: its own `memory` tool recalled, changed and removed the notes of the first person's member; on a runtime without registered agents such a member was given those records in its instructions at its start; and the Console's memory panel judged the records by the member name, not by an owner. It needed agent memory on, a private member that had stored at least one note, and afterwards a member seated under the same name in that realm by another person or by a host. Now a private member keeps its agent memory in a scope of its own, `private/<owner>/<member name>`: its `memory` tool stores, recalls, changes and removes its notes there and in no other member's memory, and a member of the same name of another person, or of nobody, recalls none of it. The memory panel shows such a scope to its owner, as the access rules allow, and to an access administrator, also after the member has ended and while another person's member holds the name; a quarantined record in it is decided by one of those two. The Steward, the Distiller and the Hygienist do no work in such a scope. A registered agent keeps its memory under its name, and a shared member under its member name. Limits: notes that a private member stored before the upgrade are not moved into its new scope: a private member no longer recalls them, and the entry on notes stored before the upgrade says what the first start does with them and which of them a later member of that name is still given; no operator call forgets or erases a record in a private scope: only the member's own tool can, while the member lives; by its id a hidden record is answered as hidden, not as missing, in two places; a host's own program that drives the mob directly can still seat a member under a reserved name (by its own durable fork, or by a resume spawn onto the old session of a member that ran under that name): such a member gets no memory work. Affected: Meta 0.9.11 through 0.9.16 (by the source at the release tags; that a private side chat's note is stored under its plain name was shown by a run of a gateway built from the 0.9.15 tag). (Shown by rows and by a run of a gateway built from the change.)
+
+### Added
+
+- `AgentMemoryProvider` gains the provided method `recall_in_scope`; its default answers that the call is unsupported, so every implementor builds unchanged. A provider that serves a private member's `memory` tool implements it; until it does, that member's recall through it answers unsupported. The bundled SQLite store implements it.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

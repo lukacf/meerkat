@@ -1105,6 +1105,12 @@ impl DelegationExecutionService {
         let Some(helper_peer_id) = entry.peer_id() else {
             return false;
         };
+        // Two runtimes built on one key (two session runtimes of one realm
+        // under tcp or uds comms) have one peer id. Wiring them would file
+        // each store's own key in it, so the helper is not wired.
+        if helper_peer_id == parent.peer_id {
+            return false;
+        }
         let Ok(helper_comms_name) = meerkat_core::MemberCommsName::new(
             self.handle.definition().id.as_str(),
             entry.role.as_str(),

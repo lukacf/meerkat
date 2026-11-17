@@ -9560,8 +9560,10 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
 
+    mod allowed_origins_tests;
     pub(crate) mod committed_reads_tests;
     mod default_context_root_tests;
+    mod served_hosts_tests;
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};

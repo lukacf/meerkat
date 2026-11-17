@@ -5531,7 +5531,31 @@ mod tests {
         assert!(!spec.with_image_input_support(false).supports_image_input());
     }
 
+    /// This test's own Copilot account. A credential identity names one
+    /// AuthMachine lease and one entry of the process-wide login lifecycle
+    /// lock, so rows that shared an account contended for that entry whenever
+    /// the suite ran as threads of one process: a turn parked behind another
+    /// row's token load, and a bare lease release answered busy. Every test
+    /// thread gets an account of its own (a `#[tokio::test]` runs on its
+    /// test's thread); everything one test builds still shares one account.
     fn account_identity() -> AuthCredentialIdentity {
+        static NEXT_TEST_ACCOUNT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        thread_local! {
+            static TEST_ACCOUNT: CredentialAccountId = CredentialAccountId::parse(format!(
+                "github_copilot_test_{}",
+                NEXT_TEST_ACCOUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
+            .expect("valid account id");
+        }
+        AuthCredentialIdentity::Account(CredentialAccountRef {
+            realm: RealmId::global(),
+            account: TEST_ACCOUNT.with(Clone::clone),
+        })
+    }
+
+    /// The account the zero-config Copilot routes name.
+    fn zero_config_account_identity() -> AuthCredentialIdentity {
         AuthCredentialIdentity::Account(CredentialAccountRef {
             realm: RealmId::global(),
             account: CredentialAccountId::parse("github_copilot").expect("valid account id"),
@@ -7717,23 +7741,25 @@ mod tests {
             Some(meerkat_llm_core::LlmError::NetworkTimeout { .. })
         ));
 
-        // A refused connection, through the production transport.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = closed.local_addr().unwrap();
-        drop(closed);
+        // A refused connection, through the production transport. The port
+        // is bound, never listens and stays bound until the answer is in: a
+        // port that was bound and freed can be given to another test's
+        // listener before the request reaches it.
+        let unlistened = tokio::net::TcpSocket::new_v4().unwrap();
+        unlistened.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = unlistened.local_addr().unwrap();
         let refused = match ReqwestCopilotHttpTransport::new()
             .get(&format!("http://{address}/token"), HeaderMap::new())
             .await
         {
             Err(error) => error,
-            Ok(response) => panic!("a closed port answered: status {}", response.status),
+            Ok(response) => panic!("an unlistened port answered: status {}", response.status),
         };
+        drop(unlistened);
+        let class = retryable_class(&refused);
         assert!(
-            matches!(
-                retryable_class(&refused),
-                Some(meerkat_llm_core::LlmError::ConnectionReset)
-            ),
-            "{refused:?}"
+            matches!(class, Some(meerkat_llm_core::LlmError::ConnectionReset)),
+            "a refused connection is classified {class:?}, from {refused:?}"
         );
 
         for failure in [
@@ -13218,10 +13244,10 @@ mod tests {
                 assert_eq!(target.backend.backend_kind, route.backend_kind());
                 assert_eq!(target.auth_profile.auth_method, route.token_auth_method());
                 assert_eq!(target.auth_profile.source, env_source());
-                assert_eq!(target.credential_identity, account_identity());
+                assert_eq!(target.credential_identity, zero_config_account_identity());
                 ProviderRuntimeCatalog::validate_binding_with_credential_identity(
                     &reference,
-                    account_identity(),
+                    zero_config_account_identity(),
                     &target.backend,
                     &target.auth_profile,
                     &target.binding.policy,

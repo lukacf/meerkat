@@ -466,7 +466,9 @@ async function main() {
     await page.getByTestId("inspect-panel:incident-commander").waitFor();
     // Agent details say reachability in words; the raw "addressable" moved
     // out of the visible copy.
-    await waitForText(page.getByTestId("inspect-panel:incident-commander"), "Can receive messages");
+    // The panel now says it twice, in its summary line and in its details;
+    // the summary is the one to wait for.
+    await waitForText(page.getByTestId("inspect-summary:incident-commander"), "Can receive messages");
 
     console.log("smoke:split");
     await selectSidebarItem(page, "Incident Commander");

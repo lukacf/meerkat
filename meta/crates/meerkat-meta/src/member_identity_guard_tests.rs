@@ -508,3 +508,8 @@ fn skip_whitespace(code: &[u8], at: usize) -> usize {
             .count()
     })
 }
+
+/// The census of the gating doors, on this module's reading of the crate's
+/// production sources.
+#[path = "gating_door_census_tests.rs"]
+mod gating_doors;

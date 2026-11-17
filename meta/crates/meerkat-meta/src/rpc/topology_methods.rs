@@ -8,8 +8,8 @@ use crate::access::{
 };
 use crate::topology_control::{
     TopologyApplyRequest, TopologyApplyScope, TopologyAuditPage, TopologyControlError,
-    TopologyControlMode, TopologyMutation, TopologyNodeAffordances, TopologyPlanRequest,
-    TopologyRuntimeHandle,
+    TopologyControlMode, TopologyMutation, TopologyNodeAffordances, TopologyOperationRecordStatus,
+    TopologyPlanRequest, TopologyRuntimeHandle,
 };
 
 use super::{JSONRPC_VERSION, JsonRpcError, JsonRpcResponse};
@@ -161,8 +161,48 @@ pub(crate) async fn handle_plan(
     }
 }
 
+/// The request the denied operation record of an apply the access rules
+/// refuse is written of: the one place that decides what such a record
+/// stores. A request is recorded as it is unless one of its ends is a name
+/// the attribute records of the caller's audience (the Console's) know no
+/// agent under (no member holds it, or the caller's surface stood it in
+/// for a member hidden from the caller) or an agent hidden from the
+/// caller; an agent the rules only refuse the caller a view of keeps its
+/// name in the record. With such an end the request is recorded with its
+/// operations left out: the record then holds no name and nothing derived
+/// from one (its operation id covers the request), it is written and
+/// counted like any other, and [`handle_audit`] shows it to access
+/// administrators only.
+fn denied_record_request(
+    view: &AccessView,
+    request: &TopologyApplyRequest,
+) -> TopologyApplyRequest {
+    let mut recorded = request.clone();
+    if request.operations.iter().any(|operation| {
+        [&operation.edge.a, &operation.edge.b]
+            .into_iter()
+            .any(|end| {
+                !view.knows_agent(end.identity.as_str()) || view.hides_agent(end.identity.as_str())
+            })
+    }) {
+        recorded.operations.clear();
+    }
+    recorded
+}
+
 /// `meta/topology/apply` for a caller of `scope`: its idempotency keys are
 /// its own, so the same key from another caller names another operation.
+///
+/// `owed` is a refusal the caller's surface owes the request whatever the
+/// topology would answer: the console's, for a request in which it stood a
+/// name no member holds in for an end
+/// ([`crate::http_console::ConsoleAbsentNames::recorded_refusal`]). It is
+/// the answer once the request parsed and the access rules allowed every
+/// operation, so the rules' refusal comes first, as it does for any other
+/// name, and such a request is never applied. A refusal of it by the rules
+/// writes its denied operation record like that of any request with an end
+/// that is a name the caller's audience knows no agent under, or an agent
+/// hidden from the caller ([`denied_record_request`]).
 pub(crate) async fn handle_apply(
     topology: &TopologyRuntimeHandle,
     response_id: Value,
@@ -170,6 +210,7 @@ pub(crate) async fn handle_apply(
     view: Option<&AccessView>,
     actor: Option<&str>,
     scope: &TopologyApplyScope,
+    owed: Option<JsonRpcError>,
 ) -> JsonRpcResponse {
     let mut request: TopologyApplyRequest = match serde_json::from_value(params.clone()) {
         Ok(request) => request,
@@ -190,9 +231,13 @@ pub(crate) async fn handle_apply(
                 .clone()
                 .unwrap_or_else(|| "<redacted>".to_string()),
         };
+        let recorded = match view {
+            Some(view) => denied_record_request(view, &request),
+            None => request,
+        };
         if let Err(audit_error) = topology
             .record_denied_apply(
-                &request,
+                &recorded,
                 scope,
                 actor,
                 actor.unwrap_or("local-host"),
@@ -203,6 +248,14 @@ pub(crate) async fn handle_apply(
             return failure(response_id, audit_error);
         }
         return access_denied(response_id, violation);
+    }
+    if let Some(refusal) = owed {
+        return JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(refusal),
+        };
     }
     let expose_attribution = attribution_allowed_for_operations(view, &request.operations);
     match topology
@@ -313,6 +366,16 @@ pub(crate) async fn handle_audit(
     for record in page.records {
         next_after_seq = record.seq;
         let visible = view.is_none_or(|view| {
+            // A denied record that holds no operation is of a request with
+            // an end that was a name its caller's audience knew no agent
+            // under, or an agent hidden from its caller
+            // ([`denied_record_request`]): no end decides who reads it;
+            // access administrators do.
+            if record.status == TopologyOperationRecordStatus::Denied
+                && record.operations.is_empty()
+            {
+                return view.can_administer();
+            }
             record.operations.iter().all(|operation| {
                 [&operation.edge.a, &operation.edge.b]
                     .into_iter()

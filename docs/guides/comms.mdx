@@ -112,10 +112,11 @@ Each agent has an Ed25519 keypair managed by the `Keypair` type (`crates/meerkat
 
 ### Where a session's keys are kept
 
-A session with comms has its own key pair, in a directory named by the session
-id that holds `identity.key` and `identity.pub`. That directory is not in the
-state root and not in the realm: it lies under the user's home, and the place
-depends on the command that built the session.
+With in-process comms, the default, a session with comms has its own key pair,
+in a directory named by the session id that holds `identity.key` and
+`identity.pub`. That directory is not in the state root and not in the realm:
+it lies under the user's home, and the place depends on the command that built
+the session.
 
 | Command | Session keys under |
 |---------|--------------------|
@@ -130,12 +131,21 @@ builds sessions with an `AgentFactory` gets the same places:
 `<user_config_root>/.rkat/session_comms_identity` when the factory has a
 `user_config_root`, else the per-user state directory of the three servers.
 
+With `[comms]` `mode = "tcp"` or `"uds"` there is no directory per session:
+the host has one key pair, in `<realm directory>/.rkat/identity/`, which lies
+inside the realm directory and moves with it. `rkat mob host` has, besides its
+members' session keys, a host identity directory of its own:
+`<state root>/host-identity`, beside the realm directories, unless
+`--identity-dir` or `[mob_host].identity_dir` names another.
+
 A backup or a move of a state root or a realm therefore does not hold the
-keys: copy the `session_comms_identity` directory with it, to the place the
-command on the new host reads. Without it a session that is not a mob member
-is still resumed: it gets a new key pair, and so a new `PeerId`, without a
-word on stderr, and peers that trusted the old key do not know the new one. A
-mob member restored without its keys is marked broken, with the reason
+session keys of in-process comms: copy the `session_comms_identity` directory
+with it, to the place the command on the new host reads. A copy of a mob
+host's realm directory alone does not hold its host identity directory either.
+Without its session keys a session that is not a mob member is still resumed:
+it gets a new key pair, and so a new `PeerId`, without a word on stderr, and
+peers that trusted the old key do not know the new one. A mob member restored
+without its keys is marked broken, with the reason
 `restored member '<id>' cannot publish its comms endpoint: ...; respawn the member to mint a new endpoint`.
 
 <Accordion title="Envelope signing">

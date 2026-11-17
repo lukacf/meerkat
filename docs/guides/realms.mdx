@@ -186,7 +186,7 @@ divergent domains or discard the backup.
 | Equal realm IDs on two hosts do not share | Each host selected a different local store | Configure one shared storage provider/root |
 | Backend override is rejected | The manifest already pinned another backend/provider | Open with the pinned profile or migrate intentionally |
 | Startup reports both candidate roots | Two physical copies exist | Run `storage doctor`, review `storage migrate`, then adopt one root |
-| A session moved with its state root has a new comms identity, or a restored mob member is marked broken | Session comms keys are kept outside the state root and the realm | Copy the `session_comms_identity` directory with the state (see [where a session's keys are kept](/guides/comms#where-a-session%E2%80%99s-keys-are-kept)) |
+| A session moved with its state root has a new comms identity, or a restored mob member is marked broken | With in-process comms, the default, session comms keys are kept outside the state root and the realm | Copy the `session_comms_identity` directory with the state (see [where a session's keys are kept](/guides/comms#where-a-session%E2%80%99s-keys-are-kept)) |
 | A global login is visible in a workspace | Config and credential reads inherit from `global` | This is expected; state and sessions still remain realm-local |
 
 ## Recommended Profiles

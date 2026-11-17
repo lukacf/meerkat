@@ -1552,87 +1552,6 @@ mod tests {
         );
     }
 
-    /// A skills directory is a convention source judged as a whole: a host
-    /// whose confined processes can write anything under the project skills
-    /// directory does not trust it and names it in its report; one they
-    /// cannot reach is trusted.
-    #[test]
-    fn a_writable_skills_directory_is_not_trusted() {
-        let (_temp, base) = tree();
-        let work = base.join("work");
-        let skills = work.join(".rkat").join("skills");
-        std::fs::create_dir_all(skills.join("planted")).unwrap();
-        let nested = confined(&ConfinementConfig::for_all(custom(
-            &work,
-            &[&skills.join("planted")],
-            &[],
-        )));
-        assert!(
-            nested.untrusted_directory(&skills),
-            "a writable directory under it is enough"
-        );
-        assert!(!nested.untrusted_source(&skills));
-        let sources = HostConfinement::convention_sources(Some(&work), None);
-        assert!(sources.contains(&skills), "{sources:?}");
-        let report = nested.startup_report(
-            &HostConfinement::host_inputs(&base.join("state"), None),
-            &sources,
-        );
-        assert!(
-            report.iter().any(|notice| notice.warning
-                && notice.text.contains(&skills.display().to_string())
-                && notice.text.contains("skills")),
-            "{report:?}"
-        );
-        let elsewhere = confined(&ConfinementConfig::for_all(custom(
-            &base.join("scratch"),
-            &[&base.join("scratch")],
-            &[],
-        )));
-        assert!(!elsewhere.untrusted_directory(&skills));
-    }
-
-    /// The startup report names each kind's requested and effective
-    /// confinement, the inputs kept from confined processes, and each
-    /// convention source it does not trust.
-    #[test]
-    fn the_report_names_kinds_inputs_and_untrusted_sources() {
-        let (_temp, base) = tree();
-        let work = base.join("work");
-        let home = base.join("home");
-        let host = confined(&ConfinementConfig::for_all(custom(&work, &[&work], &[])));
-        let inputs = HostConfinement::host_inputs(&base.join("state"), None);
-        let sources = HostConfinement::convention_sources(Some(&work), Some(&home));
-        let report = host.startup_report(&inputs, &sources);
-        let texts: Vec<&str> = report.iter().map(|notice| notice.text.as_str()).collect();
-        assert!(
-            texts
-                .iter()
-                .any(|text| text.starts_with("shell confinement: requested custom")),
-            "{texts:?}"
-        );
-        assert!(
-            texts.iter().any(
-                |text| text.starts_with("kept from every confined process: the realm state at")
-            ),
-            "{texts:?}"
-        );
-        for source in [
-            work.join(".rkat").join("mcp.toml"),
-            work.join(".rkat").join("config.toml"),
-        ] {
-            assert!(host.untrusted_source(&source), "{}", source.display());
-            assert!(
-                report
-                    .iter()
-                    .any(|notice| notice.warning
-                        && notice.text.contains(&source.display().to_string())),
-                "{texts:?}"
-            );
-        }
-        assert!(!host.untrusted_source(&home.join(".rkat").join("mcp.toml")));
-    }
-
     /// The realm's and the user's config documents of a host over `base`.
     fn composed_documents(base: &Path) -> (PathBuf, PathBuf) {
         (
@@ -1793,6 +1712,87 @@ mod tests {
             .is_empty(),
             "a project file that is the realm's document is read"
         );
+    }
+
+    /// A skills directory is a convention source judged as a whole: a host
+    /// whose confined processes can write anything under the project skills
+    /// directory does not trust it and names it in its report; one they
+    /// cannot reach is trusted.
+    #[test]
+    fn a_writable_skills_directory_is_not_trusted() {
+        let (_temp, base) = tree();
+        let work = base.join("work");
+        let skills = work.join(".rkat").join("skills");
+        std::fs::create_dir_all(skills.join("planted")).unwrap();
+        let nested = confined(&ConfinementConfig::for_all(custom(
+            &work,
+            &[&skills.join("planted")],
+            &[],
+        )));
+        assert!(
+            nested.untrusted_directory(&skills),
+            "a writable directory under it is enough"
+        );
+        assert!(!nested.untrusted_source(&skills));
+        let sources = HostConfinement::convention_sources(Some(&work), None);
+        assert!(sources.contains(&skills), "{sources:?}");
+        let report = nested.startup_report(
+            &HostConfinement::host_inputs(&base.join("state"), None),
+            &sources,
+        );
+        assert!(
+            report.iter().any(|notice| notice.warning
+                && notice.text.contains(&skills.display().to_string())
+                && notice.text.contains("skills")),
+            "{report:?}"
+        );
+        let elsewhere = confined(&ConfinementConfig::for_all(custom(
+            &base.join("scratch"),
+            &[&base.join("scratch")],
+            &[],
+        )));
+        assert!(!elsewhere.untrusted_directory(&skills));
+    }
+
+    /// The startup report names each kind's requested and effective
+    /// confinement, the inputs kept from confined processes, and each
+    /// convention source it does not trust.
+    #[test]
+    fn the_report_names_kinds_inputs_and_untrusted_sources() {
+        let (_temp, base) = tree();
+        let work = base.join("work");
+        let home = base.join("home");
+        let host = confined(&ConfinementConfig::for_all(custom(&work, &[&work], &[])));
+        let inputs = HostConfinement::host_inputs(&base.join("state"), None);
+        let sources = HostConfinement::convention_sources(Some(&work), Some(&home));
+        let report = host.startup_report(&inputs, &sources);
+        let texts: Vec<&str> = report.iter().map(|notice| notice.text.as_str()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with("shell confinement: requested custom")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(
+                |text| text.starts_with("kept from every confined process: the realm state at")
+            ),
+            "{texts:?}"
+        );
+        for source in [
+            work.join(".rkat").join("mcp.toml"),
+            work.join(".rkat").join("config.toml"),
+        ] {
+            assert!(host.untrusted_source(&source), "{}", source.display());
+            assert!(
+                report
+                    .iter()
+                    .any(|notice| notice.warning
+                        && notice.text.contains(&source.display().to_string())),
+                "{texts:?}"
+            );
+        }
+        assert!(!host.untrusted_source(&home.join(".rkat").join("mcp.toml")));
     }
 
     /// The realm document list stays level with the path authority: every

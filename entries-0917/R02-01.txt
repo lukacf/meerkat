@@ -10,5 +10,5 @@
   host that matched on `unknown` for these errors sees `connection_reset`,
   and the OpenAI clients' error no longer carries the transport's own text.
   Affects the Copilot token exchange since 0.9.9, the OpenAI client since
-  0.3.4 and the OpenAI-compatible client since 0.5.2. No run against a
-  live GitHub Copilot account was made for this release.
+  0.3.4 and the OpenAI-compatible client since 0.5.2. This change was not
+  run against a live GitHub Copilot account.

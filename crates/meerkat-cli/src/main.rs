@@ -22,6 +22,8 @@ mod cli_parse;
 mod exit_status;
 #[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(feature = "mcp")]
+mod mcp_stdio_report;
 #[cfg(all(
     feature = "mob",
     feature = "comms",
@@ -13265,10 +13267,15 @@ async fn create_mcp_tools(
         // K14: wait-for-mcp is fail-closed — servers still pending at the
         // deadline surface as a typed `McpNotReady` fault that aborts the run
         // before the first turn, never a warn-and-proceed.
-        let notices = adapter
-            .wait_until_ready(total_timeout)
-            .await
-            .map_err(|not_ready| anyhow::anyhow!("{not_ready}"))?;
+        let notices = match adapter.wait_until_ready(total_timeout).await {
+            Ok(notices) => notices,
+            Err(not_ready) => {
+                // The stdio servers that did fail are reported to the
+                // operator before the run is refused.
+                mcp_stdio_report::print(&adapter).await;
+                return Err(anyhow::anyhow!("{not_ready}"));
+            }
+        };
         for notice in &notices {
             if notice.status_text().starts_with("failed") {
                 eprintln!(
@@ -13278,6 +13285,9 @@ async fn create_mcp_tools(
                 );
             }
         }
+        // The operator also gets what a failed stdio server wrote to
+        // stderr: on this terminal only.
+        mcp_stdio_report::print(&adapter).await;
     }
 
     // Refresh cached tools to include any that connected immediately
@@ -13560,6 +13570,10 @@ fn with_governed_mcp_auth(
 async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     #[cfg(feature = "mcp")]
     if let Some(adapter) = _adapter {
+        // A stdio server that failed in the background, during the run, is
+        // reported to the operator here, before the shutdown releases what
+        // the router retains of it; one already reported is not repeated.
+        mcp_stdio_report::print(adapter).await;
         adapter.shutdown().await;
     }
 }
@@ -34985,6 +34999,98 @@ url = "https://user.example/mcp"
         assert!(
             !marker.exists(),
             "a refused server never starts its process"
+        );
+        adapter.shutdown().await;
+    }
+
+    /// The `rkat run` loader's failed stdio server is reported to the
+    /// operator once: the phase, the server's own exit status and the lines
+    /// it wrote to stderr. A healthy server is not reported.
+    #[cfg(all(feature = "mcp", unix))]
+    #[tokio::test]
+    async fn test_cli_reports_a_failed_stdio_server_once_with_exit_status_and_stderr() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let scope = test_scope(root.join("realms"), "report-realm");
+        let factory = AgentFactory::new(root.join("sessions"));
+        let crashing = meerkat_core::McpServerConfig::stdio(
+            "crashing",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "printf 'config file not found\\n' >&2\nprintf 'giving up\\n' >&2\nexit 3\n".into(),
+            ],
+            HashMap::new(),
+        );
+        let healthy = meerkat_core::McpServerConfig::stdio(
+            "healthy",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                r#"printf 'serving\n' >&2
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"healthy","version":"0"}}}\n' "$id" ;;
+    *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id" ;;
+  esac
+done
+"#
+                .into(),
+            ],
+            HashMap::new(),
+        );
+
+        let adapter = create_mcp_tools(
+            &scope,
+            &[crashing, healthy],
+            false,
+            CliMcpAuthMode::Stored,
+            Some(Arc::new(
+                meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+            )),
+            cli_mcp_stdio_profile(&factory),
+            Some(&CliMcpRouterOwner::fresh(&SessionId::new())),
+        )
+        .await
+        .expect("the loader stages the realm servers")
+        .expect("two configured servers");
+        let deltas = adapter
+            .wait_until_ready(std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(
+            deltas.iter().any(|delta| delta.target == "crashing"
+                && delta.phase == meerkat_core::ExternalToolDeltaPhase::Failed),
+            "{deltas:?}"
+        );
+        for delta in &deltas {
+            let rendered = format!("{delta:?}");
+            assert!(
+                !rendered.contains("config file not found") && !rendered.contains("giving up"),
+                "the server's stderr stays out of the notices: {rendered}"
+            );
+        }
+
+        let reports = mcp_stdio_report::collect(&adapter).await;
+        assert_eq!(reports.len(), 1, "the failed server only: {reports:?}");
+        let report = &reports[0];
+        assert!(
+            report.starts_with("MCP server 'crashing': stdio setup failed during initialize: "),
+            "{report}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            report.contains("the server process ended, exit status 3\n"),
+            "{report}"
+        );
+        assert!(
+            report.ends_with("  its last stderr output:\n  | config file not found\n  | giving up"),
+            "{report}"
+        );
+        assert!(
+            mcp_stdio_report::collect(&adapter).await.is_empty(),
+            "a reported failure is not reported again"
         );
         adapter.shutdown().await;
     }

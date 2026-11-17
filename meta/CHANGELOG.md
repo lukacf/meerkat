@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the set. It said "Decide where it was presented.", which names no place
   for a set that was presented nowhere. A decision of another kind keeps
   its hint.
+- Console: a reply to an agent's questions that is sent after their
+  deadline now leaves the line of a question that timed out ("This
+  question timed out before the gateway took your reply, so nothing was
+  sent. If the answer still matters, tell the agent in its chat."). The
+  gateway refuses such a reply `not_open`, as it refuses a reply to a set
+  someone else closed, and the Console said for both "This question was
+  already answered or closed ... Nothing more is needed from you." It now
+  words the line by the set's own deadline; the refusal is unchanged.
 
 ## [0.9.15] - 2026-11-15
 

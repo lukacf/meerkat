@@ -63,6 +63,9 @@ Python applications register deterministic host runnables with
 `MetaBuilder.host_runnables(...)` and handle
 `callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
 The callback is delivery for a durable occurrence, not a substitute scheduler.
+In releases 0.7.32 to 0.9.16 a callback can arrive while the application is
+still starting, before its handler is registered: see
+[Schedule callbacks that arrive during startup](/sdks/python#schedule-callbacks-that-arrive-during-startup).
 
 ## Console schedules
 

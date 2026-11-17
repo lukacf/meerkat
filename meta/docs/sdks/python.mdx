@@ -1070,7 +1070,7 @@ rt = await (
 | `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `meta/on_error` notification; sync or async, fire-and-forget. Without a callback the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered` and `mob_announcement_escalation_resolved`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/guides/unified-runtime#error-hook-and-logging)). `ErrorEvent.is_resolution` is true for those two, a failure ending rather than starting |
 | `.identity_bootstrap_mode(mode)` | The roster pass's mode: every mode seats each roster identity without materializing it, and `lazy_with_background_warm` also materializes them in a bounded background task; requires `.roster(...)` |
 | `.member_restore(restore)` | How the mob materializes its seated members at start: `"on_demand"` (default; only the members that must be live, such as those that hold work: the full set is under `member_restore` in [Configuration](/reference/configuration#sdk-and-gateway-runtime-options)), `"on_demand_verified"` (plus a read-only check of the others before ready) or `"eager"` (all); sent as `runtime_options.member_restore` |
-| `.max_sessions(n)` | The gateway's session limit, sent as `runtime_options.max_sessions`: a positive integer, 16 by default when unset. Zero, a negative number, a `bool` or a non-integer raises `ValueError`. Keep it at or above the number of agent sessions (members, helpers and scheduled runs included) that can be awake on the host at once; see `max_sessions` in [Configuration](/reference/configuration#sdk-and-gateway-runtime-options). New in the next release. TypeScript twin `maxSessions(n)` |
+| `.max_sessions(n)` | The gateway's session limit, sent as `runtime_options.max_sessions`: a positive integer, 16 by default when unset. Zero, a negative number, a `bool` or a non-integer raises `ValueError`. Keep it at or above the number of agent sessions (members, helpers and scheduled runs included) that can be awake on the host at once; see `max_sessions` in [Configuration](/reference/configuration#sdk-and-gateway-runtime-options). New in 0.9.16. TypeScript twin `maxSessions(n)` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder)` | Session agent builder |
 | `.gating(path)` | Gating config path (`config/gating.toml` is discovered when present). An empty path raises `ValueError`: it no longer switches gating off. To keep gating off, do not call it and keep nothing at `config/gating.toml` under the working directory |
@@ -1325,6 +1325,30 @@ builder, customizer) must not call ordinary runtime RPCs on the same
 runtime. Ordinary dispatch starts only after init settles, and the
 gateway refuses an earlier request at once with `InitInProgressError`
 (`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
+
+### Schedule callbacks that arrive during startup
+
+A host runnable is application code that a durable schedule fires. The builder
+declares its name with `.host_runnables([...])`, and
+`on_schedule_fire(name, handler)` on the runtime registers the handler that
+takes each fire (see [Scheduling](/concepts/scheduling#targets)).
+
+<Warning>
+From 0.7.32 to 0.9.16 a schedule callback can arrive before the application
+has registered its handler. The gateway begins firing stored schedules while
+`build()` is still running, and a handler can be registered only after
+`build()` has returned. A callback that arrives in between is answered
+`no schedule-fire handler registered for runnable: <name>`, and its occurrence
+is recorded `delivery_failed` (`runtime_rejected`). A recurring schedule fires
+again at its next time; the fire of a schedule that fires once is lost. It
+takes persistent state, a declared runnable and a stored schedule that falls
+due while the application starts.
+
+This was shown by a run of the 0.9.16 source against the released 0.9.15
+gateway with the SDK's start held open; one unforced start on the published
+0.9.15 did not meet it. A fix, a way to register the handler on the builder,
+is planned.
+</Warning>
 
 ## Adopting a gateway child the host started
 

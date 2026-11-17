@@ -556,6 +556,7 @@ pub enum GeneratedCommsTrustAuthoritySourceKind {
     MobMachineExternalPeerTrustUnwiring,
     MobMachineExternalPeerTrustRepair,
     MobMachineExternalPeerReciprocalTrust,
+    MobMachineExternalPeerReciprocalTrustRemoval,
 }
 
 #[doc(hidden)]
@@ -1017,6 +1018,14 @@ unsafe extern "Rust" {
     fn mob_external_peer_reciprocal_trust_generated_authority_bridge_token_is_valid(
         token: &(dyn std::any::Any + Send + Sync),
     ) -> bool;
+
+    #[link_name = concat!(
+        "__meerkat_mob_generated_authority_bridge_token_is_valid_v1_mob_external_peer_reciprocal_trust_removal_",
+        env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
+    )]
+    fn mob_external_peer_reciprocal_trust_removal_generated_authority_bridge_token_is_valid(
+        token: &(dyn std::any::Any + Send + Sync),
+    ) -> bool;
 }
 
 #[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
@@ -1138,6 +1147,11 @@ fn validate_mob_generated_authority_bridge_token(
             GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust => {
                 mob_external_peer_reciprocal_trust_generated_authority_bridge_token_is_valid(token)
             }
+            GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrustRemoval => {
+                mob_external_peer_reciprocal_trust_removal_generated_authority_bridge_token_is_valid(
+                    token,
+                )
+            }
             _ => false,
         }
     };
@@ -1197,6 +1211,7 @@ fn is_mob_machine_trust_source(kind: GeneratedCommsTrustAuthoritySourceKind) -> 
             | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustUnwiring
             | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerTrustRepair
             | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrust
+            | GeneratedCommsTrustAuthoritySourceKind::MobMachineExternalPeerReciprocalTrustRemoval
     )
 }
 

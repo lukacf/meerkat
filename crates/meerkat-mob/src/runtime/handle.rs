@@ -5130,21 +5130,30 @@ async fn pause_fork_admission_if_requested(source: &AgentIdentity) {
     }
 }
 
-struct ProvisionedChildRetireOnDrop {
+pub(super) struct ProvisionedChildRetireOnDrop {
     handle: Option<MobHandle>,
     identity: AgentIdentity,
 }
 
 impl ProvisionedChildRetireOnDrop {
-    fn arm(handle: MobHandle, identity: AgentIdentity) -> Self {
+    pub(super) fn arm(handle: MobHandle, identity: AgentIdentity) -> Self {
         Self {
             handle: Some(handle),
             identity,
         }
     }
 
-    fn disarm(mut self) {
+    pub(super) fn disarm(mut self) {
         self.handle = None;
+    }
+}
+
+impl std::fmt::Debug for ProvisionedChildRetireOnDrop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionedChildRetireOnDrop")
+            .field("identity", &self.identity)
+            .field("armed", &self.handle.is_some())
+            .finish()
     }
 }
 

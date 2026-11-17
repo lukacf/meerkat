@@ -1682,6 +1682,7 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId },
             AuthorizeRetiringMemberTrustCleanupObserved { edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             AuthorizeExternalPeerReciprocalTrust { key: ExternalPeerKey, agent_identity: AgentIdentity },
+            AuthorizeExternalPeerReciprocalTrustRemoval { key: ExternalPeerKey, agent_identity: AgentIdentity },
             UnwireExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge },
             CleanupRetiringExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             RestoreRetiringExternalPeer { key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
@@ -2908,6 +2909,10 @@ macro_rules! mob_catalog_machine_dsl {
             MemberPeerRebindAuthorized { agent_identity: AgentIdentity, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint },
             MemberPeerOverlayAuthorized { agent_identity: AgentIdentity, peer_id: PeerId, peer_overlay_endpoints: Set<MemberPeerEndpoint>, epoch: u64 },
             ExternalPeerReciprocalTrustRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64 },
+            // The removal of the row `ExternalPeerReciprocalTrustRequested`
+            // added: the member's peer (`peer_id`) leaves the trust store of
+            // the edge's external peer.
+            ExternalPeerReciprocalTrustRemovalRequested { key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64 },
             PersistSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String> },
             DeleteSupervisorAuthority { peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion },
             // D-wiring-observability (#27): pair-valued notice emitted from
@@ -4951,6 +4956,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition MemberPeerRebindAuthorized => local seam NoOwnerRealization,
         disposition MemberPeerOverlayAuthorized => external handoff mob_member_peer_overlay seam OwnerRealizationOnly,
         disposition ExternalPeerReciprocalTrustRequested => external handoff mob_external_peer_reciprocal_trust seam OwnerRealizationOnly,
+        disposition ExternalPeerReciprocalTrustRemovalRequested => external handoff mob_external_peer_reciprocal_trust_removal seam OwnerRealizationOnly,
         disposition PersistSupervisorAuthority => local seam SurfaceResultAlignment,
         disposition DeleteSupervisorAuthority => local seam SurfaceResultAlignment,
         disposition EmitWiringLifecycleNotice => external seam SurfaceResultAlignment,
@@ -19236,6 +19242,29 @@ macro_rules! mob_catalog_machine_dsl {
                 edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
                 peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
                 peer_endpoint: self.member_peer_endpoints.get_cloned(agent_identity).get("value"),
+                epoch: self.topology_epoch
+            }
+        }
+
+        // The removal twin of the reciprocal add above. The owner asks it
+        // while the external edge is still wired and the member's peer is
+        // still registered, before the input that ends the edge (the
+        // member's retirement, its mob's destroy, an explicit unwire): the
+        // edge and the member's current peer id both come from MobMachine
+        // state. It changes no state, as the add changes none, and a
+        // retirement runs in a stopped mob too.
+        transition AuthorizeExternalPeerReciprocalTrustRemoval {
+            per_phase [Running, Stopped]
+            on input AuthorizeExternalPeerReciprocalTrustRemoval { key, agent_identity }
+            guard "external_peer_key_currently_wired" { self.external_peer_edges_by_key.contains_key(key) == true }
+            guard "external_peer_key_matches_member" { mob_machine_external_peer_key_matches_local(key, agent_identity) }
+            guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit ExternalPeerReciprocalTrustRemovalRequested {
+                key: key,
+                edge: self.external_peer_edges_by_key.get_cloned(key).get("value"),
+                peer_id: self.member_peer_ids.get_cloned(agent_identity).get("value"),
                 epoch: self.topology_epoch
             }
         }

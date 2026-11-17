@@ -10057,6 +10057,14 @@ pub(super) struct MobActor {
     /// durable HostStatus truth drive a retry.
     pub(super) orphan_release_reservations:
         BTreeMap<super::state::HostOrphanReleaseKey, HostOrphanReleaseReservation>,
+    /// The runtime each external reciprocal trust row was realized on, by the
+    /// external edge it belongs to: the handle the removal of that row is
+    /// realized through when the edge ends. Realization custody only, and
+    /// weak: MobMachine authorizes the row and its removal, and a runtime
+    /// that is gone holds no row. Volatile: a restart clears it, and the
+    /// rows of a runtime another process built are not this actor's to reach.
+    pub(super) external_peer_reciprocal_trust_targets:
+        BTreeMap<mob_dsl::ExternalPeerKey, std::sync::Weak<dyn CoreCommsRuntime>>,
     /// Volatile binding-incarnation fence for each host identity. Supervisor
     /// epochs are not sufficient here: revoke followed by a fresh bind may
     /// reuse the same authority epoch while changing the host route/process.
@@ -52016,7 +52024,155 @@ impl MobActor {
         .map_err(MobError::WiringError)?;
         self.apply_trusted_peer_add(target_comms.as_ref(), peer, authority)
             .await
+            .map_err(MobError::CommsError)?;
+        // The row stands on `target_comms`: its removal, when the edge ends,
+        // is realized through this handle.
+        self.external_peer_reciprocal_trust_targets
+            .insert(key, Arc::downgrade(&target_comms));
+        Ok(())
+    }
+
+    /// Ask MobMachine for the removal of the reciprocal trust row that
+    /// [`Self::apply_external_peer_reciprocal_trust`] added for `key`'s
+    /// member on the external peer's runtime, and realize it there. Called
+    /// before a machine input ends the external edge (the member's
+    /// retirement, its mob's destroy, an explicit unwire), while MobMachine
+    /// still holds the edge and the member's peer. The runtime handle is the
+    /// one the add was realized on, and it is taken: the removal is asked
+    /// once. Best effort: a runtime that is gone holds no row, and a removal
+    /// that is refused is logged and never fails the edge's end.
+    async fn remove_external_peer_reciprocal_trust_before_edge_end(
+        &mut self,
+        key: &mob_dsl::ExternalPeerKey,
+    ) {
+        let Some(target) = self.external_peer_reciprocal_trust_targets.remove(key) else {
+            return;
+        };
+        let Some(target_comms) = target.upgrade() else {
+            return;
+        };
+        if let Err(error) = self
+            .remove_external_peer_reciprocal_trust(key, target_comms)
+            .await
+        {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %key.local.0,
+                %error,
+                "external reciprocal trust removal was not realized; the external edge ends regardless"
+            );
+        }
+    }
+
+    async fn remove_external_peer_reciprocal_trust(
+        &mut self,
+        key: &mob_dsl::ExternalPeerKey,
+        target_comms: Arc<dyn CoreCommsRuntime>,
+    ) -> Result<bool, MobError> {
+        let local_identity = AgentIdentity::from(key.local.0.as_str());
+        let transition = self.apply_dsl_input_collect_transition(
+            mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrustRemoval {
+                key: key.clone(),
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&local_identity),
+            },
+            "remove_external_peer_reciprocal_trust",
+        )?;
+        let Some(obligation) =
+            crate::generated::protocol_mob_external_peer_reciprocal_trust_removal::extract_obligations_with_freshness(
+                &transition,
+                crate::generated::protocol_mob_external_peer_reciprocal_trust_removal::MobTopologyFreshnessAuthority::from_live_topology_epoch(self.dsl_topology_epoch.clone(), Arc::clone(&self.dsl_authority_owner_token)),
+            )
+            .into_iter()
+            .find(|obligation| obligation.key() == key)
+        else {
+            return Err(MobError::WiringError(
+                "MobMachine produced no external reciprocal trust removal obligation".to_string(),
+            ));
+        };
+        let target_peer_id = target_comms.peer_id().ok_or_else(|| {
+            MobError::WiringError(
+                "external reciprocal trust removal target runtime did not expose peer_id"
+                    .to_string(),
+            )
+        })?;
+        if target_peer_id.to_string() != obligation.edge().endpoint.peer_id.0 {
+            return Err(MobError::WiringError(format!(
+                "external reciprocal trust removal target peer_id {target_peer_id} does not match MobMachine external edge peer_id {}",
+                obligation.edge().endpoint.peer_id.0
+            )));
+        }
+        let peer_id = obligation.peer_id().0.clone();
+        let authority = crate::generated::protocol_mob_external_peer_reciprocal_trust_removal::reciprocal_removal_authority_for_peer(
+            &obligation,
+            &peer_id,
+        )
+        .map_err(MobError::WiringError)?;
+        self.apply_trusted_peer_remove(target_comms.as_ref(), peer_id, authority)
+            .await
             .map_err(MobError::CommsError)
+    }
+
+    /// Delete the comms key pair of a delegation helper whose seat ended
+    /// with its session archived. A delegation helper is a member under the
+    /// `delegate` profile of a session's implicit delegation mob (both facts
+    /// are MobMachine's and the roster's, so they hold after a restart too);
+    /// its session is never the seat of a later incarnation, and a later
+    /// build of that session mints a new key pair, so it is another peer.
+    /// Callers pass only a seat that ended with
+    /// [`mob_dsl::MemberSessionDisposal::Archived`]: a session kept for a
+    /// successor keeps its key pair. Only a session-scoped key pair is
+    /// deleted: under network comms the key is the realm's. Best effort: a
+    /// deletion that fails is logged once, by session, and fails nothing.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::unused_async))]
+    async fn delete_ended_delegation_helper_key_pair(&self, entry: &RosterEntry) {
+        if !self.dsl_authority.state().implicit_delegation_mob
+            || entry.role.as_str() != super::delegation::DELEGATION_HELPER_PROFILE
+        {
+            return;
+        }
+        let Some(session_id) = entry.bridge_session_id() else {
+            return;
+        };
+        let Ok(super::dormant_seat::MemberSeatEndpointSource::SessionScopedInproc {
+            identity_root,
+        }) = self.seat_endpoint_source()
+        else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dir = identity_root.join(session_id.to_string());
+            let mut failure = None;
+            for file in ["identity.key", "identity.pub"] {
+                match tokio::fs::remove_file(dir.join(file)).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => failure = Some(error.kind()),
+                }
+            }
+            if failure.is_none() {
+                // The directory held the key pair only; anything else in it
+                // keeps it in place.
+                match tokio::fs::remove_dir(&dir).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => failure = Some(error.kind()),
+                }
+            }
+            if let Some(kind) = failure {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %entry.agent_identity,
+                    session_id = %session_id,
+                    error_kind = ?kind,
+                    "the ended delegation helper's session key pair was not deleted"
+                );
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (identity_root, session_id);
+        }
     }
 
     fn apply_unwire_external_peer_idempotent(
@@ -52646,6 +52802,9 @@ impl MobActor {
         let edge = authority_edge
             .unwrap_or_else(|| Self::external_peer_edge(&local_identity, &prior_spec));
         let key = Self::external_peer_key_for_edge(&edge);
+        // The unwire ends this edge: the external peer's reciprocal row for
+        // the member goes first, while the machine holds both.
+        Box::pin(self.remove_external_peer_reciprocal_trust_before_edge_end(&key)).await;
         // MobMachine's verdict says whether the local member holds a row to
         // remove: one that is not materialized holds none, and its wake
         // installs only the edges the machine still holds.
@@ -54382,6 +54541,9 @@ impl MobActor {
                 })?;
             let prior_spec = Self::trusted_peer_descriptor_from_machine_endpoint(&edge.endpoint)?;
             let key = Self::external_peer_key_for_edge(&edge);
+            // The member's end ends this edge: the external peer's reciprocal
+            // row for the member goes first, while the machine holds both.
+            Box::pin(self.remove_external_peer_reciprocal_trust_before_edge_end(&key)).await;
             match comms.as_ref() {
                 Some(comms) => {
                     let unwiring_authority =
@@ -54836,6 +54998,11 @@ impl MobActor {
             {
                 report.aborted_at = Some((DisposalStep::ArchiveSession, error));
             } else {
+                // The member's archive is committed: a delegation helper's
+                // session key pair goes with its seat.
+                if disposal == mob_dsl::MemberSessionDisposal::Archived {
+                    Box::pin(self.delete_ended_delegation_helper_key_pair(&ctx.entry)).await;
+                }
                 #[cfg(test)]
                 if let Ok(mut target) = FAIL_AFTER_DESTROY_MEMBER_ARCHIVE_FOR_IDENTITY.lock()
                     && target.as_ref() == Some(&ctx.entry.agent_identity)

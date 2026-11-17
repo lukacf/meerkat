@@ -451,6 +451,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId)
 - `AuthorizeRetiringMemberTrustCleanupObserved`(edge: WiringEdge, a_identity: AgentIdentity, a_peer_id: PeerId, b_identity: AgentIdentity, b_peer_id: PeerId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `AuthorizeExternalPeerReciprocalTrust`(key: ExternalPeerKey, agent_identity: AgentIdentity)
+- `AuthorizeExternalPeerReciprocalTrustRemoval`(key: ExternalPeerKey, agent_identity: AgentIdentity)
 - `CleanupRetiringExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `RestoreRetiringExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `CleanupRetiringExternalPeerObservedAbsent`(key: ExternalPeerKey, edge: ExternalPeerEdge, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
@@ -820,6 +821,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberPeerRebindAuthorized`(agent_identity: AgentIdentity, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint)
 - `MemberPeerOverlayAuthorized`(agent_identity: AgentIdentity, peer_id: PeerId, peer_overlay_endpoints: Set<MemberPeerEndpoint>, epoch: u64)
 - `ExternalPeerReciprocalTrustRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, peer_endpoint: MemberPeerEndpoint, epoch: u64)
+- `ExternalPeerReciprocalTrustRemovalRequested`(key: ExternalPeerKey, edge: ExternalPeerEdge, peer_id: PeerId, epoch: u64)
 - `PersistSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion, pending_operation_id: Option<String>, pending_peer_id: Option<PeerId>, pending_signing_key: Option<PeerSigningKey>, pending_epoch: Option<u64>, pending_protocol_version: Option<SupervisorProtocolVersion>, pending_accepted_peer_ids: Set<PeerId>, pending_member_target_names: Map<PeerId, String>, pending_member_target_addresses: Map<PeerId, String>)
 - `DeleteSupervisorAuthority`(peer_id: PeerId, signing_key: PeerSigningKey, epoch: u64, protocol_version: SupervisorProtocolVersion)
 - `EmitWiringLifecycleNotice`(kind: WiringLifecycleKind, edge: WiringEdge)
@@ -9228,6 +9230,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_endpoint_registered`
 - Emits: `ExternalPeerReciprocalTrustRequested`
 - To: `Running`
+
+### `AuthorizeExternalPeerReciprocalTrustRemovalRunning`
+- From: `Running`
+- On: `AuthorizeExternalPeerReciprocalTrustRemoval`(key, agent_identity)
+- Guards:
+  - `external_peer_key_currently_wired`
+  - `external_peer_key_matches_member`
+  - `member_peer_registered`
+- Emits: `ExternalPeerReciprocalTrustRemovalRequested`
+- To: `Running`
+
+### `AuthorizeExternalPeerReciprocalTrustRemovalStopped`
+- From: `Stopped`
+- On: `AuthorizeExternalPeerReciprocalTrustRemoval`(key, agent_identity)
+- Guards:
+  - `external_peer_key_currently_wired`
+  - `external_peer_key_matches_member`
+  - `member_peer_registered`
+- Emits: `ExternalPeerReciprocalTrustRemovalRequested`
+- To: `Stopped`
 
 ### `RecoverExternalPeerWiringRunning`
 - From: `Running`

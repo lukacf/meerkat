@@ -385,8 +385,8 @@ export interface TransportTermination {
    * `"retained_until_exit"` (cleanup completes only with the process exit),
    * `"refused"` (an error or non-attesting answer), `"unanswered"` (no answer:
    * a timeout, a failed reader or a gone process), or `"not_negotiated"`
-   * (the gateway offered no shutdown handshake, so the stop only closed its
-   * stdin).
+   * (no shutdown request was made, so the stop only closed its stdin: the
+   * gateway offered no shutdown handshake, or its init settled `failed`).
    */
   readonly nativeShutdown:
     | "acknowledged"
@@ -556,6 +556,16 @@ export class PersistentTransport {
 
   closeInitWatch(watch: InitWatch): void {
     if (this._initWatch === watch) this._initWatch = null;
+  }
+
+  /**
+   * The current child's `meta/init` settled `failed`. The gateway exits after
+   * that settlement without waiting for a shutdown request, so its stop makes
+   * none: it ends the gateway's input and reaps it, as for a gateway that
+   * offered no handshake.
+   */
+  initSettledFailed(): void {
+    this._supportsShutdownHandshake = false;
   }
 
   /**

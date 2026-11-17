@@ -1783,6 +1783,10 @@ export class MetaRuntime {
       return ready;
     }
     if (settled.outcome === "failed") {
+      // The gateway exits now, with no answer to a shutdown request: the stop
+      // that follows must not make one, or its rejection would be thrown in
+      // place of this refusal.
+      transport.initSettledFailed();
       const data = settled.data;
       const errorData: Record<string, unknown> =
         typeof data === "object" && data !== null && !Array.isArray(data)

@@ -1608,6 +1608,10 @@ class MetaRuntime:
             }
         if outcome == "failed":
             self._init_outcome = "failed"
+            # The gateway exits now, with no answer to a shutdown request:
+            # the stop that follows must not make one, or its failure would
+            # be raised in place of this refusal.
+            transport.init_settled_failed()
             data = settled.get("data")
             error_data = dict(data) if isinstance(data, dict) else {}
             if data is not None and not isinstance(data, dict):

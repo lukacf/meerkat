@@ -703,6 +703,15 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "DeferInputBehindBacklogEndedWithRefusedRunRunning",
     "DeferInputBehindBacklogEndedWithRefusedRunRetired",
     "DeferInputBehindBacklogEndedWithRefusedRunStopped",
+    // The recovery verdict that keeps a consumed ephemeral input whose
+    // terminal carrier is pending (0.9.17), declared beside its sibling
+    // verdicts in the catalog: after every variant 0.9.16 published.
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired",
+    "ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped",
 ];
 
 /// One published `TransitionId` variant whose transition no longer exists.

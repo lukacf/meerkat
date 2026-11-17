@@ -1222,6 +1222,43 @@ fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
     }
 }
 
+/// MeerkatMachine's recovery verdict that keeps a consumed ephemeral input
+/// whose terminal carrier is pending (0.9.17) is declared beside its sibling
+/// verdicts in the catalog and emitted on the late tail: its six arms
+/// directly follow `DeferInputBehindBacklogEndedWithRefusedRunStopped`, the
+/// last variant 0.9.16 published, which keeps index 2878, so no published
+/// `TransitionId` discriminant moves.
+#[test]
+fn meerkat_recovered_pending_carrier_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.16 published.
+    let published_last = index("DeferInputBehindBacklogEndedWithRefusedRunStopped");
+    assert_eq!(published_last, 2878);
+    let arms = [
+        "Initializing",
+        "Idle",
+        "Attached",
+        "Running",
+        "Retired",
+        "Stopped",
+    ]
+    .map(|phase| {
+        format!("ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier{phase}")
+    });
+    assert_eq!(
+        variants[published_last + 1..published_last + 1 + arms.len()].to_vec(),
+        arms.to_vec(),
+        "the pending carrier verdict's arms directly follow the last variant 0.9.16 published"
+    );
+}
+
 /// MobMachine's stale respawn abandonment arm (0.9.11) is declared beside
 /// its siblings in the catalog and emitted on the late tail, after every
 /// variant 0.9.10 published and after the arms 0.9.11 appended before it:

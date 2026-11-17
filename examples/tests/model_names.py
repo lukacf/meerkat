@@ -185,8 +185,11 @@ def main() -> int:
                 model = match.group(0).rstrip(".-")
                 where = f"{path}:{number}: {model}"
                 if model not in line_of:
-                    extends = any(model.startswith(known) for known in ids)
-                    fragment = any(known.startswith(model) for known in ids)
+                    # A catalog id with a date after it, or the leading parts
+                    # of one (a family named in prose). A misspelled id is
+                    # neither: it is reported as not in the catalog.
+                    extends = any(re.fullmatch(re.escape(known) + r"-\d{8}", model) for known in ids)
+                    fragment = any(known.startswith((model + "-", model + ".")) for known in ids)
                     if extends or fragment or whole_file is not None:
                         continue
                     if model in keeps:

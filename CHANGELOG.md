@@ -353,7 +353,8 @@ them.
   exception: an allow-list that holds every tool of the binding's mode
   cannot be told from no other overlay, so a session with none of those
   tools takes that turn with its own tools too. Present in every release
-  since 0.8.41.
+  since 0.7.23 (by the source at the release tags from v0.7.23 through
+  v0.9.16; shown by a run on a Meta 0.9.15 gateway only).
 
 - `meerkat-auth-core` (`rkat mcp login`, and every host's MCP OAuth login): a
   remote MCP server that publishes only OAuth authorization-server metadata

@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Behaviour only: a mob profile's `shell = true` keeps its shape and now
   also turns on `monitor_start` for the member. See Changed, Upgrade, and
   Breaking in the Meerkat changelog.
+- Behaviour-only (not measured by the gate): Python and TypeScript SDKs: a
+  gateway start that the gateway refuses after accepting the init request
+  now raises the refusal itself. With a gateway the SDK starts or adopts,
+  `build()` and `connect()` raised `GatewayStartupCleanupError`, a transport
+  error, in that case, with the refusal as its cause (through 0.9.16; read
+  by lines back to 0.9.9). They now raise the refusal unchanged:
+  `CompositionProvenanceError` (`-32019`), `StorageResolutionError`
+  (`-32014`), or the typed RPC error of its code, with its data and no
+  cause. A handler that caught the cleanup error or the transport error for
+  this case no longer matches; catch the typed error, or both, as the
+  documented example does. Unchanged: a gateway that exits after acceptance
+  without settling still raises the cleanup error around the
+  unknown-outcome error. After such a start the stop record's native
+  shutdown value reads `not_negotiated` where it read `unanswered`.
 
 ### Security
 

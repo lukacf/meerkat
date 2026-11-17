@@ -19,6 +19,14 @@ All notable changes to the Python SDK are documented here.
   this method's source beside `host_runnables`. (The lost fire was shown by
   a run with the SDK's start held open; it was not seen in an unforced
   start.)
+- A gateway start refused after the init request was accepted raises the
+  refusal's own typed error (`CompositionProvenanceError`,
+  `StorageResolutionError` or the typed RPC error) instead of
+  `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+- `GatewayStartupCleanupError`'s message names the type of the startup
+  failure it wraps ("gateway startup failed (CompositionProvenanceError) and
+  the stop of its gateway transport ..."); it still formats nothing of the
+  failure itself.
 
 ## 0.9.16
 

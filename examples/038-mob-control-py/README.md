@@ -1,4 +1,4 @@
-# 038 — Drive a Mob from the Python SDK
+# 038: Drive a Mob from the Python SDK
 
 An application creates a small mob over `rkat-rpc`, gives it work, follows
 what its members do and stops work it no longer wants. Two members: an editor,
@@ -10,22 +10,22 @@ Use the 0.9.15 SDK and runtime or later (see
 [Stop and cancel](#stop-and-cancel) for why).
 
 ## Concepts
-- `client.create_mob(definition=...)` — profiles are the roles; only a profile
+- `client.create_mob(definition=...)`: profiles are the roles; only a profile
   with `external_addressable: true` takes work from outside the mob, and every
   profile needs `tools.comms: true`
 - `mob.spawn(profile=..., agent_identity=..., initial_message=...)` and
-  `mob.wire(a, b)` — a member runs one first turn on its initial message, and
+  `mob.wire(a, b)`: a member runs one first turn on its initial message, and
   `mob.wait_for_kickoff_complete()` waits for those turns
-- `mob.member(identity).send(text)` — work goes to a member through the mob,
+- `mob.member(identity).send(text)`: work goes to a member through the mob,
   not to its session
-- `mob.subscribe_events()` — one stream for all members; each item names the
+- `mob.subscribe_events()`: one stream for all members; each item names the
   member (`source`) and carries the event (`envelope.payload`)
-- `mob.member_status(identity)` — status, tokens used, the last answer
+- `mob.member_status(identity)`: status, tokens used, the last answer
   (`output_preview`) and whether a run is open (`progress.run_state`)
-- `mob.member_history(identity, from_index=0, limit=1)` — the first message
+- `mob.member_history(identity, from_index=0, limit=1)`: the first message
   of a member is its system prompt, with the skills the runtime gave it
 - `mob.stop_member_run(identity, run_id, reason=...)` and
-  `client.mob_cancel_all_work(member_ref)` — the two ways to end work
+  `client.mob_cancel_all_work(member_ref)`: the two ways to end work
 
 ## What it does
 

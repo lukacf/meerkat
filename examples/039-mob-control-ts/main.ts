@@ -1,5 +1,5 @@
 /**
- * 039 — Drive a Mob from the TypeScript SDK
+ * 039: Drive a Mob from the TypeScript SDK
  *
  * An application creates a small mob over `rkat-rpc`, gives it work, follows
  * what the members do and stops work it no longer wants.
@@ -130,43 +130,42 @@ async function waitUntilIdle(mob: Mob, members: string[], timeoutSeconds = 180):
   let quiet = 0;
   for (let second = 0; second < timeoutSeconds; second++) {
     const states = await Promise.all(members.map((member) => mob.memberStatus(member)));
-    quiet = states.every((state) => state.progress?.run_state === "idle") ? quiet + 1 : 0;
+    // Idle with nothing admitted: a message that has arrived but whose run
+    // has not started yet still counts as work.
+    const idle = states.every(
+      (state) => state.progress?.run_state === "idle" && state.progress.in_flight_work === 0,
+    );
+    quiet = idle ? quiet + 1 : 0;
     if (quiet === 2) return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error("the mob did not become idle");
 }
 
-async function main() {
-  const client = new MeerkatClient();
+/** The steps after the create, on a mob that `main` destroys whatever happens. */
+async function drive(client: MeerkatClient, mob: Mob): Promise<void> {
+  const editor = await mob.spawn({ profile: "editor", agentIdentity: EDITOR, initialMessage: EDITOR_BRIEF });
+  await mob.spawn({ profile: "researcher", agentIdentity: RESEARCHER, initialMessage: RESEARCHER_BRIEF });
+  await mob.wire(EDITOR, RESEARCHER);
+  // A member runs one first turn on its initial message when it is spawned.
+  await mob.waitForKickoffComplete({ timeoutMs: 120_000 });
+  for (const member of await mob.listMembers()) {
+    console.log(`  ${member.agentIdentity}: ${member.profile}, wired to ${JSON.stringify(member.wiredTo ?? [])}`);
+  }
 
+  // What a member was told: the first message of its transcript is its
+  // system prompt, with the skills the runtime gave it.
+  const history = await mob.memberHistory(EDITOR, { fromIndex: 0, limit: 1 });
+  const first = history.page.messages[0] as { content?: unknown } | undefined;
+  const systemPrompt = typeof first?.content === "string" ? first.content : "";
+  const named = [...systemPrompt.matchAll(/skill_name="([^"]+)"/g)].map((match) => match[1]);
+  const skills = [...new Set(named)].sort();
+  console.log(`  ${EDITOR} system prompt: ${systemPrompt.length} characters, skills ${JSON.stringify(skills)}`);
+
+  const desk = new Desk();
+  const subscription = await mob.subscribeEvents();
+  const follower = desk.follow(subscription);
   try {
-    await client.connect();
-
-    // ── 1. Create, spawn, wire ──
-    console.log("=== 1. Create the mob ===");
-    const mob = await client.createMob({ definition: DEFINITION });
-    const editor = await mob.spawn({ profile: "editor", agentIdentity: EDITOR, initialMessage: EDITOR_BRIEF });
-    await mob.spawn({ profile: "researcher", agentIdentity: RESEARCHER, initialMessage: RESEARCHER_BRIEF });
-    await mob.wire(EDITOR, RESEARCHER);
-    // A member runs one first turn on its initial message when it is spawned.
-    await mob.waitForKickoffComplete({ timeoutMs: 120_000 });
-    for (const member of await mob.listMembers()) {
-      console.log(`  ${member.agentIdentity}: ${member.profile}, wired to ${JSON.stringify(member.wiredTo ?? [])}`);
-    }
-
-    // What a member was told: the first message of its transcript is its
-    // system prompt, with the skills the runtime gave it.
-    const history = await mob.memberHistory(EDITOR, { fromIndex: 0, limit: 1 });
-    const first = history.page.messages[0] as { content?: unknown } | undefined;
-    const systemPrompt = typeof first?.content === "string" ? first.content : "";
-    const named = [...systemPrompt.matchAll(/skill_name="([^"]+)"/g)].map((match) => match[1]);
-    const skills = [...new Set(named)].sort();
-    console.log(`  ${EDITOR} system prompt: ${systemPrompt.length} characters, skills ${JSON.stringify(skills)}`);
-
-    const desk = new Desk();
-    const subscription = await mob.subscribeEvents();
-    const follower = desk.follow(subscription);
     await waitUntilIdle(mob, [EDITOR, RESEARCHER]);
 
     // ── 2. Send work and read the result ──
@@ -215,11 +214,29 @@ async function main() {
     // Had ONE and TWO still been queued, they would run before this.
     const done = await desk.next(EDITOR, isRunCompleted, mark);
     console.log(`  ${EDITOR} answered: ${JSON.stringify(done.result.trim())}`);
-
+  } finally {
     await subscription.close();
     await follower;
-    await client.mobDestroy(MOB_ID);
-    console.log("\nMob destroyed.");
+  }
+}
+
+async function main() {
+  const client = new MeerkatClient();
+
+  try {
+    await client.connect();
+
+    // ── 1. Create, spawn, wire ──
+    console.log("=== 1. Create the mob ===");
+    const mob = await client.createMob({ definition: DEFINITION });
+    try {
+      await drive(client, mob);
+    } finally {
+      // Also when a step failed: the mob is kept in the realm of this run,
+      // and nothing else would remove it.
+      await client.mobDestroy(MOB_ID);
+      console.log("\nMob destroyed.");
+    }
   } finally {
     await client.close();
   }

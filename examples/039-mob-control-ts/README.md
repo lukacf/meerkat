@@ -1,4 +1,4 @@
-# 039 — Drive a Mob from the TypeScript SDK
+# 039: Drive a Mob from the TypeScript SDK
 
 An application creates a small mob over `rkat-rpc`, gives it work, follows
 what its members do and stops work it no longer wants. Two members: an editor,
@@ -10,23 +10,23 @@ Use the 0.9.15 SDK and runtime or later (see
 [Stop and cancel](#stop-and-cancel) for why).
 
 ## Concepts
-- `client.createMob({ definition })` — profiles are the roles; only a profile
+- `client.createMob({ definition })`: profiles are the roles; only a profile
   with `external_addressable: true` takes work from outside the mob, and every
   profile needs `tools.comms: true`
 - `mob.spawn({ profile, agentIdentity, initialMessage })` and
-  `mob.wire(a, b)` — a member runs one first turn on its initial message, and
+  `mob.wire(a, b)`: a member runs one first turn on its initial message, and
   `mob.waitForKickoffComplete()` waits for those turns
-- `mob.member(identity).send(text)` — work goes to a member through the mob,
+- `mob.member(identity).send(text)`: work goes to a member through the mob,
   not to its session
-- `mob.subscribeEvents()` — one stream for all members; each item names the
+- `mob.subscribeEvents()`: one stream for all members; each item names the
   member (`source`) and carries the event (`envelope.payload`). Narrow the
   event with the guards the SDK exports (`isRunCompleted`, `isTextDelta`, ...)
-- `mob.memberStatus(identity)` — status, tokens used, the last answer
+- `mob.memberStatus(identity)`: status, tokens used, the last answer
   (`outputPreview`) and whether a run is open (`progress.run_state`)
-- `mob.memberHistory(identity, { fromIndex: 0, limit: 1 })` — the first
+- `mob.memberHistory(identity, { fromIndex: 0, limit: 1 })`: the first
   message of a member is its system prompt, with the skills the runtime gave it
 - `mob.stopMemberRun(identity, runId, reason)` and
-  `client.mobCancelAllWork({ memberRef })` — the two ways to end work
+  `client.mobCancelAllWork({ memberRef })`: the two ways to end work
 
 ## What it does
 

@@ -302,6 +302,11 @@ for line in sys.stdin:
             "code": -32602, "message": "Synthetic mob refusal",
         }})
         continue
+    elif method == "mob/member_send" and mode == "send-error":
+        send({"id": request["id"], "error": {
+            "code": -32602, "message": "Synthetic send refusal",
+        }})
+        continue
     elif method.startswith("mob/"):
         result, after = mob_request(method, params)
     else:

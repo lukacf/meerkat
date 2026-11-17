@@ -330,6 +330,16 @@ describe("Mob control examples", { concurrency: 2 }, () => {
       assert.match(result.stdout, /editor-1 answered: .Synthetic answer./);
       assert.match(result.stdout, /Mob destroyed\./);
     });
+    it(`${example}: a step that fails after the create still destroys the mob`, async () => {
+      const result = await runExample(example, "send-error",
+        { ANTHROPIC_API_KEY: "synthetic-not-a-key" });
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /Synthetic send refusal/);
+      // The stream the example opened is closed, then the mob is destroyed.
+      assert.deepEqual(result.requests.slice(-3).map((r) => r.method),
+        ["mob/member_send", "mob/stream_close", "mob/destroy"]);
+      assert.match(result.stdout, /Mob destroyed\./);
+    });
     it(`${example}: a refused mob fails nonzero and leaves no child`, async () => {
       const result = await runExample(example, "create-error",
         { ANTHROPIC_API_KEY: "synthetic-not-a-key" });

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""038 — Drive a Mob from the Python SDK
+"""038: Drive a Mob from the Python SDK
 
 An application creates a small mob over `rkat-rpc`, gives it work, follows
 what the members do and stops work it no longer wants.
@@ -112,7 +112,11 @@ async def wait_until_idle(mob, members: list[str], *, timeout: float = 180) -> N
     quiet = 0
     for _ in range(int(timeout)):
         states = [(await mob.member_status(member)).get("progress", {}) for member in members]
-        idle = all(state.get("run_state") == "idle" for state in states)
+        # Idle with nothing admitted: a message that has arrived but whose run
+        # has not started yet still counts as work.
+        idle = all(
+            state.get("run_state") == "idle" and state.get("in_flight_work") == 0 for state in states
+        )
         quiet = quiet + 1 if idle else 0
         if quiet == 2:
             return
@@ -120,31 +124,27 @@ async def wait_until_idle(mob, members: list[str], *, timeout: float = 180) -> N
     raise TimeoutError("the mob did not become idle")
 
 
-async def main() -> None:
-    client = MeerkatClient()
-    await client.connect()
+async def drive(client, mob) -> None:
+    """The steps after the create, on a mob that `main` destroys whatever happens."""
+    editor = await mob.spawn(profile="editor", agent_identity=EDITOR, initial_message=EDITOR_BRIEF)
+    await mob.spawn(profile="researcher", agent_identity=RESEARCHER, initial_message=RESEARCHER_BRIEF)
+    await mob.wire(EDITOR, RESEARCHER)
+    # A member runs one first turn on its initial message when it is spawned.
+    await mob.wait_for_kickoff_complete(timeout_ms=120_000)
+    for member in await mob.members():
+        print(f"  {member['agent_identity']}: {member['profile']}, wired to {member.get('wired_to', [])}")
+
+    # What a member was told: the first message of its transcript is its
+    # system prompt, with the skills the runtime gave it.
+    history = await mob.member_history(EDITOR, from_index=0, limit=1)
+    system_prompt = str(history.page.messages[0].get("content", ""))
+    skills = sorted(set(re.findall(r'skill_name="([^"]+)"', system_prompt)))
+    print(f"  {EDITOR} system prompt: {len(system_prompt)} characters, skills {skills}")
+
+    desk = Desk()
+    subscription = await mob.subscribe_events()
+    follower = asyncio.create_task(desk.follow(subscription))
     try:
-        # ── 1. Create, spawn, wire ──
-        print("=== 1. Create the mob ===")
-        mob = await client.create_mob(definition=DEFINITION)
-        editor = await mob.spawn(profile="editor", agent_identity=EDITOR, initial_message=EDITOR_BRIEF)
-        await mob.spawn(profile="researcher", agent_identity=RESEARCHER, initial_message=RESEARCHER_BRIEF)
-        await mob.wire(EDITOR, RESEARCHER)
-        # A member runs one first turn on its initial message when it is spawned.
-        await mob.wait_for_kickoff_complete(timeout_ms=120_000)
-        for member in await mob.members():
-            print(f"  {member['agent_identity']}: {member['profile']}, wired to {member.get('wired_to', [])}")
-
-        # What a member was told: the first message of its transcript is its
-        # system prompt, with the skills the runtime gave it.
-        history = await mob.member_history(EDITOR, from_index=0, limit=1)
-        system_prompt = str(history.page.messages[0].get("content", ""))
-        skills = sorted(set(re.findall(r'skill_name="([^"]+)"', system_prompt)))
-        print(f"  {EDITOR} system prompt: {len(system_prompt)} characters, skills {skills}")
-
-        desk = Desk()
-        subscription = await mob.subscribe_events()
-        follower = asyncio.create_task(desk.follow(subscription))
         await wait_until_idle(mob, [EDITOR, RESEARCHER])
 
         # ── 2. Send work and read the result ──
@@ -191,11 +191,25 @@ async def main() -> None:
         # Had ONE and TWO still been queued, they would run before this.
         done = await desk.next(EDITOR, RunCompleted, after=mark)
         print(f"  {EDITOR} answered: {done.result.strip()!r}")
-
+    finally:
         follower.cancel()
         await subscription.close()
-        await client.mob_destroy(MOB_ID)
-        print("\nMob destroyed.")
+
+
+async def main() -> None:
+    client = MeerkatClient()
+    await client.connect()
+    try:
+        # ── 1. Create, spawn, wire ──
+        print("=== 1. Create the mob ===")
+        mob = await client.create_mob(definition=DEFINITION)
+        try:
+            await drive(client, mob)
+        finally:
+            # Also when a step failed: the mob is kept in the realm of this
+            # run, and nothing else would remove it.
+            await client.mob_destroy(MOB_ID)
+            print("\nMob destroyed.")
     finally:
         await client.close()
 

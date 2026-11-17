@@ -3565,9 +3565,190 @@ async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value,
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
+/// The config document's tables that hold a host's own listener settings:
+/// the address a server binds, the origins and hosts it answers, and how it
+/// admits a peer. `rest` is the REST server's listener, `mob_host` the host
+/// acceptor's and its live WebSocket's, `comms` the comms listeners' with
+/// their transport mode and peer authentication. Every member of these
+/// tables is such a setting, so the rule is on the table's path: a member
+/// this build's schema does not know is judged like the ones it knows.
+const LISTENER_SETTINGS_TABLES: [&str; 3] = ["rest", "mob_host", "comms"];
+
+/// A `meerkat_config` write as the caller sent it.
+enum ConfigToolWrite<'a> {
+    /// `action=set`: the whole document.
+    Set(&'a Value),
+    /// `action=patch`: an RFC 7396 merge patch.
+    Patch(&'a Value),
+}
+
+/// Whether the merge patch `patch`, applied where the committed document
+/// holds `committed`, leaves that value as it is. A patch object is judged
+/// member by member against a committed object; any other patch value
+/// replaces what is there, so it has to equal it. A member the committed
+/// document does not hold is a change even as `null`: the document on disk
+/// may hold a member that this build's schema does not serialize.
+fn merge_patch_restates(committed: Option<&Value>, patch: &Value) -> bool {
+    match (committed, patch) {
+        (Some(Value::Object(committed)), Value::Object(patch)) => patch
+            .iter()
+            .all(|(member, value)| merge_patch_restates(committed.get(member), value)),
+        (Some(committed), patch) => committed == patch,
+        (None, _) => false,
+    }
+}
+
+/// The first listener-settings table that `write`, as sent, would change in
+/// the realm's own committed document. `committed` is that document as
+/// serialized and `default` the default document.
+///
+/// A patch is judged by the members it names under a table. A full replace
+/// is judged by its table as a whole, and a table it does not state takes
+/// the default, as the typed document would; so is a patch that is not an
+/// object, which replaces the document as a whole.
+fn listener_table_changed_by(
+    write: &ConfigToolWrite<'_>,
+    committed: &Value,
+    default: &Value,
+) -> Option<&'static str> {
+    LISTENER_SETTINGS_TABLES.into_iter().find(|table| {
+        let committed_table = committed.get(*table);
+        match write {
+            ConfigToolWrite::Patch(patch) if patch.is_object() => patch
+                .get(*table)
+                .is_some_and(|members| !merge_patch_restates(committed_table, members)),
+            ConfigToolWrite::Set(document) | ConfigToolWrite::Patch(document) => {
+                document.get(*table).or_else(|| default.get(*table)) != committed_table
+            }
+        }
+    })
+}
+
+/// The first listener-settings table two composed configs state differently.
+fn listener_table_composed_differently(
+    before: &Config,
+    after: &Config,
+) -> Result<Option<&'static str>, serde_json::Error> {
+    let before = serde_json::to_value(before)?;
+    let after = serde_json::to_value(after)?;
+    Ok(LISTENER_SETTINGS_TABLES
+        .into_iter()
+        .find(|table| before.get(*table) != after.get(*table)))
+}
+
+/// The typed refusal of a `meerkat_config` write that would change a
+/// host's own listener settings: invalid params with the documented
+/// `confinement_administration_required` data; nothing was written.
+fn listener_settings_refusal(change: &str, table: &str) -> ToolCallError {
+    let message = format!(
+        "Invalid config: {change} `[{table}]`, which holds a host's own listener settings (the \
+         address a server binds, the origins and hosts it answers, how it admits a peer); this \
+         tool does not change them. Set them in the configuration file or through the \
+         operator's commands; nothing was written"
+    );
+    match serde_json::to_value(WireConfigWriteRefusal::ConfinementAdministrationRequired) {
+        Ok(data) => ToolCallError::new(-32602, message, Some(data)),
+        Err(serialize_error) => ToolCallError::new(
+            -32603,
+            format!("failed to serialize config refusal data: {serialize_error}"),
+            None,
+        ),
+    }
+}
+
+/// Refuse a `meerkat_config` write that would change a host's own listener
+/// settings ([`LISTENER_SETTINGS_TABLES`]), judged in two ways against the
+/// committed document:
+///
+/// - on the request as sent, against the realm's own document: a patch that
+///   names a member of such a table with another value than the committed
+///   one, or a full replace whose table differs from the committed one. A
+///   write that carries the tables unchanged passes, and one that restates
+///   a parent's value in the realm's own document does not.
+/// - on what the realm composes along its parent chain, before and after
+///   the write: `rest` and `comms` compose whole and `mob_host` member by
+///   member, so a change of the realm's own parent edge can bring another
+///   realm's table into force without naming a member of it. A write is
+///   refused as well when the chain does not compose before it, or would
+///   not after it.
+///
+/// Returns the generation the write commits at, the one of the document it
+/// was judged against, so a write that lands in between is a generation
+/// conflict and not a commit of an unjudged document. A caller's
+/// `expected_generation` other than that one is a generation conflict here,
+/// before anything is judged. (An edit of the configuration file does not
+/// move the generation.)
+async fn refuse_listener_settings_change(
+    state: &MeerkatMcpState,
+    write: ConfigToolWrite<'_>,
+    expected_generation: Option<u64>,
+) -> Result<Option<u64>, ToolCallError> {
+    let committed = state
+        .config_runtime
+        .get()
+        .await
+        .map_err(map_config_runtime_error)?;
+    if let Some(expected) = expected_generation
+        && expected != committed.generation
+    {
+        return Err(map_config_runtime_error(
+            ConfigRuntimeError::GenerationConflict {
+                expected,
+                current: committed.generation,
+            },
+        ));
+    }
+    let serialize_error = |error: serde_json::Error| {
+        ToolCallError::new(
+            -32603,
+            format!("failed to compare the config's listener settings: {error}"),
+            None,
+        )
+    };
+    let committed_document = serde_json::to_value(&committed.config).map_err(serialize_error)?;
+    let default_document = serde_json::to_value(Config::default()).map_err(serialize_error)?;
+    if let Some(table) = listener_table_changed_by(&write, &committed_document, &default_document) {
+        return Err(listener_settings_refusal("the write would change", table));
+    }
+
+    let candidate = match write {
+        ConfigToolWrite::Set(document) => serde_json::from_value::<Config>(document.clone())
+            .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?,
+        ConfigToolWrite::Patch(patch) => apply_patch_preview(&state.config_runtime, patch).await?,
+    };
+    let reader = meerkat_core::EffectiveConfigReader::new(Arc::clone(&state.realm_config_source));
+    let composed_committed = reader
+        .effective_config_over_head(&state.realm_id, committed.config)
+        .await
+        .map_err(|error| {
+            ToolCallError::internal(format!(
+                "failed to compose the realm's config chain: {error}"
+            ))
+        })?;
+    let composed_candidate = reader
+        .effective_config_over_head(&state.realm_id, candidate)
+        .await
+        .map_err(|error| {
+            ToolCallError::invalid_params(format!(
+                "Invalid config: the document does not compose along the realm's parent chain: \
+                 {error}; nothing was written"
+            ))
+        })?;
+    if let Some(table) =
+        listener_table_composed_differently(&composed_committed, &composed_candidate)
+            .map_err(serialize_error)?
+    {
+        return Err(listener_settings_refusal(
+            "the write would make the realm compose another",
+            table,
+        ));
+    }
+    Ok(Some(committed.generation))
+}
+
 async fn handle_meerkat_config(
     state: &MeerkatMcpState,
-    input: MeerkatConfigInput,
+    mut input: MeerkatConfigInput,
 ) -> Result<Value, ToolCallError> {
     match input.action {
         ConfigAction::Get => {
@@ -3582,6 +3763,14 @@ async fn handle_meerkat_config(
             let config_value = input.config.ok_or_else(|| {
                 ToolCallError::invalid_params("config is required for action=set")
             })?;
+            // A host's own listener settings are not this tool's to change;
+            // the write commits at the generation it was judged at.
+            input.expected_generation = refuse_listener_settings_change(
+                state,
+                ConfigToolWrite::Set(&config_value),
+                input.expected_generation,
+            )
+            .await?;
             let config: Config = serde_json::from_value(config_value.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
             reject_config_payload_defaulting(&config_value, &config)?;
@@ -3608,6 +3797,13 @@ async fn handle_meerkat_config(
             let patch = input.patch.ok_or_else(|| {
                 ToolCallError::invalid_params("patch is required for action=patch")
             })?;
+            // As for a full replace: judged first, on the patch as sent.
+            input.expected_generation = refuse_listener_settings_change(
+                state,
+                ConfigToolWrite::Patch(&patch),
+                input.expected_generation,
+            )
+            .await?;
             let preview = apply_patch_preview(&state.config_runtime, &patch).await?;
             refuse_launching_entries(state, &preview).await?;
             validate_config_for_commit(&preview)?;
@@ -10532,6 +10728,636 @@ mod tests {
             generation,
             "a refused write commits nothing"
         );
+    }
+
+    /// The committed config envelope (`config`, `generation`, ...), read
+    /// through the `meerkat_config` tool.
+    async fn config_tool_get(state: &MeerkatMcpState) -> Value {
+        let payload = Box::pin(handle_tools_call(
+            state,
+            "meerkat_config",
+            &json!({"action": "get"}),
+        ))
+        .await
+        .expect("config get");
+        let text = payload["content"][0]["text"]
+            .as_str()
+            .expect("config payload text");
+        serde_json::from_str::<Value>(text).expect("config payload json")
+    }
+
+    /// A `meerkat_config` write that would change a host's own listener
+    /// settings is refused as invalid params with the typed refusal, and the
+    /// committed envelope reads as it did before the call.
+    async fn assert_listener_settings_write_refused(state: &MeerkatMcpState, arguments: Value) {
+        let before = config_tool_get(state).await;
+        let refused = Box::pin(handle_tools_call(state, "meerkat_config", &arguments))
+            .await
+            .expect_err("a config tool write cannot change a host's own listener settings");
+        assert_eq!(refused.code, -32602, "{arguments}: {}", refused.message);
+        assert_eq!(
+            refused.data,
+            Some(json!({"type": "confinement_administration_required"})),
+            "{arguments}: {}",
+            refused.message
+        );
+        assert_eq!(
+            config_tool_get(state).await,
+            before,
+            "{arguments}: a refused write commits nothing"
+        );
+    }
+
+    /// A server over realm documents on disk, serving `head`. Returns the
+    /// state and the path of the head realm's document.
+    async fn config_state_over_realm_documents(
+        temp: &tempfile::TempDir,
+        documents: &[(&str, &str)],
+        head: &str,
+    ) -> (MeerkatMcpState, PathBuf) {
+        let realms = temp.path().join("realms");
+        for (realm, text) in documents {
+            let path = meerkat_store::realm_paths_in(&realms, realm).config_path;
+            std::fs::create_dir_all(path.parent().expect("realm dir")).expect("realm dir");
+            std::fs::write(&path, text).expect("realm document");
+        }
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: head.into(),
+        };
+        bootstrap.realm.state_root = Some(realms.clone());
+        bootstrap.context.user_config_root = Some(temp.path().join("user"));
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+            None,
+        )
+        .await
+        .expect("the head realm serves");
+        let head_document = meerkat_store::realm_paths_in(&realms, head).config_path;
+        (state, head_document)
+    }
+
+    /// A `meerkat_config` patch cannot change the address the REST server
+    /// binds: its host.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_rest_bind_host() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"rest": {"host": "0.0.0.0"}}}),
+        )
+        .await;
+    }
+
+    /// A `meerkat_config` patch cannot change the address the REST server
+    /// binds: its port.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_rest_port() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"rest": {"port": 9090}}}),
+        )
+        .await;
+    }
+
+    /// A `meerkat_config` full replace cannot change the REST server's bind
+    /// host: the document it read back with only that member changed is
+    /// refused.
+    #[tokio::test]
+    async fn test_config_set_cannot_change_the_rest_bind_host() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let mut config = config_tool_get(&state).await["config"].clone();
+        config["rest"]["host"] = json!("0.0.0.0");
+        assert_listener_settings_write_refused(&state, json!({"action": "set", "config": config}))
+            .await;
+    }
+
+    /// A `meerkat_config` patch cannot add a member under `rest` that this
+    /// build's config schema does not know: the rule is on the path, so the
+    /// realm document on disk keeps its bytes.
+    #[tokio::test]
+    async fn test_config_patch_cannot_add_an_unknown_member_under_rest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let text = "[realm.solo]\n";
+        let (state, document) =
+            config_state_over_realm_documents(&temp, &[("solo", text)], "solo").await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({
+                "action": "patch",
+                "patch": {"rest": {"member_this_schema_does_not_know": ["https://example.test"]}}
+            }),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&document).expect("solo"), text);
+    }
+
+    /// A `meerkat_config` patch cannot remove the realm document's `[rest]`
+    /// table (which would put the bind address back to the default).
+    #[tokio::test]
+    async fn test_config_patch_cannot_remove_the_rest_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let text = "[realm.solo]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 8111\n";
+        let (state, document) =
+            config_state_over_realm_documents(&temp, &[("solo", text)], "solo").await;
+        assert_eq!(
+            config_tool_get(&state).await["config"]["rest"]["port"],
+            8111
+        );
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"rest": null}}),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(&document).expect("solo"), text);
+    }
+
+    /// In a realm whose parent states `[rest]`, a `meerkat_config` write is
+    /// judged against the served realm's own document: it can neither state
+    /// a table of its own nor restate the parent's in the child document.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_rest_in_a_child_realm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\nparent = \"org\"\n";
+        let org_text = "[realm.org]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("org", org_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        for patch in [
+            json!({"rest": {"port": 9001}}),
+            json!({"rest": {"host": "127.0.0.1", "port": 9000}}),
+        ] {
+            assert_listener_settings_write_refused(
+                &state,
+                json!({"action": "patch", "patch": patch}),
+            )
+            .await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&team_document).expect("team"),
+            team_text
+        );
+    }
+
+    /// A `meerkat_config` write that does not touch listener settings still
+    /// commits: a patch of another key, and a full replace that carries the
+    /// `rest` table as it was read.
+    #[tokio::test]
+    async fn test_config_writes_outside_listener_settings_still_commit() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+        ))
+        .await
+        .expect("a patch of another key commits");
+        let patched = config_tool_get(&state).await;
+        assert_eq!(patched["config"]["max_tokens"], 2048);
+
+        let mut config = patched["config"].clone();
+        config["max_tokens"] = json!(4096);
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "set", "config": config}),
+        ))
+        .await
+        .expect("a full replace that carries the rest table unchanged commits");
+        let replaced = config_tool_get(&state).await;
+        assert_eq!(replaced["config"]["max_tokens"], 4096);
+        assert_eq!(replaced["config"]["rest"], before["config"]["rest"]);
+    }
+
+    /// A `meerkat_config` patch that restates the committed `rest` table
+    /// unchanged still commits, with the other keys it names.
+    #[tokio::test]
+    async fn test_config_patch_restating_the_committed_rest_table_commits() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+        let rest = before["config"]["rest"].clone();
+        assert!(rest.is_object(), "{rest}");
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"rest": rest, "max_tokens": 1024}}),
+        ))
+        .await
+        .expect("a patch that restates the committed rest table commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 1024);
+        assert_eq!(after["config"]["rest"], before["config"]["rest"]);
+    }
+
+    /// The config runtime's own write (the door under the operator's
+    /// commands) still changes the REST bind host, and the tool then judges
+    /// against that committed value: a patch that carries it commits.
+    #[tokio::test]
+    async fn test_config_runtime_write_still_changes_the_rest_bind_host() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        state
+            .config_runtime
+            .patch(ConfigDelta(json!({"rest": {"host": "0.0.0.0"}})), None)
+            .await
+            .expect("the runtime's own write commits");
+        let committed = config_tool_get(&state).await;
+        assert_eq!(committed["config"]["rest"]["host"], "0.0.0.0");
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "patch",
+                "patch": {"rest": {"host": "0.0.0.0"}, "max_tokens": 1024}
+            }),
+        ))
+        .await
+        .expect("a patch that carries the committed bind host commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 1024);
+        assert_eq!(after["config"]["rest"], committed["config"]["rest"]);
+    }
+
+    /// A `meerkat_config` patch cannot change the `mob_host` table: the host
+    /// acceptor's bind address, its pre-auth bounds, its identity directory.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_mob_host_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        for patch in [
+            json!({"mob_host": {"listen_tcp": "0.0.0.0:4900"}}),
+            json!({"mob_host": {"max_connections": 100_000}}),
+            json!({"mob_host": {"identity_dir": "/tmp/another-identity"}}),
+        ] {
+            assert_listener_settings_write_refused(
+                &state,
+                json!({"action": "patch", "patch": patch}),
+            )
+            .await;
+        }
+    }
+
+    /// A `meerkat_config` full replace cannot change the `mob_host` table.
+    #[tokio::test]
+    async fn test_config_set_cannot_change_the_mob_host_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let mut config = config_tool_get(&state).await["config"].clone();
+        config["mob_host"]["listen_tcp"] = json!("0.0.0.0:4900");
+        assert_listener_settings_write_refused(&state, json!({"action": "set", "config": config}))
+            .await;
+    }
+
+    /// A `meerkat_config` patch cannot change the `comms` table: whether peer
+    /// traffic is authenticated, the transport mode, and the listeners' bind
+    /// and advertised addresses.
+    #[tokio::test]
+    async fn test_config_patch_cannot_change_the_comms_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        for patch in [
+            json!({"comms": {"require_peer_auth": false}}),
+            json!({"comms": {"mode": "tcp", "address": "0.0.0.0:4951"}}),
+            json!({"comms": {"event_address": "0.0.0.0:4950"}}),
+            json!({"comms": {"advertise_address": "example.test:4951"}}),
+            json!({"comms": {"auth": "ed25519"}}),
+        ] {
+            assert_listener_settings_write_refused(
+                &state,
+                json!({"action": "patch", "patch": patch}),
+            )
+            .await;
+        }
+    }
+
+    /// A `meerkat_config` full replace cannot change the `comms` table.
+    #[tokio::test]
+    async fn test_config_set_cannot_change_the_comms_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let mut config = config_tool_get(&state).await["config"].clone();
+        config["comms"]["require_peer_auth"] = json!(false);
+        assert_listener_settings_write_refused(&state, json!({"action": "set", "config": config}))
+            .await;
+    }
+
+    /// A `meerkat_config` patch that restates the committed `mob_host` and
+    /// `comms` tables unchanged (their unset members as `null`) still
+    /// commits, with the other keys it names.
+    #[tokio::test]
+    async fn test_config_patch_restating_the_committed_mob_host_and_comms_tables_commits() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+        let mob_host = before["config"]["mob_host"].clone();
+        let comms = before["config"]["comms"].clone();
+        assert!(mob_host.is_object() && comms.is_object(), "{before}");
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "patch",
+                "patch": {"mob_host": mob_host, "comms": comms, "max_tokens": 1024}
+            }),
+        ))
+        .await
+        .expect("a patch that restates the committed tables commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 1024);
+        assert_eq!(after["config"]["mob_host"], before["config"]["mob_host"]);
+        assert_eq!(after["config"]["comms"], before["config"]["comms"]);
+    }
+
+    /// A `meerkat_config` write that names no listener key cannot bring
+    /// another realm's `[rest]` into force: a patch that gives the served
+    /// realm a parent whose document states `[rest]` is refused, and the
+    /// realm document keeps its bytes.
+    #[tokio::test]
+    async fn test_config_write_cannot_add_a_parent_edge_that_changes_the_composed_rest_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\n";
+        let edge_text = "[realm.edge]\n\n[rest]\nhost = \"0.0.0.0\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("edge", edge_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"realm": {"team": {"parent": "edge"}}}}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&team_document).expect("team"),
+            team_text
+        );
+    }
+
+    /// A `meerkat_config` write cannot cut the served realm from the parent
+    /// whose `[rest]` it composes: a patch that removes the parent edge is
+    /// refused, and the realm document keeps its bytes.
+    #[tokio::test]
+    async fn test_config_write_cannot_drop_a_parent_edge_that_changes_the_composed_rest_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\nparent = \"org\"\n";
+        let org_text = "[realm.org]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("org", org_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        assert_listener_settings_write_refused(
+            &state,
+            json!({"action": "patch", "patch": {"realm": {"team": {"parent": null}}}}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&team_document).expect("team"),
+            team_text
+        );
+    }
+
+    /// A `meerkat_config` write that gives the served realm a parent whose
+    /// document states no listener settings still commits.
+    #[tokio::test]
+    async fn test_config_write_can_add_a_parent_edge_that_keeps_the_composed_listener_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\n";
+        let plain_text = "[realm.plain]\n\nmax_tokens = 512\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("plain", plain_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"realm": {"team": {"parent": "plain"}}}}),
+        ))
+        .await
+        .expect("a parent edge that keeps the composed listener settings commits");
+        let committed = std::fs::read_to_string(&team_document).expect("team");
+        assert!(committed.contains("parent = \"plain\""), "{committed}");
+    }
+
+    /// In a realm whose parent states `[rest]`, the unchanged round trip
+    /// still commits: the document the tool read back, replaced with only
+    /// another key changed.
+    #[tokio::test]
+    async fn test_config_round_trip_commits_in_a_realm_whose_parent_states_rest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let team_text = "[realm.team]\nparent = \"org\"\n";
+        let org_text = "[realm.org]\n\n[rest]\nhost = \"127.0.0.1\"\nport = 9000\n";
+        let (state, team_document) = config_state_over_realm_documents(
+            &temp,
+            &[("org", org_text), ("team", team_text)],
+            "team",
+        )
+        .await;
+        let before = config_tool_get(&state).await;
+        let mut config = before["config"].clone();
+        config["max_tokens"] = json!(2048);
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "set", "config": config}),
+        ))
+        .await
+        .expect("the unchanged round trip commits");
+        let after = config_tool_get(&state).await;
+        assert_eq!(after["config"]["max_tokens"], 2048);
+        assert_eq!(after["config"]["rest"], before["config"]["rest"]);
+        let committed = std::fs::read_to_string(&team_document).expect("team");
+        assert!(committed.contains("parent = \"org\""), "{committed}");
+    }
+
+    /// A `meerkat_config` full replace that omits the `rest` table cannot
+    /// put a committed bind host back to the default: it is refused and the
+    /// committed table stands.
+    #[tokio::test]
+    async fn test_config_set_that_omits_the_rest_table_cannot_reset_it() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        state
+            .config_runtime
+            .patch(ConfigDelta(json!({"rest": {"host": "0.0.0.0"}})), None)
+            .await
+            .expect("the runtime's own write commits");
+        let committed = config_tool_get(&state).await;
+        let mut config = committed["config"].clone();
+        config
+            .as_object_mut()
+            .expect("config object")
+            .remove("rest");
+
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "set", "config": config}),
+        ))
+        .await
+        .expect_err("a full replace that omits the rest table is refused");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(config_tool_get(&state).await, committed);
+    }
+
+    /// A `meerkat_config` patch that is not a JSON object (it would replace
+    /// the document as a whole) cannot put a committed bind host back to the
+    /// default: it is refused and the committed table stands.
+    #[tokio::test]
+    async fn test_config_patch_that_is_not_an_object_cannot_reset_the_rest_table() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        state
+            .config_runtime
+            .patch(ConfigDelta(json!({"rest": {"host": "0.0.0.0"}})), None)
+            .await
+            .expect("the runtime's own write commits");
+        let committed = config_tool_get(&state).await;
+
+        Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": []}),
+        ))
+        .await
+        .expect_err("a patch that is not an object is refused");
+        assert_eq!(config_tool_get(&state).await, committed);
+    }
+
+    /// A realm config source that commits a config write of its own, once,
+    /// the first time a composition fetches a document through it: a write
+    /// that lands after a `meerkat_config` write was judged and before it
+    /// commits. (The raw documents keep the trait's default.)
+    struct WriteDuringComposition {
+        inner: Arc<dyn meerkat_core::RealmConfigSource>,
+        runtime: Arc<meerkat_core::ConfigRuntime>,
+        written: AtomicBool,
+    }
+
+    impl WriteDuringComposition {
+        async fn write_once(&self) {
+            if !self.written.swap(true, Ordering::SeqCst) {
+                self.runtime
+                    .patch(ConfigDelta(json!({"max_tokens": 777})), None)
+                    .await
+                    .expect("the write between judgment and commit commits");
+            }
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_core::RealmConfigSource for WriteDuringComposition {
+        async fn config_for_realm(
+            &self,
+            realm: &meerkat_core::connection::RealmId,
+        ) -> Result<Option<Config>, meerkat_core::ConfigError> {
+            self.write_once().await;
+            self.inner.config_for_realm(realm).await
+        }
+
+        async fn config_for_realm_with_warnings(
+            &self,
+            realm: &meerkat_core::connection::RealmId,
+        ) -> Result<Option<(Config, Vec<meerkat_core::ConfigWarning>)>, meerkat_core::ConfigError>
+        {
+            self.write_once().await;
+            self.inner.config_for_realm_with_warnings(realm).await
+        }
+
+        fn composition_lock_path(&self) -> Option<PathBuf> {
+            self.inner.composition_lock_path()
+        }
+    }
+
+    /// A `meerkat_config` write whose caller gave no `expected_generation`
+    /// is pinned to the generation it was judged at: when another write
+    /// commits between the judgment and the commit, the tool's write is
+    /// refused as a generation conflict and the other write stands.
+    #[tokio::test]
+    async fn test_config_write_is_pinned_to_the_generation_it_was_judged_at() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut state = MeerkatMcpState::new_with_store(store).await;
+        state.realm_config_source = Arc::new(WriteDuringComposition {
+            inner: Arc::clone(&state.realm_config_source),
+            runtime: Arc::clone(&state.config_runtime),
+            written: AtomicBool::new(false),
+        });
+
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+        ))
+        .await
+        .expect_err("a write judged at an older generation does not commit");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(
+            refused.data.as_ref().map(|data| &data["type"]),
+            Some(&json!("generation_conflict")),
+            "{}",
+            refused.message
+        );
+        assert_eq!(config_tool_get(&state).await["config"]["max_tokens"], 777);
+    }
+
+    /// A `meerkat_config` write whose caller gave another generation than
+    /// the judged document's is a generation conflict at the judgment: it
+    /// cannot commit on a document it was not judged against, here the one
+    /// a write between judgment and commit would leave at exactly the
+    /// caller's generation. Nothing is written, by either write.
+    #[tokio::test]
+    async fn test_config_write_at_another_generation_than_the_judged_one_is_a_conflict() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut state = MeerkatMcpState::new_with_store(store).await;
+        let before = config_tool_get(&state).await;
+        let generation = before["generation"].as_u64().expect("config generation");
+        state.realm_config_source = Arc::new(WriteDuringComposition {
+            inner: Arc::clone(&state.realm_config_source),
+            runtime: Arc::clone(&state.config_runtime),
+            written: AtomicBool::new(false),
+        });
+
+        let refused = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_config",
+            &json!({
+                "action": "patch",
+                "patch": {"max_tokens": 2048},
+                "expected_generation": generation + 1
+            }),
+        ))
+        .await
+        .expect_err("a write at another generation than the judged one does not commit");
+        assert_eq!(refused.code, -32602, "{}", refused.message);
+        assert_eq!(
+            refused.data.as_ref().map(|data| &data["type"]),
+            Some(&json!("generation_conflict")),
+            "{}",
+            refused.message
+        );
+        assert_eq!(config_tool_get(&state).await, before);
     }
 
     /// The realm's committed configuration document, as the config runtime

@@ -502,7 +502,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.15",
+        "CARGO_PKG_VERSION": "0.9.16",
         "CARGO_BIN_NAME": "config_tool_provider_routes",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },

@@ -25375,6 +25375,27 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
     }
 
+    /// 12a. `config/patch` changes the REST listener's bind host: the RPC
+    /// config methods write the `rest` table.
+    #[tokio::test]
+    async fn config_patch_changes_the_rest_bind_host() {
+        let (router, _notif_rx) = test_router().await;
+
+        let patch_req = make_request(
+            "config/patch",
+            serde_json::json!({"rest": {"host": "0.0.0.0"}}),
+        );
+        let patch_resp = router.dispatch(patch_req).await.unwrap();
+        assert_eq!(
+            result_value(&patch_resp)["config"]["rest"]["host"],
+            "0.0.0.0"
+        );
+
+        let get_req = make_request_no_params("config/get");
+        let get_resp = router.dispatch(get_req).await.unwrap();
+        assert_eq!(result_value(&get_resp)["config"]["rest"]["host"], "0.0.0.0");
+    }
+
     /// 12b. `config/patch` does not re-enable retired legacy skill alias ingress.
     #[tokio::test]
     async fn config_patch_keeps_legacy_skill_references_rejected() {

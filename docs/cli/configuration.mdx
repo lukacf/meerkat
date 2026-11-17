@@ -220,8 +220,10 @@ section for that command, `--confinement trusted-host` included:
 rkat --confinement workspace run "Build and test the project"
 ```
 
-On Linux, started in the project's root, this command is refused unless it
-also carries `--state-root <dir>` outside the project (see below).
+On Linux this command is refused when the realm state would lie inside the
+directory it is started in (that directory holds a `.rkat` entry, or no
+directory above it does): then it also needs `--state-root <dir>` outside the
+project (see below).
 
 Check that command's stderr for the confinement lines: where none is printed,
 it is not confined. A later run started without the flags has only what the
@@ -244,10 +246,10 @@ drives can still change them, and no project file is refused.
 With every launch kind confined (the example above, or the flags):
 
 - On Linux a start is refused when its realm state lies in a write path, as
-  the default state root `<project>/.rkat/realms` does for a command started
-  in the project's root directory, with a message that says so. Start with
-  `--state-root <dir>` outside the project and outside every write path (see
-  below).
+  the default state root does when it would lie inside the directory the
+  command is started in (that directory holds a `.rkat` entry, or no directory
+  above it does), with a message that says so. Start with `--state-root <dir>`
+  outside the project and outside every write path (see below).
 - On Linux the project's `.rkat/mcp.toml`, `.rkat/config.toml` (from which
   only hook entries are read) and `.rkat/skills` are refused as files a
   confined process can write, and stderr names each. Keep MCP servers in

@@ -1484,7 +1484,7 @@ fn no_op_pre_build_hook() -> PreBuildHook {
 
 /// `inner` behind one more layer that runs `hook` on every member build and
 /// forwards everything else.
-fn with_pre_build_hook(
+pub(crate) fn with_pre_build_hook(
     inner: Arc<dyn MobSessionService>,
     hook: PreBuildHook,
 ) -> Arc<dyn MobSessionService> {
@@ -7734,6 +7734,12 @@ pub struct MobBootstrapSpec {
     /// `workgraph_attention_reassign` runs the same duplicate-binding guard
     /// (and holds the same gate) as the RPC surfaces.
     pub(crate) workgraph_admission_slots: Vec<crate::workgraph_admission::WorkGraphAdmissionSlot>,
+    /// The WorkGraph tools of this runtime's members: the base
+    /// session-service wrapper puts the tools each member build carries
+    /// behind the runtime's admission
+    /// ([`crate::workgraph_wiring::MemberWorkGraphTools`]). Its admission
+    /// slot is filled with [`Self::workgraph_admission_slots`].
+    pub(crate) member_workgraph_tools: crate::workgraph_wiring::MemberWorkGraphTools,
     /// Empties this spec's builder tool slots once nothing holds the
     /// composition (see [`CompositionRelease`]).
     pub(crate) composition_release: CompositionRelease,
@@ -7893,15 +7899,23 @@ impl MobBootstrapSpec {
         let personal_accounts_slot =
             crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
+        // The WorkGraph tools a member build carries go behind this
+        // runtime's admission (`MemberWorkGraphTools`): the runtime binds
+        // the mob's scope before it builds a member and fills the admission
+        // once it has its mob handle.
+        let member_workgraph_tools = crate::workgraph_wiring::MemberWorkGraphTools::default();
         // The `ask_user` tool is mounted last, over the tools every other
         // hook left on the build.
         let ask_user_slot = crate::ask_user::AskUserSlot::default();
-        let session_service = Arc::new(PreBuildMobSessionService {
-            inner: session_service,
-            hook: ask_user_slot.after_hook(
+        let base_hook = ask_user_slot.after_hook(
+            member_workgraph_tools.after_hook(
                 personal_accounts_slot
                     .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
             ),
+        );
+        let session_service = Arc::new(PreBuildMobSessionService {
+            inner: session_service,
+            hook: base_hook,
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7969,6 +7983,7 @@ impl MobBootstrapSpec {
             child_mcp_servers: None,
             workgraph_service: None,
             workgraph_admission_slots: Vec::new(),
+            member_workgraph_tools,
             composition_release: CompositionRelease::default(),
             workgraph_admission_sidecar: None,
             workgraph_realm_migration: crate::workgraph_realm::WorkGraphRealmMigrationMode::default(
@@ -11781,6 +11796,11 @@ impl MobRuntime {
         // apply_runtime_turn for every mob-executor turn iff the builder
         // carries the service.
         builder = builder.with_workgraph_service(spec.workgraph_service.clone());
+        // The same service decides which member builds get their WorkGraph
+        // tools behind this runtime's admission: bound here, before the mob
+        // is built, so no member is built without it.
+        spec.member_workgraph_tools
+            .bind(spec.workgraph_service.as_ref(), &mob_id);
 
         // Durable workers (members spawned with a durable identity: the
         // members of a `durable = true` profile, and every identity-first
@@ -11963,7 +11983,14 @@ impl MobRuntime {
             Some(Arc::clone(&session_service)),
             spec.workgraph_admission_sidecar,
         ));
-        for slot in &spec.workgraph_admission_slots {
+        // The members' own WorkGraph tools read the same admission through
+        // their slot, filled with the builders' slots.
+        let member_tools_admission = spec.member_workgraph_tools.admission_slot();
+        for slot in spec
+            .workgraph_admission_slots
+            .iter()
+            .chain(std::iter::once(&member_tools_admission))
+        {
             spec.composition_release.register_slot(slot);
             *slot
                 .write()
@@ -11985,6 +12012,51 @@ impl MobRuntime {
             )),
             None => None,
         };
+        // A stored attention binding whose target is a member private to a
+        // person is held paused from the start, before any member takes a
+        // turn (`WorkGraphAdmission::hold_bindings_onto_private_members`).
+        // Only the launch that speaks for the composition writes; a
+        // candidate launch holds every member's run starts anyway. What is
+        // held is health-visible beside the storage slots, by binding id:
+        // the summary is read by more people than a private member's owner.
+        let held_private_member_bindings = match spec.workgraph_service.as_ref() {
+            Some(service)
+                if spec.composition_authority.speaks_for_composition()
+                    && service.store().kind() != meerkat::WorkGraphStoreKind::Disabled =>
+            {
+                match workgraph_admission
+                    .hold_bindings_onto_private_members(service)
+                    .await
+                {
+                    Ok(held) => held,
+                    Err(error) => {
+                        tracing::error!(
+                            error = ?error,
+                            "the attention bindings could not be read at the start; a binding \
+                             onto a member private to a person may still be active"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        let held_private_member_bindings_slot =
+            (!held_private_member_bindings.is_empty()).then(|| {
+                crate::storage_health::StorageSlotSummary::degraded(
+                    "workgraph_attention",
+                    format!(
+                        "{} attention binding(s) name a member private to a person and are held \
+                         paused: {}; reassign each to another member or close its goal",
+                        held_private_member_bindings.len(),
+                        held_private_member_bindings
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                )
+            });
         // A member created under one of the console's runtime-plane
         // identities before every creation path refused them still comes up.
         crate::member_comms_id::warn_reserved_identity_members(&handle).await;
@@ -12007,13 +12079,14 @@ impl MobRuntime {
             workgraph_service: spec.workgraph_service,
             workgraph_admission,
             workgraph_realm_migration,
-            resolved_storage: match (spec.resolved_storage, candidate_composition_slot) {
-                (Some(mut summary), Some(slot)) => {
-                    summary.slots.push(slot);
-                    Some(summary)
-                }
-                (summary, _) => summary,
-            },
+            resolved_storage: spec.resolved_storage.map(|mut summary| {
+                summary.slots.extend(
+                    candidate_composition_slot
+                        .into_iter()
+                        .chain(held_private_member_bindings_slot),
+                );
+                summary
+            }),
             durable_runtime_store: spec.durable_runtime_store,
             committed_boundary_recoverer: spec.committed_boundary_recoverer,
             controller_pin_source: spec.controller_pin_source,

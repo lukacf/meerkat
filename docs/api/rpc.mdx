@@ -317,6 +317,21 @@ operation carrier: `output`, `tokens_used`, `agent_identity`, `member_ref`,
 required, while `retirement_error` reports post-result cleanup debt when
 present.
 
+`mob/profile/create` and `mob/profile/update` are a host's own caller's
+methods and accept the stored profile form: beyond the fields of
+`MobProfileInput`, which their parameter schemas describe, a profile may
+carry `auth_binding`, `tools.mcp_servers` and `tools.rust_bundles`, and its
+`tools.bundles` is stored as sent. Members spawned from that realm profile
+build on the binding, start the servers and mount the bundles of
+`tools.rust_bundles` and `tools.bundles` that the host registered for child
+mobs. A profile read back (`mob/profile/get`, `mob/profile/list`, and the
+answers of create and update) shows none of these four fields. The agent
+profile tools take `MobProfileInput` only and refuse all four on a realm
+profile; the MCP profile tools take `MobProfileInput` and `auth_binding`, and
+refuse the other three. An update through either replaces the stored profile
+whole, so it removes from a profile a host stored every one of these fields
+that the update does not send.
+
 <Note>
 Every `Schedule` result is one flattened public object. Configuration fields
 including `planning_horizon_days`, `planning_horizon_occurrences`, `labels`,
@@ -636,9 +651,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.15"
+      "version": "0.9.16"
     },
-    "contract_version": "0.9.15",
+    "contract_version": "0.9.16",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -968,7 +983,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.15",
+    "agent_version": "0.9.16",
     "model_name": "claude-opus-5"
   }
 }
@@ -4132,7 +4147,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 15},
+    "contract_version": {"major": 0, "minor": 9, "patch": 16},
     "providers": [
       {
         "provider": "anthropic",
@@ -4196,7 +4211,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 15},
+    "contract_version": {"major": 0, "minor": 9, "patch": 16},
     "capabilities": [
       {
         "id": "sessions",
@@ -4902,12 +4917,21 @@ that holds no level, are busy there, where the table below queues them);
 with no turn running it rebuilds the session (see [REST](/api/rest) and
 [MCP](/api/mcp)).
 
-A level is judged again when its turn starts. A `turn/start` refused
-there, after its input was stored, is a failed start: its stored input ends
-as abandoned with the reason `stopped`, not with the refusal, the session's
-live runtime is retired, and the other requests queued on that session end
-without a run (see Known limitations in the changelog; a later release is
-planned to change this). What can still be refused at its start: a
+A level is judged again when its turn starts. From 0.9.16 a `turn/start`
+refused there, after its input was stored, ends alone while the session is
+live: it is answered the typed refusal, its stored input ends as abandoned
+with the reason `never_executed`, the session's live runtime stays, and the
+other requests queued on that session run. In 0.9.15 such a refused turn
+was a failed start: its stored input ended as abandoned with the reason
+`stopped`, the session's live runtime was retired, and the other requests
+queued on that session ended without a run. When the session is not live at
+the refusal (the level is refused by the session's build), the session's
+runtime registration is retired as after a failed start and the other
+requests queued on that session end without a run (see Known limitations
+in the changelog); so it is for a refused turn whose answer is resolved
+after a restart, or while another run's result is the one the session's
+runtime holds open. What can
+still be refused at its start: a
 deferred create's
 first turn; a turn on a stored session that is not live whose level cannot
 be judged yet (`supported_levels_unavailable`); a request sent without

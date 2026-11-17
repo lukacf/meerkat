@@ -2156,6 +2156,11 @@ pub enum RuntimeApplyFailureCause {
     ExecutorStopped,
     ExecutorControlFailed,
     ExecutorInternal,
+    /// The request was refused and nothing was applied: the executor
+    /// answered before it changed the session. The run's contributors end
+    /// as never executed, and the run is resolved as an abandoned turn, not
+    /// as a failed apply, so the runtime that refused it is kept.
+    RequestRefused,
 }
 
 impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFailureCause {
@@ -2191,7 +2196,21 @@ impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFa
 }
 
 impl From<&meerkat_core::lifecycle::CoreApplyFailureCause> for RuntimeApplyFailureCause {
+    /// The machine's cause of a failed apply. The executor's kind decides
+    /// it, with one exception read from the failure's typed reason: a
+    /// request refused for its reasoning effort level. That refusal is
+    /// answered by the session's build or by the reconfiguration before the
+    /// turn, so nothing was applied, whatever kind the executor gave the
+    /// failure. (A level refused inside a run is a failed run with its own
+    /// terminal, never an apply failure.) No kind is added for it, so the
+    /// executor's vocabulary and its text form stay as they are.
     fn from(cause: &meerkat_core::lifecycle::CoreApplyFailureCause) -> Self {
+        if matches!(
+            cause.reason(),
+            Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { .. })
+        ) {
+            return Self::RequestRefused;
+        }
         Self::from(cause.kind)
     }
 }

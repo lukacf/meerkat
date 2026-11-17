@@ -4652,6 +4652,13 @@ async fn handle_meerkat_run_with_help_tools(
     )>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The session's top-level labels and application context pass the shared
+    // public metadata rule, as on the JSON-RPC and REST session create.
+    meerkat::surface::validate_public_surface_metadata(
+        input.labels.as_ref(),
+        input.app_context.as_ref(),
+    )
+    .map_err(ToolCallError::invalid_params)?;
     // The level has one home, the build's provider params: both spellings
     // of it must agree before anything is built.
     let build_provider_params = run_build_provider_params(&input)?;
@@ -10997,6 +11004,169 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    // Caller labels and application context on `meerkat_run`. A session's
+    // top-level `labels` and `app_context` pass the shared metadata rule of
+    // `meerkat_core::surface_metadata`, as on the JSON-RPC and REST session
+    // create: a key Meerkat reserves for its own runtime facts is invalid
+    // params with the rule's message, and no session is created.
+
+    async fn run_metadata_state() -> (MeerkatMcpState, Arc<dyn SessionStore>) {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store_options_and_llm(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+            Some(Arc::new(TestClient::for_provider(Provider::Anthropic))),
+        )
+        .await;
+        (state, store)
+    }
+
+    /// The labels `meerkat_read` shows for the session a run result names.
+    async fn run_session_labels(state: &MeerkatMcpState, run_payload: &Value) -> Value {
+        let session_id = run_payload["session_id"]
+            .as_str()
+            .expect("run result names its session");
+        let read = Box::pin(handle_tools_call(
+            state,
+            "meerkat_read",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("read the run's session");
+        unwrap_payload(read)["state"]["labels"].clone()
+    }
+
+    fn run_metadata_with_key(key: &str) -> Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("org".to_string(), json!("acme"));
+        metadata.insert(key.to_string(), json!("caller-value"));
+        Value::Object(metadata)
+    }
+
+    /// Each `(member, key, message)` case is a `meerkat_run` whose `member`
+    /// (`labels` or `app_context`) carries `key`: every one is refused as
+    /// invalid params with exactly `message`, and afterwards no session is
+    /// listed or stored.
+    async fn assert_run_metadata_refused(cases: Vec<(&str, &str, String)>) {
+        let (state, store) = run_metadata_state().await;
+        let mut wrong = Vec::new();
+        for (member, key, message) in cases {
+            let mut input = json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "enable_builtins": false
+            });
+            input[member] = run_metadata_with_key(key);
+            match Box::pin(handle_tools_call(&state, "meerkat_run", &input)).await {
+                Err(err) if err.code == -32602 && err.message == message => {}
+                Err(err) => wrong.push(format!(
+                    "{member} key '{key}': answered {} '{}', wanted -32602 '{message}'",
+                    err.code, err.message
+                )),
+                Ok(result) => {
+                    let labels = run_session_labels(&state, &unwrap_payload(result)).await;
+                    wrong.push(format!(
+                        "{member} key '{key}': the run was accepted (wanted -32602 '{message}'); its session's labels read {labels}"
+                    ));
+                }
+            }
+        }
+        let listed = Box::pin(handle_tools_call(&state, "meerkat_sessions", &json!({})))
+            .await
+            .expect("sessions list call should succeed");
+        let listed = unwrap_payload(listed);
+        assert!(
+            wrong.is_empty(),
+            "runs with a reserved key were not refused as the rule answers:\n{}",
+            wrong.join("\n")
+        );
+        assert_eq!(
+            listed["sessions"],
+            json!([]),
+            "a refused run leaves no session listed"
+        );
+        let stored = store
+            .list(meerkat::SessionFilter::default())
+            .await
+            .expect("list the stored sessions");
+        assert!(
+            stored.is_empty(),
+            "a refused run stores no session: {} stored",
+            stored.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_meerkat_run_refuses_reserved_label_keys_and_creates_no_session() {
+        // The four mob discovery names, the Meerkat namespace, and the forms
+        // the rule covers beyond them: another letter case, the bare token.
+        let cases = [
+            "mob_id",
+            "role",
+            "meerkat_id",
+            "agent_identity",
+            "meerkat.runtime_id",
+            "Role",
+            "MOB_ID",
+            "meerkat",
+        ]
+        .into_iter()
+        .map(|key| {
+            (
+                "labels",
+                key,
+                format!("metadata label key '{key}' is reserved for Meerkat-owned runtime facts"),
+            )
+        })
+        .collect();
+        assert_run_metadata_refused(cases).await;
+    }
+
+    #[tokio::test]
+    async fn test_meerkat_run_refuses_reserved_app_context_keys_and_creates_no_session() {
+        let cases = ["meerkat.runtime_id", "MEERKAT.runtime_id", "meerkat"]
+            .into_iter()
+            .map(|key| {
+                (
+                    "app_context",
+                    key,
+                    format!("app_context key '{key}' is reserved for Meerkat-owned runtime facts"),
+                )
+            })
+            .collect();
+        assert_run_metadata_refused(cases).await;
+    }
+
+    /// Ordinary labels and application context are taken as before: the run
+    /// completes and its session is listed under the caller's labels. The
+    /// mob discovery names are reserved as label keys only, so an
+    /// application context may use them as top-level keys.
+    #[tokio::test]
+    async fn test_meerkat_run_keeps_ordinary_labels_and_app_context() {
+        let (state, _store) = run_metadata_state().await;
+        let result = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_run",
+            &json!({
+                "prompt": "Reply briefly.",
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "enable_builtins": false,
+                "labels": {"org": "acme", "tier": "gold"},
+                "app_context": {"client_ref": {"view": "compact"}, "role": "reviewer"}
+            }),
+        ))
+        .await
+        .unwrap_or_else(|err| panic!("a run with ordinary labels completes: {}", err.message));
+        assert_eq!(
+            run_session_labels(&state, &unwrap_payload(result)).await,
+            json!({"org": "acme", "tier": "gold"}),
+            "the session carries the caller's labels"
+        );
+    }
+
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_keep_alive_requires_comms_name() {
@@ -12626,6 +12796,271 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             !err.message.is_empty(),
             "validation errors should return a non-empty message"
         );
+    }
+
+    /// The realm profile tools take the public profile input and
+    /// `auth_binding`: any other profile field is an argument error naming
+    /// the field, and nothing is stored or changed.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_profile_tools_take_the_public_profile_input() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let with = |key: &str, value: Value| {
+            let mut profile = json!({ "model": "claude-sonnet-4-6", "tools": { "comms": true } });
+            if key == "auth_binding" {
+                profile[key] = value;
+            } else {
+                profile["tools"][key] = value;
+            }
+            profile
+        };
+        let outside = [
+            ("mcp_servers", json!([])),
+            ("rust_bundles", json!(["internal-only"])),
+        ];
+
+        let bound = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_create",
+            &json!({
+                "name": "bound",
+                "profile": with("auth_binding", json!({ "realm": "global", "binding": "some-binding" })),
+            }),
+        ))
+        .await
+        .expect("a profile naming a binding is stored");
+        assert_eq!(unwrap_tool_payload_json(bound)["revision"], 1);
+
+        for (field, value) in &outside {
+            let err = Box::pin(handle_tools_call(
+                &state,
+                "meerkat_mob_profile_create",
+                &json!({ "name": "worker", "profile": with(field, value.clone()) }),
+            ))
+            .await
+            .expect_err("a profile field outside the public input is refused");
+            assert_eq!(err.code, -32602, "{field}: {}", err.message);
+            assert!(err.message.contains(field), "{field}: {}", err.message);
+        }
+        let absent = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_get",
+            &json!({ "name": "worker" }),
+        ))
+        .await
+        .expect("profile get should succeed");
+        assert_eq!(unwrap_tool_payload_json(absent)["not_found"], true);
+
+        let created = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_create",
+            &json!({ "name": "worker", "profile": with("comms", json!(true)) }),
+        ))
+        .await
+        .expect("a public profile is stored");
+        assert_eq!(unwrap_tool_payload_json(created)["revision"], 1);
+
+        for (field, value) in &outside {
+            let err = Box::pin(handle_tools_call(
+                &state,
+                "meerkat_mob_profile_update",
+                &json!({
+                    "name": "worker",
+                    "profile": with(field, value.clone()),
+                    "expected_revision": 1,
+                }),
+            ))
+            .await
+            .expect_err("a profile field outside the public input is refused");
+            assert_eq!(err.code, -32602, "{field}: {}", err.message);
+            assert!(err.message.contains(field), "{field}: {}", err.message);
+        }
+        let kept = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_profile_get",
+            &json!({ "name": "worker" }),
+        ))
+        .await
+        .expect("profile get should succeed");
+        assert_eq!(unwrap_tool_payload_json(kept)["revision"], 1);
+    }
+
+    /// The unified server's `tools/call` answers a reserved label or context
+    /// key on the two public mob spawn tools as invalid params with the
+    /// shared metadata rule's message, and the mob seats nobody; ordinary
+    /// labels and context are taken and stored.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_spawn_tools_refuse_reserved_metadata_keys() {
+        async fn create_mob(state: &MeerkatMcpState, mob_id: &str) {
+            Box::pin(handle_tools_call(
+                state,
+                "meerkat_mob_create",
+                &json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "worker": { "model": "claude-sonnet-4-6", "tools": {"comms": true} }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .expect("typed mob create should succeed");
+        }
+        fn with_key(key: &str) -> Value {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("org".to_string(), json!("acme"));
+            metadata.insert(key.to_string(), json!("caller-value"));
+            Value::Object(metadata)
+        }
+        // `meerkat_mob_spawn_many` gets an entry with no labels and no
+        // context first, then the entry that carries them.
+        fn arguments(tool: &str, mob_id: &str, labels: Value, context: Value) -> Value {
+            if tool == "meerkat_mob_spawn" {
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "w-labelled",
+                    "runtime_mode": "turn_driven",
+                    "labels": labels,
+                    "context": context,
+                })
+            } else {
+                json!({
+                    "mob_id": mob_id,
+                    "specs": [
+                        {
+                            "profile": "worker",
+                            "agent_identity": "w-plain",
+                            "runtime_mode": "turn_driven",
+                        },
+                        {
+                            "profile": "worker",
+                            "agent_identity": "w-labelled",
+                            "runtime_mode": "turn_driven",
+                            "labels": labels,
+                            "context": context,
+                        },
+                    ],
+                })
+            }
+        }
+
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let mut cases = Vec::new();
+        for tool in ["meerkat_mob_spawn", "meerkat_mob_spawn_many"] {
+            for key in [
+                "mob_id",
+                "role",
+                "meerkat_id",
+                "agent_identity",
+                "meerkat.runtime_id",
+                "Role",
+            ] {
+                cases.push((
+                    tool,
+                    with_key(key),
+                    Value::Null,
+                    format!(
+                        "metadata label key '{key}' is reserved for Meerkat-owned runtime facts"
+                    ),
+                ));
+            }
+            cases.push((
+                tool,
+                Value::Null,
+                with_key("meerkat.runtime_id"),
+                "app_context key 'meerkat.runtime_id' is reserved for Meerkat-owned runtime facts"
+                    .to_string(),
+            ));
+        }
+        let mut wrong = Vec::new();
+        for (case, (tool, labels, context, message)) in cases.into_iter().enumerate() {
+            let mob = format!("spawn-metadata-{case}");
+            create_mob(&state, &mob).await;
+            let outcome = Box::pin(handle_tools_call(
+                &state,
+                tool,
+                &arguments(tool, &mob, labels, context),
+            ))
+            .await;
+            let seated: Vec<String> = state
+                .mob_state
+                .mob_list_members(&meerkat_mob::MobId::from(mob.as_str()))
+                .await
+                .expect("list the mob's members")
+                .into_iter()
+                .map(|member| {
+                    format!(
+                        "'{}' with roster labels {:?}",
+                        member.agent_identity, member.labels
+                    )
+                })
+                .collect();
+            match outcome {
+                Err(err) if err.code == -32602 && err.message == message && seated.is_empty() => {}
+                Err(err) => wrong.push(format!(
+                    "{tool} answered {} '{}' (wanted -32602 '{message}'); seated: [{}]",
+                    err.code,
+                    err.message,
+                    seated.join(", ")
+                )),
+                Ok(_) => wrong.push(format!(
+                    "{tool} accepted the call (wanted -32602 '{message}'); seated: [{}]",
+                    seated.join(", ")
+                )),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "calls with a reserved key were not refused as the rule answers:\n{}",
+            wrong.join("\n")
+        );
+
+        for tool in ["meerkat_mob_spawn", "meerkat_mob_spawn_many"] {
+            let mob = format!(
+                "spawn-metadata-plain-{}",
+                if tool == "meerkat_mob_spawn" {
+                    "one"
+                } else {
+                    "many"
+                }
+            );
+            create_mob(&state, &mob).await;
+            Box::pin(handle_tools_call(
+                &state,
+                tool,
+                &arguments(
+                    tool,
+                    &mob,
+                    json!({"org": "acme", "tier": "gold"}),
+                    json!({"client_ref": {"view": "compact"}, "role": "reviewer"}),
+                ),
+            ))
+            .await
+            .unwrap_or_else(|err| panic!("{tool} takes ordinary labels: {}", err.message));
+            let members = state
+                .mob_state
+                .mob_list_members(&meerkat_mob::MobId::from(mob.as_str()))
+                .await
+                .expect("list the mob's members");
+            let labelled = members
+                .iter()
+                .find(|member| member.agent_identity.as_str() == "w-labelled")
+                .unwrap_or_else(|| panic!("{tool} seats the labelled member"));
+            assert_eq!(
+                labelled.labels,
+                BTreeMap::from([
+                    ("org".to_string(), "acme".to_string()),
+                    ("tier".to_string(), "gold".to_string()),
+                ]),
+                "{tool}: roster labels"
+            );
+        }
     }
 
     #[tokio::test]

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.16
+
+No SDK API changes; released with Meta 0.9.16.
+
 ## 0.9.15
 
 - `MetaRuntime.compactMember(identity, { floorTokens, timeoutMs })` calls

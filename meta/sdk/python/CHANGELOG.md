@@ -4,6 +4,15 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.16
+
+- Added `Meta.builder().max_sessions(n)`: the gateway's session limit, sent
+  as `runtime_options.max_sessions` (16 by default when unset). Until now a
+  Python host had no way to raise it. The value is a positive integer; zero,
+  a negative number, a `bool` or a non-integer raises `ValueError`. A builder
+  that does not call it sends the same `meta/init` parameters as before.
+  Mirrors the TypeScript builder's `maxSessions(n)`.
+
 ## 0.9.15
 
 - `MetaRuntime.compact_member(identity, *, floor_tokens=None, timeout=None)`

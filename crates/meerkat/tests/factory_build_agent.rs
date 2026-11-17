@@ -5646,6 +5646,83 @@ async fn declared_deny_refuses_a_mounted_declared_mcp_tool() {
     assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
 }
 
+/// A stock tool the build's host names as one of its host tools is
+/// deniable on every build of that host, whether or not the build carries
+/// it. With no tool of that name the entry is inert. With an external tool
+/// of that name the deny does what it does to every tool: the tool leaves
+/// the visible scope and its call is an `access_denied` result that never
+/// reaches it. A name in no vocabulary still fails the build, and the
+/// refusal lists the host tools among the vocabularies it checked.
+#[tokio::test]
+async fn declared_deny_of_a_host_tools_name_is_known_mounted_or_not() {
+    let host_tools = || {
+        [(
+            meerkat_core::ToolVocabularySource::HostTools,
+            &["stock_probe"][..],
+        )]
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let dispatched = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = temp_factory(&temp)
+        .build_agent(
+            declared_probe_config(
+                &["alpha"],
+                &dispatched,
+                None,
+                Some(vocabulary_restriction(&["stock_probe"], &host_tools())),
+                None,
+            ),
+            &Config::default(),
+        )
+        .await
+        .expect("a host tools name the build does not carry is an inert deny entry");
+    assert!(gate_admits(&mut agent, "alpha").await);
+
+    let external = |deny: &'static str| AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        external_tools: Some(Arc::new(PolicyProbeDispatcher::new(
+            &["stock_probe", "echo"],
+            Arc::clone(&dispatched),
+        ))),
+        declared_tool_restriction: Some(vocabulary_restriction(&[deny], &host_tools())),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    dispatched.lock().unwrap().clear();
+    let mut agent = temp_factory(&temp)
+        .build_agent(external("stock_probe"), &Config::default())
+        .await
+        .expect("an external tool that carries a host tools name is deniable by that name");
+    let visible: Vec<String> = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        !visible.iter().any(|name| name == "stock_probe"),
+        "{visible:?}"
+    );
+    assert!(visible.iter().any(|name| name == "echo"), "{visible:?}");
+    assert!(!gate_admits(&mut agent, "stock_probe").await);
+    assert!(gate_admits(&mut agent, "echo").await);
+    assert_eq!(*dispatched.lock().unwrap(), ["echo"]);
+
+    let err = temp_factory(&temp)
+        .build_agent(external("stock_prob"), &Config::default())
+        .await
+        .err()
+        .expect("a name in no vocabulary must fail");
+    assert!(
+        matches!(
+            &err,
+            BuildAgentError::DeclaredToolUnknown(unknown)
+                if unknown.tool == "stock_prob"
+                    && unknown.vocabulary.iter().any(|source| source == "host tools")
+        ),
+        "got: {err:?}"
+    );
+}
+
 /// Every provider-owned family is vocabulary whatever the build composes:
 /// with comms and the builtin utilities off, denying `send_message` and
 /// `apply_patch` is inert, not `DeclaredToolUnknown`.

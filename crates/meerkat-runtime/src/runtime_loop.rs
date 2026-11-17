@@ -4901,9 +4901,10 @@ fn machine_terminal_completion_error(
             //
             // DO NOT DERIVE A CAUSE FROM `last_runtime_apply_failure_cause`
             // HERE the way the `Completed` arm does. That field is run-scoped
-            // only because `RunFailed` assigns it; `RunCancelled` does not
-            // touch it either, so on a cancelled run it is exactly as stale as
-            // `terminal_cause_kind`.
+            // only where `RunFailed` assigned it. `RunCancelled` drops it,
+            // but the other transitions that leave a `Cancelled` outcome do
+            // not write it, so on a cancelled run it can be exactly as stale
+            // as `terminal_cause_kind`.
             Ok(None)
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed
@@ -5047,11 +5048,11 @@ fn machine_terminal_completion_error(
             // - [`realize_runtime_loop_terminal_owned`] calls it after a
             //   successful realization of either `OwnedRuntimeLoopTerminalization`
             //   variant. `Failed` fires `RunFailed`. `Cancelled` fires
-            //   `RunCancelled`, which does NOT assign
-            //   `last_runtime_apply_failure_cause` - but it does set
-            //   `terminal_outcome = Cancelled` unconditionally, so that branch
-            //   lands on the `Cancelled` arm above and never here. That arm
-            //   reads neither field, for exactly this reason.
+            //   `RunCancelled`, which drops
+            //   `last_runtime_apply_failure_cause` (a cancelled run has none)
+            //   and sets `terminal_outcome = Cancelled` unconditionally, so
+            //   that branch lands on the `Cancelled` arm above and never
+            //   here. That arm reads neither field.
             // - [`resolve_process_local_failed_run_waiters`] and
             //   [`resolve_machine_terminal_completion_waiters_under_authority`]
             //   are reached only from failed-run resolution sites that are
@@ -5394,12 +5395,17 @@ async fn prepare_turn_state_for_primitive(
 /// Decide what becomes of a failed run's staged contributors, from the typed
 /// apply failure alone.
 ///
-/// Exactly one failure class refuses the release: a run whose consumer never
-/// began executing. There the loop dropped an `apply` whose in-flight fate it
-/// cannot observe, so returning a contributor to its work lane could have the
-/// instruction carried out twice. Every other failure - including every other
-/// teardown reason - is an answer the executor gave, with nothing in flight, so
-/// replay repeats nothing.
+/// Exactly one failure class refuses the release here: a run whose consumer
+/// never began executing. There the loop dropped an `apply` whose in-flight
+/// fate it cannot observe, so returning a contributor to its work lane could
+/// have the instruction carried out twice. Every other failure - including
+/// every other teardown reason - is an answer the executor gave, with nothing
+/// in flight, so replay repeats nothing.
+///
+/// A request the executor refused with nothing applied is not decided here:
+/// the loop hands it over as replayable like every answered failure, and the
+/// failed-run realization ends its contributors when the cause the machine
+/// recorded with `RunFailed` is `RequestRefused`.
 ///
 /// `CoreExecutorTeardownReason` is `#[non_exhaustive]`, so this stays a
 /// `matches!` on the one reason rather than a `match` that would silently
@@ -15016,6 +15022,76 @@ mod tests {
             failed_run_contributor_disposition(&CoreExecutorError::Internal(
                 "ordinary apply failure".into()
             )),
+            FailedRunContributorDisposition::Replayed
+        );
+    }
+
+    /// A failed apply whose typed reason is the reasoning effort refusal is
+    /// a refused request, whatever kind the executor gave it: the machine's
+    /// cause for it is `RequestRefused`. The same failure without that
+    /// reason, and a failure that carries another typed reason, keep the
+    /// executor's kind. The loop does not decide the refused run's end from
+    /// the error: it hands every answered failure over as replayable, and
+    /// the failed-run realization reads the cause the machine recorded.
+    #[test]
+    fn a_refused_reasoning_effort_level_is_a_refused_request_for_the_machine_only() {
+        use crate::meerkat_machine::FailedRunContributorDisposition;
+        use crate::meerkat_machine::dsl::RuntimeApplyFailureCause;
+        use meerkat_core::lifecycle::core_executor::{
+            CoreApplyFailureCause, CoreApplyFailureCauseKind,
+        };
+
+        let refusal: meerkat_core::ReasoningEffortRefusal =
+            serde_json::from_value(serde_json::json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                "facts": "catalog",
+            }))
+            .unwrap();
+        let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        };
+        for kind in [
+            CoreApplyFailureCauseKind::RuntimeTurn,
+            CoreApplyFailureCauseKind::ExecutorInternal,
+            CoreApplyFailureCauseKind::Unknown,
+        ] {
+            let refused = CoreApplyFailureCause::new(kind, "refused").with_reason(reason.clone());
+            assert_eq!(
+                RuntimeApplyFailureCause::from(&refused),
+                RuntimeApplyFailureCause::RequestRefused,
+                "{}",
+                kind.as_str()
+            );
+            assert_eq!(
+                failed_run_contributor_disposition(&CoreExecutorError::apply_failed(refused)),
+                FailedRunContributorDisposition::Replayed,
+                "{}",
+                kind.as_str()
+            );
+        }
+
+        let plain = CoreApplyFailureCause::runtime_turn("the turn could not be started");
+        assert_eq!(
+            RuntimeApplyFailureCause::from(&plain),
+            RuntimeApplyFailureCause::RuntimeTurn
+        );
+        assert_eq!(
+            failed_run_contributor_disposition(&CoreExecutorError::apply_failed(plain)),
+            FailedRunContributorDisposition::Replayed
+        );
+        let rate_limited = CoreApplyFailureCause::runtime_turn("another typed reason").with_reason(
+            meerkat_core::event::AgentErrorReason::LlmRateLimited {
+                retry_after_ms: None,
+            },
+        );
+        assert_eq!(
+            RuntimeApplyFailureCause::from(&rate_limited),
+            RuntimeApplyFailureCause::RuntimeTurn
+        );
+        assert_eq!(
+            failed_run_contributor_disposition(&CoreExecutorError::apply_failed(rate_limited)),
             FailedRunContributorDisposition::Replayed
         );
     }

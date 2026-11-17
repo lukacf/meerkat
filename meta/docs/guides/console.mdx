@@ -575,11 +575,16 @@ as they were.
   read it, send to it, close it or fork it, gets the answer that method
   gives a member that does not exist (for example `-32602` `member not
   found` from `meta/get_member`, or `404` `unknown_identity` from
-  `POST /console/send`); a request that would record something for it (an
-  announcement subscription, a schedule, a remembered fact, a topology edge,
-  a WorkGraph goal, attention target or supervisor, whether it names the
-  member, its owner key or its session) is refused as naming an unknown
-  member (`-32001`). This holds with or without an access configuration
+  `POST /console/send`, or `403` `access_denied` from it where the access
+  rules refuse the caller that send for any name); a request that would
+  record a schedule or a remembered fact for it is answered as the same
+  request for a name no member holds; a request that would record a topology
+  edge, a WorkGraph goal, attention target or supervisor for it, whether it
+  names the member, its owner key or its session, is refused as naming an
+  unknown member (`-32001`); an announcement subscription that names it is
+  refused as the announcement methods refuse a name no member holds (see
+  [Access control](/concepts/access-control)).
+  This holds with or without an access configuration
   (the SDK gateway's stdio plane is the trusted host plane: see
   [Known limitations](/concepts/access-control#known-limitations)). Its
   header says who can see it:

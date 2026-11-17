@@ -1,0 +1,454 @@
+[
+  {
+    "admission_sequence": 1000000000,
+    "attempt_count": 1,
+    "created_at": "2026-11-16T09:15:29.815684561Z",
+    "current_state": "consumed",
+    "durability": "durable",
+    "history": [
+      {
+        "from": "accepted",
+        "reason": "QueueAccepted",
+        "timestamp": "2026-11-16T09:15:29.815837841Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "StageForRun(01a1e3a3-de99-7516-93dd-b293cd59e85d)",
+        "timestamp": "2026-11-16T09:15:29.817709589Z",
+        "to": "staged"
+      },
+      {
+        "from": "staged",
+        "reason": "MarkApplied(01a1e3a3-de99-7516-93dd-b293cd59e85d)",
+        "timestamp": "2026-11-16T09:15:29.835326644Z",
+        "to": "applied"
+      },
+      {
+        "from": "applied",
+        "reason": "MarkAppliedPendingConsumption(boundary_sequence=1)",
+        "timestamp": "2026-11-16T09:15:29.835326644Z",
+        "to": "applied_pending_consumption"
+      },
+      {
+        "from": "applied_pending_consumption",
+        "reason": "Consume",
+        "timestamp": "2026-11-16T09:15:29.835445272Z",
+        "to": "consumed"
+      }
+    ],
+    "input_id": "01a1e3a3-de93-7072-a6d7-d14cce6a8d26",
+    "last_boundary_sequence": 1,
+    "last_run_id": "01a1e3a3-de99-7516-93dd-b293cd59e85d",
+    "policy": {
+      "decision": {
+        "apply_mode": "stage_run_start",
+        "consume_point": "on_run_complete",
+        "drain_policy": "queue_next_turn",
+        "emit_operator_content": true,
+        "policy_version": 1,
+        "queue_mode": "fifo",
+        "record_transcript": true,
+        "routing_disposition": "queue",
+        "wake_mode": "wake_if_idle"
+      },
+      "version": 1
+    },
+    "recovery_count": 0,
+    "runtime_semantics": {
+      "boundary": "run_start",
+      "execution_handling_mode": null,
+      "execution_kind": "content_turn",
+      "live_interrupt_required": false,
+      "peer_response_terminal_apply_intent": null
+    },
+    "scoped_destination": {
+      "kind": "never_scoped"
+    },
+    "stored_input_state_version": 7,
+    "terminal_completion": {
+      "batch_key": {
+        "run_id": "01a1e3a3-de99-7516-93dd-b293cd59e85d",
+        "scope": "run"
+      },
+      "batch_ordinal": 0,
+      "candidate_digest": "bd12a59bfb848ea419c82fd5e1d7063cd3128ecac973e037dff49c29e517cec7",
+      "completion_input_ids": [
+        "01a1e3a3-de93-7072-a6d7-d14cce6a8d26"
+      ],
+      "completion_input_ids_digest": "bdfb303523c2173a8a038d6e8ef5c7153bf4b760ab4e7bb253a938cb689699b5",
+      "input_id": "01a1e3a3-de93-7072-a6d7-d14cce6a8d26",
+      "outcome": {
+        "completion_type": "completed",
+        "request_usage": [
+          {
+            "accounting": {
+              "aggregation": "provider_inclusive_input_total",
+              "convention": "host_declared_inclusive_input_total",
+              "model": "claude-sonnet-4-5",
+              "presented_tokens": 0,
+              "provider": "anthropic"
+            },
+            "cache_creation_tokens": null,
+            "cache_read_tokens": null,
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        ],
+        "run_usage": {
+          "cache_creation_tokens": null,
+          "cache_read_tokens": null,
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "session_id": "01a1e3a3-de8c-7357-961f-6ad427d2b7e5",
+        "skill_diagnostics": {
+          "quarantined": [],
+          "source_health": {
+            "failure_streak": 0,
+            "handshake_failed": false,
+            "invalid_count": 0,
+            "invalid_ratio": 0.0,
+            "state": "healthy",
+            "total_count": 14
+          }
+        },
+        "text": "Released response",
+        "tool_calls": 0,
+        "turns": 1,
+        "usage": {
+          "cache_creation_tokens": null,
+          "cache_read_tokens": null,
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "owner_input_id": "01a1e3a3-de93-7072-a6d7-d14cce6a8d26",
+      "phase": {
+        "finalization": "succeeded",
+        "phase": "finalized",
+        "receipt_digest": "bc425328dda5e2b1993a59fa1cb7909707a94b3b638831f4ef25bb65ed81c093"
+      },
+      "requires_session_checkpoint": true
+    },
+    "terminal_outcome": {
+      "outcome_type": "consumed"
+    },
+    "updated_at": "2026-11-16T09:15:29.835445272Z"
+  },
+  {
+    "admission_sequence": 1000000003,
+    "attempt_count": 1,
+    "created_at": "2026-11-16T09:15:29.893963269Z",
+    "current_state": "abandoned",
+    "durability": "durable",
+    "history": [
+      {
+        "from": "accepted",
+        "reason": "QueueAccepted",
+        "timestamp": "2026-11-16T09:15:29.894107766Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "StageForRun(01a1e3a3-dee7-7092-9c8c-da2ecc2967d3)",
+        "timestamp": "2026-11-16T09:15:29.895693264Z",
+        "to": "staged"
+      },
+      {
+        "from": "staged",
+        "reason": "ResolveStagedRollback",
+        "timestamp": "2026-11-16T09:15:29.908705362Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "Abandon",
+        "timestamp": "2026-11-16T09:15:31.917643Z",
+        "to": "abandoned"
+      }
+    ],
+    "input_id": "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+    "policy": {
+      "decision": {
+        "apply_mode": "stage_run_start",
+        "consume_point": "on_run_complete",
+        "drain_policy": "queue_next_turn",
+        "emit_operator_content": true,
+        "policy_version": 1,
+        "queue_mode": "fifo",
+        "record_transcript": true,
+        "routing_disposition": "queue",
+        "wake_mode": "wake_if_idle"
+      },
+      "version": 1
+    },
+    "recovery_count": 0,
+    "runtime_semantics": {
+      "boundary": "run_start",
+      "execution_handling_mode": null,
+      "execution_kind": "content_turn",
+      "live_interrupt_required": false,
+      "peer_response_terminal_apply_intent": null
+    },
+    "scoped_destination": {
+      "kind": "never_scoped"
+    },
+    "stored_input_state_version": 7,
+    "terminal_completion": {
+      "batch_key": {
+        "owner_input_id": "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+        "scope": "runtime_termination"
+      },
+      "batch_ordinal": 0,
+      "candidate_digest": "a7732a0862321dc5d99442c330b98046b88afe90be1d8039c1fe634d8758ed11",
+      "completion_input_ids": [
+        "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+        "01a1e3a3-dee8-74ae-a4cd-b7f624c2298f"
+      ],
+      "completion_input_ids_digest": "5e29744ec46a359804e658025315a64859a0f88bff51798084300ad2528c317d",
+      "input_id": "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+      "outcome": {
+        "completion_type": "runtime_terminated",
+        "error": {
+          "detail": "runtime session unregistered",
+          "kind": "fatal_failure",
+          "outcome": "failed",
+          "terminal": true
+        },
+        "reason": "runtime session unregistered"
+      },
+      "owner_input_id": "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+      "phase": {
+        "finalization": "succeeded",
+        "phase": "finalized",
+        "receipt_digest": "54a1b2623f4cec29e48f7155b01f2b4ea3bc44bb838eafaaf1c2d228e6002f9c"
+      },
+      "requires_session_checkpoint": false
+    },
+    "terminal_outcome": {
+      "outcome_type": "abandoned",
+      "reason": "stopped"
+    },
+    "updated_at": "2026-11-16T09:15:31.917643Z"
+  },
+  {
+    "admission_sequence": 1000000004,
+    "attempt_count": 1,
+    "created_at": "2026-11-16T09:15:29.897884511Z",
+    "current_state": "abandoned",
+    "durability": "durable",
+    "history": [
+      {
+        "from": "accepted",
+        "reason": "QueueAccepted",
+        "timestamp": "2026-11-16T09:15:29.897992503Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "StageForRun(01a1e3a3-def6-73aa-80d9-18475ad90415)",
+        "timestamp": "2026-11-16T09:15:29.910469509Z",
+        "to": "staged"
+      },
+      {
+        "from": "staged",
+        "reason": "ResolveStagedRollback",
+        "timestamp": "2026-11-16T09:15:31.914371453Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "Abandon",
+        "timestamp": "2026-11-16T09:15:31.917687267Z",
+        "to": "abandoned"
+      }
+    ],
+    "input_id": "01a1e3a3-dee8-74ae-a4cd-b7f624c2298f",
+    "policy": {
+      "decision": {
+        "apply_mode": "stage_run_start",
+        "consume_point": "on_run_complete",
+        "drain_policy": "queue_next_turn",
+        "emit_operator_content": true,
+        "policy_version": 1,
+        "queue_mode": "fifo",
+        "record_transcript": true,
+        "routing_disposition": "queue",
+        "wake_mode": "none"
+      },
+      "version": 1
+    },
+    "recovery_count": 0,
+    "runtime_semantics": {
+      "boundary": "run_start",
+      "execution_handling_mode": null,
+      "execution_kind": "content_turn",
+      "live_interrupt_required": false,
+      "peer_response_terminal_apply_intent": null
+    },
+    "scoped_destination": {
+      "kind": "never_scoped"
+    },
+    "stored_input_state_version": 7,
+    "terminal_completion": {
+      "batch_key": {
+        "owner_input_id": "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+        "scope": "runtime_termination"
+      },
+      "batch_ordinal": 1,
+      "candidate_digest": "a7732a0862321dc5d99442c330b98046b88afe90be1d8039c1fe634d8758ed11",
+      "completion_input_ids_digest": "5e29744ec46a359804e658025315a64859a0f88bff51798084300ad2528c317d",
+      "input_id": "01a1e3a3-dee8-74ae-a4cd-b7f624c2298f",
+      "owner_input_id": "01a1e3a3-dee3-74e4-9b5d-859839dc59cc",
+      "phase": {
+        "finalization": "succeeded",
+        "phase": "finalized",
+        "receipt_digest": "54a1b2623f4cec29e48f7155b01f2b4ea3bc44bb838eafaaf1c2d228e6002f9c"
+      },
+      "requires_session_checkpoint": false
+    },
+    "terminal_outcome": {
+      "outcome_type": "abandoned",
+      "reason": "stopped"
+    },
+    "updated_at": "2026-11-16T09:15:31.917687267Z"
+  },
+  {
+    "admission_sequence": 1000000000,
+    "attempt_count": 1,
+    "created_at": "2026-11-16T09:15:36.934015973Z",
+    "current_state": "consumed",
+    "durability": "durable",
+    "history": [
+      {
+        "from": "accepted",
+        "reason": "QueueAccepted",
+        "timestamp": "2026-11-16T09:15:36.934147020Z",
+        "to": "queued"
+      },
+      {
+        "from": "queued",
+        "reason": "StageForRun(01a1e3a3-fa67-71ed-8520-176d6333bbf7)",
+        "timestamp": "2026-11-16T09:15:36.935796884Z",
+        "to": "staged"
+      },
+      {
+        "from": "staged",
+        "reason": "MarkApplied(01a1e3a3-fa67-71ed-8520-176d6333bbf7)",
+        "timestamp": "2026-11-16T09:15:36.952146198Z",
+        "to": "applied"
+      },
+      {
+        "from": "applied",
+        "reason": "MarkAppliedPendingConsumption(boundary_sequence=1)",
+        "timestamp": "2026-11-16T09:15:36.952146198Z",
+        "to": "applied_pending_consumption"
+      },
+      {
+        "from": "applied_pending_consumption",
+        "reason": "Consume",
+        "timestamp": "2026-11-16T09:15:36.952266889Z",
+        "to": "consumed"
+      }
+    ],
+    "input_id": "01a1e3a3-fa60-76d1-bdfe-c076406619a5",
+    "last_boundary_sequence": 1,
+    "last_run_id": "01a1e3a3-fa67-71ed-8520-176d6333bbf7",
+    "policy": {
+      "decision": {
+        "apply_mode": "stage_run_start",
+        "consume_point": "on_run_complete",
+        "drain_policy": "queue_next_turn",
+        "emit_operator_content": true,
+        "policy_version": 1,
+        "queue_mode": "fifo",
+        "record_transcript": true,
+        "routing_disposition": "queue",
+        "wake_mode": "wake_if_idle"
+      },
+      "version": 1
+    },
+    "recovery_count": 0,
+    "runtime_semantics": {
+      "boundary": "run_start",
+      "execution_handling_mode": null,
+      "execution_kind": "content_turn",
+      "live_interrupt_required": false,
+      "peer_response_terminal_apply_intent": null
+    },
+    "scoped_destination": {
+      "kind": "never_scoped"
+    },
+    "stored_input_state_version": 7,
+    "terminal_completion": {
+      "batch_key": {
+        "run_id": "01a1e3a3-fa67-71ed-8520-176d6333bbf7",
+        "scope": "run"
+      },
+      "batch_ordinal": 0,
+      "candidate_digest": "bd12a59bfb848ea419c82fd5e1d7063cd3128ecac973e037dff49c29e517cec7",
+      "completion_input_ids": [
+        "01a1e3a3-fa60-76d1-bdfe-c076406619a5"
+      ],
+      "completion_input_ids_digest": "2a095639822810c2f8cddbe582673804b02073cd36b245b631ccb89dd8a6a86c",
+      "input_id": "01a1e3a3-fa60-76d1-bdfe-c076406619a5",
+      "outcome": {
+        "completion_type": "completed",
+        "request_usage": [
+          {
+            "accounting": {
+              "aggregation": "provider_inclusive_input_total",
+              "convention": "host_declared_inclusive_input_total",
+              "model": "claude-sonnet-4-5",
+              "presented_tokens": 0,
+              "provider": "anthropic"
+            },
+            "cache_creation_tokens": null,
+            "cache_read_tokens": null,
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        ],
+        "run_usage": {
+          "cache_creation_tokens": null,
+          "cache_read_tokens": null,
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "session_id": "01a1e3a3-de8c-7357-961f-6ad427d2b7e5",
+        "skill_diagnostics": {
+          "quarantined": [],
+          "source_health": {
+            "failure_streak": 0,
+            "handshake_failed": false,
+            "invalid_count": 0,
+            "invalid_ratio": 0.0,
+            "state": "healthy",
+            "total_count": 14
+          }
+        },
+        "text": "Released response",
+        "tool_calls": 0,
+        "turns": 1,
+        "usage": {
+          "cache_creation_tokens": null,
+          "cache_read_tokens": null,
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "owner_input_id": "01a1e3a3-fa60-76d1-bdfe-c076406619a5",
+      "phase": {
+        "finalization": "succeeded",
+        "phase": "finalized",
+        "receipt_digest": "bc425328dda5e2b1993a59fa1cb7909707a94b3b638831f4ef25bb65ed81c093"
+      },
+      "requires_session_checkpoint": true
+    },
+    "terminal_outcome": {
+      "outcome_type": "consumed"
+    },
+    "updated_at": "2026-11-16T09:15:36.952266889Z"
+  }
+]

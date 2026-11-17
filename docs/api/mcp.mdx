@@ -386,18 +386,22 @@ ask its user.
   each.
 - **Discovery, registration and scopes.** The server's protected resource
   metadata (RFC 9728), named by its `401` challenge or found at a well-known
-  URL, names the authorization server. A server that publishes none (its
-  challenge names no document and every well-known URL answers `404` or
-  `410`; the
+  URL, names the authorization server. A server that publishes none (the
   2025-03-26 MCP authorization revision) is taken to be its own
   authorization server: the metadata is then read from the origin of the
   configured server URL, its `issuer` must be that origin (written with or
   without one trailing slash, and nothing else), and the
-  configured URL is the resource. A metadata document is required either
+  configured URL is the resource. A server publishes none when its
+  challenge names no document and every location the document is looked
+  for says so: the two well-known URLs at the origin root (with and without
+  the server's path) by `404` or `410`, and the one under the server's own
+  endpoint path by `404`, `410`, `401`, `403` or `405` (the endpoint's own
+  guard answers there). Any other answer without a document (a server
+  error, a redirect, `401` at the origin root) refuses the login, unless
+  another of the candidate locations serves the document. A metadata
+  document is required either
   way (no default endpoint paths are assumed), a document the server does
-  publish is always the one followed (a well-known URL that answers
-  anything else without a document, such as a server error, a redirect or
-  `401`, refuses the login), and a host-registered client is never
+  publish is always the one followed, and a host-registered client is never
   discovered this way. The authorization server's metadata
   is read from RFC 8414 discovery, falling back to OpenID Connect discovery.
   Dynamic client registration declares `application_type: "native"`. The

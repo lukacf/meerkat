@@ -4440,7 +4440,8 @@ impl McpOAuthAuthority {
     /// are the resource's.
     ///
     /// A server that publishes no resource metadata (its challenge names
-    /// none and every well-known URL answers `404` or `410`; MCP authorization
+    /// none and every well-known URL says no document is published there,
+    /// see [`ResourceMetadataPlace::says_absent`]; MCP authorization
     /// 2025-03-26) has one possible authorization server, its own origin:
     /// the resource is then the configured server URL, and that origin's
     /// metadata must pass the same authorization-server stage. A
@@ -4600,7 +4601,8 @@ impl McpOAuthAuthority {
     /// The protected resource's metadata URL (from the challenge, or the
     /// first well-known candidate that answers) and its document. `None`
     /// when the server publishes none: its challenge names no document and
-    /// every well-known candidate answers `404` or `410`. A document the challenge names, or
+    /// every well-known candidate says none is published there
+    /// ([`ResourceMetadataPlace::says_absent`]). A document the challenge names, or
     /// one that answers, is the server's word: any defect of it is an error.
     async fn fetch_protected_resource_metadata(
         &self,
@@ -4802,10 +4804,13 @@ impl McpOAuthAuthority {
     }
 
     /// The first protected-resource well-known URL of the server that
-    /// answers. `None` when every candidate answers `404` or `410`: the server
-    /// publishes none. With any other answer of a candidate and no later
-    /// candidate answering, the server may publish a document that could not
-    /// be read, which is the refusal it has always been.
+    /// answers. `None` when every candidate says that no document is
+    /// published there ([`ResourceMetadataPlace::says_absent`]: `404` or
+    /// `410`, and under the server's own endpoint path also `401`, `403`
+    /// and `405`): the server publishes none. With any other answer of a
+    /// candidate and no later candidate answering, the server may publish
+    /// a document that could not be read, which is the refusal it has
+    /// always been.
     async fn discover_resource_metadata_url_by_well_known(
         &self,
         target: &McpServerIdentity,
@@ -4813,19 +4818,15 @@ impl McpOAuthAuthority {
         let mut every_candidate_absent = true;
         for candidate in protected_resource_well_known_candidates(target.server_url())? {
             let response = self
-                .http_for(target, &candidate)?
-                .get(&candidate)
+                .http_for(target, &candidate.url)?
+                .get(&candidate.url)
                 .send()
                 .await;
             match response {
-                Ok(response) if response.status().is_success() => return Ok(Some(candidate)),
-                // Only an absent document says the server publishes none at
-                // this URL (the authorization-server stage's own rule).
-                Ok(response)
-                    if matches!(
-                        response.status(),
-                        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
-                    ) => {}
+                Ok(response) if response.status().is_success() => return Ok(Some(candidate.url)),
+                // Only an answer that says no document is published at this
+                // place lets the server be one that publishes none.
+                Ok(response) if candidate.place.says_absent(response.status()) => {}
                 // The egress profile's own resolver refusal is typed, and so is
                 // a probe that passed its client's bound; neither is ever taken
                 // as an absent document.
@@ -4843,10 +4844,11 @@ impl McpOAuthAuthority {
                         },
                     ));
                 }
-                // Any other answer (a server error, a redirect, a demand for
-                // authorization) and any other failed request: a later
-                // candidate may still answer, but the server may publish a
-                // document here, so it is never said to publish none.
+                // Any other answer (a server error, a redirect, a root URL
+                // that demands authorization) and any other failed request:
+                // a later candidate may still answer, but the server may
+                // publish a document here, so it is never said to publish
+                // none.
                 _ => every_candidate_absent = false,
             }
         }
@@ -5933,9 +5935,43 @@ pub(crate) fn absolutize_url(base: &str, value: &str) -> Result<String, String> 
         .map_err(|error| error.to_string())
 }
 
+/// Where a protected resource metadata candidate lies on its server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceMetadataPlace {
+    /// A well-known URL at the origin root (RFC 9728), with or without the
+    /// server's path inserted: the origin's own word.
+    OriginRoot,
+    /// The well-known suffix under the server's own endpoint path, a form
+    /// no standard defines: the endpoint's own guard commonly answers it.
+    UnderEndpointPath,
+}
+
+impl ResourceMetadataPlace {
+    /// Whether `status` says that no document is published at a candidate
+    /// in this place: `404` or `410` anywhere, and under the endpoint path
+    /// also the answers of the endpoint's own guard (`401`, `403`, `405`).
+    /// Every other answer leaves open that a document is published there.
+    fn says_absent(self, status: reqwest::StatusCode) -> bool {
+        use reqwest::StatusCode;
+        match status {
+            StatusCode::NOT_FOUND | StatusCode::GONE => true,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED => {
+                self == Self::UnderEndpointPath
+            }
+            _ => false,
+        }
+    }
+}
+
+/// One URL a server's protected resource metadata may be published at.
+struct ResourceMetadataCandidate {
+    url: String,
+    place: ResourceMetadataPlace,
+}
+
 fn protected_resource_well_known_candidates(
     server_url: &str,
-) -> Result<Vec<String>, McpOAuthError> {
+) -> Result<Vec<ResourceMetadataCandidate>, McpOAuthError> {
     let url = reqwest::Url::parse(server_url).map_err(|error| McpOAuthError::DiscoveryFailed {
         server_name: "unknown".to_string(),
         reason: error.to_string(),
@@ -5944,14 +5980,19 @@ fn protected_resource_well_known_candidates(
     let path = url.path().trim_matches('/');
     let mut candidates = Vec::new();
     if !path.is_empty() {
-        candidates.push(format!(
-            "{origin}/.well-known/oauth-protected-resource/{path}"
-        ));
-        candidates.push(format!(
-            "{origin}/{path}/.well-known/oauth-protected-resource"
-        ));
+        candidates.push(ResourceMetadataCandidate {
+            url: format!("{origin}/.well-known/oauth-protected-resource/{path}"),
+            place: ResourceMetadataPlace::OriginRoot,
+        });
+        candidates.push(ResourceMetadataCandidate {
+            url: format!("{origin}/{path}/.well-known/oauth-protected-resource"),
+            place: ResourceMetadataPlace::UnderEndpointPath,
+        });
     }
-    candidates.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    candidates.push(ResourceMetadataCandidate {
+        url: format!("{origin}/.well-known/oauth-protected-resource"),
+        place: ResourceMetadataPlace::OriginRoot,
+    });
     Ok(candidates)
 }
 
@@ -5965,6 +6006,7 @@ fn canonical_resource_metadata_url(target: &McpServerIdentity) -> Result<String,
         protected_resource_well_known_candidates(target.server_url())?
             .into_iter()
             .next()
+            .map(|candidate| candidate.url)
             .unwrap_or_default(),
     )
 }

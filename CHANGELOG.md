@@ -357,6 +357,38 @@ them.
     `McpStdioSetupFailureClass` and `McpStdioExit` implement `Display`.
   - Not covered: a server that dies during a call, after a good setup.
 
+- `meerkat-session`: on a realm created with `--realm-backend jsonl`, and on
+  in-memory stores, the first turn after a run was cancelled at its boundary
+  is no longer lost. After `mob/cancel_all_work` ended a member's running
+  run, the first turn then started on that member's session (`turn/start`,
+  `mob/turn_start`) made its model call, and its result was not kept: the
+  request was answered an internal error (`-32603`, `turn abandoned: ...
+  WholeBlob committed authority differs from the live actor base ...`). A
+  `mob/member_send` to that member was accepted, made its model call and
+  ended without its result, with no error to its sender. The turn after
+  that ran. A session with no mob showed the same after a run of its own
+  was cancelled at the run's boundary. The first turn and the member send
+  now complete. The cause: the runtime alone made the cancelled run's last
+  save the session's committed document, and the live session's own record
+  of the committed document it saves from stayed at the earlier one,
+  because the conversation itself had not changed; the next run's first
+  save was then refused. A turn's entry now compares that record with the
+  store and brings the live session up to the committed document when they
+  differ. A realm on the default `sqlite` backend was not affected: it
+  reads the committed document's identity from the store at each save. This
+  ends the 0.9.15 Known limitation about the first turn after
+  `mob/cancel_all_work`. Affected: 0.9.5 through 0.9.16 by the presence of
+  the code that settles a cancelled run without telling the session layer
+  (first in 0.9.5); shown by runs on the published 0.9.14 with a `jsonl`
+  realm and by tests on the 0.9.15 and 0.9.16 trees; 0.9.5 through 0.9.13
+  were not run. Measured by tests of this change for `mob/cancel_all_work`
+  (the cancelled run started by a member send, on in-memory stores, and by
+  a client's own `turn/start`, on a `jsonl` realm with a `sqlite` realm as
+  the control), and for a session with no mob through the session runtime's
+  own boundary cancel, which no public JSON-RPC method sends;
+  `mob/force_cancel` and a member stop that cancels at the run's boundary
+  reach the same state by reading and were not run.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

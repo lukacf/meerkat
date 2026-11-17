@@ -762,11 +762,24 @@ impl Host {
     async fn rate_limited_turn(&self, session: &SessionId, who: &str) -> (Turn, Vec<String>) {
         let watched = self.watch_model_fallback(session).await;
         let turn = self.turn(session, RATE_LIMITED_PROMPT).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let events = watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        // The session's events reach the watcher on a task of its own: wait
+        // for the fallback's decision (a skip or a commit), not for a fixed
+        // time. A turn that decided no fallback ends the wait at its bound.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let events = loop {
+            let events = watched
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let decided = events.iter().any(|event| {
+                event.starts_with("ModelFallbackSkipped")
+                    || event.starts_with("ModelFallbackCommitted")
+            });
+            if decided || tokio::time::Instant::now() >= deadline {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
         for event in &events {
             eprintln!("LN-RECORD: {who}'s model fallback event: {event}");
         }

@@ -35,6 +35,25 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeScript SDK (`@rkat/sdk`): a call written to an `rkat-rpc` process that
+  is gone, before the Node program has returned to its event loop (a few
+  milliseconds after a kill, or after a stretch of synchronous work during
+  which the process ended), now rejects with `PROCESS_EXITED` and the
+  process's stderr, like any call the process died on. Before, the write's
+  `write EPIPE` error was raised outside the call and ended a program
+  without a handler for uncaught exceptions (`Unhandled 'error' event`, exit
+  code 1), although the call was inside a try/catch. This holds for every
+  request, for starting a streaming session or turn, for subscribing to a
+  session's, a mob's or a mob member's events, and for the reply to a tool
+  call the process asked for. A process that keeps running after it closed
+  its input, or whose output can no longer be read, now fails pending and
+  later calls with `PROTOCOL_ERROR` about a second later and is stopped the
+  way `close()` stops it; a failed read of its stderr only ends the stderr
+  an error message carries. Affected: every release of the TypeScript SDK
+  since 0.3.0.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

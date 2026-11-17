@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A request or callback reply written to a gateway whose input is gone (it
+  exited, or closed its input) no longer ends the Node program with an
+  unhandled `write EPIPE` error: the waiting requests and every later
+  request on that gateway process reject with `TransportReaderFailedError`,
+  whose `reason` names the failed write. A failed read of the gateway's
+  output rejects the same way. So when a gateway refuses the start after it
+  has accepted the init request, and exits, `MetaBuilder.build()` always
+  rejects with the refusal (today inside `GatewayStartupCleanupError`, as its
+  `startupError`). No new error type.
+
 ## 0.9.16
 
 No SDK API changes; released with Meta 0.9.16.

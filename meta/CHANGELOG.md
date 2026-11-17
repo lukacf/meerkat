@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeScript SDK: when a gateway that the SDK started refuses the start
+  after it has accepted the init request, and exits, `builder.build()` now
+  always rejects with the refusal (today inside `GatewayStartupCleanupError`,
+  as its `startupError`). Before, the Node program could be ended by an
+  unhandled `write EPIPE` error (`Unhandled 'error' event`, exit code 1)
+  although `build()` was inside a try/catch: the SDK asked the exiting
+  gateway to shut down, and the failed write was raised outside the call.
+  The same holds for any request or callback reply written to a gateway
+  whose input is gone, and for a failed read of its output: the waiting
+  requests and every later request on that gateway process reject with
+  `TransportReaderFailedError`, whose `reason` names the failed write or
+  read. A refusal that the gateway gives as its answer to the init request,
+  and a gateway that exits without a refusal (`InitOutcomeUnknownError`),
+  were not affected. Affected: every release of the TypeScript SDK up to
+  0.9.16.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

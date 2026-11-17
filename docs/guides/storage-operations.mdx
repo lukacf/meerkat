@@ -39,14 +39,19 @@ record locks, which do not exclude a second claim from the same process.
 
 ## Select Roots And Realms
 
-Without explicit roots, storage commands inspect two sweep candidates:
+Without explicit roots, `storage migrate` and `storage prune` act on two sweep
+candidates:
 
 - invocation-context-local `<context-root>/.rkat/realms`
 - the user-global Meerkat data root
 
-Ordinary runtime resolution first walks up to the nearest ancestor containing
-`.rkat`, so run storage commands from that project root (or pass `--root`) when
-you want their local sweep to match the runtime's project-local candidate.
+`storage doctor`, which only reads, also reads the `.rkat/realms` of every
+ancestor of the context root that has a `.rkat` directory: the roots ordinary
+runtime resolution probes for an existing realm. A realm ID present under more
+than one of them is reported as a `split-brain-realm` finding naming both
+directories; the runtime refuses to start on such a realm. Pass `--root` to
+`storage migrate` or `storage prune` for each ancestor root they should act
+on.
 
 Use global `--state-root` or repeatable command `--root` to provide an explicit
 set. Once either is present, only those roots are read; ambient candidates are

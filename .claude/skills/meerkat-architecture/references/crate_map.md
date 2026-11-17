@@ -108,9 +108,11 @@ bridge modules that invoke its bodies, not in that optional oracle.
 ```
 RuntimeBootstrap (surface flags)
   → StorageLayout::resolve (meerkat-core: path authority; realm-id-first
-     dual-root resolution — explicit --state-root wins, single existing
-     candidate is used where it lies, both = typed RealmSplitBrain refusal,
-     neither = surface default; candidate_roots feed first-start reservation)
+     resolution over every ancestor's project-local candidate and the
+     user-global root: explicit --state-root wins, single existing
+     candidate is used where it lies, more than one = typed RealmSplitBrain
+     refusal, none = surface default; candidate_roots feed first-start
+     reservation)
   → RealmStorageProvider::open (meerkat facade seam; DiskStorageProvider is
      the built-in — realm manifest v2 pin: builtin backend or external
      provider pin, refused typed on mismatch/future format)

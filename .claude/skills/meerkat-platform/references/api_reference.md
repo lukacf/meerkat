@@ -47,7 +47,7 @@ Global flags (available on all commands):
 --isolated                # start in isolated mode (new generated realm)
 --instance <id>           # optional instance ID inside a realm
 --realm-backend <sqlite|jsonl|memory>
---state-root <path>       # explicit realm state root (no probing); otherwise the realm is used where it already exists (<project-root>/.rkat/realms or the user-global <data dir>/meerkat/realms), else <project-root>/.rkat/realms
+--state-root <path>       # explicit realm state root (no probing); otherwise the realm is used where it already exists (<project-root>/.rkat/realms, a farther ancestor's .rkat/realms, or the user-global <data dir>/meerkat/realms; more than one is refused), else <project-root>/.rkat/realms
 --context-root <path>     # realm identity + project files root; default CWD
 --user-config-root <path> # optional user-global convention root
 --as-agent <AGENT>        # governed realm: act as this agent (default rkat-agent)

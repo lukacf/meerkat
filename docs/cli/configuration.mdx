@@ -46,7 +46,12 @@ the same root. Without `--realm`, RPC still creates an isolated realm.
 For CLI commands, the default invocation context is the current directory. The
 project-local state root is `<project-root>/.rkat/realms`, where the project
 root is the nearest ancestor containing a `.rkat` entry. If none exists, the
-context root is used. `--context-root` changes the ancestor-search starting
+context root is used. A realm that already exists (has its manifest) under a
+farther ancestor's `.rkat/realms` is used where it lies, so a `.rkat`
+directory that appears nearer, for example after `rkat init` in a
+subdirectory, does not leave it behind; only a new realm goes to the nearest
+root. A realm found under more than one of these roots is refused.
+`--context-root` changes the ancestor-search starting
 point; `--state-root` bypasses discovery.
 
 Use `--verbose` on `rkat run` to print the active realm, context root, and

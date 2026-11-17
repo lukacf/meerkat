@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Upgrade
 
 - Schedules the gateway keeps for itself: at its first start on this version the gateway makes them anew: the memory steward's first pass comes one interval after that start, and the collector of every live announcement source that names a runner runs once at that start and then at its interval. From then on the gateway keeps its own schedules across starts, resumes one that was paused, sets its timing back, and removes any other row that claims to be one of them.
+- A stdio gateway launch without `persistent_state`, which is what the SDKs start unless a state directory is given: the files its agents write by a relative path now go into a workspace inside the launch's own temporary directory and are removed with it when the gateway exits. Before, they were written into the directory that holds that temporary directory and stayed there. A launch whose agents' files must outlast it gives `persistent_state` (see Breaking).
 
 ### Known limitations
 

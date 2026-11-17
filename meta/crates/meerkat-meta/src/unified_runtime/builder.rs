@@ -2118,14 +2118,20 @@ impl UnifiedRuntimeBuilder {
         if let Some(provider) = classic_agent_memory.as_ref() {
             // Composed after a spawn customizer the spec already carries,
             // never replacing it: the host's runs first, and memory keys on
-            // the identity it leaves.
+            // the identity it leaves. It reads who the spawn will be private
+            // to from the mob's owner record: the owner is written on the
+            // spec only after it.
+            let private_owners = mob_spec.private_owners.clone();
             mob_spec.spawn_member_customizer =
                 Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
                     mob_spec.spawn_member_customizer.take(),
-                    Arc::new(crate::memory::MemorySpawnCustomizer::new(
-                        provider.clone(),
-                        self.agent_memory_config.clone().unwrap_or_default(),
-                    )),
+                    Arc::new(
+                        crate::memory::MemorySpawnCustomizer::new(
+                            provider.clone(),
+                            self.agent_memory_config.clone().unwrap_or_default(),
+                        )
+                        .with_private_owners(private_owners),
+                    ),
                 ));
         }
         // Identity-first `customize_build` tools follow each member across

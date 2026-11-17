@@ -1386,6 +1386,41 @@ impl AccessView {
         self.decide_agent_lineage(action, identity, &lineage)
     }
 
+    /// Whether the access rules allow this caller `action` on the member
+    /// named `identity` that is, or was, private to the person `owner`: the
+    /// rules half of a read of that member's memory, which is kept under
+    /// its owner and its name whether or not the member still exists. The
+    /// private-owner rule is the caller's to apply first: this asks for a
+    /// caller who is that owner or an administrator.
+    ///
+    /// The name's own entry is asked ([`Self::allows_agent`]) whenever the
+    /// attributes held for the name are that owner's member's, live or
+    /// ended, and for an administrator. Otherwise the name is held by
+    /// another member now, or by none this console knows (a restart whose
+    /// read of who the members are private to has not landed, a mob that is
+    /// gone): the member is then decided as a name no entry describes, and
+    /// refused under a deny that could only match it through a role, a
+    /// label or an ancestor it can no longer be read to carry.
+    pub(crate) fn allows_owned_member(&self, action: &str, identity: &str, owner: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        let entry_is_the_owners = self
+            .lineage_for(alias.member_key(identity))
+            .first()
+            .and_then(|link| link.attributes.as_deref())
+            .and_then(|attributes| private_owner(&attributes.labels))
+            == Some(owner);
+        if self.is_admin || entry_is_the_owners {
+            return self.allows_agent(action, identity);
+        }
+        if !self.config.enabled {
+            return true;
+        }
+        !self.has_deny_undecidable_by_identity(action, identity)
+            && self
+                .decide(action, &AccessResource::for_identity(identity))
+                .is_allow()
+    }
+
     /// Full decision for an action against an exact, caller-supplied agent
     /// attribute snapshot.
     ///

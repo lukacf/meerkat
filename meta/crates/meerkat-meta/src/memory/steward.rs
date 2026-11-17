@@ -810,7 +810,9 @@ impl DreamPartition {
 
     /// Route a bare identity (harvest/ledger rows carry no scope).
     fn covers_identity(&self, identity: &str) -> bool {
-        if self.private.contains(identity) {
+        if self.private.contains(identity)
+            || !crate::memory::records::IdentityScopeKey::of(identity).is_named()
+        {
             return false;
         }
         match &self.slice {
@@ -823,9 +825,13 @@ impl DreamPartition {
     }
 
     /// Whether `scope` is the identity scope of a member private to a
-    /// person.
+    /// person: an identity scope kept apart by its key
+    /// ([`MemoryScope::kept_apart_by_its_key`]: the scope of a member's owner
+    /// and name, or a key no member is bound to), whatever this partition's
+    /// set holds, or the scope of a plain name the set holds.
     fn private_scope(&self, scope: &MemoryScope) -> bool {
-        matches!(scope, MemoryScope::Identity { identity, .. } if self.private.contains(identity))
+        scope.kept_apart_by_its_key()
+            || matches!(scope, MemoryScope::Identity { identity, .. } if self.private.contains(identity))
     }
 
     /// Whether `author` is a member private to a person.
@@ -1966,7 +1972,12 @@ impl StewardEngine {
         {
             Ok(records) => records
                 .into_iter()
-                .filter(|record| record.status != RecordStatus::Tombstoned)
+                // A record of a scope kept apart by its key is ranked by no
+                // dream, by whatever id the model named it.
+                .filter(|record| {
+                    record.status != RecordStatus::Tombstoned
+                        && !record.scope.kept_apart_by_its_key()
+                })
                 .map(|record| record.id)
                 .collect(),
             Err(err) => {
@@ -2655,11 +2666,16 @@ impl StewardEngine {
             .iter()
             .map(|entry| entry.record_id.clone())
             .collect();
-        let records = self
+        // The ledger names records by id. A record that lies in a scope kept
+        // apart by its key is read by no dream, whoever was once given it.
+        let records: Vec<_> = self
             .store
             .records_by_ids(&self.realm, &ids)
             .await
-            .map_err(store_err)?;
+            .map_err(store_err)?
+            .into_iter()
+            .filter(|record| !record.scope.kept_apart_by_its_key())
+            .collect();
         let mut sample_text = String::new();
         for record in &records {
             let injections = turn_ledger
@@ -4077,6 +4093,10 @@ impl StewardEngine {
             realm: self.realm.clone(),
             identity: harvest.identity.clone(),
         };
+        // No harvest reads a scope kept apart by its key.
+        if scope.kept_apart_by_its_key() {
+            return Ok(());
+        }
         let manifest = self
             .store
             .manifest(std::slice::from_ref(&scope), ManifestTier::Full)
@@ -9945,6 +9965,106 @@ mod tests {
         assert_eq!(queued[0].record_id, "mem-a");
     }
 
+    /// The usage audit loads the records its ledger rows name by id. A
+    /// record that lies in a scope kept apart by its key (under an owner, or
+    /// under a key no member is bound to) is not loaded: its title reaches
+    /// no prompt, and a verdict the model gives on its id is not queued,
+    /// whoever the ledger says was once given it.
+    #[tokio::test]
+    async fn the_stewards_loads_by_id_drop_a_record_under_a_reserved_key() {
+        let usage_reply = serde_json::json!([
+            {"record_id": "mem-a", "verdict": "dead_weight", "rationale": "never referenced"},
+            {"record_id": "mem-owned", "verdict": "dead_weight", "rationale": "never referenced"},
+            {"record_id": "mem-apart", "verdict": "dead_weight", "rationale": "never referenced"}
+        ]);
+        let fixture = build_fixture(
+            vec![empty_gather(), json_reply(usage_reply), empty_consolidate()],
+            vec![],
+        );
+        for (id, key, title) in [
+            ("mem-a", "identity:worker", "Turn-injected note"),
+            (
+                "mem-owned",
+                "private/console-caller:v1:aa/identity:worker",
+                "OWNED-NOTE-TITLE",
+            ),
+            ("mem-apart", "set-aside/identity:worker", "APART-NOTE-TITLE"),
+        ] {
+            seed_active(
+                &fixture.store,
+                id,
+                &identity_scope(key),
+                title,
+                "went into a live turn once",
+            )
+            .await;
+        }
+        fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("gate", "opens the dream"),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose");
+        let turn_injected = |record_id: &str, at_ms: u64| InjectionLogEntry {
+            record_id: record_id.to_string(),
+            identity: "identity:worker".to_string(),
+            session_key: Some("sess-1".to_string()),
+            surface: InjectionSurface::Turn,
+            at_ms,
+        };
+        fixture
+            .store
+            .log_injections(
+                REALM,
+                &[
+                    turn_injected("mem-a", 1),
+                    turn_injected("mem-owned", 2),
+                    turn_injected("mem-apart", 3),
+                ],
+            )
+            .await
+            .expect("ledger");
+        fixture
+            .transcripts
+            .insert("sess-1", vec!["do the thing", "done"]);
+
+        let outcome = fixture.engine.dream_now().await;
+        assert!(
+            matches!(outcome, DreamOutcome::Completed(_)),
+            "the dream completes: {outcome:?}"
+        );
+        let prompts = fixture.llm.prompts();
+        assert!(
+            prompts.iter().any(|prompt| prompt.contains("mem-a")),
+            "the audit judges the record under the plain name"
+        );
+        for kept in [
+            "OWNED-NOTE-TITLE",
+            "APART-NOTE-TITLE",
+            "mem-owned",
+            "mem-apart",
+        ] {
+            assert!(
+                prompts.iter().all(|prompt| !prompt.contains(kept)),
+                "no prompt holds '{kept}'"
+            );
+        }
+        let queued: Vec<String> = fixture
+            .store
+            .open_dream_audit_verdicts(REALM, 16)
+            .await
+            .expect("review queue")
+            .into_iter()
+            .map(|verdict| verdict.record_id)
+            .collect();
+        assert_eq!(queued, vec!["mem-a".to_string()]);
+    }
+
     #[tokio::test]
     async fn legacy_quarantined_records_older_than_prior_dreams_still_get_verdicted() {
         // Task #55(2) pin-down: there is NO "new since last dream" window on
@@ -10114,5 +10234,43 @@ mod tests {
             failure_row.detail
         );
         assert!(failure_row.completed_at_ms > 0);
+    }
+
+    /// No dream covers an identity scope kept under an owner
+    /// (`private/<owner>/<member>`) or under any other key that holds a
+    /// `/`, also when its set of private members is empty: such a scope is
+    /// private by its key. An identity scope under a plain name is covered
+    /// as before.
+    #[test]
+    fn the_steward_covers_no_scope_kept_under_an_owner() {
+        let scope = |key: &str| MemoryScope::Identity {
+            realm: "family".to_string(),
+            identity: key.to_string(),
+        };
+        for slice in [
+            DreamSlice::Realm,
+            DreamSlice::RealmRemainder {
+                covered_mobs: BTreeSet::new(),
+                covered_identities: BTreeSet::new(),
+            },
+        ] {
+            let partition = DreamPartition::new(slice);
+            for key in [
+                "private/console-caller:v1:aa/ledger-side",
+                "private/ledger-side",
+                "set-aside/ledger-side",
+            ] {
+                assert!(
+                    partition.private_scope(&scope(key)),
+                    "a scope keyed '{key}' is private for every dream"
+                );
+                assert!(
+                    !partition.covers(&scope(key)),
+                    "no dream covers a scope keyed '{key}'"
+                );
+            }
+            assert!(!partition.private_scope(&scope("ledger-side")));
+            assert!(partition.covers(&scope("ledger-side")));
+        }
     }
 }

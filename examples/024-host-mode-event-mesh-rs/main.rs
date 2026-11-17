@@ -37,6 +37,12 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::service::InitialTurnPolicy;
 use tokio::sync::mpsc;
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a small
+/// limit a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     meerkat_runtime::host_stack::run_host("024-host-mode-event-mesh", async_main)?
 }
@@ -125,7 +131,7 @@ timer, or durable external ingress is configured here.
                  Always be brief: 2-3 sentences max."
                     .to_string(),
             ),
-            max_tokens: Some(256),
+            max_tokens: Some(MAX_TOKENS_PER_TURN),
             event_tx: Some(event_tx),
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,

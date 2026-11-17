@@ -2412,7 +2412,7 @@ mod tests {
 
     #[test]
     fn provider_override_requires_model_and_provider_together() {
-        let err = parse_provider_override(&["--model".into(), "gpt-5.5".into()]).unwrap_err();
+        let err = parse_provider_override(&["--model".into(), "gpt-6-astra".into()]).unwrap_err();
         assert!(err.to_string().contains("--model requires --provider"));
 
         let err = parse_provider_override(&["--provider".into(), "openai".into()]).unwrap_err();
@@ -2423,7 +2423,7 @@ mod tests {
     fn provider_override_parses_explicit_provider() {
         let provider = parse_provider_override(&[
             "--model".into(),
-            "gpt-5.5".into(),
+            "gpt-6-astra".into(),
             "--provider".into(),
             "openai".into(),
         ])
@@ -2534,7 +2534,7 @@ mod tests {
 
         let req = CreateSessionRequest {
             injected_context: Vec::new(),
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-astra".to_string(),
             prompt: ContentInput::Text("inspect target tools".to_string()),
             system_prompt: meerkat::SystemPromptOverride::Set("test target".to_string()),
             max_tokens: None,
@@ -2601,7 +2601,7 @@ mod tests {
             &surface.service,
             &surface.runtime_adapter,
             None,
-            "gpt-5.5",
+            "gpt-6-astra",
             "test",
             &surface.mob_state,
             "openai",
@@ -2678,7 +2678,7 @@ mod tests {
             .unwrap();
         let req = CreateSessionRequest {
             injected_context: Vec::new(),
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-astra".to_string(),
             prompt: ContentInput::Text(String::new()),
             system_prompt: meerkat::SystemPromptOverride::Set("cleanup".to_string()),
             max_tokens: None,
@@ -2705,7 +2705,7 @@ mod tests {
 
         surface
             .mob_state
-            .get_or_create_implicit_mob_for_bridge_session(&session_id.to_string(), "gpt-5.5")
+            .get_or_create_implicit_mob_for_bridge_session(&session_id.to_string(), "gpt-6-astra")
             .await
             .unwrap();
         assert!(
@@ -2813,7 +2813,7 @@ mod tests {
                 ],
             ]));
             host.runtime.set_default_llm_client(Some(llm_client));
-            let mut build = meerkat::AgentBuildConfig::new("gpt-5.5");
+            let mut build = meerkat::AgentBuildConfig::new("gpt-6-astra");
             build.provider = Some(meerkat_core::Provider::OpenAI);
             build.override_builtins = meerkat_core::ToolCategoryOverride::Enable;
             build.override_shell = meerkat_core::ToolCategoryOverride::Enable;
@@ -2970,7 +2970,7 @@ mod tests {
         let capture2: Arc<CaptureClient> = Arc::new(CaptureClient::default());
         let req2 = CreateSessionRequest {
             injected_context: Vec::new(),
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-astra".to_string(),
             prompt: ContentInput::Text("list tools".into()),
             system_prompt: meerkat::SystemPromptOverride::Set("test".into()),
             max_tokens: None,
@@ -3062,7 +3062,7 @@ mod tests {
             &surface.service,
             &surface.runtime_adapter,
             None,
-            "gpt-5.5",
+            "gpt-6-astra",
             "test",
             &surface.mob_state,
             "openai",
@@ -3104,7 +3104,7 @@ mod tests {
 
         let req = CreateSessionRequest {
             injected_context: Vec::new(),
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-astra".to_string(),
             prompt: ContentInput::Text("list tools".into()),
             system_prompt: meerkat::SystemPromptOverride::Set("test".into()),
             max_tokens: None,

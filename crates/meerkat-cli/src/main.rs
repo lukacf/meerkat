@@ -16039,6 +16039,12 @@ async fn run_agent(
         // authority so shared RPC/REST realms can read them without trusting
         // the compatibility SessionStore projection.
         let schedule_service = persistence.schedule_service();
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
+        #[cfg(feature = "mob")]
+        let run_schedule_service = schedule_service.clone();
         let default_schedule_tools =
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
@@ -16077,6 +16083,12 @@ async fn run_agent(
             )
             .await?;
             let ctx = prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?;
+            // The members of these mobs hold the schedule tools of this
+            // run's schedule service: their schedule writes are judged by
+            // the mobs' own wiring.
+            run_schedule_service.attach_write_judge(Arc::new(
+                meerkat_mob_mcp::MobScheduleWriteJudge::new(&ctx.state),
+            ));
             if keep_alive {
                 ctx.state.set_detached_completion_delivery(
                     meerkat_mob_mcp::DetachedCompletionDelivery::Available,
@@ -16889,6 +16901,12 @@ async fn resume_session_with_llm_override(
         // realize it. Routing through the shared CLI builder is what keeps
         // resume identical to a fresh run.
         let schedule_service = persistence.schedule_service();
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
+        #[cfg(feature = "mob")]
+        let run_schedule_service = schedule_service.clone();
         let default_schedule_tools =
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
@@ -16914,6 +16932,12 @@ async fn resume_session_with_llm_override(
             let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
                 Arc::new(MobCliSessionService::new(mob_persistent));
             let ctx = prepare_run_mob_tools(scope, run_mob_service).await?;
+            // The members of these mobs hold the schedule tools of this
+            // run's schedule service: their schedule writes are judged by
+            // the mobs' own wiring.
+            run_schedule_service.attach_write_judge(Arc::new(
+                meerkat_mob_mcp::MobScheduleWriteJudge::new(&ctx.state),
+            ));
             if keep_alive {
                 ctx.state.set_detached_completion_delivery(
                     meerkat_mob_mcp::DetachedCompletionDelivery::Available,
@@ -17425,6 +17449,9 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
     let factory = with_cli_confinement(factory, &config, scope, &project_root)?;
 
     let schedule_service = persistence.schedule_service();
+    // Whether this host's agents may write a schedule that creates a
+    // session, from the host's own configuration.
+    schedule_service.allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
     let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
         schedule_service.clone(),
     )) as Arc<dyn AgentToolDispatcher>);
@@ -17444,7 +17471,10 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         Some(scope),
     )?;
     #[cfg(all(feature = "mob", feature = "session-store"))]
-    let mob_state_cache = Arc::new(CliMobStateCache::default());
+    let mob_state_cache = Arc::new(CliMobStateCache {
+        state: tokio::sync::Mutex::new(None),
+        schedule_service: Some(schedule_service.clone()),
+    });
     let schedule_host = if schedule_host_supported(schedule_service.store().kind()) {
         #[cfg(all(feature = "mob", feature = "session-store"))]
         let mob_host = build_cli_schedule_mob_host(
@@ -17537,6 +17567,10 @@ struct CliPersistentSurfaceState {
 #[derive(Default)]
 struct CliMobStateCache {
     state: tokio::sync::Mutex<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
+    /// The schedule service the surface's sessions hold their schedule tools
+    /// over: the mob state, once hydrated, judges its members' schedule
+    /// writes through it.
+    schedule_service: Option<meerkat::ScheduleService>,
 }
 
 #[cfg(all(feature = "mob", feature = "session-store"))]
@@ -17565,6 +17599,11 @@ async fn hydrate_cli_mob_state_cached(
         std::collections::BTreeMap::new(),
     )
     .await?;
+    if let Some(schedule_service) = mob_state_cache.schedule_service.as_ref() {
+        schedule_service.attach_write_judge(Arc::new(meerkat_mob_mcp::MobScheduleWriteJudge::new(
+            &mob_state,
+        )));
+    }
     *cached = Some(Arc::clone(&mob_state));
     Ok(mob_state)
 }
@@ -39295,6 +39334,7 @@ default_model = "gpt-5.4"
             runtime_adapter,
             Arc::new(CliMobStateCache {
                 state: tokio::sync::Mutex::new(Some(Arc::clone(&mob_state))),
+                schedule_service: None,
             }),
         );
 
@@ -39446,6 +39486,451 @@ default_model = "gpt-5.4"
         assert!(names.contains("meerkat_schedule_create"));
         assert!(names.contains("meerkat_schedule_list"));
         assert!(names.contains("meerkat_schedule_occurrences"));
+    }
+
+    /// A model one of whose requests (the one numbered `schedules_at`, from
+    /// zero) calls `meerkat_schedule_create` for a schedule whose target is
+    /// a session created on demand, and whose other requests answer text.
+    struct SessionCreatingScheduleClient {
+        calls: std::sync::atomic::AtomicUsize,
+        schedules_at: usize,
+    }
+
+    #[async_trait]
+    impl LlmClient for SessionCreatingScheduleClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let events = if call == self.schedules_at {
+                vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "make-a-fresh-session-schedule".into(),
+                        name: "meerkat_schedule_create".into(),
+                        args: serde_json::json!({
+                            "name": "a fresh session",
+                            "trigger": {
+                                "type": "once",
+                                "due_at_utc":
+                                    (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                            },
+                            "target": {
+                                "target_kind": "session",
+                                "type": "materialize_on_demand_session",
+                                "create": { "model": "gpt-5.4" },
+                                "action": { "type": "prompt", "prompt": "Run the report." }
+                            }
+                        }),
+                        meta: None,
+                    }),
+                    Ok(normalized_cli_fixture_usage(request)),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "done".into(),
+                        meta: None,
+                    }),
+                    Ok(normalized_cli_fixture_usage(request)),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    }),
+                ]
+            };
+            Box::pin(stream::iter(events))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// One session on the CLI's session service, built with `build`, whose
+    /// model writes a schedule that creates a session: the schedules the
+    /// service holds afterwards.
+    async fn schedules_after_a_session_schedules_a_session(
+        build: SessionBuildOptions,
+    ) -> Vec<meerkat::Schedule> {
+        schedules_after_a_session_schedules_a_session_on(Config::default(), build).await
+    }
+
+    /// [`schedules_after_a_session_schedules_a_session`] on a host whose
+    /// configuration is `config`.
+    async fn schedules_after_a_session_schedules_a_session_on(
+        config: Config,
+        build: SessionBuildOptions,
+    ) -> Vec<meerkat::Schedule> {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .schedule(true);
+        let schedule_service =
+            meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+        let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
+            schedule_service.clone(),
+        )) as Arc<dyn AgentToolDispatcher>);
+        let service = Arc::new(build_cli_service(factory, config, default_schedule_tools));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(SessionCreatingScheduleClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            schedules_at: 0,
+        });
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "schedule the report".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
+                    compaction_curator_override: None,
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..build
+                }),
+                labels: None,
+            })
+            .await
+            .expect("the session's turn ends");
+        schedule_service
+            .list()
+            .await
+            .expect("the schedules are read")
+    }
+
+    /// On the CLI's session service a session built as the host builds one
+    /// by default writes a schedule that creates a session, as before: the
+    /// session the fire creates is built the same way. A session created
+    /// with a tool family switched off that the host's factory has on is
+    /// under a restriction the created session would not be under, and its
+    /// schedule is refused: nothing is stored.
+    #[tokio::test]
+    async fn test_a_session_with_a_tool_family_off_schedules_no_session_on_the_cli_service() {
+        let default_build =
+            schedules_after_a_session_schedules_a_session(SessionBuildOptions::default()).await;
+        assert_eq!(
+            default_build.len(),
+            1,
+            "a session of the host's default build schedules a session as before"
+        );
+
+        let restricted = schedules_after_a_session_schedules_a_session(SessionBuildOptions {
+            override_builtins: meerkat_core::ToolCategoryOverride::Disable,
+            ..SessionBuildOptions::default()
+        })
+        .await;
+        assert!(
+            restricted.is_empty(),
+            "a session with the built-in tools switched off schedules no session: {restricted:?}"
+        );
+
+        let hidden = || {
+            meerkat_core::types::ToolNameSet(
+                [meerkat_core::types::ToolName::new("datetime")]
+                    .into_iter()
+                    .collect(),
+            )
+        };
+        let filtered = schedules_after_a_session_schedules_a_session(SessionBuildOptions {
+            initial_tool_filter: Some(meerkat_core::ToolFilter::Deny(hidden())),
+            ..SessionBuildOptions::default()
+        })
+        .await;
+        assert!(
+            filtered.is_empty(),
+            "a session built with a tool filter schedules no session: {filtered:?}"
+        );
+        let under_policy = schedules_after_a_session_schedules_a_session(SessionBuildOptions {
+            tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(hidden())),
+            ..SessionBuildOptions::default()
+        })
+        .await;
+        assert!(
+            under_policy.is_empty(),
+            "a session under a tool access policy schedules no session: {under_policy:?}"
+        );
+    }
+
+    /// A host configuration whose realm `desk` has two OpenAI bindings:
+    /// `main`, which the realm selects by default, and `second`. The key's
+    /// source names a variable nothing sets: the rows' scripted model
+    /// resolves no credential.
+    fn config_with_a_default_binding() -> Config {
+        toml::from_str(
+            r#"
+[realm.desk]
+default_binding = "main"
+
+[realm.desk.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.desk.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "SCHEDULE_ROW_KEY_NOT_SET" }
+
+[realm.desk.binding.main]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+
+[realm.desk.binding.second]
+backend_profile = "openai_primary"
+auth_profile = "openai_key"
+"#,
+        )
+        .expect("the row's host configuration parses")
+    }
+
+    fn desk_binding(binding: &str) -> meerkat_core::AuthBindingRef {
+        meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("desk").expect("realm id parses"),
+            binding: meerkat_core::BindingId::parse(binding).expect("binding id parses"),
+            profile: None,
+            origin: meerkat_core::connection::BindingOrigin::Configured,
+        }
+    }
+
+    /// A stored session of realm `desk` whose record carries `binding`,
+    /// as a first life leaves it: the build records the binding its
+    /// credential resolution selected. It is written here by hand, since a
+    /// scripted model resolves no credential.
+    fn stored_session_on(binding: &str) -> Session {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.4".to_string(),
+                max_tokens: 4096,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some(meerkat_core::RealmId::parse("desk").expect("realm id parses")),
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: Some(desk_binding(binding)),
+                mob_member_binding: None,
+            })
+            .expect("the stored record is written");
+        session
+    }
+
+    /// A session built by default stays a default writer when it is
+    /// continued from storage, as every continued CLI run is. Its stored
+    /// record carries the binding the host's credential resolution
+    /// selected for it, and the continued build runs on that binding: where
+    /// it is the binding the host selects by default, the session's
+    /// schedule that creates a session is taken as in its first life. A
+    /// stored binding the host does not select by default, and a binding a
+    /// fresh session names that the host does not select by default, are
+    /// bindings of the session's own: refused, nothing stored.
+    #[tokio::test]
+    async fn test_a_continued_session_on_the_hosts_default_binding_schedules_a_session() {
+        let realm = || meerkat_core::RealmId::parse("desk").expect("realm id parses");
+        let continued = |binding: &str| SessionBuildOptions {
+            resume_session: Some(stored_session_on(binding)),
+            realm_id: Some(realm()),
+            ..SessionBuildOptions::default()
+        };
+        let on_the_default = schedules_after_a_session_schedules_a_session_on(
+            config_with_a_default_binding(),
+            continued("main"),
+        )
+        .await;
+        assert_eq!(
+            on_the_default.len(),
+            1,
+            "a session continued on the host's default binding schedules a session"
+        );
+        let on_another = schedules_after_a_session_schedules_a_session_on(
+            config_with_a_default_binding(),
+            continued("second"),
+        )
+        .await;
+        assert!(
+            on_another.is_empty(),
+            "a session continued on a binding of its own schedules no session: {on_another:?}"
+        );
+        let naming_another = schedules_after_a_session_schedules_a_session_on(
+            config_with_a_default_binding(),
+            SessionBuildOptions {
+                auth_binding: Some(desk_binding("second")),
+                realm_id: Some(realm()),
+                ..SessionBuildOptions::default()
+            },
+        )
+        .await;
+        assert!(
+            naming_another.is_empty(),
+            "a session that names a binding of its own schedules no session: {naming_another:?}"
+        );
+    }
+
+    /// What a host puts on a live session before the turn in which its model
+    /// writes a schedule that creates a session.
+    enum LiveLayer {
+        Nothing,
+        /// A tool filter staged on the live session.
+        Filter,
+        /// A per-turn overlay on that turn alone.
+        TurnOverlay,
+    }
+
+    /// One session of the host's default build on the CLI's session service
+    /// whose first turn answers text and whose second turn writes a schedule
+    /// that creates a session, with `layer` put on the live session between
+    /// the two: the schedules the service holds afterwards.
+    async fn schedules_after_a_later_turn_schedules_a_session(
+        layer: LiveLayer,
+    ) -> Vec<meerkat::Schedule> {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .schedule(true);
+        let schedule_service =
+            meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+        let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
+            schedule_service.clone(),
+        )) as Arc<dyn AgentToolDispatcher>);
+        let service = Arc::new(build_cli_service(
+            factory,
+            Config::default(),
+            default_schedule_tools,
+        ));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(SessionCreatingScheduleClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            schedules_at: 1,
+        });
+        let created = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "say hello".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    custom_models: std::collections::BTreeMap::new(),
+                    image_generation_provider: None,
+                    auto_compact_threshold_override: None,
+                    compaction_curator_override: None,
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("the session's first turn ends");
+        assert!(
+            schedule_service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "the first turn writes no schedule"
+        );
+
+        let hidden = meerkat_core::types::ToolName::new("datetime");
+        let mut overlay = None;
+        match layer {
+            LiveLayer::Nothing => {}
+            LiveLayer::Filter => service
+                .set_session_tool_filter(
+                    &created.session_id,
+                    meerkat_core::ToolFilter::Deny(meerkat_core::types::ToolNameSet(
+                        [hidden].into_iter().collect(),
+                    )),
+                )
+                .await
+                .expect("the filter is staged on the live session"),
+            LiveLayer::TurnOverlay => {
+                overlay = Some(meerkat_core::service::TurnToolOverlay {
+                    blocked_tools: Some(vec![hidden]),
+                    ..Default::default()
+                });
+            }
+        }
+        service
+            .start_turn(
+                &created.session_id,
+                StartTurnRequest {
+                    injected_context: Vec::new(),
+                    prompt: "schedule the report".to_string().into(),
+                    system_prompt: None,
+                    event_tx: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics {
+                        turn_tool_overlay: overlay,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("the second turn ends");
+        schedule_service
+            .list()
+            .await
+            .expect("the schedules are read")
+    }
+
+    /// What narrows a session's tools after its build refuses its schedule
+    /// that creates a session as a restriction of the build does. A session
+    /// of the host's default build writes one in a later turn as before. A
+    /// tool filter the host stages on the live session, and an overlay on
+    /// the one turn, each leave the session with fewer tools than a session
+    /// the fire would create: the schedule is refused and nothing is
+    /// stored. The agent loop states the live layers on every dispatch; no
+    /// argument of the call can.
+    #[tokio::test]
+    async fn test_a_live_sessions_narrowed_tools_schedule_no_session_on_the_cli_service() {
+        let untouched = schedules_after_a_later_turn_schedules_a_session(LiveLayer::Nothing).await;
+        assert_eq!(
+            untouched.len(),
+            1,
+            "a later turn of a session nothing narrows schedules a session as before"
+        );
+        let filtered = schedules_after_a_later_turn_schedules_a_session(LiveLayer::Filter).await;
+        assert!(
+            filtered.is_empty(),
+            "a session under a live tool filter schedules no session: {filtered:?}"
+        );
+        let overlaid =
+            schedules_after_a_later_turn_schedules_a_session(LiveLayer::TurnOverlay).await;
+        assert!(
+            overlaid.is_empty(),
+            "a turn under a tool overlay schedules no session: {overlaid:?}"
+        );
     }
 
     #[cfg(feature = "session-store")]

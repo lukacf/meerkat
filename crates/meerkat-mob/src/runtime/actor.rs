@@ -50842,16 +50842,11 @@ impl MobActor {
         self.ensure_member_runtime_durability_ready(&recipient_entry)
             .await?;
 
-        let edge = mob_dsl::WiringEdge::new(
-            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(from.as_str())),
-            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(to.as_str())),
+        let wired_by_machine = super::handle::MobHandle::machine_members_wired(
+            self.dsl_authority.state(),
+            from.as_str(),
+            to.as_str(),
         );
-        let wired_by_machine = self
-            .dsl_authority
-            .state()
-            .wiring_edges
-            .iter()
-            .any(|existing| existing == &edge);
         if !wired_by_machine {
             return Err(MobError::WiringError(format!(
                 "peer message requires wired members '{from}' and '{to}'"

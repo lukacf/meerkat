@@ -49,7 +49,7 @@ pub use public_mcp::{
     public_tools_list_without_workgraph, wrap_public_tool_payload,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use schedule_host::MobMcpScheduleHost;
+pub use schedule_host::{JudgedMobState, MobMcpScheduleHost, MobScheduleWriteJudge};
 pub use surface::wire_mob_tools;
 pub use temporary_council::{
     MergeBackPolicy, TEMPORARY_COUNCIL_CLAIM_LEASE, TEMPORARY_COUNCIL_CLEANUP_BUDGET,

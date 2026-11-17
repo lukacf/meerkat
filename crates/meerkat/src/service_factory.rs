@@ -1541,6 +1541,13 @@ pub struct FactoryAgentBuilder {
 }
 
 impl FactoryAgentBuilder {
+    /// The configuration this builder was created with: what a host reads
+    /// for a setting it applies once, when it composes its services over
+    /// the builder. A build reads the live configuration instead.
+    pub fn initial_config(&self) -> &Config {
+        &self.config_snapshot
+    }
+
     /// Create a new builder backed by the given factory and config.
     pub fn new(factory: AgentFactory, config: Config) -> Self {
         Self {

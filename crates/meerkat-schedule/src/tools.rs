@@ -303,16 +303,235 @@ impl AgentToolDispatcher for ScheduleToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         if !self.tool_defs.iter().any(|tool| tool.name == call.name) {
             return Err(ToolError::not_found(call.name));
         }
 
         let arguments = call_arguments(&call)?;
+        refuse_write_out_of_reach(&self.service, call.name, &arguments, context).await?;
         let result = run_schedule_tools_call(&self.service, call.name, &arguments)
             .await
             .map_err(|failure| map_schedule_tool_dispatch_error(call.name, failure))?;
 
         Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
+    }
+}
+
+/// The denial code of a schedule create or update whose target is not a peer
+/// the writing agent can schedule for ([`crate::ScheduleWriteJudge`]).
+pub const SCHEDULE_TARGET_NOT_A_PEER: &str = "schedule_target_not_a_peer";
+
+/// The refusal of a schedule write whose target is out of the writer's
+/// reach. One sentence for every such target (a member the writer cannot
+/// message, a name no member holds, a mob no host holds): it names nothing
+/// of the target, so it tells the writer nothing of who exists.
+pub fn schedule_target_not_a_peer(tool_name: &str) -> ToolError {
+    ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+        SCHEDULE_TARGET_NOT_A_PEER,
+        format!(
+            "{tool_name} refused: the target is not a peer this agent can schedule for. An \
+             agent schedules for itself, or for a member of its own mob it is wired to"
+        ),
+    ))
+}
+
+/// The denial code of a session's schedule write that would have the host
+/// create a session at the fire, where neither the host's statements about
+/// the writer nor the host's configuration admit it.
+pub const SCHEDULE_SESSION_CREATION_NOT_ALLOWED: &str = "schedule_session_creation_not_allowed";
+
+/// The refusal of a session's schedule write whose target is a session
+/// created on demand.
+pub fn schedule_session_creation_not_allowed(tool_name: &str) -> ToolError {
+    ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+        SCHEDULE_SESSION_CREATION_NOT_ALLOWED,
+        format!(
+            "{tool_name} refused: this agent's schedule cannot create a session. A schedule \
+             that creates a session on demand is written by the host, or by an agent of a \
+             host whose configuration allows it"
+        ),
+    ))
+}
+
+/// The refusal of a session's schedule write whose target spawns or forks
+/// a helper: the code of a schedule that creates a session
+/// ([`SCHEDULE_SESSION_CREATION_NOT_ALLOWED`]), with the helper's sentence.
+fn schedule_helper_creation_not_allowed(tool_name: &str) -> ToolError {
+    ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+        SCHEDULE_SESSION_CREATION_NOT_ALLOWED,
+        format!(
+            "{tool_name} refused: this agent's schedule cannot create a helper. A schedule \
+             that spawns or forks a helper is written by an agent that holds the mob \
+             tools, by the host, or by an agent of a host whose configuration allows it"
+        ),
+    ))
+}
+
+/// Whether a schedule aimed at `target` has the host create a helper when
+/// it fires.
+fn creates_a_helper(target: &TargetBinding) -> bool {
+    matches!(
+        target,
+        TargetBinding::Mob(binding)
+            if matches!(
+                binding.as_ref(),
+                MobTargetBinding::SpawnHelper { .. } | MobTargetBinding::ForkHelper { .. }
+            )
+    )
+}
+
+/// Whether a schedule aimed at `target` has the host create a session when
+/// it fires.
+fn creates_a_session(target: &TargetBinding) -> bool {
+    matches!(
+        target,
+        TargetBinding::Session(binding)
+            if matches!(
+                binding.as_ref(),
+                SessionTargetBinding::MaterializeOnDemandSession { .. }
+            )
+    )
+}
+
+/// Whether the dispatch carries the host's own statements that the writing
+/// session is under no restriction a session the host creates would not be
+/// under: its build is the host's default build (stated by the composition
+/// that built its tools), and no live layer narrows its tools at this round
+/// (stated by the agent loop). A statement that is absent is unknown, and
+/// unknown is not admitted. Neither is a value of the call.
+fn writer_is_unrestricted(context: &meerkat_core::ToolDispatchContext) -> bool {
+    context.host_default_build_stated() && context.live_tool_narrowing() == Some(false)
+}
+
+/// What a session's turn may write with the schedule tools, asked before a
+/// create, an update or a resume runs. A call that belongs to no session's
+/// turn is the host's own and is not asked.
+///
+/// A SCHEDULE THAT CREATES A SESSION. A target that is a session created on
+/// demand has the host build a fresh session at the fire, as the host
+/// builds a session by default and not as the writer's was built. A create
+/// of one, any
+/// update of a schedule that has such a target afterwards (its name or its
+/// prompt alone included) and the resume of a paused one are refused
+/// ([`schedule_session_creation_not_allowed`]) unless the dispatch carries
+/// the host's statements that the writer is under no restriction the
+/// created session would not be under ([`writer_is_unrestricted`]), or the
+/// host allows it by name
+/// ([`ScheduleService::allow_agent_session_creation`]).
+///
+/// A SCHEDULE THAT CREATES A HELPER. A target that spawns or forks a
+/// helper has the host create a helper at the fire, from the role the
+/// schedule names. The same calls are refused with the same code unless
+/// the dispatch carries the host's statement that the writer's build
+/// mounts the mob tools
+/// ([`meerkat_core::ToolDispatchContext::mob_tools_held_stated`]), or the
+/// host allows it by the same name. It is asked after the writer's reach,
+/// so a helper in a mob out of the writer's reach is answered as before. A
+/// writer that holds the mob tools still names the helper's role freely:
+/// the helper is held to the writer's tool access policy, not to the
+/// writer's other bounds.
+///
+/// THE WRITER'S REACH. The host's judge, if it attached one, is asked about
+/// a create or update: refused when the writer could not message whom the
+/// schedule's target names after the call (the target the call writes,
+/// else, for an update, the one the schedule holds).
+///
+/// The call is read here exactly as the tools read it, so what is judged is
+/// what would be written: an update whose `target` is absent or null writes
+/// no target and is judged on the schedule's own, and arguments the tools
+/// would refuse (a `target` that does not read among them) are refused here
+/// with the tools' own answer, never passed on unjudged. An update of an id
+/// no schedule holds is the tools' own refusal too. An update of a deleted
+/// schedule is not judged: nothing fires from it, and what the tools answer
+/// about its record stays theirs.
+pub(crate) async fn refuse_write_out_of_reach(
+    service: &ScheduleService,
+    name: &str,
+    arguments: &Value,
+    context: &meerkat_core::ToolDispatchContext,
+) -> Result<(), ToolError> {
+    let resume = name == "meerkat_schedule_resume";
+    if name != "meerkat_schedule_create" && name != "meerkat_schedule_update" && !resume {
+        return Ok(());
+    }
+    let Some(writer) = context.origin_session_id() else {
+        return Ok(());
+    };
+    let tools_own_refusal =
+        |error: ScheduleToolError| map_schedule_tool_dispatch_error(name, error.into());
+    let target = if name == "meerkat_schedule_create" {
+        let request: CreateScheduleRequest =
+            parse_args(name, arguments).map_err(tools_own_refusal)?;
+        request.target
+    } else {
+        let (schedule_id, written) = if resume {
+            let args: ScheduleIdArgs = parse_args(name, arguments).map_err(tools_own_refusal)?;
+            (args.schedule_id, None)
+        } else {
+            let args: UpdateScheduleArgs =
+                parse_args(name, arguments).map_err(tools_own_refusal)?;
+            (args.schedule_id, args.update.target)
+        };
+        let schedule_id = parse_schedule_id(&schedule_id).map_err(tools_own_refusal)?;
+        let stored = match service.get(&schedule_id).await {
+            Ok(schedule) if schedule.phase == SchedulePhase::Deleted => return Ok(()),
+            Ok(schedule) => schedule.target,
+            Err(ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. })) => {
+                return Ok(());
+            }
+            // What the schedule is aimed at cannot be read now: never let
+            // through as "in reach" or as "creates no session".
+            Err(_) => {
+                return Err(ToolError::unavailable(
+                    name,
+                    ToolUnavailableReason::TemporarilyUnavailable,
+                ));
+            }
+        };
+        written.unwrap_or(stored)
+    };
+    if creates_a_session(&target)
+        && !writer_is_unrestricted(context)
+        && !service.agent_session_creation_allowed()
+    {
+        return Err(schedule_session_creation_not_allowed(name));
+    }
+    // A helper target is asked about after the writer's reach, so a target
+    // out of the writer's reach is answered as it was before this rule.
+    let helper_refused = creates_a_helper(&target)
+        && !context.mob_tools_held_stated()
+        && !service.agent_session_creation_allowed();
+    let within_reach = || {
+        if helper_refused {
+            Err(schedule_helper_creation_not_allowed(name))
+        } else {
+            Ok(())
+        }
+    };
+    // A resume writes no target: the judge of the writer's reach is asked
+    // about a create and an update, as before.
+    if resume {
+        return within_reach();
+    }
+    let Some(judge) = service.write_judge() else {
+        return within_reach();
+    };
+    match judge.judge_schedule_write(writer, &target).await {
+        crate::ScheduleWriteVerdict::Accepted => within_reach(),
+        crate::ScheduleWriteVerdict::OutOfReach => Err(schedule_target_not_a_peer(name)),
+        crate::ScheduleWriteVerdict::Unavailable => Err(ToolError::unavailable(
+            name,
+            ToolUnavailableReason::TemporarilyUnavailable,
+        )),
     }
 }
 
@@ -393,6 +612,13 @@ pub struct CurrentSessionScheduleToolDispatcher {
     /// (absent/`inherit` specs are stamped; a diverging explicit spec is
     /// denied).
     creator_tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Whether the composition that built these tools found the session's
+    /// build to be the host's default build
+    /// ([`Self::with_host_default_build`]).
+    host_default_build: bool,
+    /// Whether the composition that built these tools mounted the mob
+    /// tools for the session ([`Self::with_mob_tools_held`]).
+    mob_tools_held: bool,
 }
 
 impl CurrentSessionScheduleToolDispatcher {
@@ -414,7 +640,37 @@ impl CurrentSessionScheduleToolDispatcher {
             current_session_id,
             target_resolver,
             creator_tool_access_policy: None,
+            host_default_build: false,
+            mob_tools_held: false,
         }
+    }
+
+    /// Say whether the session these tools are built for is built as the
+    /// host builds a session by default: under no restriction a session the
+    /// host creates with nothing set would not be under. Only the
+    /// composition that builds the session says so, from the build itself
+    /// (the facade's agent factory). The tools then state it on every
+    /// dispatch of that session's turn
+    /// ([`meerkat_core::ToolDispatchContext::with_host_default_build_stated`]),
+    /// where the write of a schedule that creates a session asks for it.
+    /// Not said is unknown, and such a write is refused.
+    #[must_use]
+    pub fn with_host_default_build(mut self, host_default_build: bool) -> Self {
+        self.host_default_build = host_default_build;
+        self
+    }
+
+    /// Say whether the session these tools are built for holds the mob
+    /// tools: the composition that builds the session mounted them for
+    /// it. The tools then state it on every dispatch of that session's
+    /// turn
+    /// ([`meerkat_core::ToolDispatchContext::with_mob_tools_held_stated`]),
+    /// where the write of a schedule that spawns or forks a helper asks
+    /// for it. Not said is unknown, and such a write is refused.
+    #[must_use]
+    pub fn with_mob_tools_held(mut self, mob_tools_held: bool) -> Self {
+        self.mob_tools_held = mob_tools_held;
+        self
     }
 
     /// Carry the creating session's effective tool access policy so scheduled
@@ -426,6 +682,63 @@ impl CurrentSessionScheduleToolDispatcher {
     ) -> Self {
         self.creator_tool_access_policy = policy;
         self
+    }
+
+    /// The dispatch context a create or update reaches the wrapped tools
+    /// with: the call's own, naming this dispatcher's session as the turn's
+    /// where the call's names none. The session is the one the tools were
+    /// built for, never a value of the call, so the host's judge of the
+    /// write ([`crate::ScheduleWriteJudge`]) knows the writer on every
+    /// dispatch path.
+    fn writer_context(
+        &self,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> meerkat_core::ToolDispatchContext {
+        let context = match context.origin_session_id() {
+            Some(_) => context.clone(),
+            None => context.clone().with_runtime_identity(
+                self.current_session_id.clone(),
+                context.interaction_lineage_id(),
+            ),
+        };
+        self.stating_the_build(&context)
+    }
+
+    /// The dispatch context a call that is neither a create nor an update
+    /// reaches the wrapped tools with. A resume is judged as a write, so
+    /// it names this dispatcher's session as its writer exactly as a
+    /// create and an update do ([`Self::writer_context`]); every other
+    /// call carries only this composition's word about the build.
+    fn passed_on_context(
+        &self,
+        name: &str,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> meerkat_core::ToolDispatchContext {
+        if name == "meerkat_schedule_resume" {
+            self.writer_context(context)
+        } else {
+            self.stating_the_build(context)
+        }
+    }
+
+    /// `context` with this composition's word about the build and no
+    /// other: the statement is about the session these tools were built
+    /// for, is made for no other session's turn, and one that arrives
+    /// with the call is not kept. Every call the wrapper passes on goes
+    /// through here, so a resume is judged on the same word as a create.
+    fn stating_the_build(
+        &self,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> meerkat_core::ToolDispatchContext {
+        let own_turn = context.origin_session_id() == Some(&self.current_session_id);
+        let context = context
+            .clone()
+            .without_host_default_build_stated()
+            .with_mob_tools_held_stated(own_turn && self.mob_tools_held);
+        if self.host_default_build && own_turn {
+            return context.with_host_default_build_stated();
+        }
+        context
     }
 
     fn rewrite_call_arguments(
@@ -704,10 +1017,14 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
         }
 
         if call.name != "meerkat_schedule_create" && call.name != "meerkat_schedule_update" {
-            return self.inner.dispatch_with_context(call, context).await;
+            return self
+                .inner
+                .dispatch_with_context(call, &self.passed_on_context(call.name, context))
+                .await;
         }
 
         let rewritten_raw = self.rewrite_call_arguments(&call)?;
+        let context = self.writer_context(context);
         self.inner
             .dispatch_with_context(
                 ToolCallView {
@@ -715,7 +1032,7 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
                     name: call.name,
                     args: &rewritten_raw,
                 },
-                context,
+                &context,
             )
             .await
     }
@@ -738,11 +1055,16 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
         if call.name != "meerkat_schedule_create" && call.name != "meerkat_schedule_update" {
             return self
                 .inner
-                .dispatch_resolved_with_context(call, context, plan)
+                .dispatch_resolved_with_context(
+                    call,
+                    &self.passed_on_context(call.name, context),
+                    plan,
+                )
                 .await;
         }
 
         let rewritten_raw = self.rewrite_call_arguments(&call)?;
+        let context = self.writer_context(context);
         self.inner
             .dispatch_resolved_with_context(
                 ToolCallView {
@@ -750,7 +1072,7 @@ impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
                     name: call.name,
                     args: &rewritten_raw,
                 },
-                context,
+                &context,
                 plan,
             )
             .await
@@ -3699,7 +4021,10 @@ mod tests {
             Arc::new(ScheduleToolDispatcher::new(service.clone())),
             SessionId::new(),
         )
-        .with_creator_tool_access_policy(Some(creator.clone()));
+        .with_creator_tool_access_policy(Some(creator.clone()))
+        // The creator holds the mob tools: a session that does not is
+        // refused a helper schedule before anything is stamped.
+        .with_mob_tools_held(true);
 
         let request = spawn_helper_create_args(None);
         let raw = RawValue::from_string(request.to_string()).expect("raw args");
@@ -5882,5 +6207,1126 @@ mod tests {
         let bytes = row.to_string().len();
         assert!(bytes < 2_048, "the row is {bytes} bytes");
         Ok(())
+    }
+
+    /// A judge that answers one verdict and keeps what it was asked.
+    struct RecordingJudge {
+        verdict: crate::ScheduleWriteVerdict,
+        asked: Mutex<Vec<(SessionId, TargetBinding)>>,
+    }
+
+    impl RecordingJudge {
+        fn answering(verdict: crate::ScheduleWriteVerdict) -> Arc<Self> {
+            Arc::new(Self {
+                verdict,
+                asked: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<(SessionId, TargetBinding)> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl crate::ScheduleWriteJudge for RecordingJudge {
+        async fn judge_schedule_write(
+            &self,
+            writer_session: &SessionId,
+            target: &TargetBinding,
+        ) -> crate::ScheduleWriteVerdict {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((writer_session.clone(), target.clone()));
+            self.verdict
+        }
+    }
+
+    /// A schedule service whose host judges writes with `verdict`, and the
+    /// agent-facing tools over it.
+    fn judged_tools(
+        verdict: crate::ScheduleWriteVerdict,
+    ) -> (ScheduleService, Arc<RecordingJudge>, ScheduleToolDispatcher) {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let judge = RecordingJudge::answering(verdict);
+        service.attach_write_judge(judge.clone());
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        (service, judge, tools)
+    }
+
+    /// The dispatch context of a tool call the turn of `session` makes.
+    fn turn_of(session: &SessionId) -> meerkat_core::ToolDispatchContext {
+        meerkat_core::ToolDispatchContext::default().with_runtime_identity(session.clone(), None)
+    }
+
+    /// One schedule tool call `name` with `args` under `context`.
+    async fn judged_call(
+        tools: &dyn AgentToolDispatcher,
+        context: &meerkat_core::ToolDispatchContext,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ToolError> {
+        let raw = RawValue::from_string(args.to_string()).unwrap();
+        let outcome = tools
+            .dispatch_with_context(tool_call("judged", name, &raw), context)
+            .await?;
+        Ok(serde_json::from_str(&outcome.result.text_content()).unwrap())
+    }
+
+    fn is_not_a_peer(answer: &Result<Value, ToolError>) -> bool {
+        matches!(
+            answer,
+            Err(ToolError::PolicyDenied { denial }) if denial.code == SCHEDULE_TARGET_NOT_A_PEER
+        )
+    }
+
+    /// A create the turn of a session makes is put to the host's judge with
+    /// that session and the target it writes: refused as a target that is
+    /// not a peer when the judge finds it out of reach, as temporarily
+    /// unavailable when the judge cannot read it, and stored only when the
+    /// judge accepts it.
+    #[tokio::test]
+    async fn a_sessions_schedule_create_is_judged_on_the_target_it_writes() {
+        let writer = SessionId::new();
+        let request = serde_json::to_value(schedule_request()).unwrap();
+        let written = schedule_request().target;
+
+        let (service, judge, tools) = judged_tools(crate::ScheduleWriteVerdict::OutOfReach);
+        let refused = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            request.clone(),
+        )
+        .await;
+        assert!(is_not_a_peer(&refused), "{refused:?}");
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+        let asked = judge.asked();
+        assert_eq!(asked.len(), 1, "the judge is asked once");
+        assert_eq!(asked[0].0, writer, "with the session whose turn it is");
+        assert_eq!(
+            serde_json::to_value(&asked[0].1).unwrap()["target_kind"],
+            serde_json::to_value(&written).unwrap()["target_kind"],
+            "and the target the call writes"
+        );
+
+        let (service, _judge, tools) = judged_tools(crate::ScheduleWriteVerdict::Unavailable);
+        let unread = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            request.clone(),
+        )
+        .await;
+        assert!(
+            matches!(&unread, Err(ToolError::Unavailable { .. })),
+            "a reach that cannot be read is never read as in reach: {unread:?}"
+        );
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let (service, _judge, tools) = judged_tools(crate::ScheduleWriteVerdict::Accepted);
+        let created = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            request,
+        )
+        .await;
+        assert!(created.is_ok(), "{created:?}");
+        assert_eq!(service.list().await.unwrap().len(), 1);
+    }
+
+    /// An update that names no target is judged on the target the schedule
+    /// holds; a refused update changes nothing; an update of an id no
+    /// schedule holds is the tools' own refusal, and the judge is not asked.
+    #[tokio::test]
+    async fn an_update_that_names_no_target_is_judged_on_the_schedules_own() {
+        let writer = SessionId::new();
+        let (service, judge, tools) = judged_tools(crate::ScheduleWriteVerdict::OutOfReach);
+        let stored = service.create(schedule_request()).await.unwrap();
+
+        let refused = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": stored.schedule_id, "name": "renamed" }),
+        )
+        .await;
+        assert!(is_not_a_peer(&refused), "{refused:?}");
+        let asked = judge.asked();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].1, stored.target, "the schedule's own target");
+        assert_eq!(
+            service.get(&stored.schedule_id).await.unwrap().config.name,
+            stored.config.name,
+            "the refused update changes nothing"
+        );
+
+        let absent = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": ScheduleId::new(), "name": "renamed" }),
+        )
+        .await;
+        assert!(
+            absent.is_err() && !is_not_a_peer(&absent),
+            "an id no schedule holds is the tools' own refusal: {absent:?}"
+        );
+        assert_eq!(judge.asked().len(), 1, "and the judge is not asked");
+
+        service.delete(&stored.schedule_id).await.unwrap();
+        let deleted = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": stored.schedule_id, "name": "renamed" }),
+        )
+        .await;
+        assert!(
+            !is_not_a_peer(&deleted),
+            "an update of a deleted schedule is the tools' own to answer: {deleted:?}"
+        );
+        assert_eq!(judge.asked().len(), 1, "and the judge is not asked");
+    }
+
+    /// An update whose `target` is JSON null names no target, as an update
+    /// without the field does: it is judged on the target the schedule
+    /// holds. An update whose `target` reads as no target at all is refused.
+    /// Neither changes a schedule aimed out of the writer's reach, through
+    /// the tools themselves or through the tools built for a session.
+    #[tokio::test]
+    async fn an_update_whose_target_is_null_or_does_not_read_changes_nothing_out_of_reach() {
+        let writer = SessionId::new();
+        let (service, judge, tools) = judged_tools(crate::ScheduleWriteVerdict::OutOfReach);
+        let stored = service.create(schedule_request()).await.unwrap();
+        let scoped = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            writer.clone(),
+        );
+        let forms: [(
+            &str,
+            &dyn AgentToolDispatcher,
+            meerkat_core::ToolDispatchContext,
+        ); 2] = [
+            ("the tools", &tools, turn_of(&writer)),
+            (
+                "the tools built for the session",
+                &scoped,
+                meerkat_core::ToolDispatchContext::default(),
+            ),
+        ];
+        let cases: [(&str, Option<Value>, bool); 6] = [
+            ("no target", None, true),
+            ("a null target", Some(Value::Null), true),
+            ("a number", Some(json!(7)), false),
+            ("a string", Some(json!("someone")), false),
+            ("a list", Some(json!([])), false),
+            (
+                "an object that is no target",
+                Some(json!({ "target_kind": "nobody" })),
+                false,
+            ),
+        ];
+        for (form, dispatcher, context) in &forms {
+            for (case, target, names_the_stored_one) in &cases {
+                let mut args = json!({ "schedule_id": stored.schedule_id, "name": "renamed" });
+                if let Some(target) = target {
+                    args["target"] = target.clone();
+                }
+                let asked_before = judge.asked().len();
+                let answer =
+                    judged_call(*dispatcher, context, "meerkat_schedule_update", args).await;
+                assert!(
+                    answer.is_err(),
+                    "{form}, {case}: the update is refused: {answer:?}"
+                );
+                assert_eq!(
+                    service.get(&stored.schedule_id).await.unwrap(),
+                    stored,
+                    "{form}, {case}: the schedule is as it was"
+                );
+                let asked = judge.asked();
+                if *names_the_stored_one {
+                    assert!(is_not_a_peer(&answer), "{form}, {case}: {answer:?}");
+                    assert_eq!(
+                        asked.len(),
+                        asked_before + 1,
+                        "{form}, {case}: the judge is asked"
+                    );
+                    assert_eq!(
+                        asked[asked_before],
+                        (writer.clone(), stored.target.clone()),
+                        "{form}, {case}: about the writer and the schedule's own target"
+                    );
+                } else {
+                    assert!(
+                        matches!(&answer, Err(ToolError::InvalidArguments { .. })),
+                        "{form}, {case}: the tools' own refusal of the arguments: {answer:?}"
+                    );
+                    assert_eq!(
+                        asked.len(),
+                        asked_before,
+                        "{form}, {case}: nothing readable to judge"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Only a create or an update the turn of a session makes is judged: a
+    /// call that belongs to no session's turn is the host's own, and the
+    /// other verbs write no target.
+    #[tokio::test]
+    async fn a_schedule_write_of_no_sessions_turn_is_not_judged() {
+        let (service, judge, tools) = judged_tools(crate::ScheduleWriteVerdict::OutOfReach);
+        let created = judged_call(
+            &tools,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            serde_json::to_value(schedule_request()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let schedule_id = created["schedule_id"].clone();
+        for verb in [
+            "meerkat_schedule_get",
+            "meerkat_schedule_pause",
+            "meerkat_schedule_resume",
+            "meerkat_schedule_delete",
+        ] {
+            let answered = judged_call(
+                &tools,
+                &turn_of(&SessionId::new()),
+                verb,
+                json!({ "schedule_id": schedule_id }),
+            )
+            .await;
+            assert!(answered.is_ok(), "{verb}: {answered:?}");
+        }
+        assert!(judge.asked().is_empty(), "the judge was never asked");
+        drop(service);
+    }
+
+    /// The reusable tool surface puts a session's create to the host's judge
+    /// as the tools do: refused out of reach with nothing stored, and the
+    /// host's own call is not judged.
+    #[tokio::test]
+    async fn the_tool_surface_puts_a_sessions_write_to_the_judge() {
+        let writer = SessionId::new();
+        let (service, judge, _tools) = judged_tools(crate::ScheduleWriteVerdict::OutOfReach);
+        let surface = crate::ScheduleToolSurface::new(service.clone());
+        let request = serde_json::to_value(schedule_request()).unwrap();
+
+        let refused = judged_call(
+            &surface,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            request.clone(),
+        )
+        .await;
+        assert!(is_not_a_peer(&refused), "{refused:?}");
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+        assert_eq!(judge.asked().len(), 1, "the judge is asked");
+
+        let hosts = judged_call(
+            &surface,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            request,
+        )
+        .await;
+        assert!(hosts.is_ok(), "the host's own call: {hosts:?}");
+        assert_eq!(judge.asked().len(), 1, "and is not judged");
+    }
+
+    /// The denial code of a session's schedule that would create a session.
+    const SESSION_CREATION_NOT_ALLOWED: &str = "schedule_session_creation_not_allowed";
+
+    /// A schedule request whose target is a session created on demand.
+    fn session_creating_request() -> Value {
+        let mut request = serde_json::to_value(schedule_request()).unwrap();
+        request["target"] = json!({
+            "target_kind": "session",
+            "type": "materialize_on_demand_session",
+            "create": { "model": "claude-sonnet-4-5" },
+            "action": { "type": "prompt", "prompt": "Run the report." },
+        });
+        request
+    }
+
+    /// The refusals of the schedule write rules read as sentences: single
+    /// spaces, no line break.
+    #[test]
+    fn the_schedule_write_refusals_read_as_sentences() {
+        for refusal in [
+            schedule_target_not_a_peer("meerkat_schedule_create"),
+            schedule_session_creation_not_allowed("meerkat_schedule_create"),
+            schedule_helper_creation_not_allowed("meerkat_schedule_create"),
+        ] {
+            assert!(
+                matches!(
+                    &refusal,
+                    ToolError::PolicyDenied { denial }
+                        if !denial.message.contains("  ") && !denial.message.contains('\n')
+                ),
+                "a policy denial in one run of text: {refusal:?}"
+            );
+        }
+    }
+
+    fn is_session_creation_refusal(answer: &Result<Value, ToolError>) -> bool {
+        matches!(
+            answer,
+            Err(ToolError::PolicyDenied { denial }) if denial.code == SESSION_CREATION_NOT_ALLOWED
+        )
+    }
+
+    /// A schedule whose target is a session created on demand is the host's
+    /// to write. A session's turn that writes one is refused unless the
+    /// dispatch carries the host's own statements about that session, which
+    /// no call made here carries: through the tools themselves, with or
+    /// without a judge that accepts the target, through the tools built for
+    /// a session, and through the reusable tool surface. Nothing is stored.
+    /// Words in the arguments state nothing. The host's own call, of no
+    /// session's turn, writes one as before.
+    #[tokio::test]
+    async fn a_sessions_schedule_that_creates_a_session_is_refused() {
+        let writer = SessionId::new();
+        let unjudged = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let (judged, judge, judged_dispatcher) =
+            judged_tools(crate::ScheduleWriteVerdict::Accepted);
+        let plain = ScheduleToolDispatcher::new(unjudged.clone());
+        let scoped = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(unjudged.clone())),
+            writer.clone(),
+        );
+        let surface = crate::ScheduleToolSurface::new(unjudged.clone());
+        let forms: [(
+            &str,
+            &dyn AgentToolDispatcher,
+            meerkat_core::ToolDispatchContext,
+        ); 4] = [
+            ("the tools", &plain, turn_of(&writer)),
+            (
+                "the tools over a judge that accepts",
+                &judged_dispatcher,
+                turn_of(&writer),
+            ),
+            (
+                "the tools built for the session",
+                &scoped,
+                meerkat_core::ToolDispatchContext::default(),
+            ),
+            ("the tool surface", &surface, turn_of(&writer)),
+        ];
+        for (form, dispatcher, context) in &forms {
+            let answer = judged_call(
+                *dispatcher,
+                context,
+                "meerkat_schedule_create",
+                session_creating_request(),
+            )
+            .await;
+            assert!(
+                is_session_creation_refusal(&answer),
+                "{form}: a session's schedule that creates a session is refused: {answer:?}"
+            );
+        }
+        assert!(
+            judge.asked().is_empty(),
+            "refused before the judge is asked about it"
+        );
+
+        for stated in [
+            json!({ "writer_build": "host_default" }),
+            json!({ "host_default_build": true }),
+            json!({ "allow_session_creation": true }),
+        ] {
+            let mut request = session_creating_request();
+            for (key, value) in stated.as_object().unwrap() {
+                request[key.as_str()] = value.clone();
+            }
+            let answer = judged_call(
+                &plain,
+                &turn_of(&writer),
+                "meerkat_schedule_create",
+                request,
+            )
+            .await;
+            assert!(
+                answer.is_err(),
+                "words in the arguments state nothing: {stated}: {answer:?}"
+            );
+        }
+        assert!(
+            unjudged.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+        assert!(judged.list().await.unwrap().is_empty(), "nothing is stored");
+
+        let hosts = judged_call(
+            &plain,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await;
+        assert!(hosts.is_ok(), "the host's own call writes one: {hosts:?}");
+        assert_eq!(unjudged.list().await.unwrap().len(), 1);
+    }
+
+    /// Every change a session's turn makes to a schedule whose target is a
+    /// session created on demand is a write of one: an update of its name
+    /// alone, an update of its prompt, an update that turns another
+    /// schedule's target into that form, and the resume of a paused one are
+    /// refused and change nothing. A read of it, and an update of a schedule
+    /// with another target, are answered as before.
+    #[tokio::test]
+    async fn a_sessions_change_of_a_schedule_that_creates_a_session_is_refused() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        let hosts = meerkat_core::ToolDispatchContext::default();
+        let created = judged_call(
+            &tools,
+            &hosts,
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await
+        .unwrap();
+        let creating = ScheduleId::parse(created["schedule_id"].as_str().unwrap()).unwrap();
+        let ordinary = service.create(schedule_request()).await.unwrap();
+        let stored = service.get(&creating).await.unwrap();
+
+        let mut reprompted = session_creating_request()["target"].clone();
+        reprompted["action"]["prompt"] = json!("Run another report.");
+        for (case, args) in [
+            (
+                "its name alone",
+                json!({ "schedule_id": creating, "name": "renamed" }),
+            ),
+            (
+                "its prompt",
+                json!({ "schedule_id": creating, "target": reprompted }),
+            ),
+        ] {
+            let answer =
+                judged_call(&tools, &turn_of(&writer), "meerkat_schedule_update", args).await;
+            assert!(is_session_creation_refusal(&answer), "{case}: {answer:?}");
+            assert_eq!(
+                service.get(&creating).await.unwrap(),
+                stored,
+                "{case}: the schedule is as it was"
+            );
+        }
+        let turned = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({
+                "schedule_id": ordinary.schedule_id,
+                "target": session_creating_request()["target"],
+            }),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&turned), "{turned:?}");
+        assert_eq!(
+            service.get(&ordinary.schedule_id).await.unwrap(),
+            ordinary,
+            "the other schedule is as it was"
+        );
+
+        let paused = service.pause(&creating).await.unwrap();
+        let resumed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": creating }),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&resumed), "{resumed:?}");
+        assert_eq!(
+            service.get(&creating).await.unwrap().phase,
+            paused.phase,
+            "the schedule stays paused"
+        );
+
+        let read = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_get",
+            json!({ "schedule_id": creating }),
+        )
+        .await;
+        assert!(read.is_ok(), "a read is answered as before: {read:?}");
+        let renamed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": ordinary.schedule_id, "name": "renamed" }),
+        )
+        .await;
+        assert!(
+            renamed.is_ok(),
+            "a schedule with another target is updated as before: {renamed:?}"
+        );
+    }
+
+    /// A session can still stop a schedule that creates a session: its pause
+    /// and its delete are taken as before, and so are its reads, with no
+    /// statement about the writer and no allowance on the host. Only the
+    /// calls that make such a schedule run, or change what it runs, are
+    /// refused.
+    #[tokio::test]
+    async fn a_session_still_pauses_and_deletes_a_schedule_that_creates_a_session() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        let hosts = meerkat_core::ToolDispatchContext::default();
+        let created = judged_call(
+            &tools,
+            &hosts,
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await
+        .unwrap();
+        let creating = ScheduleId::parse(created["schedule_id"].as_str().unwrap()).unwrap();
+        let active = service.get(&creating).await.unwrap();
+
+        for name in [
+            "meerkat_schedule_get",
+            "meerkat_schedule_occurrences",
+            "meerkat_schedule_list",
+        ] {
+            let args = if name == "meerkat_schedule_list" {
+                json!({})
+            } else {
+                json!({ "schedule_id": creating })
+            };
+            let read = judged_call(&tools, &turn_of(&writer), name, args).await;
+            assert!(read.is_ok(), "{name} is answered as before: {read:?}");
+        }
+        assert_eq!(service.get(&creating).await.unwrap(), active);
+
+        let paused = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_pause",
+            json!({ "schedule_id": creating }),
+        )
+        .await;
+        assert!(paused.is_ok(), "the pause is taken: {paused:?}");
+        assert_ne!(
+            service.get(&creating).await.unwrap().phase,
+            active.phase,
+            "the schedule is paused"
+        );
+
+        let deleted = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_delete",
+            json!({ "schedule_id": creating }),
+        )
+        .await;
+        assert!(deleted.is_ok(), "the delete is taken: {deleted:?}");
+        assert!(
+            service
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .all(|schedule| schedule.schedule_id != creating || schedule.phase != active.phase),
+            "the schedule no longer runs"
+        );
+    }
+
+    /// A schedule whose target spawns or forks a helper, in one mob.
+    fn helper_creating_request(kind: &str) -> Value {
+        let mut request = serde_json::to_value(schedule_request()).unwrap();
+        request["target"] = json!({
+            "target_kind": "mob",
+            "type": kind,
+            "mob_id": "ops",
+            "member_id": "helper-1",
+            "prompt": "Do the scheduled work.",
+        });
+        if kind == "fork_helper" {
+            request["target"]["source_member_id"] = json!("anna");
+        }
+        request
+    }
+
+    /// A schedule whose target spawns or forks a helper has the host create
+    /// a helper at the fire, from the role the schedule names. A session's
+    /// turn that writes one is refused unless the dispatch carries the
+    /// host's statement that the writer holds the mob tools, which no call
+    /// made here carries: by a create of either kind, by an update of one
+    /// (its name alone included), by an update that turns another schedule
+    /// into one, and by the resume of a paused one. Nothing is stored or
+    /// changed. The host's own call, of no session's turn, writes one as
+    /// before, and the session still reads, pauses and deletes it.
+    #[tokio::test]
+    async fn a_sessions_schedule_that_creates_a_helper_is_refused() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        for kind in ["spawn_helper", "fork_helper"] {
+            let answer = judged_call(
+                &tools,
+                &turn_of(&writer),
+                "meerkat_schedule_create",
+                helper_creating_request(kind),
+            )
+            .await;
+            assert!(is_session_creation_refusal(&answer), "{kind}: {answer:?}");
+        }
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let hosts = meerkat_core::ToolDispatchContext::default();
+        let created = judged_call(
+            &tools,
+            &hosts,
+            "meerkat_schedule_create",
+            helper_creating_request("spawn_helper"),
+        )
+        .await
+        .expect("the host's own call writes one");
+        let helper = ScheduleId::parse(created["schedule_id"].as_str().unwrap()).unwrap();
+        let ordinary = service.create(schedule_request()).await.unwrap();
+        let stored = service.get(&helper).await.unwrap();
+
+        let renamed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": helper, "name": "renamed" }),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&renamed), "{renamed:?}");
+        assert_eq!(service.get(&helper).await.unwrap(), stored);
+        let turned = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({
+                "schedule_id": ordinary.schedule_id,
+                "target": helper_creating_request("fork_helper")["target"],
+            }),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&turned), "{turned:?}");
+        assert_eq!(
+            service.get(&ordinary.schedule_id).await.unwrap(),
+            ordinary,
+            "the other schedule is as it was"
+        );
+
+        let read = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_get",
+            json!({ "schedule_id": helper }),
+        )
+        .await;
+        assert!(read.is_ok(), "a read is answered as before: {read:?}");
+        let paused = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_pause",
+            json!({ "schedule_id": helper }),
+        )
+        .await;
+        assert!(paused.is_ok(), "the pause is taken: {paused:?}");
+        let resumed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": helper }),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&resumed), "{resumed:?}");
+        let deleted = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_delete",
+            json!({ "schedule_id": helper }),
+        )
+        .await;
+        assert!(deleted.is_ok(), "the delete is taken: {deleted:?}");
+    }
+
+    /// The tools built for a session name their session as the writer of a
+    /// resume, as they do for a create and an update: a resume that reaches
+    /// them with no session named is that session's and is judged, not
+    /// passed on as the host's own call.
+    #[tokio::test]
+    async fn the_per_session_tools_name_their_session_as_the_writer_of_a_resume() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        let created = judged_call(
+            &tools,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await
+        .expect("the host's own call writes one");
+        let id = ScheduleId::parse(created["schedule_id"].as_str().unwrap()).unwrap();
+        let paused = service.pause(&id).await.unwrap();
+
+        let scoped = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            writer,
+        );
+        let resumed = judged_call(
+            &scoped,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": id }),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&resumed), "{resumed:?}");
+        assert_eq!(
+            service.get(&id).await.unwrap().phase,
+            paused.phase,
+            "the schedule stays paused"
+        );
+    }
+
+    /// A session's schedule that spawns or forks a helper is taken when the
+    /// dispatch carries the host's statement that the writer holds the mob
+    /// tools, and on a host that allows it by name. The tools built for a
+    /// session state it for that session's turn only, only when the
+    /// composition that built them said so, and keep no statement that
+    /// arrives with the call.
+    #[tokio::test]
+    async fn a_session_that_holds_the_mob_tools_schedules_a_helper() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        for kind in ["spawn_helper", "fork_helper"] {
+            let refused = judged_call(
+                &tools,
+                &turn_of(&writer).with_mob_tools_held_stated(false),
+                "meerkat_schedule_create",
+                helper_creating_request(kind),
+            )
+            .await;
+            assert!(is_session_creation_refusal(&refused), "{kind}: {refused:?}");
+            let taken = judged_call(
+                &tools,
+                &turn_of(&writer).with_mob_tools_held_stated(true),
+                "meerkat_schedule_create",
+                helper_creating_request(kind),
+            )
+            .await;
+            assert!(taken.is_ok(), "{kind}, the mob tools held: {taken:?}");
+        }
+        assert_eq!(service.list().await.unwrap().len(), 2);
+
+        let silent = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            writer.clone(),
+        );
+        let stating = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            writer.clone(),
+        )
+        .with_mob_tools_held(true);
+        let other = SessionId::new();
+        for (case, dispatcher, context) in [
+            (
+                "tools whose composition said nothing",
+                &silent,
+                turn_of(&writer),
+            ),
+            (
+                "a statement that arrives with the call",
+                &silent,
+                turn_of(&writer).with_mob_tools_held_stated(true),
+            ),
+            (
+                "another session's turn through tools built for this one",
+                &stating,
+                turn_of(&other),
+            ),
+        ] {
+            let answer = judged_call(
+                dispatcher,
+                &context,
+                "meerkat_schedule_create",
+                helper_creating_request("spawn_helper"),
+            )
+            .await;
+            assert!(is_session_creation_refusal(&answer), "{case}: {answer:?}");
+        }
+        let taken = judged_call(
+            &stating,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            helper_creating_request("spawn_helper"),
+        )
+        .await;
+        assert!(
+            taken.is_ok(),
+            "the tools state it for their session's turn: {taken:?}"
+        );
+        assert_eq!(service.list().await.unwrap().len(), 3);
+
+        service.allow_agent_session_creation(true);
+        let allowed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            helper_creating_request("fork_helper"),
+        )
+        .await;
+        assert!(
+            allowed.is_ok(),
+            "a host that allows it by name: {allowed:?}"
+        );
+    }
+
+    /// A session's schedule that creates a session is taken when the
+    /// dispatch carries both of the host's statements about the writer: its
+    /// build is the host's default build, and no live layer narrows its
+    /// tools at this round. Either one missing, a live layer that narrows,
+    /// and a reading that is unknown all leave it refused. The tools built
+    /// for a session state the first for that session's turn only, and only
+    /// when the composition that built them said so.
+    #[tokio::test]
+    async fn a_session_the_host_states_unrestricted_schedules_a_session() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        let default_build = || turn_of(&writer).with_host_default_build_stated();
+        for (case, context) in [
+            ("no statement", turn_of(&writer)),
+            ("the build alone", default_build()),
+            (
+                "the live layers alone",
+                turn_of(&writer).with_live_tool_narrowing(Some(false)),
+            ),
+            (
+                "a live layer that narrows",
+                default_build().with_live_tool_narrowing(Some(true)),
+            ),
+            (
+                "live layers that could not be read",
+                default_build().with_live_tool_narrowing(None),
+            ),
+        ] {
+            let answer = judged_call(
+                &tools,
+                &context,
+                "meerkat_schedule_create",
+                session_creating_request(),
+            )
+            .await;
+            assert!(is_session_creation_refusal(&answer), "{case}: {answer:?}");
+        }
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "nothing is stored"
+        );
+
+        let stated = default_build().with_live_tool_narrowing(Some(false));
+        let taken = judged_call(
+            &tools,
+            &stated,
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await;
+        assert!(taken.is_ok(), "both statements: {taken:?}");
+        assert_eq!(service.list().await.unwrap().len(), 1);
+
+        // The tools built for a session: the composition's word about the
+        // build, for that session's turn only.
+        let unrestricted_round =
+            || meerkat_core::ToolDispatchContext::default().with_live_tool_narrowing(Some(false));
+        let silent = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            writer.clone(),
+        );
+        let stating = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            writer.clone(),
+        )
+        .with_host_default_build(true);
+        let other = SessionId::new();
+        for (case, dispatcher, context) in [
+            (
+                "tools whose composition said nothing",
+                &silent,
+                unrestricted_round(),
+            ),
+            (
+                "a statement that arrives with the call, through tools whose composition said nothing",
+                &silent,
+                unrestricted_round().with_host_default_build_stated(),
+            ),
+            (
+                "another session's turn through tools built for this one",
+                &stating,
+                unrestricted_round().with_runtime_identity(other.clone(), None),
+            ),
+            (
+                "tools that state the build, in a round a live layer narrows",
+                &stating,
+                meerkat_core::ToolDispatchContext::default().with_live_tool_narrowing(Some(true)),
+            ),
+        ] {
+            let answer = judged_call(
+                dispatcher,
+                &context,
+                "meerkat_schedule_create",
+                session_creating_request(),
+            )
+            .await;
+            assert!(is_session_creation_refusal(&answer), "{case}: {answer:?}");
+        }
+        let taken = judged_call(
+            &stating,
+            &unrestricted_round(),
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await;
+        assert!(
+            taken.is_ok(),
+            "the tools state the build for their session's turn: {taken:?}"
+        );
+        assert_eq!(service.list().await.unwrap().len(), 2);
+
+        // A resume through the tools built for a session is judged on the
+        // same word as a create.
+        let stored = ScheduleId::parse(taken.unwrap()["schedule_id"].as_str().unwrap()).unwrap();
+        service.pause(&stored).await.unwrap();
+        let turn = || unrestricted_round().with_runtime_identity(writer.clone(), None);
+        let refused = judged_call(
+            &silent,
+            &turn(),
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": stored }),
+        )
+        .await;
+        assert!(
+            is_session_creation_refusal(&refused),
+            "a resume through tools whose composition said nothing: {refused:?}"
+        );
+        let resumed = judged_call(
+            &stating,
+            &turn(),
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": stored }),
+        )
+        .await;
+        assert!(
+            resumed.is_ok(),
+            "a resume through tools that state the build: {resumed:?}"
+        );
+    }
+
+    /// A host that allows it by name lets every session's turn write, update
+    /// and resume a schedule that creates a session, with no statement about
+    /// the writer; the host can take the allowance back.
+    #[tokio::test]
+    async fn a_host_that_allows_it_lets_its_agents_schedule_a_session() {
+        let writer = SessionId::new();
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let tools = ScheduleToolDispatcher::new(service.clone());
+        service.allow_agent_session_creation(true);
+        let created = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await
+        .unwrap();
+        let schedule_id = created["schedule_id"].clone();
+        let renamed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": schedule_id, "name": "renamed" }),
+        )
+        .await;
+        assert!(renamed.is_ok(), "{renamed:?}");
+        service
+            .pause(&ScheduleId::parse(schedule_id.as_str().unwrap()).unwrap())
+            .await
+            .unwrap();
+        let resumed = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": schedule_id }),
+        )
+        .await;
+        assert!(resumed.is_ok(), "{resumed:?}");
+
+        service.allow_agent_session_creation(false);
+        let refused = judged_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            session_creating_request(),
+        )
+        .await;
+        assert!(is_session_creation_refusal(&refused), "{refused:?}");
+    }
+
+    /// The tools built for a session name that session as the writer on a
+    /// dispatch that carries none, and leave a session the dispatch names.
+    #[tokio::test]
+    async fn the_per_session_tools_name_their_session_as_the_writer() {
+        let built_for = SessionId::new();
+        let (_service, judge, tools) = judged_tools(crate::ScheduleWriteVerdict::Accepted);
+        let scoped = CurrentSessionScheduleToolDispatcher::new(Arc::new(tools), built_for.clone());
+        let request = serde_json::to_value(schedule_request()).unwrap();
+
+        judged_call(
+            &scoped,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            request.clone(),
+        )
+        .await
+        .unwrap();
+        let named = SessionId::new();
+        judged_call(
+            &scoped,
+            &turn_of(&named),
+            "meerkat_schedule_create",
+            request,
+        )
+        .await
+        .unwrap();
+        let writers = judge
+            .asked()
+            .into_iter()
+            .map(|(writer, _)| writer)
+            .collect::<Vec<_>>();
+        assert_eq!(writers, vec![built_for, named]);
     }
 }

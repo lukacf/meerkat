@@ -632,6 +632,11 @@ impl Config {
         if other.workgraph_enabled != defaults.workgraph_enabled {
             self.tools.workgraph_enabled = other.workgraph_enabled;
         }
+        if other.agent_schedules_may_create_sessions != defaults.agent_schedules_may_create_sessions
+        {
+            self.tools.agent_schedules_may_create_sessions =
+                other.agent_schedules_may_create_sessions;
+        }
     }
 
     /// `[agent] budget_warning_threshold` by presence: an explicit value wins
@@ -686,6 +691,10 @@ impl Config {
         }
         if tools.contains_key("workgraph_enabled") {
             self.tools.workgraph_enabled = layer.workgraph_enabled;
+        }
+        if tools.contains_key("agent_schedules_may_create_sessions") {
+            self.tools.agent_schedules_may_create_sessions =
+                layer.agent_schedules_may_create_sessions;
         }
     }
 
@@ -2733,6 +2742,17 @@ pub struct ToolsConfig {
     pub schedule_enabled: bool,
     /// WorkGraph tools enabled
     pub workgraph_enabled: bool,
+    /// Whether an agent's schedule may create a session when it fires.
+    ///
+    /// A schedule whose target is a session created on demand has the host
+    /// build a fresh session at the fire, as the host builds a session by
+    /// default and not as the writer's was built. Off (the default), only
+    /// the host writes such a schedule, and an agent whose own session is
+    /// built as the host builds one by default and whose tools nothing
+    /// narrows. On, every agent that holds the schedule tools may. Read
+    /// when the host composes its schedule tools; written only when on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_schedules_may_create_sessions: bool,
 }
 
 impl Default for ToolsConfig {
@@ -2748,6 +2768,7 @@ impl Default for ToolsConfig {
             mob_enabled: false,
             schedule_enabled: true,
             workgraph_enabled: false,
+            agent_schedules_may_create_sessions: false,
         }
     }
 }
@@ -6671,6 +6692,62 @@ stream_inactivity_timeout = "2m"
         let toml_str = toml::to_string(&config.provider_tools).unwrap();
         let parsed: ProviderToolsConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed, config.provider_tools);
+    }
+
+    /// The allowance for agents' schedules that create a session is off
+    /// unless a `[tools]` table sets it, and is written only when on, so a
+    /// document of a host that never set it is the document an earlier
+    /// build wrote. A later layer that does not name it keeps it; one that
+    /// names it wins. A `[tools]` table with a key the build does not know
+    /// still loads, which is how an earlier build reads a document that
+    /// carries this key.
+    #[test]
+    fn the_allowance_for_schedules_that_create_sessions_is_written_only_when_on() {
+        const KEY: &str = "agent_schedules_may_create_sessions";
+        let off = Config::default();
+        assert!(!off.tools.agent_schedules_may_create_sessions);
+        let written = toml::to_string(&off.tools).unwrap();
+        assert!(!written.contains(KEY), "off is not written: {written}");
+        let whole = toml::to_string(&off).unwrap();
+        assert!(!whole.contains(KEY), "off is not written: {whole}");
+
+        let on: Config = toml::from_str(&format!("[tools]\n{KEY} = true\n")).unwrap();
+        assert!(on.tools.agent_schedules_may_create_sessions);
+        let written = toml::to_string(&on.tools).unwrap();
+        assert!(written.contains(&format!("{KEY} = true")), "{written}");
+        let read_back: ToolsConfig = toml::from_str(&written).unwrap();
+        assert!(read_back.agent_schedules_may_create_sessions);
+
+        let mut layered = Config::default();
+        layered
+            .merge_toml_str(&format!("[tools]\n{KEY} = true\n"))
+            .unwrap();
+        assert!(layered.tools.agent_schedules_may_create_sessions);
+        layered
+            .merge_toml_str("[tools]\nschedule_enabled = true\n")
+            .unwrap();
+        assert!(
+            layered.tools.agent_schedules_may_create_sessions,
+            "a layer that does not name it keeps it"
+        );
+        layered
+            .merge_toml_str(&format!("[tools]\n{KEY} = false\n"))
+            .unwrap();
+        assert!(
+            !layered.tools.agent_schedules_may_create_sessions,
+            "a layer that names it wins"
+        );
+
+        let later: Config =
+            toml::from_str("[tools]\na_key_of_a_later_build = true\nschedule_enabled = true\n")
+                .unwrap();
+        assert!(later.tools.schedule_enabled);
+        assert!(!later.tools.agent_schedules_may_create_sessions);
+        let mut merged = Config::default();
+        merged
+            .merge_toml_str("[tools]\na_key_of_a_later_build = true\n")
+            .unwrap();
+        assert!(!merged.tools.agent_schedules_may_create_sessions);
     }
 
     #[test]

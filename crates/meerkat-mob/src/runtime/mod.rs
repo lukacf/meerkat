@@ -561,7 +561,7 @@ pub use held_spawn::HeldSpawnDeadline;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use held_spawn::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-pub use host_schedule::HostObservationScheduleMobHost;
+pub use host_schedule::{HostObservationScheduleMobHost, HostResidentScheduleWriteJudge};
 pub use identity_entry::{
     EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
     IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,

@@ -33,6 +33,246 @@ use crate::tokio::time::sleep;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time::sleep;
 
+impl MobMcpState {
+    /// Whether member `writer` of mob `writer_mob` could message member
+    /// `target` of mob `target_mob`, by MobMachine's wiring
+    /// ([`meerkat_mob::MobHandle::member_can_message`]): the two are members
+    /// of one mob and that mob holds the wiring edge between them. A
+    /// member's comms trust, which its own `send_message` checks, is
+    /// installed from that edge.
+    ///
+    /// A member of another mob answers `false`, whatever wires a member to
+    /// a peer outside its mob: such an edge is one mob's fact about a peer
+    /// it does not hold, and this judgement never widens on it. So do a
+    /// name no member holds and a mob this state does not manage. The
+    /// writer's mob is read as it stands: nothing is restored for the
+    /// question. A member is not asked about itself here.
+    ///
+    /// # Errors
+    /// The writer's own mob is not managed now, or could not be read.
+    pub async fn member_can_message(
+        &self,
+        writer_mob: &MobId,
+        writer: &AgentIdentity,
+        target_mob: &MobId,
+        target: &AgentIdentity,
+    ) -> Result<bool, MobError> {
+        if writer_mob != target_mob {
+            return Ok(false);
+        }
+        self.managed_mob_as_it_stands(writer_mob)
+            .await
+            .ok_or_else(|| MobError::Internal(format!("mob {writer_mob} is not managed now")))?
+            .member_can_message(writer, target)
+    }
+
+    /// The handle of the mob `mob_id` when this state manages it now and it
+    /// is not destroyed. Unlike [`Self::handle_for`] it restores nothing and
+    /// re-attempts no quarantined store: a name in an agent's schedule
+    /// target must not move a mob.
+    async fn managed_mob_as_it_stands(&self, mob_id: &MobId) -> Option<meerkat_mob::MobHandle> {
+        self.mobs
+            .read()
+            .await
+            .get(mob_id)
+            .filter(|managed| {
+                managed.handle.status_observation_snapshot() != meerkat_mob::MobState::Destroyed
+            })
+            .map(|managed| managed.handle.clone())
+    }
+
+    /// Whether the member holding `writer_session`, a member of mob
+    /// `writer_mob`, may write a schedule that has the host act in mob
+    /// `target_mob` (spawn a helper there, run one of its flows): in its own
+    /// mob, and in a mob whose durable creation record names that session's
+    /// member as the creator of its own create (the rule the agent mob tools
+    /// re-derive a creator's grant from). A mob this state does not manage
+    /// now answers `false`, and nothing is restored for the question.
+    pub async fn member_may_schedule_in_mob(
+        &self,
+        writer_mob: &MobId,
+        writer_session: &meerkat_core::types::SessionId,
+        target_mob: &MobId,
+    ) -> bool {
+        if writer_mob == target_mob {
+            return true;
+        }
+        match self.managed_mob_as_it_stands(target_mob).await {
+            Some(mob) => self.session_is_recorded_creator(&mob, writer_session).await,
+            None => false,
+        }
+    }
+
+    /// This host's judgement of a schedule create or update the turn of the
+    /// session `writer_session` makes, for a schedule aimed at `target`
+    /// ([`meerkat::ScheduleWriteJudge`]): accepted where the member holding
+    /// that session could message the member the target names
+    /// ([`Self::member_can_message`]), and for a schedule the member aims
+    /// at itself.
+    ///
+    /// The member a target names is the member of a member target, the
+    /// source of a fork helper, the member a `mob_member:` identity names,
+    /// and the member holding a session target's session. A session target
+    /// that names another session no member holds is out of reach. A target
+    /// that has the host act in a mob (a helper to spawn, a flow) is
+    /// accepted for a mob the writer may schedule in
+    /// ([`Self::member_may_schedule_in_mob`]). A turn of a session no
+    /// member holds is not a member's write, and a target that names
+    /// neither a member nor a mob (a host runnable, a session created on
+    /// demand, any other identity) is not judged here.
+    pub async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::types::SessionId,
+        target: &meerkat::TargetBinding,
+    ) -> meerkat::ScheduleWriteVerdict {
+        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        let writer = match self.session_member_matches(writer_session).await {
+            Ok(matches) => match matches.as_slice() {
+                [] => return Accepted,
+                [writer] => (writer.mob_id.clone(), writer.identity.clone()),
+                _ => return Unavailable,
+            },
+            Err(_) => return Unavailable,
+        };
+        let named = match target {
+            meerkat::TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => (
+                    MobId::from(mob_id.as_str()),
+                    AgentIdentity::from(member_id.as_str()),
+                ),
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => (
+                    MobId::from(mob_id.as_str()),
+                    AgentIdentity::from(source_member_id.as_str()),
+                ),
+                MobTargetBinding::SpawnHelper { mob_id, .. }
+                | MobTargetBinding::Flow { mob_id, .. } => {
+                    let acts_in = MobId::from(mob_id.as_str());
+                    return if self
+                        .member_may_schedule_in_mob(&writer.0, writer_session, &acts_in)
+                        .await
+                    {
+                        Accepted
+                    } else {
+                        OutOfReach
+                    };
+                }
+            },
+            meerkat::TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => (
+                        MobId::from(named.mob_id.as_str()),
+                        AgentIdentity::from(named.member.as_str()),
+                    ),
+                    None => return Accepted,
+                }
+            }
+            meerkat::TargetBinding::Session(binding) => {
+                let session_id = match binding.as_ref() {
+                    meerkat::SessionTargetBinding::ExactSession { session_id, .. }
+                    | meerkat::SessionTargetBinding::ResumableSession { session_id, .. } => {
+                        session_id
+                    }
+                    meerkat::SessionTargetBinding::MaterializeOnDemandSession {
+                        bound_session_id: Some(session_id),
+                        ..
+                    } => session_id,
+                    meerkat::SessionTargetBinding::MaterializeOnDemandSession {
+                        bound_session_id: None,
+                        ..
+                    } => return Accepted,
+                };
+                if session_id == writer_session {
+                    return Accepted;
+                }
+                match self.session_member_matches(session_id).await {
+                    Ok(matches) => match matches.as_slice() {
+                        [] => return OutOfReach,
+                        [holder] => (holder.mob_id.clone(), holder.identity.clone()),
+                        _ => return Unavailable,
+                    },
+                    Err(_) => return Unavailable,
+                }
+            }
+            meerkat::TargetBinding::HostRunnable(_) => return Accepted,
+        };
+        if named == writer {
+            return Accepted;
+        }
+        match self
+            .member_can_message(&writer.0, &writer.1, &named.0, &named.1)
+            .await
+        {
+            Ok(true) => Accepted,
+            Ok(false) => OutOfReach,
+            Err(_) => Unavailable,
+        }
+    }
+}
+
+/// The mob state a [`MobScheduleWriteJudge`] reads now.
+pub enum JudgedMobState {
+    /// The host's mobs.
+    Mobs(Arc<MobMcpState>),
+    /// The host holds no mobs: no session is a member's.
+    NoMobs,
+    /// The host stopped.
+    Stopped,
+}
+
+/// A host's judge of its agents' schedule writes
+/// ([`meerkat::ScheduleWriteJudge`]) over the mobs it holds
+/// ([`MobMcpState::judge_schedule_write`]). A host attaches it to the
+/// schedule service its schedule tools write through
+/// (`ScheduleService::attach_write_judge`).
+///
+/// The service keeps the judge for as long as any clone of it lives, so the
+/// judge holds no mob state: it reads the host's current one per call, and
+/// a stopped host's writes are refused as temporarily unavailable.
+pub struct MobScheduleWriteJudge {
+    state: Box<dyn Fn() -> JudgedMobState + Send + Sync>,
+}
+
+impl MobScheduleWriteJudge {
+    /// A judge over `state`, held weakly: once the host dropped it, a write
+    /// is unavailable.
+    pub fn new(state: &Arc<MobMcpState>) -> Self {
+        let state = Arc::downgrade(state);
+        Self::over(move || match state.upgrade() {
+            Some(state) => JudgedMobState::Mobs(state),
+            None => JudgedMobState::Stopped,
+        })
+    }
+
+    /// A judge over the mob state `current` answers at each call, for a
+    /// host whose mob state is installed or replaced while it runs.
+    pub fn over(current: impl Fn() -> JudgedMobState + Send + Sync + 'static) -> Self {
+        Self {
+            state: Box::new(current),
+        }
+    }
+}
+
+#[async_trait]
+impl meerkat::ScheduleWriteJudge for MobScheduleWriteJudge {
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::types::SessionId,
+        target: &meerkat::TargetBinding,
+    ) -> meerkat::ScheduleWriteVerdict {
+        match (self.state)() {
+            JudgedMobState::Mobs(state) => state.judge_schedule_write(writer_session, target).await,
+            JudgedMobState::NoMobs => meerkat::ScheduleWriteVerdict::Accepted,
+            JudgedMobState::Stopped => meerkat::ScheduleWriteVerdict::Unavailable,
+        }
+    }
+}
+
 #[async_trait]
 pub(crate) trait ScheduleMobRuntime: Send + Sync {
     async fn begin_external_delivery(
@@ -3078,5 +3318,317 @@ mod tests {
             delivery_failure_reason_for(&MobError::Internal("boom".to_string())),
             DeliveryFailureReason::InternalError
         );
+    }
+
+    fn prompt_action() -> ScheduledSessionAction {
+        ScheduledSessionAction::Prompt {
+            prompt: ContentInput::Text("A scheduled note.".to_string()),
+            system_prompt: None,
+            render_metadata: None,
+            skill_refs: Vec::new(),
+            additional_instructions: Vec::new(),
+        }
+    }
+
+    fn send_to(mob: &str, member: &str) -> TargetBinding {
+        TargetBinding::Mob(Box::new(MobTargetBinding::Member {
+            mob_id: mob.to_string(),
+            member_id: member.to_string(),
+            action: ScheduledMobAction::Send {
+                content: ContentInput::Text("A scheduled note.".to_string()),
+                render_metadata: None,
+            },
+        }))
+    }
+
+    fn fork_of(mob: &str, source: &str) -> TargetBinding {
+        TargetBinding::Mob(Box::new(MobTargetBinding::ForkHelper {
+            mob_id: mob.to_string(),
+            source_member_id: source.to_string(),
+            member_id: format!("{source}-fork"),
+            prompt: "A scheduled note.".to_string(),
+            fork_context: ForkContextSpec::default(),
+            options: HelperOptionsSpec::default(),
+        }))
+    }
+
+    fn identity_of(mob: &str, member: &str) -> TargetBinding {
+        TargetBinding::Identity(Box::new(IdentityTargetBinding::resumable(
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: mob.to_string(),
+                role: "worker".to_string(),
+                member: member.to_string(),
+            }),
+            prompt_action(),
+        )))
+    }
+
+    fn session_of(session_id: &meerkat_core::types::SessionId) -> TargetBinding {
+        TargetBinding::session(meerkat::SessionTargetBinding::ExactSession {
+            session_id: session_id.clone(),
+            action: prompt_action(),
+        })
+    }
+
+    async fn worker_mob(state: &MobMcpState, mob: &str, members: &[&str]) -> MobId {
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
+            "id": mob,
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.4",
+                    "external_addressable": true,
+                    "tools": { "comms": true, "schedule": true }
+                }
+            }
+        }))
+        .expect("the mob definition decodes");
+        let mob_id = state
+            .mob_create_definition(definition)
+            .await
+            .expect("the mob is created");
+        for member in members {
+            state
+                .mob_spawn(
+                    &mob_id,
+                    meerkat_mob::ProfileName::from("worker"),
+                    AgentIdentity::from(*member),
+                    Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                    None,
+                    None,
+                )
+                .await
+                .expect("the member is seated");
+        }
+        mob_id
+    }
+
+    async fn session_held_by(
+        state: &MobMcpState,
+        mob_id: &MobId,
+        member: &str,
+    ) -> meerkat_core::types::SessionId {
+        state
+            .mob_resolve_bridge_session_id(mob_id, &AgentIdentity::from(member))
+            .await
+            .expect("the member's session is read")
+            .expect("the member has a session")
+    }
+
+    /// A member's schedule write is judged by the wiring of the mobs the
+    /// host holds, for every form in which a target names a member: accepted
+    /// for the member itself and for a member it is wired to, out of reach
+    /// for a member it is not wired to, a member of another mob, a name no
+    /// member holds, a mob the host does not hold and a session no member
+    /// holds. A turn of a session no member holds is not a member's write.
+    #[tokio::test]
+    async fn a_members_schedule_write_is_judged_by_the_wiring_of_the_hosts_mobs() {
+        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+
+        let state = MobMcpState::new_in_memory();
+        let ops = worker_mob(&state, "ops", &["anna", "boris", "carl"]).await;
+        let side = worker_mob(&state, "side", &["helper"]).await;
+        state
+            .mob_wire(
+                &ops,
+                AgentIdentity::from("anna"),
+                meerkat_mob::PeerTarget::Local(AgentIdentity::from("boris")),
+            )
+            .await
+            .expect("anna and boris are wired");
+        let anna = session_held_by(&state, &ops, "anna").await;
+        let boris = session_held_by(&state, &ops, "boris").await;
+        let carl = session_held_by(&state, &ops, "carl").await;
+        let helper = session_held_by(&state, &side, "helper").await;
+        let nobodys = meerkat_core::types::SessionId::new();
+
+        for (case, writer, target, expected) in [
+            ("a wired member", &anna, send_to("ops", "boris"), Accepted),
+            (
+                "the wired member back",
+                &boris,
+                send_to("ops", "anna"),
+                Accepted,
+            ),
+            ("itself", &anna, send_to("ops", "anna"), Accepted),
+            (
+                "an unwired member",
+                &anna,
+                send_to("ops", "carl"),
+                OutOfReach,
+            ),
+            (
+                "a name no member holds",
+                &anna,
+                send_to("ops", "nobody"),
+                OutOfReach,
+            ),
+            (
+                "a mob the host does not hold",
+                &anna,
+                send_to("elsewhere", "boris"),
+                OutOfReach,
+            ),
+            (
+                "a member of another mob",
+                &anna,
+                send_to("side", "helper"),
+                OutOfReach,
+            ),
+            (
+                "another mob's member, the other way",
+                &helper,
+                send_to("ops", "anna"),
+                OutOfReach,
+            ),
+            (
+                "a fork of a wired member",
+                &anna,
+                fork_of("ops", "boris"),
+                Accepted,
+            ),
+            (
+                "a fork of an unwired member",
+                &anna,
+                fork_of("ops", "carl"),
+                OutOfReach,
+            ),
+            (
+                "a wired member by identity",
+                &anna,
+                identity_of("ops", "boris"),
+                Accepted,
+            ),
+            (
+                "an unwired member by identity",
+                &anna,
+                identity_of("ops", "carl"),
+                OutOfReach,
+            ),
+            ("its own session", &anna, session_of(&anna), Accepted),
+            (
+                "a wired member's session",
+                &anna,
+                session_of(&boris),
+                Accepted,
+            ),
+            (
+                "an unwired member's session",
+                &anna,
+                session_of(&carl),
+                OutOfReach,
+            ),
+            (
+                "a session no member holds",
+                &anna,
+                session_of(&nobodys),
+                OutOfReach,
+            ),
+            (
+                "a writer no member is",
+                &nobodys,
+                send_to("ops", "carl"),
+                Accepted,
+            ),
+        ] {
+            assert_eq!(
+                state.judge_schedule_write(writer, &target).await,
+                expected,
+                "{case}"
+            );
+        }
+
+        let judge = MobScheduleWriteJudge::new(&state);
+        assert_eq!(
+            meerkat::ScheduleWriteJudge::judge_schedule_write(
+                &judge,
+                &anna,
+                &send_to("ops", "carl")
+            )
+            .await,
+            OutOfReach,
+            "the host's judge answers as its mob state does"
+        );
+        let no_mobs = MobScheduleWriteJudge::over(|| JudgedMobState::NoMobs);
+        assert_eq!(
+            meerkat::ScheduleWriteJudge::judge_schedule_write(
+                &no_mobs,
+                &anna,
+                &send_to("ops", "carl")
+            )
+            .await,
+            Accepted,
+            "a host without mobs holds no member"
+        );
+        drop(state);
+        assert_eq!(
+            meerkat::ScheduleWriteJudge::judge_schedule_write(
+                &judge,
+                &anna,
+                &send_to("ops", "carl")
+            )
+            .await,
+            Unavailable,
+            "a stopped host's reach is never read as in reach"
+        );
+    }
+
+    fn acting_in(mob: &str, form: &str) -> TargetBinding {
+        let target = match form {
+            "flow" => serde_json::json!({
+                "target_kind": "mob",
+                "type": "flow",
+                "mob_id": mob,
+                "flow_id": "daily",
+                "params": {},
+            }),
+            _ => serde_json::json!({
+                "target_kind": "mob",
+                "type": "spawn_helper",
+                "mob_id": mob,
+                "member_id": "scheduled-helper",
+                "prompt": "Look at the queue.",
+            }),
+        };
+        serde_json::from_value(target).expect("the target decodes")
+    }
+
+    /// A schedule that has the host act in a mob (spawn a helper there, run
+    /// one of its flows) is a member's to write for its own mob. A member
+    /// of another mob that did not create that mob is out of reach, as for
+    /// a mob the host does not hold. A turn of a session no member holds
+    /// is not a member's write.
+    #[tokio::test]
+    async fn a_members_schedule_that_acts_in_a_mob_is_judged_by_whose_mob_it_is() {
+        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach};
+
+        let state = MobMcpState::new_in_memory();
+        let ops = worker_mob(&state, "ops", &["anna"]).await;
+        let side = worker_mob(&state, "side", &["helper"]).await;
+        let anna = session_held_by(&state, &ops, "anna").await;
+        let helper = session_held_by(&state, &side, "helper").await;
+        let nobodys = meerkat_core::types::SessionId::new();
+
+        for (case, writer, mob, expected) in [
+            ("its own mob", &anna, "ops", Accepted),
+            ("another mob it did not create", &helper, "ops", OutOfReach),
+            ("another mob, the other way", &anna, "side", OutOfReach),
+            (
+                "a mob the host does not hold",
+                &anna,
+                "elsewhere",
+                OutOfReach,
+            ),
+            ("a writer no member is", &nobodys, "ops", Accepted),
+        ] {
+            for form in ["spawn_helper", "flow"] {
+                assert_eq!(
+                    state
+                        .judge_schedule_write(writer, &acting_in(mob, form))
+                        .await,
+                    expected,
+                    "{form} in {case}"
+                );
+            }
+        }
     }
 }

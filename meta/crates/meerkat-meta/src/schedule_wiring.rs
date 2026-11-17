@@ -72,6 +72,11 @@ pub const STEWARD_DREAM_RUNNABLE: &str = "meta.memory.steward.dream";
 /// schedule listings — idempotency keys on the host-runnable target, not this.
 pub(crate) const STEWARD_DREAM_SCHEDULE_NAME: &str = "meta-memory-steward-dream";
 
+/// The label of the host's own steward dream schedule: the schedule
+/// [`ensure_steward_dream_schedule`] keeps carries it. The label is the
+/// host's: agents' schedule tools take no create or update that carries it.
+pub const STEWARD_DREAM_LABEL: &str = "meta.memory.steward.schedule";
+
 /// A [`HostRunnable`] that runs one guarded steward dream attempt. Registered
 /// with the schedule host so the dream fires as a durable, misfire-aware
 /// schedule occurrence instead of a bare in-process interval loop.
@@ -263,8 +268,17 @@ pub fn gateway_runnable_host_with(
 
 /// The label every source runner schedule Meta makes carries. A schedule
 /// without it is never Meta's to change or end, whatever it targets: a
-/// host's own schedule of its collector stays the host's.
+/// host's own schedule of its collector stays the host's. The label is the
+/// host's at any value: agents' schedule tools take no create or update
+/// that carries it.
 pub const SOURCE_RUNNER_LABEL: &str = "mob_announcements.source_runner";
+
+/// The label's value on the runner schedules this version makes. Only a
+/// schedule carrying it is kept across a start; a labelled schedule with
+/// any other value (one an earlier version made, which carried "1") ends
+/// and the source's schedule is made anew. The key is unchanged, so an
+/// earlier version still reads these schedules as its own.
+const SOURCE_RUNNER_MARK: &str = "2";
 
 /// The params a source runner's schedule carries: the source its collector
 /// reads.
@@ -288,19 +302,34 @@ fn host_runnable_target(target: &TargetBinding) -> Option<(HostRunnableName, Val
 /// naming its source.
 type RunnerSchedule = (Schedule, HostRunnableName, Value);
 
-/// Every source runner schedule Meta made on `service`.
-async fn runner_schedules(service: &ScheduleService) -> Result<Vec<RunnerSchedule>, String> {
-    Ok(service
+/// Every schedule on `service` that carries [`SOURCE_RUNNER_LABEL`]: the
+/// source runner schedules (a host runnable with a source as params), in
+/// the order they were stored, and the labelled schedules that are none.
+async fn runner_schedules(
+    service: &ScheduleService,
+) -> Result<(Vec<RunnerSchedule>, Vec<Schedule>), String> {
+    let mut labelled: Vec<Schedule> = service
         .list()
         .await
         .map_err(|error| format!("list schedules: {error}"))?
         .into_iter()
         .filter(|schedule| schedule.config.labels.contains_key(SOURCE_RUNNER_LABEL))
-        .filter_map(|schedule| {
-            let (runnable, params) = host_runnable_target(&schedule.target)?;
-            Some((schedule, runnable, params))
-        })
-        .collect())
+        .collect();
+    labelled.sort_by_cached_key(|schedule| {
+        (
+            schedule.config.created_at_utc,
+            schedule.schedule_id.to_string(),
+        )
+    });
+    let mut runners = Vec::new();
+    let mut others = Vec::new();
+    for schedule in labelled {
+        match host_runnable_target(&schedule.target) {
+            Some((runnable, params)) => runners.push((schedule, runnable, params)),
+            None => others.push(schedule),
+        }
+    }
+    Ok((runners, others))
 }
 
 /// Bring `source`'s runner schedule in line with its record, given the
@@ -315,6 +344,14 @@ async fn runner_schedules(service: &ScheduleService) -> Result<Vec<RunnerSchedul
 /// `now_utc`; a changed runnable replaces it; no runner, or an ended source,
 /// ends it. A paused source keeps its schedule: the collector reads the
 /// pause and does nothing.
+///
+/// The schedule that is kept carries this version's mark
+/// ([`SOURCE_RUNNER_MARK`]), the one stored first if several do. It is
+/// resumed when it is paused, and retimed from `now_utc` whenever its
+/// trigger is not the source's (another interval, an end time, a start
+/// that has not come). Every other labelled schedule for the source ends,
+/// one an earlier version made included: the source's schedule is then
+/// made anew.
 async fn apply_source_runner(
     service: &ScheduleService,
     source: &AnnouncementSource,
@@ -331,7 +368,14 @@ async fn apply_source_runner(
         .map_err(|error| format!("source runner host runnable: {error}"))?;
     let mut kept: Option<Schedule> = None;
     for (schedule, target_runnable, _) in theirs {
-        if kept.is_none() && runnable.as_ref() == Some(&target_runnable) {
+        if kept.is_none()
+            && runnable.as_ref() == Some(&target_runnable)
+            && schedule
+                .config
+                .labels
+                .get(SOURCE_RUNNER_LABEL)
+                .is_some_and(|value| value == SOURCE_RUNNER_MARK)
+        {
             kept = Some(schedule);
             continue;
         }
@@ -351,22 +395,31 @@ async fn apply_source_runner(
     });
     match kept {
         Some(schedule) => {
-            if matches!(
+            let the_sources = matches!(
                 &schedule.trigger,
-                TriggerSpec::Interval(spec) if spec.every_seconds == every_seconds
-            ) {
-                return Ok(());
+                TriggerSpec::Interval(spec)
+                    if spec.every_seconds == every_seconds
+                        && spec.end_at_utc.is_none()
+                        && spec.start_at_utc <= now_utc
+            );
+            if !the_sources {
+                service
+                    .update(
+                        &schedule.schedule_id,
+                        UpdateScheduleRequest {
+                            trigger: Some(trigger),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("update a source runner schedule: {error}"))?;
             }
-            service
-                .update(
-                    &schedule.schedule_id,
-                    UpdateScheduleRequest {
-                        trigger: Some(trigger),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| format!("update a source runner schedule: {error}"))?;
+            if schedule.phase == SchedulePhase::Paused {
+                service
+                    .resume(&schedule.schedule_id)
+                    .await
+                    .map_err(|error| format!("resume a source runner schedule: {error}"))?;
+            }
         }
         None => {
             let params = meerkat::HostRunnableParams::try_from(source_runner_params(source))
@@ -389,7 +442,10 @@ async fn apply_source_runner(
                     misfire_policy: meerkat::MisfirePolicy::default(),
                     overlap_policy: meerkat::OverlapPolicy::default(),
                     missing_target_policy: meerkat::MissingTargetPolicy::default(),
-                    labels: BTreeMap::from([(SOURCE_RUNNER_LABEL.to_string(), "1".to_string())]),
+                    labels: BTreeMap::from([(
+                        SOURCE_RUNNER_LABEL.to_string(),
+                        SOURCE_RUNNER_MARK.to_string(),
+                    )]),
                     planning_horizon_days: None,
                     planning_horizon_occurrences: None,
                 })
@@ -409,8 +465,8 @@ pub async fn reconcile_source_runner(
     now_utc: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
     let params = source_runner_params(source);
-    let theirs = runner_schedules(service)
-        .await?
+    let (runners, _) = runner_schedules(service).await?;
+    let theirs = runners
         .into_iter()
         .filter(|(_, _, target_params)| *target_params == params)
         .collect();
@@ -421,13 +477,15 @@ pub async fn reconcile_source_runner(
 /// sources that are not ended, from one read of the schedules: each live
 /// source's is kept, made or changed as [`reconcile_source_runner`] would,
 /// and a runner schedule naming no live source (its source ended, or is
-/// gone) ends. Every source is tried; the failures come back together.
+/// gone) ends, as does a labelled schedule that is no runner schedule (no
+/// host runnable, or no source as params). Every source is tried; the
+/// failures come back together.
 pub async fn reconcile_source_runners(
     service: &ScheduleService,
     live: &[AnnouncementSource],
     now_utc: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
-    let mut left = runner_schedules(service).await?;
+    let (mut left, unreadable) = runner_schedules(service).await?;
     let mut failures = Vec::new();
     for source in live {
         let params = source_runner_params(source);
@@ -439,7 +497,8 @@ pub async fn reconcile_source_runners(
             failures.push(format!("{} {}: {error}", source.mob_id, source.source_id));
         }
     }
-    for (schedule, _, _) in left {
+    let left = left.into_iter().map(|(schedule, _, _)| schedule);
+    for schedule in left.chain(unreadable) {
         if let Err(error) = service.delete(&schedule.schedule_id).await {
             failures.push(format!(
                 "end runner schedule {}: {error}",
@@ -476,12 +535,19 @@ impl SourceRunners for ScheduleSourceRunners {
     }
 }
 
-/// Find-or-create the durable schedule that drives the steward dream runnable
-/// at `cadence`. Idempotent across boots against the persistent schedule
-/// store: keyed on the reserved host-runnable target, so a restart reuses the
-/// existing schedule (and its planning cursor) rather than stacking duplicate
-/// dreams. When the configured cadence changed, the existing schedule's
-/// interval is updated in place; otherwise it is left untouched.
+/// Keep the one durable schedule that drives the steward dream runnable at
+/// `cadence`. The host's own schedule names the reserved host-runnable target
+/// and carries [`STEWARD_DREAM_LABEL`]. Idempotent across boots against the
+/// persistent schedule store: a restart reuses that schedule (and its
+/// planning cursor) rather than stacking duplicate dreams, resumes it when it
+/// is paused, and retimes it in place when the configured cadence changed
+/// or its trigger would not run as configured (an end time, a first run
+/// later than one interval from now). Every other schedule naming the
+/// runnable is deleted, so one schedule runs the steward; of several
+/// labelled ones the one stored first stays. Where no schedule of the
+/// runnable carries the label (a store written before the label existed)
+/// they are all deleted and the host creates its own, first due one
+/// interval later.
 // The runnable name is a non-empty const, so its parse is infallible.
 #[allow(clippy::expect_used)]
 pub async fn ensure_steward_dream_schedule(
@@ -497,12 +563,24 @@ pub async fn ensure_steward_dream_schedule(
         .list()
         .await
         .map_err(|error| format!("list schedules: {error}"))?;
-    let existing = schedules.into_iter().find(|schedule| {
-        matches!(
-            &schedule.target,
-            TargetBinding::HostRunnable(binding) if binding.runnable == runnable
+    let (mut hosts, mut others): (Vec<Schedule>, Vec<Schedule>) = schedules
+        .into_iter()
+        .filter(|schedule| {
+            matches!(
+                &schedule.target,
+                TargetBinding::HostRunnable(binding) if binding.runnable == runnable
+            )
+        })
+        .partition(|schedule| schedule.config.labels.contains_key(STEWARD_DREAM_LABEL));
+    hosts.sort_by_cached_key(|schedule| {
+        (
+            schedule.config.created_at_utc,
+            schedule.schedule_id.to_string(),
         )
     });
+    let mut hosts = hosts.into_iter();
+    let existing = hosts.next();
+    others.extend(hosts);
 
     // First occurrence one interval out (parity with the old loop's initial
     // sleep-then-dream) so a fresh gateway does not dream immediately on boot.
@@ -519,29 +597,43 @@ pub async fn ensure_steward_dream_schedule(
 
     match existing {
         Some(schedule) => {
+            // The host's own trigger: the configured interval, no end, a
+            // first run no later than one interval from now. It is left as
+            // it is (and keeps its planning cursor); any other is retimed.
             let cadence_unchanged = matches!(
                 &schedule.trigger,
-                TriggerSpec::Interval(spec) if spec.every_seconds == every_seconds
+                TriggerSpec::Interval(spec)
+                    if spec.every_seconds == every_seconds
+                        && spec.end_at_utc.is_none()
+                        && spec.start_at_utc <= start_at_utc
             );
-            if cadence_unchanged {
-                return Ok(());
+            if !cadence_unchanged {
+                service
+                    .update(
+                        &schedule.schedule_id,
+                        UpdateScheduleRequest {
+                            trigger: Some(trigger),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("update steward dream schedule cadence: {error}"))?;
+                tracing::info!(
+                    schedule_id = %schedule.schedule_id,
+                    every_seconds,
+                    "updated steward dream schedule cadence"
+                );
             }
-            service
-                .update(
-                    &schedule.schedule_id,
-                    UpdateScheduleRequest {
-                        trigger: Some(trigger),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| format!("update steward dream schedule cadence: {error}"))?;
-            tracing::info!(
-                schedule_id = %schedule.schedule_id,
-                every_seconds,
-                "updated steward dream schedule cadence"
-            );
-            Ok(())
+            if schedule.phase == SchedulePhase::Paused {
+                service
+                    .resume(&schedule.schedule_id)
+                    .await
+                    .map_err(|error| format!("resume steward dream schedule: {error}"))?;
+                tracing::info!(
+                    schedule_id = %schedule.schedule_id,
+                    "resumed steward dream schedule"
+                );
+            }
         }
         None => {
             let created = service
@@ -555,7 +647,7 @@ pub async fn ensure_steward_dream_schedule(
                     misfire_policy: meerkat::MisfirePolicy::default(),
                     overlap_policy: meerkat::OverlapPolicy::default(),
                     missing_target_policy: meerkat::MissingTargetPolicy::default(),
-                    labels: std::collections::BTreeMap::new(),
+                    labels: BTreeMap::from([(STEWARD_DREAM_LABEL.to_string(), "1".to_string())]),
                     planning_horizon_days: None,
                     planning_horizon_occurrences: None,
                 })
@@ -566,9 +658,26 @@ pub async fn ensure_steward_dream_schedule(
                 every_seconds,
                 "created steward dream schedule (host-runnable target)"
             );
-            Ok(())
         }
     }
+
+    // One schedule runs the steward: the host's own, kept or created above.
+    let mut failed = None;
+    for other in others {
+        match service.delete(&other.schedule_id).await {
+            Ok(_) => tracing::info!(
+                schedule_id = %other.schedule_id,
+                "removed a steward dream schedule that is not the host's own"
+            ),
+            Err(error) => {
+                failed.get_or_insert(format!(
+                    "remove steward dream schedule {}: {error}",
+                    other.schedule_id
+                ));
+            }
+        }
+    }
+    failed.map_or(Ok(()), Err)
 }
 
 #[derive(Clone, Default)]
@@ -902,6 +1011,164 @@ impl ScheduleMobTargetRegistry {
             Some(Some(state)) => state,
         };
         MobSessionResolution::Resolved(bridge_session_member(&state, session_id).await)
+    }
+
+    /// The launch's judgement of a schedule create or update the turn of the
+    /// session `writer_session` makes, for a schedule aimed at `target`
+    /// ([`meerkat::ScheduleWriteJudge`]): accepted where the member holding
+    /// that session could message the member the target names, by the
+    /// wiring of the mobs the launch holds
+    /// ([`MobMcpState::member_can_message`]), and for a schedule a member
+    /// aims at itself.
+    ///
+    /// The member a target names is read as the private rule reads it
+    /// ([`Self::target_private_owner`]): the member of a member target, the
+    /// source of a fork helper, the member an identity target names (an
+    /// identity that is no `mob_member:` form names an agent of the
+    /// launch's own mob), and the member holding a session target's
+    /// session. A session target naming another session no member holds is
+    /// out of reach. A target that has the host act in a mob (a helper to
+    /// spawn, a flow) is accepted for the writer's own mob and for a mob
+    /// its session created ([`MobMcpState::member_may_schedule_in_mob`]). A
+    /// turn of a session no member holds is not a member's write, and a
+    /// target that names neither a member nor a mob is not judged here.
+    /// Member names are compared as roster ids, whichever form the target
+    /// wrote.
+    ///
+    /// A launch that adopted no mob state holds no member. A mob state that
+    /// is gone, or that cannot be read now, answers unavailable: never "in
+    /// reach".
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::types::SessionId,
+        target: &TargetBinding,
+    ) -> meerkat::ScheduleWriteVerdict {
+        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        let state = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.upgrade(),
+            Ok(AdoptedMobState::Unset) => return Accepted,
+            Err(_) => None,
+        };
+        let Some(state) = state else {
+            return Unavailable;
+        };
+        let Ok(handles) = state.mob_handles_snapshot().await else {
+            return Unavailable;
+        };
+        let Some((writer_mob, writer)) = session_holder(&handles, writer_session).await else {
+            return Accepted;
+        };
+        let (target_mob, named) = match target {
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => (mob_id.clone(), member_id.clone()),
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => (mob_id.clone(), source_member_id.clone()),
+                MobTargetBinding::SpawnHelper { mob_id, .. }
+                | MobTargetBinding::Flow { mob_id, .. } => {
+                    return if state
+                        .member_may_schedule_in_mob(
+                            &meerkat_mob::MobId::from(writer_mob.as_str()),
+                            writer_session,
+                            &meerkat_mob::MobId::from(mob_id.as_str()),
+                        )
+                        .await
+                    {
+                        Accepted
+                    } else {
+                        OutOfReach
+                    };
+                }
+            },
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => (named.mob_id, named.member),
+                    None => match self.mob.read().ok().and_then(|guard| guard.clone()) {
+                        Some(mob) => (mob.mob_id().to_string(), binding.identity().to_string()),
+                        None => return OutOfReach,
+                    },
+                }
+            }
+            TargetBinding::Session(session) => {
+                let Some(session_id) = session_target_session(session) else {
+                    return Accepted;
+                };
+                if session_id == writer_session.to_string() {
+                    return Accepted;
+                }
+                let Ok(session_id) = meerkat::SessionId::parse(&session_id) else {
+                    return OutOfReach;
+                };
+                match session_holder(&handles, &session_id).await {
+                    Some(holder) => holder,
+                    None => return OutOfReach,
+                }
+            }
+            TargetBinding::HostRunnable(_) => return Accepted,
+        };
+        let roster_id = |member: &str| {
+            crate::member_comms_id::mob_member_id(&crate::member_comms_id::runtime_alias_str(
+                member,
+            ))
+        };
+        let (writer, named) = (roster_id(&writer), roster_id(&named));
+        if writer_mob == target_mob && writer == named {
+            return Accepted;
+        }
+        match state
+            .member_can_message(
+                &meerkat_mob::MobId::from(writer_mob.as_str()),
+                &writer,
+                &meerkat_mob::MobId::from(target_mob.as_str()),
+                &named,
+            )
+            .await
+        {
+            Ok(true) => Accepted,
+            Ok(false) => OutOfReach,
+            Err(_) => Unavailable,
+        }
+    }
+}
+
+/// The member (mob id and roster member id) holding the session `session`
+/// among the mobs `handles`, if a member holds it.
+async fn session_holder(
+    handles: &[(meerkat_mob::MobId, MobHandle)],
+    session: &meerkat_core::types::SessionId,
+) -> Option<(String, String)> {
+    for (mob_id, handle) in handles {
+        let roster = handle.roster().await;
+        if let Some(entry) = roster.find_by_bridge_session_id(session) {
+            return Some((mob_id.to_string(), entry.agent_identity.to_string()));
+        }
+    }
+    None
+}
+
+/// A launch's judge of its agents' schedule writes
+/// ([`meerkat::ScheduleWriteJudge`]) over the mobs its registry adopted
+/// ([`ScheduleMobTargetRegistry::judge_schedule_write`]). The registry holds
+/// the mob state weakly, so the schedule service that keeps this judge
+/// keeps no stopped host's mob state alive.
+struct MemberReachScheduleJudge {
+    registry: ScheduleMobTargetRegistry,
+}
+
+#[async_trait]
+impl meerkat::ScheduleWriteJudge for MemberReachScheduleJudge {
+    async fn judge_schedule_write(
+        &self,
+        writer_session: &meerkat_core::types::SessionId,
+        target: &TargetBinding,
+    ) -> meerkat::ScheduleWriteVerdict {
+        self.registry
+            .judge_schedule_write(writer_session, target)
+            .await
     }
 }
 
@@ -1568,6 +1835,12 @@ const ARCHIVED_SCHEDULE_TARGET: &str = "identity_archived";
 /// the calling member's reach ([`private_target_refusal`]), else because
 /// the schedule would point at an archived agent
 /// ([`archived_target_refusal`]).
+///
+/// An archived agent out of the writing member's reach answers as every
+/// target out of its reach does ([`meerkat::schedule_target_not_a_peer`]),
+/// so the refusal does not say that a name it cannot reach is an archived
+/// agent. A member that could reach the agent, and a call of no member's
+/// turn, are told it is archived.
 async fn schedule_target_refusal(
     registry: &ScheduleMobTargetRegistry,
     service: &ScheduleService,
@@ -1578,7 +1851,36 @@ async fn schedule_target_refusal(
     if let Some(refusal) = private_target_refusal(registry, service, name, args, context).await {
         return Some(refusal);
     }
-    archived_target_refusal(registry, service, name, args).await
+    let archived = archived_target_refusal(registry, service, name, args).await?;
+    if let Some(writer) = context.origin_session_id()
+        && let Some(target) = target_after(service, name, args).await
+        && registry.judge_schedule_write(writer, &target).await
+            == meerkat::ScheduleWriteVerdict::OutOfReach
+    {
+        return Some(meerkat::schedule_target_not_a_peer(name));
+    }
+    Some(archived)
+}
+
+/// The target a schedule has after a create or update: the one the call
+/// writes, when it writes one that parses, else, for an update, the one
+/// the schedule holds.
+async fn target_after(
+    service: &ScheduleService,
+    name: &str,
+    args: &Value,
+) -> Option<TargetBinding> {
+    match written_target(args) {
+        Some(target) => Some(target),
+        None if name == "meerkat_schedule_update" => {
+            let schedule_id = args
+                .get("schedule_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| meerkat::ScheduleId::parse(raw).ok())?;
+            Some(service.get(&schedule_id).await.ok()?.target)
+        }
+        None => None,
+    }
 }
 
 /// Why a schedule create or update is refused because the schedule would
@@ -1599,17 +1901,7 @@ async fn archived_target_refusal(
     name: &str,
     args: &Value,
 ) -> Option<meerkat_core::ToolError> {
-    let target = match written_target(args) {
-        Some(target) => target,
-        None if name == "meerkat_schedule_update" => {
-            let schedule_id = args
-                .get("schedule_id")
-                .and_then(Value::as_str)
-                .and_then(|raw| meerkat::ScheduleId::parse(raw).ok())?;
-            service.get(&schedule_id).await.ok()?.target
-        }
-        None => return None,
-    };
+    let target = target_after(service, name, args).await?;
     match registry.archived_target(&target) {
         Ok(None) => None,
         Ok(Some(agent)) => Some(meerkat_core::ToolError::policy_denied(
@@ -1645,7 +1937,10 @@ async fn archived_target_refusal(
 /// itself, or the call is refused as a policy denial
 /// ([`PRIVATE_MEMBER_SCHEDULE_TARGET`]). Any other caller's target that names
 /// a member private to a person the caller is not private to is refused as
-/// an act on a member outside the caller's reach (`access_denied`).
+/// every target out of a writer's reach is
+/// ([`meerkat::schedule_target_not_a_peer`]): the same code and the same
+/// sentence a name no member holds gets, so the refusal does not say that
+/// the name is somebody's private member.
 async fn private_target_refusal(
     registry: &ScheduleMobTargetRegistry,
     service: &ScheduleService,
@@ -1688,7 +1983,7 @@ async fn private_target_refusal(
     }
     let owner = registry.target_private_owner(target.as_ref()?).await?;
     (caller_owner.as_deref() != Some(owner.as_str()))
-        .then(|| meerkat_core::ToolError::access_denied(name))
+        .then(|| meerkat::schedule_target_not_a_peer(name))
 }
 
 impl MobIdentityScheduleToolDispatcher {
@@ -2120,6 +2415,15 @@ fn attach_schedule_tools_with_store_and_binding(
     firing_host_binding: ScheduleFiringHostBinding,
 ) -> AttachedScheduleTools {
     let service = ScheduleService::new(store);
+    // Whether this gateway's agents may write a schedule that creates a
+    // session, from the configuration the builder was created with (the
+    // operator's file over the defaults).
+    service.allow_agent_session_creation(
+        builder
+            .initial_config()
+            .tools
+            .agent_schedules_may_create_sessions,
+    );
     let mob_target_registry = ScheduleMobTargetRegistry::default();
     let gated = FiringHostGatedScheduleTools {
         inner: agent_schedule_tool_chain(service.clone(), mob_target_registry.clone()),
@@ -2139,10 +2443,19 @@ fn attach_schedule_tools_with_store_and_binding(
 /// are left to the console, and the schedules aimed at a member private to
 /// a person the calling agent does not act for are on no surface of its
 /// tools.
+///
+/// `service` also gets the launch's judge of its agents' schedule writes
+/// here ([`MemberReachScheduleJudge`]), so no composition of these tools is
+/// without it: the innermost tools ask it on the target the schedule has
+/// after the rewrite, once the private and the archived refusals have
+/// answered.
 fn agent_schedule_tool_chain(
     service: ScheduleService,
     mob_target_registry: ScheduleMobTargetRegistry,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    service.attach_write_judge(Arc::new(MemberReachScheduleJudge {
+        registry: mob_target_registry.clone(),
+    }));
     let dispatcher = MobIdentityScheduleToolDispatcher::new(
         Arc::new(ScheduleToolDispatcher::new(service.clone())),
         mob_target_registry.clone(),
@@ -3166,6 +3479,10 @@ pub fn spawn_schedule_claim_watchdog(
 #[cfg(test)]
 #[path = "schedule_wiring_follow_tests.rs"]
 mod follow_tests;
+
+#[cfg(test)]
+#[path = "schedule_wiring_writer_tests.rs"]
+mod writer_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -6942,6 +7259,295 @@ schedule = true
             "cadence change reuses schedule"
         );
         assert_eq!(dream_interval_seconds(&schedules[0]), 30 * 60);
+    }
+
+    fn fixed_start() -> chrono::DateTime<chrono::Utc> {
+        "2026-07-01T00:00:00Z".parse().expect("fixed now")
+    }
+
+    /// Store a schedule naming the steward's runnable every `every_seconds`,
+    /// carrying the host's label when `labelled`.
+    async fn seed_dream_schedule(
+        service: &ScheduleService,
+        every_seconds: u64,
+        labelled: bool,
+    ) -> meerkat::Schedule {
+        let labels = if labelled {
+            BTreeMap::from([(STEWARD_DREAM_LABEL.to_string(), "1".to_string())])
+        } else {
+            BTreeMap::new()
+        };
+        service
+            .create(CreateScheduleRequest {
+                name: None,
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: fixed_start(),
+                    every_seconds,
+                    end_at_utc: None,
+                }),
+                target: TargetBinding::host_runnable(HostRunnableTargetBinding {
+                    runnable: HostRunnableName::parse(STEWARD_DREAM_RUNNABLE).expect("name"),
+                    params: None,
+                }),
+                misfire_policy: meerkat::MisfirePolicy::default(),
+                overlap_policy: meerkat::OverlapPolicy::default(),
+                missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                labels,
+                planning_horizon_days: None,
+                planning_horizon_occurrences: None,
+            })
+            .await
+            .expect("store a schedule naming the steward's runnable")
+    }
+
+    /// The stored schedules that name the steward's runnable.
+    async fn dream_schedules(service: &ScheduleService) -> Vec<meerkat::Schedule> {
+        let schedules = service.list().await.expect("list");
+        let named = dream_target_count(&schedules);
+        let dreams = schedules
+            .into_iter()
+            .filter(|schedule| matches!(&schedule.target, TargetBinding::HostRunnable(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(dreams.len(), named, "these stores hold no other runnable");
+        dreams
+    }
+
+    fn carries_the_hosts_label(schedule: &meerkat::Schedule) -> bool {
+        schedule.config.labels.contains_key(STEWARD_DREAM_LABEL)
+    }
+
+    /// The schedule a start creates on a fresh store carries the host's
+    /// label.
+    #[tokio::test]
+    async fn a_start_labels_the_steward_schedule_it_creates() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1);
+        assert!(
+            carries_the_hosts_label(&dreams[0]),
+            "the host's steward schedule carries the host's label: {:?}",
+            dreams[0].config.labels
+        );
+    }
+
+    /// A start brings the host's own steward schedule back to work: paused,
+    /// it is active again afterwards and runs at the configured interval,
+    /// and it is the same schedule. A paused one already at the configured
+    /// interval is resumed as well.
+    #[tokio::test]
+    async fn a_start_resumes_and_retimes_the_hosts_steward_schedule() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let hosts = seed_dream_schedule(&service, 6 * 3600, true).await;
+        service.pause(&hosts.schedule_id).await.expect("pause");
+
+        ensure_steward_dream_schedule(&service, Duration::from_mins(30), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1);
+        assert_eq!(dreams[0].schedule_id, hosts.schedule_id);
+        assert_eq!(dream_interval_seconds(&dreams[0]), 30 * 60);
+        assert_eq!(
+            dreams[0].phase,
+            SchedulePhase::Active,
+            "a start resumes the host's steward schedule"
+        );
+
+        service.pause(&hosts.schedule_id).await.expect("pause");
+        ensure_steward_dream_schedule(&service, Duration::from_mins(30), fixed_start())
+            .await
+            .expect("start at the same interval");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1);
+        assert_eq!(dreams[0].schedule_id, hosts.schedule_id);
+        assert_eq!(
+            dreams[0].phase,
+            SchedulePhase::Active,
+            "a start resumes the host's steward schedule at an unchanged interval"
+        );
+    }
+
+    /// One schedule runs the steward: a start keeps the host's own and
+    /// removes any other schedule naming the steward's runnable, whichever
+    /// of the two was stored first.
+    #[tokio::test]
+    async fn a_start_keeps_the_hosts_steward_schedule_and_removes_any_other() {
+        for hosts_first in [true, false] {
+            let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+            let (hosts, other) = if hosts_first {
+                let hosts = seed_dream_schedule(&service, 6 * 3600, true).await;
+                (hosts, seed_dream_schedule(&service, 60, false).await)
+            } else {
+                let other = seed_dream_schedule(&service, 60, false).await;
+                (seed_dream_schedule(&service, 6 * 3600, true).await, other)
+            };
+
+            ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+                .await
+                .expect("start");
+            let dreams = dream_schedules(&service).await;
+            assert_eq!(
+                dreams
+                    .iter()
+                    .map(|schedule| &schedule.schedule_id)
+                    .collect::<Vec<_>>(),
+                vec![&hosts.schedule_id],
+                "hosts_first={hosts_first}: only the host's schedule is left, not {}",
+                other.schedule_id
+            );
+            assert_eq!(dream_interval_seconds(&dreams[0]), 6 * 3600);
+        }
+    }
+
+    /// A store whose schedules of the steward's runnable all lack the
+    /// host's label ends with one new schedule of the host's: labelled,
+    /// active, at the configured interval, first due one interval after the
+    /// start, and none of the earlier ones, whatever their state.
+    #[tokio::test]
+    async fn a_start_replaces_unlabelled_steward_schedules_with_the_hosts_own() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let earlier = [
+            seed_dream_schedule(&service, 60, false).await,
+            seed_dream_schedule(&service, 6 * 3600, false).await,
+        ];
+        service
+            .pause(&earlier[1].schedule_id)
+            .await
+            .expect("pause one of the earlier schedules");
+
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1, "one schedule runs the steward");
+        assert!(
+            earlier
+                .iter()
+                .all(|schedule| schedule.schedule_id != dreams[0].schedule_id),
+            "no earlier schedule is taken over"
+        );
+        assert!(carries_the_hosts_label(&dreams[0]));
+        assert_eq!(dreams[0].phase, SchedulePhase::Active);
+        match &dreams[0].trigger {
+            TriggerSpec::Interval(spec) => {
+                assert_eq!(spec.every_seconds, 6 * 3600);
+                assert_eq!(
+                    spec.start_at_utc,
+                    fixed_start() + chrono::Duration::hours(6),
+                    "the first run is one interval after the start"
+                );
+            }
+            other => panic!("expected interval trigger, got {other:?}"),
+        }
+    }
+
+    /// Two schedules carrying the host's label end as one, active and at
+    /// the configured interval.
+    #[tokio::test]
+    async fn a_start_keeps_one_of_two_labelled_steward_schedules() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let labelled = [
+            seed_dream_schedule(&service, 60, true).await,
+            seed_dream_schedule(&service, 120, true).await,
+        ];
+        service
+            .pause(&labelled[0].schedule_id)
+            .await
+            .expect("pause the first");
+
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("start");
+        let dreams = dream_schedules(&service).await;
+        assert_eq!(dreams.len(), 1, "one schedule runs the steward");
+        assert_eq!(
+            dreams[0].schedule_id, labelled[0].schedule_id,
+            "the one stored first is kept"
+        );
+        assert!(carries_the_hosts_label(&dreams[0]));
+        assert_eq!(dreams[0].phase, SchedulePhase::Active);
+        assert_eq!(dream_interval_seconds(&dreams[0]), 6 * 3600);
+    }
+
+    /// A labelled schedule that would not run the steward as configured (it
+    /// has an end time, or a first run later than one interval from the
+    /// start) is retimed by a start: the configured interval, no end, first
+    /// due one interval after the start. The host's own schedule has
+    /// neither, and a later start at an unchanged interval leaves it as it
+    /// is.
+    #[tokio::test]
+    async fn a_start_retimes_a_labelled_steward_schedule_that_would_not_run() {
+        let every: u64 = 6 * 3600;
+        let one_interval_out = fixed_start() + chrono::Duration::seconds(every as i64);
+        for (case, start_at_utc, end_at_utc) in [
+            (
+                "an end time",
+                fixed_start(),
+                Some(fixed_start() + chrono::Duration::days(36_500)),
+            ),
+            (
+                "a first run far ahead",
+                fixed_start() + chrono::Duration::days(36_500),
+                None,
+            ),
+        ] {
+            let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+            let seeded = seed_dream_schedule(&service, every, true).await;
+            service
+                .update(
+                    &seeded.schedule_id,
+                    UpdateScheduleRequest {
+                        trigger: Some(TriggerSpec::Interval(IntervalTriggerSpec {
+                            start_at_utc,
+                            every_seconds: every,
+                            end_at_utc,
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("give the seeded schedule the trigger of the case");
+
+            ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+                .await
+                .expect("start");
+            let dreams = dream_schedules(&service).await;
+            assert_eq!(dreams.len(), 1, "{case}");
+            assert_eq!(dreams[0].schedule_id, seeded.schedule_id, "{case}");
+            match &dreams[0].trigger {
+                TriggerSpec::Interval(spec) => {
+                    assert_eq!(spec.every_seconds, every, "{case}");
+                    assert_eq!(spec.end_at_utc, None, "{case}: no end");
+                    assert_eq!(
+                        spec.start_at_utc, one_interval_out,
+                        "{case}: first due one interval after the start"
+                    );
+                }
+                other => panic!("{case}: expected interval trigger, got {other:?}"),
+            }
+        }
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        ensure_steward_dream_schedule(&service, Duration::from_hours(6), fixed_start())
+            .await
+            .expect("first start");
+        let hosts = dream_schedules(&service).await;
+        ensure_steward_dream_schedule(
+            &service,
+            Duration::from_hours(6),
+            fixed_start() + chrono::Duration::days(1),
+        )
+        .await
+        .expect("a later start");
+        assert_eq!(
+            dream_schedules(&service).await,
+            hosts,
+            "the host's own schedule is left as it is at an unchanged interval"
+        );
     }
 
     #[tokio::test]

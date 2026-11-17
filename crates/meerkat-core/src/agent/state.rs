@@ -10391,6 +10391,11 @@ where
         // dispatched again after a resume.
         self.tool_dispatch_context
             .bind_round(self.round_commits.round);
+        // What the session's live tool layers answer for this round: a tool
+        // that asks whether anything narrows the session reads it here, not
+        // from a value of its call.
+        self.tool_dispatch_context
+            .bind_live_tool_narrowing(self.tool_scope.narrowed_by_a_live_layer());
 
         // The round's first commit, before any of its tools is admitted. A
         // resumed round's first commit is the tail it resumed from. Boxed so

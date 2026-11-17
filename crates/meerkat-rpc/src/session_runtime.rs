@@ -4322,6 +4322,10 @@ impl SessionRuntime {
         let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let continuation_bindings = persistence.continuation_bindings();
         let schedule_service = persistence.schedule_service();
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
@@ -4503,6 +4507,10 @@ impl SessionRuntime {
         let runtime_delivery_inbox = persistence.runtime_delivery_inbox();
         let continuation_bindings = persistence.continuation_bindings();
         let schedule_service = persistence.schedule_service();
+        // Whether this host's agents may write a schedule that creates a
+        // session, from the host's own configuration.
+        schedule_service
+            .allow_agent_session_creation(initial_config.tools.agent_schedules_may_create_sessions);
         let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
@@ -8790,6 +8798,12 @@ impl SessionRuntime {
                 tracing::warn!("mob state not set: the runtime is shutting down");
                 return;
             }
+            // The members of these mobs hold the schedule tools this runtime
+            // installed over its schedule service: their schedule writes are
+            // judged by the mobs' own wiring from here on.
+            self.schedule_service.attach_write_judge(Arc::new(
+                meerkat_mob_mcp::MobScheduleWriteJudge::new(&mob_state),
+            ));
             *slot = Some(mob_state);
         }
     }

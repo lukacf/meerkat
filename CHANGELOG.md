@@ -35,6 +35,28 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `meerkat-core` (behaviour, Rust hosts):
+  `meerkat_core::Agent::hot_swap_llm_identity` and
+  `meerkat_core::Agent::rotate_auth_lease_auth_binding` no longer release the
+  lease of the credential a session leaves, and so no longer cancel that
+  credential's sign-in flows in flight; a host that relied on this to
+  withdraw a credential calls the logout or the credential's clear instead.
+
+### Fixed
+
+- `meerkat-core`: one session's fallback or live model switch onto another
+  credential no longer takes the credential it leaves away from the host's
+  other sessions (0.7.0 and later): sessions on that sign-in go on, new ones
+  can be started, and a session that runs on, or falls back to, the
+  credential another session left is no longer held. A sign-out, or the
+  removal of a credential, still withdraws it for every session.
+
+- `meerkat-core`: a fallback or live switch onto another credential no
+  longer ends with `failed to release previous auth lease ... credential
+  lifecycle owner is busy` (0.8.52 and later).
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

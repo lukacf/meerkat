@@ -30203,6 +30203,144 @@ ORDER BY runtime_id";
             );
         }
 
+        /// The row the 0.9.16 code wrote for an input whose run returned a
+        /// JSON-null structured output, its completion finalized (taken from
+        /// a store that code wrote in a test run; ids and times are that
+        /// run's). The run result inside its completion holds
+        /// `"structured_output":null`, and the receipt digest was taken over
+        /// the result as the writer held it.
+        const NULL_STRUCTURED_OUTPUT_FINALIZED_ROW: &str = concat!(
+            r#"{"stored_input_state_version":7,"input_id":"01a1ea32-a791-7302-a0b9-07b7fad3"#,
+            r#"2bf1","current_state":"consumed","policy":{"version":1,"decision":{"apply_mo"#,
+            r#"de":"stage_run_start","wake_mode":"wake_if_idle","queue_mode":"fifo","consum"#,
+            r#"e_point":"on_run_complete","drain_policy":"queue_next_turn","routing_disposi"#,
+            r#"tion":"queue","record_transcript":true,"emit_operator_content":true,"policy_"#,
+            r#"version":1}},"runtime_semantics":{"boundary":"run_start","execution_kind":"c"#,
+            r#"ontent_turn","execution_handling_mode":null,"peer_response_terminal_apply_in"#,
+            r#"tent":null,"live_interrupt_required":false},"terminal_outcome":{"outcome_typ"#,
+            r#"e":"consumed"},"durability":"durable","attempt_count":1,"recovery_count":0,""#,
+            r#"history":[{"timestamp":"2026-11-17T15:49:10.675877127Z","from":"accepted","t"#,
+            r#"o":"queued","reason":"QueueAccepted"},{"timestamp":"2026-11-17T15:49:10.6895"#,
+            r#"66030Z","from":"queued","to":"staged","reason":"StageForRun(01a1ea32-a7a1-71"#,
+            r#"c6-9ff0-d48396cc89d8)"},{"timestamp":"2026-11-17T15:49:10.766985470Z","from""#,
+            r#":"staged","to":"applied","reason":"MarkApplied(01a1ea32-a7a1-71c6-9ff0-d4839"#,
+            r#"6cc89d8)"},{"timestamp":"2026-11-17T15:49:10.766985470Z","from":"applied","t"#,
+            r#"o":"applied_pending_consumption","reason":"MarkAppliedPendingConsumption(bou"#,
+            r#"ndary_sequence=1)"},{"timestamp":"2026-11-17T15:49:10.767109816Z","from":"ap"#,
+            r#"plied_pending_consumption","to":"consumed","reason":"Consume"}],"terminal_co"#,
+            r#"mpletion":{"input_id":"01a1ea32-a791-7302-a0b9-07b7fad32bf1","batch_ordinal""#,
+            r#":0,"batch_key":{"scope":"run","run_id":"01a1ea32-a7a1-71c6-9ff0-d48396cc89d8"#,
+            r#""},"owner_input_id":"01a1ea32-a791-7302-a0b9-07b7fad32bf1","candidate_digest"#,
+            r#"":"037de289eceabcdef64b99dc4b7a00ef1689ac525f703d28b5246acc0f0f311d","comple"#,
+            r#"tion_input_ids_digest":"c150e9f37a5e854a0273299dd07b677c3603c5eb34efdb74493d"#,
+            r#"e34ced29e41f","requires_session_checkpoint":true,"completion_input_ids":["01"#,
+            r#"a1ea32-a791-7302-a0b9-07b7fad32bf1"],"outcome":{"completion_type":"completed"#,
+            r#"","text":"null","session_id":"01a1ea32-a709-71f7-ac2a-a119181570b2","usage":"#,
+            r#"{"input_tokens":0,"output_tokens":0,"cache_creation_tokens":null,"cache_read"#,
+            r#"_tokens":null},"run_usage":{"input_tokens":0,"output_tokens":0,"cache_creati"#,
+            r#"on_tokens":null,"cache_read_tokens":null},"request_usage":[{"input_tokens":0"#,
+            r#","output_tokens":0,"cache_creation_tokens":null,"cache_read_tokens":null,"ac"#,
+            r#"counting":{"provider":"openai","model":"gpt-5.4","presented_tokens":0,"conve"#,
+            r#"ntion":"host_declared_inclusive_input_total","aggregation":"provider_inclusi"#,
+            r#"ve_input_total"}}],"turns":1,"tool_calls":0,"structured_output":null,"skill_"#,
+            r#"diagnostics":{"source_health":{"state":"healthy","invalid_ratio":0.0,"invali"#,
+            r#"d_count":0,"total_count":14,"failure_streak":0,"handshake_failed":false},"qu"#,
+            r#"arantined":[]}},"phase":{"phase":"finalized","receipt_digest":"39dde67e32f7a"#,
+            r#"79833ab78e772dde11d6c48386389519a90a533c7cfaa649a3b","finalization":"succeed"#,
+            r#"ed"}},"scoped_destination":{"kind":"never_scoped"},"last_run_id":"01a1ea32-a"#,
+            r#"7a1-71c6-9ff0-d48396cc89d8","last_boundary_sequence":1,"admission_sequence":"#,
+            r#"1000000000,"created_at":"2026-11-17T15:49:10.675731468Z","updated_at":"2026-"#,
+            r#"11-17T15:49:10.767109816Z"}"#,
+        );
+
+        /// The same kind of row with its completion still pending: its host
+        /// ended after the run's commit and before the finalization. The
+        /// candidate digest was taken over the result as the writer held it.
+        const NULL_STRUCTURED_OUTPUT_PENDING_ROW: &str = concat!(
+            r#"{"stored_input_state_version":7,"input_id":"01a1ea5a-81b6-73e3-a983-8eeb2979"#,
+            r#"3130","current_state":"consumed","policy":{"version":1,"decision":{"apply_mo"#,
+            r#"de":"stage_run_start","wake_mode":"wake_if_idle","queue_mode":"fifo","consum"#,
+            r#"e_point":"on_run_complete","drain_policy":"queue_next_turn","routing_disposi"#,
+            r#"tion":"queue","record_transcript":true,"emit_operator_content":true,"policy_"#,
+            r#"version":1}},"runtime_semantics":{"boundary":"run_start","execution_kind":"c"#,
+            r#"ontent_turn","execution_handling_mode":null,"peer_response_terminal_apply_in"#,
+            r#"tent":null,"live_interrupt_required":false},"terminal_outcome":{"outcome_typ"#,
+            r#"e":"consumed"},"durability":"durable","attempt_count":1,"recovery_count":0,""#,
+            r#"history":[{"timestamp":"2026-11-17T16:32:42.424377609Z","from":"accepted","t"#,
+            r#"o":"queued","reason":"QueueAccepted"},{"timestamp":"2026-11-17T16:32:42.4361"#,
+            r#"23578Z","from":"queued","to":"staged","reason":"StageForRun(01a1ea5a-81c3-74"#,
+            r#"ed-b77f-1fb13ea8e651)"},{"timestamp":"2026-11-17T16:32:42.445630649Z","from""#,
+            r#":"staged","to":"applied","reason":"MarkApplied(01a1ea5a-81c3-74ed-b77f-1fb13"#,
+            r#"ea8e651)"},{"timestamp":"2026-11-17T16:32:42.445630649Z","from":"applied","t"#,
+            r#"o":"applied_pending_consumption","reason":"MarkAppliedPendingConsumption(bou"#,
+            r#"ndary_sequence=1)"},{"timestamp":"2026-11-17T16:32:42.445743368Z","from":"ap"#,
+            r#"plied_pending_consumption","to":"consumed","reason":"Consume"}],"terminal_co"#,
+            r#"mpletion":{"input_id":"01a1ea5a-81b6-73e3-a983-8eeb29793130","batch_ordinal""#,
+            r#":0,"batch_key":{"scope":"run","run_id":"01a1ea5a-81c3-74ed-b77f-1fb13ea8e651"#,
+            r#""},"owner_input_id":"01a1ea5a-81b6-73e3-a983-8eeb29793130","candidate_digest"#,
+            r#"":"72a87946030f8a280a38cb6a241d1c4f2ab94b735c08c462d95400b41f66beeb","comple"#,
+            r#"tion_input_ids_digest":"17ed757f5fe1c41bc7573ec5e13446f53a4ca22fede11fe87f3d"#,
+            r#"ceb926709fff","requires_session_checkpoint":true,"candidate":{"candidate_typ"#,
+            r#"e":"run_result","result":{"text":"result of run 1","session_id":"01a1ea5a-81"#,
+            r#"85-7329-8369-e2e53e5e03b2","usage":{"input_tokens":0,"output_tokens":0,"cach"#,
+            r#"e_creation_tokens":null,"cache_read_tokens":null},"turns":1,"tool_calls":0,""#,
+            r#"structured_output":null}},"completion_input_ids":["01a1ea5a-81b6-73e3-a983-8"#,
+            r#"eeb29793130"],"phase":{"phase":"pending"}},"scoped_destination":{"kind":"nev"#,
+            r#"er_scoped"},"persisted_input":{"input_type":"prompt","header":{"id":"01a1ea5"#,
+            r#"a-81b6-73e3-a983-8eeb29793130","timestamp":"2026-11-17T16:32:42.422529025Z","#,
+            r#""source":{"type":"operator"},"durability":"durable","visibility":{"transcrip"#,
+            r#"t_eligible":true,"operator_eligible":true}},"content":"first"},"last_run_id""#,
+            r#":"01a1ea5a-81c3-74ed-b77f-1fb13ea8e651","last_boundary_sequence":1,"admissio"#,
+            r#"n_sequence":1000000000,"created_at":"2026-11-17T16:32:42.424245961Z","update"#,
+            r#"d_at":"2026-11-17T16:32:42.445743368Z"}"#,
+        );
+
+        /// A stored input row whose run result carries a JSON-null structured
+        /// output reads again, finalized or pending, and reads back as the
+        /// bytes that were written. Such a row used to fail its digest check
+        /// on every read: the result was written with an explicit null and
+        /// read back without it.
+        #[tokio::test]
+        async fn a_stored_row_with_a_null_structured_output_reads_again() {
+            for (name, written) in [
+                ("finalized", NULL_STRUCTURED_OUTPUT_FINALIZED_ROW),
+                ("pending", NULL_STRUCTURED_OUTPUT_PENDING_ROW),
+            ] {
+                let (_dir, store) = temp_store();
+                let runtime_id = LogicalRuntimeId::new(format!("null-structured-output-{name}"));
+                let stored_id =
+                    serde_json::from_str::<serde_json::Value>(written).unwrap()["input_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                let input_id = InputId::from_uuid(uuid::Uuid::parse_str(&stored_id).unwrap());
+                open_runtime_connection(store.path())
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                         VALUES (?1, ?2, ?3)",
+                        params![runtime_id_text(&runtime_id), stored_id, written.as_bytes()],
+                    )
+                    .unwrap();
+
+                let row = store
+                    .load_input_state(&runtime_id, &input_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("the {name} row reads: {error}"))
+                    .unwrap_or_else(|| panic!("the {name} row is stored"));
+                assert_eq!(
+                    serde_json::to_string(&row).unwrap(),
+                    written,
+                    "the {name} row reads back as it was written"
+                );
+                let rows = store.load_input_states(&runtime_id).await.unwrap();
+                assert!(
+                    matches!(rows.as_slice(), [InputStateRow::Decoded(_)]),
+                    "the {name} row decodes in the runtime's row list: {rows:?}"
+                );
+            }
+        }
+
         #[tokio::test]
         async fn commit_session_snapshot_does_not_write_boundary_receipt() {
             let (_dir, store) = temp_store();

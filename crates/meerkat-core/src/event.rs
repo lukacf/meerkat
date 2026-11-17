@@ -6972,4 +6972,69 @@ mod tests {
             "15 tokens (10 in / 5 out, 3 cache write, 2 reasoning)"
         );
     }
+
+    /// The completion events whose structured output is JSON null read back
+    /// as they were written: an explicit null is a value, not an absent
+    /// field. The interaction-complete event is stored with a digest taken
+    /// over it.
+    #[test]
+    fn completion_events_with_a_null_structured_output_read_back_as_present() {
+        let events = [
+            AgentEvent::RunCompleted {
+                identity: Default::default(),
+                session_id: SessionId::new(),
+                result: "null".to_string(),
+                structured_output: Some(Value::Null),
+                extraction_required: false,
+                usage: Usage::default().into(),
+                terminal_cause_kind: None,
+                assistant_message_id: None,
+            },
+            AgentEvent::InteractionComplete {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                result: "null".to_string(),
+                structured_output: Some(Value::Null),
+            },
+        ];
+        for event in events {
+            let written = serde_json::to_vec(&event).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&written).unwrap()["structured_output"],
+                Value::Null
+            );
+            let reread: AgentEvent = serde_json::from_slice(&written).unwrap();
+            let structured_output = match &reread {
+                AgentEvent::RunCompleted {
+                    structured_output, ..
+                }
+                | AgentEvent::InteractionComplete {
+                    structured_output, ..
+                } => structured_output.clone(),
+                other => panic!("unexpected event {other:?}"),
+            };
+            assert_eq!(structured_output, Some(Value::Null));
+            assert_eq!(serde_json::to_vec(&reread).unwrap(), written);
+        }
+
+        // An absent field stays absent.
+        let absent = AgentEvent::InteractionComplete {
+            interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+            result: "done".to_string(),
+            structured_output: None,
+        };
+        let written = serde_json::to_vec(&absent).unwrap();
+        assert!(
+            serde_json::from_slice::<Value>(&written)
+                .unwrap()
+                .get("structured_output")
+                .is_none()
+        );
+        let AgentEvent::InteractionComplete {
+            structured_output, ..
+        } = serde_json::from_slice(&written).unwrap()
+        else {
+            panic!("an interaction-complete event reads back as one");
+        };
+        assert_eq!(structured_output, None);
+    }
 }

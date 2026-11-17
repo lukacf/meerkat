@@ -265,6 +265,23 @@ pub(crate) struct PrivateOwners {
     inner: Arc<Inner>,
 }
 
+/// Test builds only: a first read a test makes a record owe
+/// ([`PrivateOwners::owe_a_first_read_in_tests`]). Dropping it is the read
+/// succeeding.
+#[cfg(test)]
+pub(crate) struct OwedFirstReadInTests(PrivateOwners);
+
+#[cfg(test)]
+impl Drop for OwedFirstReadInTests {
+    fn drop(&mut self) {
+        self.0
+            .inner
+            .first_reads
+            .0
+            .send_modify(|reads| reads.in_flight = reads.in_flight.saturating_sub(1));
+    }
+}
+
 /// Who a mob a member created is private to, as far as its records say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MobOwner {
@@ -598,6 +615,18 @@ impl PrivateOwners {
     pub(crate) fn first_read_pending(&self) -> bool {
         let reads = *self.inner.first_reads.0.borrow();
         reads.in_flight + reads.overdue > 0
+    }
+
+    /// Test builds only: this record owes one more first read, on its first
+    /// attempt, until the value handed back is dropped: that read has then
+    /// succeeded.
+    #[cfg(test)]
+    pub(crate) fn owe_a_first_read_in_tests(&self) -> OwedFirstReadInTests {
+        self.inner
+            .first_reads
+            .0
+            .send_modify(|reads| reads.in_flight += 1);
+        OwedFirstReadInTests(self.clone())
     }
 
     /// Wait while an owed first read is still on its first attempt, at

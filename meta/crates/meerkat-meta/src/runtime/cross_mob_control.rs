@@ -1943,6 +1943,69 @@ pub struct MobHandleControlHandler {
     /// member and admits no member input: `Wire`, `Unwire` and `Inject`
     /// are refused with [`CANDIDATE_LAUNCH_CONTROL_CODE`].
     candidate_launch: bool,
+    /// Which members the member verbs answer as a name no member has.
+    members_apart: MembersApart,
+}
+
+/// Which members of a mob a peer gateway's control request does not reach.
+///
+/// A member that is kept apart from other callers (its roster entry carries
+/// the label that keeps it apart, or the runtime's record of its members
+/// says so) is answered, by every verb that names a member, exactly as a
+/// name no member has: nothing is read of it, nothing is wired to it and
+/// nothing reaches its session, whatever the caller's grant lists. The
+/// roster entry's own label is read for every handler. A runtime attaches
+/// its record too; while that record still owes its first read it cannot
+/// tell, and every name is answered as a name no member has until the read
+/// has succeeded. A handler built without the record has the roster
+/// entries' labels alone.
+#[derive(Clone, Default)]
+pub(crate) struct MembersApart {
+    record: Option<crate::private_owners::PrivateOwners>,
+}
+
+impl MembersApart {
+    /// Over a runtime's record of who its members are kept apart for.
+    pub(crate) fn of_the_runtime(record: crate::private_owners::PrivateOwners) -> Self {
+        Self {
+            record: Some(record),
+        }
+    }
+
+    /// Whether the roster member `member` of `handle`'s mob is answered as
+    /// a name no member has.
+    async fn holds(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> bool {
+        if let Some(record) = &self.record
+            && (record.first_read_pending()
+                || record
+                    .owner_of(handle.mob_id().as_str(), member.as_str())
+                    .is_some())
+        {
+            return true;
+        }
+        matches!(
+            handle.get_member(member).await,
+            Ok(Some(entry)) if crate::access::private_owner(&entry.labels).is_some()
+        )
+    }
+}
+
+/// What a verb that reads a member answers a name the mob's roster does not
+/// hold.
+fn no_such_member(remote_member: &str, mob_id: &str) -> (String, String) {
+    (
+        "unknown_member".to_string(),
+        format!("member '{remote_member}' not in mob '{mob_id}'"),
+    )
+}
+
+/// What Core answers a command for a roster id no member has.
+fn member_not_found(member: &meerkat_mob::AgentIdentity) -> String {
+    meerkat_mob::MobError::MemberNotFound(member.clone()).to_string()
 }
 
 /// How the handler resolves the durable identity authority for generated
@@ -1985,6 +2048,7 @@ impl MobHandleControlHandler {
             host_facts: empty_host_facts_provider(),
             keyed_inject: super::keyed_inject::pending_keyed_inject_slot(),
             candidate_launch: false,
+            members_apart: MembersApart::default(),
         }
     }
 
@@ -2001,6 +2065,7 @@ impl MobHandleControlHandler {
             host_facts: empty_host_facts_provider(),
             keyed_inject: super::keyed_inject::pending_keyed_inject_slot(),
             candidate_launch: false,
+            members_apart: MembersApart::default(),
         }
     }
 
@@ -2020,6 +2085,7 @@ impl MobHandleControlHandler {
             host_facts: empty_host_facts_provider(),
             keyed_inject: super::keyed_inject::pending_keyed_inject_slot(),
             candidate_launch: false,
+            members_apart: MembersApart::default(),
         }
     }
 
@@ -2078,6 +2144,15 @@ impl MobHandleControlHandler {
     #[must_use]
     pub(crate) fn with_candidate_launch(mut self, candidate_launch: bool) -> Self {
         self.candidate_launch = candidate_launch;
+        self
+    }
+
+    /// Answer the members `apart` holds as names no member has (see
+    /// [`MembersApart`]). A runtime gives its listener's handler its own
+    /// record.
+    #[must_use]
+    pub(crate) fn with_members_apart(mut self, apart: MembersApart) -> Self {
+        self.members_apart = apart;
         self
     }
 }
@@ -2169,6 +2244,7 @@ impl ControlHandler for MobHandleControlHandler {
         let host_facts = self.host_facts.clone();
         let keyed_inject = self.keyed_inject.clone();
         let candidate_launch = self.candidate_launch;
+        let members_apart = self.members_apart.clone();
         Box::pin(async move {
             if candidate_launch
                 && let Some(refusal) = candidate_launch_control_refusal(request.verb())
@@ -2200,6 +2276,7 @@ impl ControlHandler for MobHandleControlHandler {
                             wire: true,
                         },
                         identity_runtime.as_ref(),
+                        &members_apart,
                     )
                     .await
                 }
@@ -2223,6 +2300,7 @@ impl ControlHandler for MobHandleControlHandler {
                             wire: false,
                         },
                         identity_runtime.as_ref(),
+                        &members_apart,
                     )
                     .await
                 }
@@ -2232,7 +2310,14 @@ impl ControlHandler for MobHandleControlHandler {
                     nonce: _,
                     caller: _,
                 } => {
-                    handle_inject(&handle, &remote_member, content, identity_runtime.as_ref()).await
+                    handle_inject(
+                        &handle,
+                        &remote_member,
+                        content,
+                        identity_runtime.as_ref(),
+                        &members_apart,
+                    )
+                    .await
                 }
                 ControlRequest::LookupMember {
                     remote_member,
@@ -2244,6 +2329,7 @@ impl ControlHandler for MobHandleControlHandler {
                         session_service.as_ref(),
                         &remote_member,
                         identity_runtime.as_ref(),
+                        &members_apart,
                     )
                     .await
                 }
@@ -2362,12 +2448,84 @@ where
         }
     }
     if crate::member_comms_id::is_reserved_generated_alias(&member_alias) {
-        return Err((
-            "identity_authority_unavailable".to_string(),
-            format!("generated member alias '{member_alias}' requires the owning IdentityRuntime"),
-        ));
+        return Err(generated_alias_without_identity_runtime(&member_alias));
     }
     operation().await
+}
+
+/// What a member verb answers a generated alias on a handler that has no
+/// identity runtime to ask whose alias it is.
+fn generated_alias_without_identity_runtime(member_alias: &str) -> (String, String) {
+    (
+        "identity_authority_unavailable".to_string(),
+        format!("generated member alias '{member_alias}' requires the owning IdentityRuntime"),
+    )
+}
+
+/// The answer for `remote_member` when the member it names is kept apart
+/// from other callers; `None` when it is not, and the verb goes on.
+///
+/// Every member verb asks this once, before its identity runtime or its
+/// roster is consulted for the member, so nothing of the member decides the
+/// answer: not whether it is registered, not whether it has a member now,
+/// not which of its incarnations is current. The answer is the one this
+/// handler gives a name no member has IN THE SAME SPELLING:
+/// - a generated alias (`rt:<name>:<n>`, whatever the number) answers as
+///   the alias of an identity the identity runtime does not hold, or, on a
+///   handler without an identity runtime, as any generated alias does;
+/// - a plain name answers what `plain_name` builds from the name as it is
+///   spelled and the roster id it stands for: the verb's own answer for a
+///   name its roster does not hold.
+///
+/// Kept apart is: what [`MembersApart::holds`] says of the roster member
+/// the name stands for, or, with an identity runtime, that the registered
+/// row of the identity the name stands for carries the label (an identity
+/// that has no member yet has no roster entry to read).
+///
+/// A name in the reserved alias space that is no generated alias names no
+/// member and no identity: the verb refuses the spelling itself.
+async fn answer_for_a_member_kept_apart(
+    apart: &MembersApart,
+    handle: &meerkat_mob::MobHandle,
+    remote_member: &str,
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    plain_name: impl FnOnce(&str, &meerkat_mob::AgentIdentity) -> (String, String),
+) -> Option<(String, String)> {
+    let alias = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    let generated =
+        crate::identity_first::IdentityRuntime::identity_for_generated_member_alias(&alias);
+    let (roster_member, identity) = match &generated {
+        Some(identity) => (
+            crate::member_comms_id::mob_member_id(identity.as_str()),
+            Some(identity.clone()),
+        ),
+        None if crate::member_comms_id::is_reserved_generated_alias(&alias) => return None,
+        None => (
+            crate::member_comms_id::roster_member_id_for_supplied_id(&alias),
+            crate::identity_first::AgentIdentity::parse(&alias).ok(),
+        ),
+    };
+    let registered_apart = match (identity_runtime, &identity) {
+        (Some(runtime), Some(identity)) => {
+            runtime
+                .registered_spec(identity)
+                .await
+                .is_ok_and(|registered| {
+                    crate::access::private_owner(&registered.spec.labels).is_some()
+                })
+        }
+        _ => false,
+    };
+    if !registered_apart && !apart.holds(handle, &roster_member).await {
+        return None;
+    }
+    Some(match generated {
+        Some(identity) if identity_runtime.is_some() => control_identity_error(
+            crate::identity_first::IdentityRuntimeError::UnknownIdentity(identity),
+        ),
+        Some(_) => generated_alias_without_identity_runtime(&alias),
+        None => plain_name(&alias, &roster_member),
+    })
 }
 
 struct WireControlParams<'a> {
@@ -2427,11 +2585,25 @@ async fn handle_wire(
     handle: &meerkat_mob::MobHandle,
     params: WireControlParams<'_>,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    apart: &MembersApart,
 ) -> ControlResponse {
     let spec = match build_remote_wire_descriptor(&params) {
         Ok(spec) => spec,
         Err((code, message)) => return ControlResponse::Err { code, message },
     };
+    // A member kept apart is no member for a peer: the answer is the one
+    // the same spelling of a name no member has gets, and nothing is wired.
+    if let Some((code, message)) = answer_for_a_member_kept_apart(
+        apart,
+        handle,
+        params.remote_member,
+        identity_runtime,
+        |_, roster_member| ("mob_error".to_string(), member_not_found(roster_member)),
+    )
+    .await
+    {
+        return ControlResponse::Err { code, message };
+    }
     // The control plane speaks the public alias space; the local roster
     // holds comms-safe encoded ids (meerkat 0.7 MemberCommsName), so encode
     // at this boundary.
@@ -2468,6 +2640,7 @@ async fn handle_inject(
     remote_member: &str,
     content: serde_json::Value,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    apart: &MembersApart,
 ) -> ControlResponse {
     let content_input: meerkat_core::ContentInput = match serde_json::from_value(content) {
         Ok(c) => c,
@@ -2484,6 +2657,25 @@ async fn handle_inject(
     // preparation apply, and Core wakes it when it is dormant. The door takes
     // the identity's own lifecycle lock and checks a generated alias itself.
     let member_alias = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    // A member kept apart is no member for a peer: neither its identity door
+    // nor its raw door is tried, and the answer is the one the same spelling
+    // of a name no member has gets.
+    if let Some((code, message)) = answer_for_a_member_kept_apart(
+        apart,
+        handle,
+        remote_member,
+        identity_runtime,
+        |_, roster_member| {
+            (
+                "unknown_member".to_string(),
+                member_not_found(roster_member),
+            )
+        },
+    )
+    .await
+    {
+        return ControlResponse::Err { code, message };
+    }
     // A name the identity runtime refuses (Core holds it for an identity the
     // runtime has not registered, or its entry could not be read) is refused
     // typed, never sent through the raw member door.
@@ -2552,7 +2744,22 @@ async fn handle_lookup_member(
     session_service: Option<&std::sync::Arc<dyn meerkat_mob::MobSessionService>>,
     remote_member: &str,
     identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    apart: &MembersApart,
 ) -> ControlResponse {
+    // A member kept apart is no member for a peer: nothing of its roster
+    // entry is read out, and the answer is the one the same spelling of a
+    // name no member has gets.
+    if let Some((code, message)) = answer_for_a_member_kept_apart(
+        apart,
+        handle,
+        remote_member,
+        identity_runtime,
+        |alias, _| no_such_member(alias, handle.mob_id().as_str()),
+    )
+    .await
+    {
+        return ControlResponse::Err { code, message };
+    }
     let operation_handle = handle.clone();
     let operation_service = session_service.cloned();
     let operation_member = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
@@ -2736,10 +2943,7 @@ pub(crate) async fn handle_lookup_member_raw(
     let entry = match handle.get_member(&mid).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            return Err((
-                "unknown_member".to_string(),
-                format!("member '{remote_member}' not in mob '{mob_id}'"),
-            ));
+            return Err(no_such_member(remote_member, &mob_id));
         }
         // A faulted lookup is a mob error, not an unknown member.
         Err(err) => {
@@ -3606,13 +3810,20 @@ mod tests {
             ))
             .await?;
 
-        let lookup =
-            handle_lookup_member(&handle, None, "rt:worker:0", Some(&identity_runtime)).await;
+        let lookup = handle_lookup_member(
+            &handle,
+            None,
+            "rt:worker:0",
+            Some(&identity_runtime),
+            &MembersApart::default(),
+        )
+        .await;
         let injected = handle_inject(
             &handle,
             "rt:worker:0",
             serde_json::json!("hello"),
             Some(&identity_runtime),
+            &MembersApart::default(),
         )
         .await;
         let remote_peer_id =
@@ -3628,6 +3839,7 @@ mod tests {
                 wire: true,
             },
             Some(&identity_runtime),
+            &MembersApart::default(),
         )
         .await;
         assert_eq!(

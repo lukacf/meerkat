@@ -70,11 +70,11 @@ def check(binary, root):
             for name in ("review", "synthetic-custom"):
                 definition = {
                     "name": name, "description": "synthetic override",
-                    "agents": {"only": {"model": "gemini-3.5-flash", "skill": "Return a synthetic answer."}},
+                    "agents": {"only": {"model": "gemini-4-hydrogen", "skill": "Return a synthetic answer."}},
                 }
                 assert "result" in tool("create_mob", {"definition": definition})
                 assert json.loads(tool("get_mob", {"name": name})["result"]["content"][0]["text"])["name"] == name
-                assert packs()[name]["roles"] == {"only": "gemini-3.5-flash"}
+                assert packs()[name]["roles"] == {"only": "gemini-4-hydrogen"}
                 definition["description"] = "updated synthetic"
                 assert "result" in tool("update_mob", {"definition": definition})
                 assert packs()[name]["description"] == "updated synthetic"

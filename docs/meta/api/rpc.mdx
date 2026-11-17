@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -1411,7 +1411,11 @@ error type for all of them.
 | `agents` | `array` | yes | 1 to 256 agents, each `{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?, addressability?, runtime_mode_override?}` |
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
-`name` is unique in the mob. On the Console, a create under the name of an
+`name` is unique in the mob. A create under a taken name is refused
+`name_taken`: when it is asked for, or, where a person decides the create
+and the caller is not shown what holds the name, when the approved create
+is carried out.
+On the Console, a create under the name of an
 agent private to another person answers `-32001` (unknown identity), not
 `name_taken`, to a caller who is neither that person nor an access
 administrator. A name that begins `approval-branch-` and holds only ASCII
@@ -1819,8 +1823,12 @@ for it: such an operation was never asked or was refused, and asking it
 commits it at most once. An operation whose decision ended without its
 change (rejected, expired, withdrawn, or refused when it was carried out)
 answers a result too: `{"outcome": "refused", "kind", "retryable",
-"detail"}` with the kind's members and no `operation_id`. Such an operation
-is closed for good: ask the change again under a new `request_id`.
+"detail"}` with the kind's members and no `operation_id`.
+Such an operation is closed for good. Where it was rejected, expired or
+was withdrawn, the change may be asked again under a new `request_id`;
+where it was refused when it was carried out, asking again is refused in
+the same way while the cause holds (for `name_taken`: choose another
+name).
 
 The entry of an agent whose create answered `pending_preparation` says what
 became of the agent since: `pending_preparation` while it waits for its
@@ -1913,8 +1921,12 @@ schedules?}`. `outcome` is `allow` or
 `rendering` the whole text a decider would be shown. The rendering names a
 person who asked, and a person a host names as the proposer, by the id
 their principal key carries, never by the key. A change the rules
-deny is refused as the change itself would be. Nothing is held and nothing
-is written.
+deny is refused as the change itself would be. The plan of a create the
+rules would hold for a person is refused `name_taken` where the create
+itself would be refused before the hold; under any other taken name, and
+for a create the rules allow at once, it answers as for a name no agent
+holds (the create is then refused when it is asked for or carried out).
+Nothing is held and nothing is written.
 
 ### On the Console
 
@@ -3149,7 +3161,10 @@ A decision nobody decided by its deadline ends `expired`, a rejected one
 decision refused when it was carried out answers the kind it was refused
 with where that kind carries nothing but its name (`subject_widened`,
 `grant_revoked`), and `decision_closed` with the state `execution_refused`
-otherwise. An agent that asked is told the outcome by a message to its own
+otherwise. Its `detail` then names the refusal (for example `name_taken`);
+the refusal stands, so the same change asked again under a new
+`request_id` is refused the same way while its cause holds.
+An agent that asked is told the outcome by a message to its own
 name once the decision ended.
 
 Limits of this release:
@@ -3273,8 +3288,9 @@ Agent-memory methods are available over the SDK JSON-RPC gateway and over
 console `POST /console/rpc` when the identity runtime has an agent-memory
 provider configured. With ABAC enforced, console `recall` and `manifest`
 require both `agent.view` and `agent.memory.read` on the target identity;
-`remember` and `forget` also require mutating console access plus
-`agent.memory.write` and `agent.memory.delete` respectively.
+`remember`, `update` and `forget` also require mutating console access plus
+`agent.memory.write` (`remember`, `update`) or `agent.memory.delete`
+(`forget`).
 Older memory-naive policies receive
 [compatibility normalization](/meta/concepts/access-control#what-gets-enforced);
 explicit memory policies are applied literally.
@@ -3297,6 +3313,12 @@ Write an identity-scoped agent memory record for later per-turn and build-contex
 
 Read identity-scoped agent memory records from the configured agent memory provider. This exposes the same durable record set used for per-turn and build-context injection. Unlike automatic injection, explicit recall reports provider errors to the caller.
 
+A recall is a selection, not a listing: it returns at most `max_entries`
+active records of the identity and takes no cursor. What each `selection`
+returns is under
+[Reading agent memory](/meta/concepts/memory#reading-agent-memory); to enumerate,
+use [`meta/agent_memory/manifest`](#meta%2Fagent_memory%2Fmanifest).
+
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -3308,9 +3330,79 @@ Read identity-scoped agent memory records from the configured agent memory provi
 | `max_entries` | `integer` | no | Maximum records, default `8`, max `64` |
 </Accordion>
 
+The result is `{ "records": [...] }`; a record has `memory_id`, `title`,
+`body`, `tags`, `created_at_ms` and `updated_at_ms`.
+
+### `meta/agent_memory/manifest`
+
+List the metadata of an identity's active agent memory records, never their
+bodies. The tier `full` returns every active record in one answer.
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tier` | `"working_set" \| "full"` | no | `"working_set"` (default): the ranked records up to `k` and the recent records that are not ranked or were changed since they were ranked, at most twice `k` together. `"full"`: every active record |
+| `k` | `integer` | no | Size of the working set, default `32`, max `512`. Refused with the tier `full` |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `records` | `object[]` | One entry per record: `id`, `kind`, `title`, `description`, `age_days` and, for a ranked record, `rank` |
+</Accordion>
+
+### `meta/agent_memory/update`
+
+Replace an active agent memory record. The new title, body and tags become a
+new active record; the replaced one is no longer recalled or listed, and
+with the bundled store its text stays in the store like a forgotten
+record's. A
+`memory_id` that is unknown, is not active (already replaced or forgotten)
+or belongs to another identity is refused invalid params (`-32602`).
+
+<Accordion title="Parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | yes | Durable `AgentIdentity` that owns the memory |
+| `memory_id` | `string` | yes | The active record to replace |
+| `title` | `string` | yes | Short record title, max 200 bytes |
+| `body` | `string` | yes | Memory body, max 64 KiB |
+| `realm` | `string` | no | Memory realm, default `"default"` |
+| `tags` | `string[]` | no | Optional labels, max 32 entries and 64 bytes each |
+</Accordion>
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `memory_id` | `string` | Id of the new active record |
+| `supersedes` | `string` | Id of the record it replaced |
+</Accordion>
+
 ### `meta/agent_memory/forget`
 
-Delete one identity-scoped agent memory record from the configured provider. Providers that do not support deletes do not advertise this method in `meta/capabilities`. `forget` prevents future provider recall and future automatic injection; it cannot remove text that has already been delivered into an active model context.
+Withdraw one identity-scoped agent memory record from its agent. A forgotten
+record is no longer recalled, injected or listed in the manifest; `forget`
+cannot remove text that has already been delivered into an active model
+context. Providers that do not support it do not advertise this method in
+`meta/capabilities`.
+
+`forget` is not erasure. What becomes of the stored text is the provider's
+to say, and the bundled SQLite store erases nothing: it marks the record
+tombstoned and keeps its title, description, body, tags and provenance in
+the realm's database. The Console's Memory panel still lists the record
+(`meta/memory/panel/records`, without its body) and still returns its body
+(`meta/memory/panel/record`): with access control enforced, to a caller with
+`agent.memory.read` and `agent.view` on the identity (an access file in
+which no rule names a memory action grants, and denies, `agent.memory.read`
+wherever a rule grants, or denies, `agent.view`), and
+`memory.quarantine.review` as well for a record that was ever quarantined;
+otherwise to any Console caller. In both cases the memory of an agent
+private to a person is shown to no other person except an access admin named
+in `admins`. The bundled store has no call that erases one record; see
+[Agent memory injection](/meta/concepts/memory#agent-memory-injection) for what
+stays and how a realm's memory is removed.
 
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
@@ -3324,7 +3416,7 @@ Delete one identity-scoped agent memory record from the configured provider. Pro
 | Field | Type | Description |
 |-------|------|-------------|
 | `memory_id` | `string` | Requested memory id |
-| `deleted` | `boolean` | `true` when a record was removed, `false` when it was already absent |
+| `deleted` | `boolean` | `true` when this call withdrew the record, `false` when there was nothing to withdraw: an unknown id, a record already forgotten, or a record of another identity. With the bundled store `true` means the record was marked tombstoned; its text stays in the store |
 </Accordion>
 
 ---

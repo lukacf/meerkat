@@ -15829,10 +15829,10 @@ impl SessionRuntime {
         let intents = intents.as_slice();
         // A governed composition supplies the realm's own installations (its
         // installation authority); otherwise the runtime's configured ones.
-        let installed = match installations {
-            Some(installed) => installed,
-            None => match self.current_mcp_installations().await {
-                Ok(installed) => installed,
+        let (installed, unresolved) = match installations {
+            Some(installed) => (installed, Vec::new()),
+            None => match self.resolve_current_mcp_installations().await {
+                Ok(installations) => installations,
                 Err(()) => {
                     for intent in intents {
                         refused.push(Self::unavailable_restore(intent));
@@ -15842,6 +15842,21 @@ impl SessionRuntime {
                 }
             },
         };
+        // An installation that cannot be resolved now (its `mcp.toml` server
+        // names a variable that is not set) is not an absence: its entry is
+        // unavailable, never retired.
+        let resolvable: Vec<_> = intents
+            .iter()
+            .filter(|intent| {
+                let unavailable = unresolved.contains(&intent.descriptor.server_name);
+                if unavailable {
+                    refused.push(Self::unavailable_restore(intent));
+                }
+                !unavailable
+            })
+            .cloned()
+            .collect();
+        let intents = resolvable.as_slice();
         let current_installation =
             |name: &str| installed.iter().find(|server| server.name == name).cloned();
         let governed = self.runtime_adapter.has_native_work_authorization_host();
@@ -16073,21 +16088,27 @@ impl SessionRuntime {
         let mut controls = HashMap::new();
         let mut refused = Vec::new();
         let mut restorable = Vec::new();
-        let installed = match installations {
-            Some(installed) => installed,
+        let (installed, unresolved) = match installations {
+            Some(installed) => (installed, Vec::new()),
             None => {
-                let Ok(installed) = self.current_mcp_installations().await else {
+                let Ok(installations) = self.resolve_current_mcp_installations().await else {
                     for intent in &intents {
                         refused.push(Self::unavailable_restore(intent));
                     }
                     Self::report_restore_outcomes(session_id, lifecycle_tx, refused, Vec::new());
                     return;
                 };
-                installed
+                installations
             }
         };
         for intent in intents {
             let name = intent.descriptor.server_name.clone();
+            // An installation that cannot be resolved now is unavailable,
+            // never retired.
+            if unresolved.contains(&name) {
+                refused.push(Self::unavailable_restore(&intent));
+                continue;
+            }
             // Only a requested entry with a current installation needs a
             // control; the native restore decides the others (suppressed,
             // retired).
@@ -16129,11 +16150,25 @@ impl SessionRuntime {
     }
 
     /// The MCP servers currently installed for this runtime: the realm's own
-    /// (from its composed configuration) and the `mcp.toml` scopes.
+    /// (from its composed configuration) and the `mcp.toml` scopes. An
+    /// `mcp.toml` server that names a variable that is not set is not among
+    /// them ([`Self::resolve_current_mcp_installations`]).
     #[cfg(feature = "mcp")]
     async fn current_mcp_installations(
         &self,
     ) -> Result<Vec<meerkat_core::mcp_config::McpServerConfig>, ()> {
+        self.resolve_current_mcp_installations()
+            .await
+            .map(|(installed, _)| installed)
+    }
+
+    /// [`Self::current_mcp_installations`], with the names of the `mcp.toml`
+    /// servers that are installed but cannot be resolved now: each names an
+    /// environment variable that is not set. Every other server resolves.
+    #[cfg(feature = "mcp")]
+    async fn resolve_current_mcp_installations(
+        &self,
+    ) -> Result<(Vec<meerkat_core::mcp_config::McpServerConfig>, Vec<String>), ()> {
         // A read failure is not an absence: the caller refuses the restore as
         // unavailable rather than as retired or a lower-precedence fallback.
         let mut servers = match self.effective_config().await {
@@ -16146,29 +16181,41 @@ impl SessionRuntime {
         let (context_root, user_root) = self.skill_identity_roots();
         // An `mcp.toml` a confined process could write installs nothing.
         let host_confinement = self.factory.host_confinement();
-        match meerkat_core::mcp_config::McpConfig::load_with_scopes_from_roots_trusting(
-            context_root.as_deref(),
-            user_root.as_deref(),
-            &|path| host_confinement.is_some_and(|host| host.untrusted_source(path)),
-        )
-        .await
-        {
-            Ok(scoped) => {
-                for entry in scoped {
-                    if !servers
-                        .iter()
-                        .any(|server| server.name == entry.server.name)
-                    {
-                        servers.push(entry.server);
-                    }
+        let files =
+            match meerkat_core::mcp_config::McpConfig::resolve_with_scopes_from_roots_trusting(
+                context_root.as_deref(),
+                user_root.as_deref(),
+                &|path| host_confinement.is_some_and(|host| host.untrusted_source(path)),
+            )
+            .await
+            {
+                Ok(files) => files,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read the MCP configuration scopes");
+                    return Err(());
                 }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "could not read the MCP configuration scopes");
-                return Err(());
+            };
+        // A realm server keeps its name: a file server under it is not a
+        // second installation, resolved or not.
+        let mut unresolved = Vec::new();
+        for entry in files.unresolved {
+            if !servers
+                .iter()
+                .any(|server| server.name == entry.server.name)
+            {
+                tracing::warn!(error = %entry, "an MCP installation is not resolved");
+                unresolved.push(entry.server.name);
             }
         }
-        Ok(servers)
+        for entry in files.servers {
+            if !servers
+                .iter()
+                .any(|server| server.name == entry.server.name)
+            {
+                servers.push(entry.server);
+            }
+        }
+        Ok((servers, unresolved))
     }
 
     /// Take `session_id`'s attachment-intent order (see `SessionMcpState`);
@@ -39877,6 +39924,133 @@ mod tests {
                 .expect("apply the staged operations"),
             0,
             "the settled removal withdrew the staged add: nothing connects"
+        );
+    }
+
+    /// A variable that is not set is the failure of the one `mcp.toml`
+    /// server that names it: the runtime's other installations stay
+    /// readable, so their attachments are not refused as unavailable.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn an_unset_variable_leaves_the_other_mcp_installations_readable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_RPC_INSTALLED_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".rkat")).unwrap();
+        std::fs::write(
+            project.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"echo\"\n\
+                 env = {{ TOKEN = \"${{{ABSENT}}}\" }}\n\n\
+                 [[servers]]\nname = \"beta\"\ncommand = \"echo\"\n"
+            ),
+        )
+        .unwrap();
+        runtime.set_skill_identity_roots(Some(project), None);
+
+        let installed = runtime
+            .current_mcp_installations()
+            .await
+            .expect("one server's unset variable does not make the installations unreadable");
+        let names: Vec<&str> = installed
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect();
+        assert_eq!(names, ["beta"]);
+
+        // The unresolved installation is named, so a restore reports its
+        // attachment unavailable and never retires it.
+        let (installed, unresolved) = runtime
+            .resolve_current_mcp_installations()
+            .await
+            .expect("the installations resolve server by server");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(unresolved, ["alpha"]);
+    }
+
+    /// A restore beside an installation that cannot be resolved now: the
+    /// attachment of the server whose `mcp.toml` entry names an unset
+    /// variable is reported unavailable, never retired, and the other
+    /// server's attachment is restored.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn a_restore_reports_only_the_unresolved_installations_attachment_unavailable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_RPC_RESTORE_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        runtime
+            .start_turn(
+                &session_id,
+                "hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the first turn materializes the session");
+        for name in ["alpha", "beta"] {
+            runtime
+                .mcp_stage_add(
+                    &session_id,
+                    McpServerConfig::stdio(name, "echo", Vec::new(), HashMap::new()),
+                )
+                .await
+                .expect("stage add");
+        }
+        let requested = runtime
+            .durable_mcp_attachment_intents(&session_id)
+            .await
+            .expect("read the durable intents");
+        assert_eq!(requested.len(), 2, "both adds are durable: {requested:?}");
+
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".rkat")).unwrap();
+        std::fs::write(
+            project.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"echo\"\n\
+                 env = {{ TOKEN = \"${{{ABSENT}}}\" }}\n\n\
+                 [[servers]]\nname = \"beta\"\ncommand = \"echo\"\n"
+            ),
+        )
+        .unwrap();
+        runtime.set_skill_identity_roots(Some(project), None);
+        {
+            let mut sessions = runtime.mcp_sessions.write().await;
+            let state = sessions
+                .get_mut(&session_id)
+                .expect("the session's MCP state");
+            while state.lifecycle_rx.try_recv().is_ok() {}
+            state.pending_restore = requested;
+        }
+
+        runtime.restore_queued_mcp_attachments(&session_id).await;
+
+        let mut reported = Vec::new();
+        {
+            let mut sessions = runtime.mcp_sessions.write().await;
+            let state = sessions
+                .get_mut(&session_id)
+                .expect("the session's MCP state");
+            while let Ok(action) = state.lifecycle_rx.try_recv() {
+                reported.push((action.target.clone(), action.restore));
+            }
+        }
+        assert_eq!(
+            reported,
+            [(
+                "alpha".to_owned(),
+                Some(meerkat_core::McpAttachmentRestoreWireOutcome::Unavailable)
+            )],
+            "only the unresolved installation's attachment is unavailable; the other is restored"
         );
     }
 

@@ -10498,13 +10498,24 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
         }
     }
 
-    match meerkat_core::mcp_config::McpConfig::load_from_roots(
+    match meerkat_core::mcp_config::McpConfig::resolve_with_scopes_from_roots(
         scope.context_root.as_deref(),
         scope.user_config_root.as_deref(),
     )
     .await
     {
-        Ok(config) => println!("ok\tmcp\t{} configured server(s)", config.servers.len()),
+        Ok(files) => {
+            println!(
+                "ok\tmcp\t{} configured server(s)",
+                files.servers.len() + files.unresolved.len()
+            );
+            // Each server resolves alone: one naming a variable that is not
+            // set is that server's warning.
+            for unresolved in &files.unresolved {
+                ok = false;
+                println!("warn\tmcp\t{unresolved}");
+            }
+        }
         Err(err) => {
             ok = false;
             println!("warn\tmcp\t{err}");
@@ -13136,7 +13147,7 @@ async fn create_mcp_tools(
         host_confinement,
         attempt_guards,
     } = stdio_profile;
-    let effective = McpConfig::effective_servers_from_roots_trusting(
+    let effective = McpConfig::resolve_effective_servers_from_roots_trusting(
         realm_servers,
         scope.context_root.as_deref(),
         scope.user_config_root.as_deref(),
@@ -13146,11 +13157,18 @@ async fn create_mcp_tools(
     .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
     let servers_with_scope = effective.admitted;
     let refused_servers = effective.refused;
+    // Each `mcp.toml` server resolves alone: one naming a variable that is
+    // not set is that server's failure, not the run's.
+    let unresolved_servers = effective.unresolved;
 
-    if servers_with_scope.is_empty() && refused_servers.is_empty() {
+    if servers_with_scope.is_empty() && refused_servers.is_empty() && unresolved_servers.is_empty()
+    {
         return Ok(None);
     }
     report_refused_mcp_servers(&refused_servers);
+    for unresolved in &unresolved_servers {
+        eprintln!("{}", unresolved_mcp_server_warning(unresolved));
+    }
 
     // Warn about project-scoped servers (potential security concern)
     let project_servers: Vec<_> = servers_with_scope
@@ -13164,16 +13182,8 @@ async fn create_mcp_tools(
             project_servers.len()
         );
         for s in &project_servers {
-            let target = match &s.server.transport {
-                meerkat_core::mcp_config::McpTransportConfig::Stdio(stdio) => {
-                    if stdio.args.is_empty() {
-                        stdio.command.clone()
-                    } else {
-                        format!("{} {}", stdio.command, stdio.args.join(" "))
-                    }
-                }
-                meerkat_core::mcp_config::McpTransportConfig::Http(http) => http.url.clone(),
-            };
+            // The listing's own target: a URL without its userinfo and query.
+            let (_, target) = mcp::format_server_target(&s.server);
             eprintln!("  - {} ({})", s.server.name, target);
         }
     }
@@ -13239,6 +13249,14 @@ async fn create_mcp_tools(
             )
             .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
     }
+    // An unresolved server is staged as written and fails at once, as a
+    // server that does not connect does: nothing of it is expanded,
+    // connected or spawned.
+    for unresolved in unresolved_servers {
+        router
+            .stage_add_unresolved(unresolved)
+            .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
+    }
 
     // Apply staged ops — spawns background connection tasks
     let result = router
@@ -13297,6 +13315,16 @@ async fn create_mcp_tools(
         .map_err(|e| anyhow::anyhow!("Failed to refresh MCP tools: {e}"))?;
 
     Ok(Some(adapter))
+}
+
+/// What the operator is told, on stderr, about an `mcp.toml` server that
+/// names an environment variable that is not set: the server, the field and
+/// the variable, never a value. The run starts without it.
+#[cfg(feature = "mcp")]
+fn unresolved_mcp_server_warning(
+    unresolved: &meerkat_core::mcp_config::UnresolvedMcpServer,
+) -> String {
+    format!("warning: {unresolved}; the run starts without it")
 }
 
 /// Tell the operator, on stderr, which `mcp.toml` servers are refused: their
@@ -13491,14 +13519,20 @@ async fn governed_configured_mcp_servers(
     #[cfg(feature = "mcp")]
     {
         // An `mcp.toml` a confined process could write configures nothing.
-        let servers = meerkat_core::mcp_config::McpConfig::effective_servers_from_roots_trusting(
-            realm_servers,
-            scope.context_root.as_deref(),
-            scope.user_config_root.as_deref(),
-            &|path| host_confinement.is_some_and(|host| host.untrusted_source(path)),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
+        let servers =
+            meerkat_core::mcp_config::McpConfig::resolve_effective_servers_from_roots_trusting(
+                realm_servers,
+                scope.context_root.as_deref(),
+                scope.user_config_root.as_deref(),
+                &|path| host_confinement.is_some_and(|host| host.untrusted_source(path)),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP config error: {e}"))?;
+        // The governed set goes to the factory whole: a server naming a
+        // variable that is not set refuses the run, by name.
+        if let Some(unresolved) = servers.unresolved.first() {
+            anyhow::bail!("MCP config error: {unresolved}");
+        }
         report_refused_mcp_servers(&servers.refused);
         Ok(Some(GovernedMcpServers {
             servers: servers
@@ -21704,22 +21738,32 @@ async fn load_mcp_login_servers(
                     .as_deref()
                     .map(meerkat_core::mcp_config::user_mcp_path_in),
             };
-            let servers = McpConfig::load_scope_from_roots(
+            // Each server resolves alone: a variable that is not set fails
+            // only a login addressed to the server that names it.
+            let resolved = McpConfig::resolve_scope_from_roots(
                 scope,
                 cli_scope.context_root.as_deref(),
                 cli_scope.user_config_root.as_deref(),
             )
-            .await?
-            .servers;
+            .await?;
+            let unresolved = resolved
+                .unresolved
+                .into_iter()
+                .find(|unresolved| unresolved.server.name == name);
             if file.as_deref().is_some_and(untrusted)
-                && servers.iter().any(|server| server.name == name)
+                && (unresolved.is_some()
+                    || resolved.servers.iter().any(|file| file.server.name == name))
             {
                 return Err(not_configured());
             }
-            servers
+            if let Some(unresolved) = unresolved {
+                return Err(unresolved.into());
+            }
+            resolved
+                .servers
                 .into_iter()
-                .map(|server| meerkat_core::McpServerWithSource {
-                    server,
+                .map(|file| meerkat_core::McpServerWithSource {
+                    server: file.server,
                     source: McpServerSource::File(scope),
                 })
                 .collect::<Vec<_>>()
@@ -21732,7 +21776,7 @@ async fn load_mcp_login_servers(
         }
         // The realm's MCP set, as a session in this realm sees it.
         None => {
-            let servers = McpConfig::effective_servers_from_roots_trusting(
+            let servers = McpConfig::resolve_effective_servers_from_roots_trusting(
                 &realm_servers,
                 cli_scope.context_root.as_deref(),
                 cli_scope.user_config_root.as_deref(),
@@ -21745,6 +21789,13 @@ async fn load_mcp_login_servers(
                 .any(|refused| refused.server.name == name)
             {
                 return Err(not_configured());
+            }
+            if let Some(unresolved) = servers
+                .unresolved
+                .into_iter()
+                .find(|unresolved| unresolved.server.name == name)
+            {
+                return Err(unresolved.into());
             }
             servers.admitted
         }
@@ -35093,6 +35144,151 @@ done
             "a reported failure is not reported again"
         );
         adapter.shutdown().await;
+    }
+
+    /// A user `mcp.toml` whose one server, `alpha`, names a variable that is
+    /// not set, and the scope that reads it. Running `alpha` would create
+    /// the returned marker file.
+    #[cfg(all(feature = "mcp", unix))]
+    async fn scope_with_an_unresolved_mcp_server(
+        root: &Path,
+        realm: &str,
+        absent: &str,
+    ) -> (RuntimeScope, PathBuf) {
+        let marker = root.join("unresolved-launch-marker");
+        let user_root = root.join("user");
+        tokio::fs::create_dir_all(user_root.join(".rkat"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            user_root.join(".rkat/mcp.toml"),
+            format!(
+                "[[servers]]\nname = \"alpha\"\ncommand = \"/bin/sh\"\n\
+                 args = [\"-c\", \"printf entered > {}\"]\n\
+                 env = {{ TOKEN = \"${{{absent}}}\" }}\n",
+                marker.display()
+            ),
+        )
+        .await
+        .unwrap();
+        let mut scope = test_scope(root.join("realms"), realm);
+        scope.user_config_root = Some(user_root);
+        (scope, marker)
+    }
+
+    /// A variable that is not set fails the one `mcp.toml` server that names
+    /// it, not the run: the loader stages that server as a failed add at
+    /// once, with or without a wait for MCP, and nothing of it is expanded,
+    /// connected or spawned.
+    #[cfg(all(feature = "mcp", unix))]
+    #[tokio::test]
+    async fn test_cli_mcp_loader_fails_only_the_server_naming_an_unset_variable() {
+        const ABSENT: &str = "RKAT_ROW_MCP_LOADER_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (scope, marker) =
+            scope_with_an_unresolved_mcp_server(&root, "loader-realm", ABSENT).await;
+        let factory = AgentFactory::new(root.join("sessions"));
+
+        for wait_for_mcp in [true, false] {
+            let adapter = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                create_mcp_tools(
+                    &scope,
+                    &[],
+                    wait_for_mcp,
+                    CliMcpAuthMode::Stored,
+                    Some(Arc::new(
+                        meerkat_runtime::handles::RuntimeExternalToolSurfaceHandle::ephemeral(),
+                    )),
+                    cli_mcp_stdio_profile(&factory),
+                    Some(&CliMcpRouterOwner::fresh(&SessionId::new())),
+                ),
+            )
+            .await
+            .expect("an unresolved server is failed at once, never pending")
+            .expect("the run starts beside a server naming an unset variable")
+            .expect("one configured server");
+            if !wait_for_mcp {
+                let deltas = adapter
+                    .wait_until_ready(std::time::Duration::from_secs(15))
+                    .await
+                    .unwrap();
+                assert!(
+                    deltas.iter().any(|delta| {
+                        delta.target == "alpha"
+                            && delta.phase == meerkat_core::ExternalToolDeltaPhase::Failed
+                            && delta.detail.as_deref().is_some_and(|detail| {
+                                detail.contains("env.TOKEN") && detail.contains(ABSENT)
+                            })
+                    }),
+                    "the server is reported failed with its field and variable: {deltas:?}"
+                );
+            }
+            adapter.shutdown().await;
+        }
+        assert!(
+            !marker.exists(),
+            "an unresolved server never starts its process"
+        );
+
+        // What the operator reads on stderr names the server, the field and
+        // the variable.
+        let unresolved = McpConfig::resolve_scope_from_roots(
+            McpScope::User,
+            None,
+            scope.user_config_root.as_deref(),
+        )
+        .await
+        .unwrap()
+        .unresolved;
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(
+            unresolved_mcp_server_warning(&unresolved[0]),
+            format!(
+                "warning: MCP server 'alpha' in the user mcp.toml is not resolved: environment \
+                 variable '{ABSENT}' referenced in env.TOKEN is not set; the run starts without it"
+            )
+        );
+    }
+
+    /// On a governed realm the configured set goes to the factory whole, so
+    /// a server naming a variable that is not set still refuses the run; the
+    /// refusal names the server, the field and the variable.
+    #[cfg(all(feature = "local-authorization", feature = "mcp", unix))]
+    #[tokio::test]
+    async fn a_governed_run_refuses_an_unset_variable_naming_its_server() {
+        use meerkat::governed_realm::{
+            RealmGovernance, open_governed_realm_persistence_with_provider,
+        };
+        const ABSENT: &str = "RKAT_ROW_MCP_GOVERNED_ABSENT_TOKEN";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (scope, _marker) =
+            scope_with_an_unresolved_mcp_server(&root, "ws-unresolved", ABSENT).await;
+        let (_, governed) = open_governed_realm_persistence_with_provider(
+            &meerkat::DiskStorageProvider,
+            &root.join("realms"),
+            "ws-unresolved",
+            None,
+            None,
+            None,
+            RealmGovernance::GovernedWithoutOwners,
+        )
+        .await
+        .expect("governed without owners");
+        assert!(persistence_is_governed(&governed));
+
+        let Err(error) = governed_configured_mcp_servers(&governed, &scope, &[], None).await else {
+            panic!("a governed run refuses a server naming an unset variable");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("'alpha'")
+                && message.contains("env.TOKEN")
+                && message.contains(ABSENT),
+            "the refusal names the server, the field and the variable: {message}"
+        );
     }
 
     /// Run the CLI loader for one stdio server under a factory whose MCP

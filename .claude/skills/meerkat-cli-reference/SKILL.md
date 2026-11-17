@@ -359,9 +359,9 @@ Realm servers are literal: `${VAR}` expands only in `mcp.toml`, and
 Live mutation of an already-running session uses RPC/REST/MCP/SDK surfaces, not
 `rkat mcp reload`.
 
-`get` text output masks env and header values whose name contains key,
-secret, token or password; `--json` output is unmasked. Neither shows
-`access`, `tool_names` or `secret_env`.
+`get` text output masks every env and header value and shows a URL without
+its userinfo and query (so does the `list` table); `--json` output is
+unmasked. Neither shows `access`, `tool_names` or `secret_env`.
 
 `--allow-operation <OPERATION>` (repeatable) writes the server's access ceiling
 (`access = { allowed_operations = [...] }`): every other raw MCP operation is

@@ -245,6 +245,14 @@ them.
   and the method's name are unchanged. The Shell capability's description
   now names `monitor_start`.
 
+- `rkat mcp get` masks every env and header value in its text form, and a
+  server URL is shown without its userinfo and query in `rkat mcp get`, the
+  `rkat mcp list` table, the line `rkat mcp add` prints and the
+  project-server lines a run prints on stderr. The `--json` forms of `list`
+  and `get` are unchanged and print the values the server is given. Not
+  covered: a credential inside a stdio server's argument (the command line is
+  shown as before) and a token used as a URL path segment.
+
 ### Fixed
 
 - `apply_patch`: the tool's description, which the model reads, said that absolute paths are rejected; the tool applies an absolute path that lies inside the project root (on Unix). The description now reads "Paths are relative to the project root; a path that leaves the root, absolute or via '..', is rejected." No behaviour changes.
@@ -422,6 +430,23 @@ them.
   own boundary cancel, which no public JSON-RPC method sends;
   `mob/force_cancel` and a member stop that cancels at the run's boundary
   reach the same state by reading and were not run.
+
+- An environment variable that is not set fails only the `mcp.toml` server
+  that names it (affected: 0.8.42 to 0.9.16, where it failed every server).
+  Each server resolves alone, and that server is reported by name with the
+  field and the variable, never a value. `rkat mcp list` and `rkat mcp get`
+  show it with nothing expanded, marked unresolved (`--json`: the entry as
+  written, with an `unresolved` object holding `field` and `variable`);
+  `rkat mcp login` and the RPC and REST auth
+  methods work for the other servers; a run starts with that server reported
+  as a failed MCP server and a warning on stderr; a resumed `rkat-rpc`
+  session restores the other servers' attachments and reports only that
+  server's as unavailable. A login addressed to that server, and a run in a
+  governed realm, are refused with a message naming the server, the field
+  and the variable. The loads of `meerkat-core` that return one list
+  (`McpConfig::load*`, `effective_servers_from_roots*`) keep their
+  whole-load error, whose field names the server; the per-server loads
+  (`McpConfig::resolve_*`, `UnresolvedMcpServer`) are additive.
 
 ### Security
 

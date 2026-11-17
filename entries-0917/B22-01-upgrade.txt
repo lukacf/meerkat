@@ -1,0 +1,12 @@
+- `meerkat-comms`: a host that starts its successor process on the same
+  `[comms]` socket `address` while the old process still listens (a restart
+  with overlap) must stop the old process and wait for its exit before the
+  successor starts its members: the socket file the old process leaves is
+  then removed and bound as before, whereas a successor started during the
+  overlap, which took the path without an error before, now has its
+  member's build fail (a restored mob member is recorded broken) and stays
+  so until that successor is started again or the member is respawned (see
+  Changed). (Shown by tests on real sockets inside one process, the refusal
+  during the overlap among them; two processes were not run, and how a
+  successor that was refused during the overlap comes back is read from the
+  source.)

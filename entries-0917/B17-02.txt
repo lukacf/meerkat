@@ -1,0 +1,10 @@
+- A gateway start refused after the init request was accepted raises the
+  refusal's own typed error (`CompositionProvenanceError`,
+  `StorageResolutionError` or the typed RPC error) instead of
+  `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+  For this `meerkat_meta._transport.PersistentTransport`, the class
+  `gateway_transport()` takes, gains the method `init_settled_failed()`,
+  which the runtime calls when the init settles `failed`, so that the stop
+  that follows makes no shutdown request. A subclass inherits it (the
+  exported `AdoptedGatewayTransport` is one); a subclass must not define a
+  method of that name for another purpose.

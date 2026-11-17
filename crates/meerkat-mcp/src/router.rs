@@ -161,7 +161,9 @@ struct RetainedStdioFailure {
     failure: meerkat_core::mcp_attachment::McpStdioSetupFailure,
     record: Arc<crate::stdio_diagnostics::StdioAttemptRecord>,
     /// Whether the host already claimed this failure for its operator's
-    /// report (see `McpRouter::claim_stdio_failures`).
+    /// report (see `McpRouter::claim_stdio_failures`). It records that the
+    /// failure was handed to the host's report and decides nothing about
+    /// the server: not a lifecycle fact.
     claimed: std::sync::atomic::AtomicBool,
 }
 

@@ -13213,10 +13213,15 @@ async fn create_mcp_tools(
         // K14: wait-for-mcp is fail-closed — servers still pending at the
         // deadline surface as a typed `McpNotReady` fault that aborts the run
         // before the first turn, never a warn-and-proceed.
-        let notices = adapter
-            .wait_until_ready(total_timeout)
-            .await
-            .map_err(|not_ready| anyhow::anyhow!("{not_ready}"))?;
+        let notices = match adapter.wait_until_ready(total_timeout).await {
+            Ok(notices) => notices,
+            Err(not_ready) => {
+                // The stdio servers that did fail are reported to the
+                // operator before the run is refused.
+                mcp_stdio_report::print(&adapter).await;
+                return Err(anyhow::anyhow!("{not_ready}"));
+            }
+        };
         for notice in &notices {
             if notice.status_text().starts_with("failed") {
                 eprintln!(

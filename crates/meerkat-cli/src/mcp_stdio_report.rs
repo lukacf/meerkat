@@ -19,7 +19,9 @@ pub(crate) const TAIL_PRINT_MAX_BYTES: usize = 4 * 1024;
 const NAME_PRINT_MAX_CHARS: usize = 64;
 
 /// One failed server's report: its name, the failure in fixed words, and the
-/// end of its stderr tail, marked when earlier output is not shown.
+/// end of its stderr tail, marked when earlier output is not shown and when
+/// the server's stderr was still open as the tail was read (more may have
+/// followed).
 pub(crate) fn render(failure: &McpStdioSetupFailure, tail: Option<&McpStdioStderrTail>) -> String {
     // The name comes from configuration: it is shown escaped and bounded,
     // never as terminal input.
@@ -31,17 +33,25 @@ pub(crate) fn render(failure: &McpStdioSetupFailure, tail: Option<&McpStdioStder
     };
     let (lines, left_out) = last_lines(&tail.text);
     if lines.is_empty() {
-        report.push_str(if tail.total_bytes == 0 {
-            "\n  it wrote nothing to stderr"
-        } else {
-            "\n  its stderr output holds no whole line to show"
+        report.push_str(match (tail.total_bytes == 0, tail.complete) {
+            (true, true) => "\n  it wrote nothing to stderr",
+            // The capture had not ended when the tail was read: nothing
+            // yet is not nothing.
+            (true, false) => {
+                "\n  it had written nothing to stderr when this was read \
+                 (its stderr was still open)"
+            }
+            (false, _) => "\n  its stderr output holds no whole line to show",
         });
         return report;
     }
-    report.push_str(if tail.truncated || left_out {
-        "\n  its last stderr output (earlier output cut):"
-    } else {
-        "\n  its last stderr output:"
+    report.push_str(match (tail.truncated || left_out, tail.complete) {
+        (false, true) => "\n  its last stderr output:",
+        (true, true) => "\n  its last stderr output (earlier output cut):",
+        (false, false) => "\n  its last stderr output (its stderr was still open):",
+        (true, false) => {
+            "\n  its last stderr output (earlier output cut; its stderr was still open):"
+        }
     });
     for line in lines {
         report.push_str(if line.is_empty() { "\n  |" } else { "\n  | " });
@@ -163,7 +173,8 @@ mod tests {
 
     #[test]
     fn only_the_last_lines_are_shown_and_the_cut_is_marked() {
-        let text: String = (1..=100).map(|line| format!("line {line}\n")).collect();
+        let lines: Vec<String> = (1..=100).map(|line| format!("line {line}\n")).collect();
+        let text = lines.concat();
         let report = render(&exited("chatty", 1), Some(&tail(&text, false)));
         let shown: Vec<&str> = report
             .lines()
@@ -181,9 +192,10 @@ mod tests {
     #[test]
     fn only_the_last_bytes_are_shown_and_the_cut_is_marked() {
         // Ten lines of 1000 bytes: four whole lines fit the bound.
-        let text: String = (0..10)
+        let lines: Vec<String> = (0..10)
             .map(|line| format!("{line}{}\n", "x".repeat(998)))
             .collect();
+        let text = lines.concat();
         let report = render(&exited("wide", 1), Some(&tail(&text, false)));
         let shown: Vec<&str> = report
             .lines()
@@ -211,6 +223,35 @@ mod tests {
         let report = render(&exited("flooded", 5), Some(&tail("last line\n", true)));
         assert!(
             report.ends_with("  its last stderr output (earlier output cut):\n  | last line"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_capture_still_open_is_said_and_never_reads_as_nothing_written() {
+        let open = |text: &str, truncated: bool| {
+            McpStdioStderrTail::new(text.to_owned(), text.len() as u64, truncated, false)
+        };
+        let report = render(&exited("open", 1), Some(&open("", false)));
+        assert!(
+            report.ends_with(
+                "\n  it had written nothing to stderr when this was read \
+                 (its stderr was still open)"
+            ),
+            "{report}"
+        );
+        let report = render(&exited("open", 1), Some(&open("starting\n", false)));
+        assert!(
+            report
+                .ends_with("\n  its last stderr output (its stderr was still open):\n  | starting"),
+            "{report}"
+        );
+        let report = render(&exited("open", 1), Some(&open("late line\n", true)));
+        assert!(
+            report.ends_with(
+                "\n  its last stderr output (earlier output cut; its stderr was still open):\
+                 \n  | late line"
+            ),
             "{report}"
         );
     }

@@ -37,7 +37,7 @@ them.
 
 ### Breaking
 
-- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::ClassifyRecoveredInputDurability` gains the public field `pending_terminal_carrier: bool`, and the public enum `generated::meerkat::TransitionId` gains six variants named `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier` with the phase suffixes. `meerkat-runtime`: the variant `MeerkatMachineInput::ClassifyRecoveredInputDurability` gains the same field. Code that builds either with a struct literal adds the field; an exhaustive `match` on `TransitionId` adds the arms. No wire form and no stored form changes.
+- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::ClassifyRecoveredInputDurability` gains the public field `pending_terminal_carrier: bool`, and the public enum `generated::meerkat::TransitionId` gains six variants named `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier` with the phase suffixes `Initializing`, `Idle`, `Attached`, `Running`, `Retired` and `Stopped`. `meerkat-runtime`: the variant `ClassifyRecoveredInputDurability` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; an exhaustive `match` on `TransitionId` adds the arms. No wire form and no stored form changes.
 
 ### Fixed
 

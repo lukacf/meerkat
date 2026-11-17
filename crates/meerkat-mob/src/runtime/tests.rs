@@ -15422,18 +15422,32 @@ fn test_comms_name_for(mob_id: &MobId, profile: &str, agent_identity: &str) -> S
     format!("{mob_id}/{profile}/{agent_identity}")
 }
 
-struct SpawnProvisionedCommandDelayGuard;
+/// Holds back the provisioned completion of the spawns of ONE mob, until it
+/// is dropped. The delay is per mob so that rows running side by side in one
+/// process do not end each other's delay or sleep through it.
+struct SpawnProvisionedCommandDelayGuard {
+    mob_id: MobId,
+}
 
 impl SpawnProvisionedCommandDelayGuard {
-    fn set(delay_ms: u64) -> Self {
-        super::actor::SPAWN_PROVISIONED_COMMAND_DELAY_MS.store(delay_ms, Ordering::Relaxed);
-        Self
+    fn set(mob_id: &MobId, delay_ms: u64) -> Self {
+        let mut delays = super::actor::SPAWN_PROVISIONED_COMMAND_DELAYS_MS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        delays.retain(|(delayed_mob_id, _)| delayed_mob_id != mob_id);
+        delays.push((mob_id.clone(), delay_ms));
+        Self {
+            mob_id: mob_id.clone(),
+        }
     }
 }
 
 impl Drop for SpawnProvisionedCommandDelayGuard {
     fn drop(&mut self) {
-        super::actor::SPAWN_PROVISIONED_COMMAND_DELAY_MS.store(0, Ordering::Relaxed);
+        super::actor::SPAWN_PROVISIONED_COMMAND_DELAYS_MS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(delayed_mob_id, _)| *delayed_mob_id != self.mob_id);
     }
 }
 
@@ -62730,7 +62744,10 @@ async fn a_cancelled_resumed_spawn_keeps_its_session(drain: ProvisionedSpawnDrai
     let identity = AgentIdentity::from("w-resumed-drain");
     let session_id = seed_existing_worker_session(&service, &definition.id, &identity).await;
 
-    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(
+        &definition.id,
+        PROVISIONED_SPAWN_COMPLETION_DELAY_MS,
+    );
     let pending_spawn = {
         let handle = handle.clone();
         let identity = identity.clone();
@@ -63006,7 +63023,10 @@ async fn a_cancelled_fresh_spawn_cleans_up_its_session(drain: ProvisionedSpawnDr
     let identity = AgentIdentity::from("w-fresh-drain");
     let comms_name = test_comms_name_for(&definition.id, "worker", identity.as_str());
 
-    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(
+        &definition.id,
+        PROVISIONED_SPAWN_COMPLETION_DELAY_MS,
+    );
     let pending_spawn = {
         let handle = handle.clone();
         let identity = identity.clone();
@@ -63092,7 +63112,10 @@ async fn stop_after_a_coordinator_owned_resumed_spawn_provisioned_releases_the_s
         .expect("coordinator owner context");
     let coordinator_registry = Arc::clone(&coordinator.ops_registry);
 
-    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(
+        &definition.id,
+        PROVISIONED_SPAWN_COMPLETION_DELAY_MS,
+    );
     let pending_spawn = {
         let handle = handle.clone();
         let identity = identity.clone();
@@ -63523,8 +63546,9 @@ async fn test_retire_retry_drains_exact_failed_pending_cleanup_before_classifyin
 
 #[tokio::test]
 async fn test_retire_absent_does_not_cancel_later_pending_spawn_incarnation() {
-    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
-    let (handle, service) = create_test_mob(sample_definition()).await;
+    let definition = sample_definition();
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(&definition.id, 500);
+    let (handle, service) = create_test_mob(definition).await;
     let agent_identity = AgentIdentity::from("w-retire-absent-pending-spawn");
     let comms_name = test_comms_name("worker", agent_identity.as_str());
 
@@ -101211,7 +101235,7 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
 
 #[tokio::test]
 async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (handle, service) = create_test_mob(sample_definition()).await;
     let member = AgentIdentity::from("worker-kickoff-quiesce-destroy");
     handle
         .spawn_with_options(
@@ -101224,6 +101248,17 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         .await
         .expect("spawn turn-driven worker");
 
+    // Machine-owned kickoff facts injected past the shell, as in the retire
+    // row above. The actor then starts the kickoff this live member owes
+    // (`start_owed_kickoffs`): it marks it starting, admits the kickoff input
+    // and waits on its run. Hold that run at the provider so the kickoff is
+    // still in flight when the destroy is admitted. A run that completes
+    // first resolves the kickoff Started: the member is then in neither
+    // kickoff set, the second command below is refused, and the destroy has
+    // nothing to quiesce.
+    service.set_start_turn_delay_ms(600_000);
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let entered_before = *turns_entered.borrow_and_update();
     let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
     handle
         .project_machine_input(
@@ -101234,6 +101269,13 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         )
         .await
         .expect("mark kickoff pending");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        turns_entered.wait_for(|entered| *entered > entered_before),
+    )
+    .await
+    .expect("the owed kickoff run reaches the provider")
+    .expect("start-turn watch");
     handle
         .project_machine_input(
             crate::machines::mob_machine::MobMachineInput::KickoffMarkStarting {
@@ -101242,6 +101284,15 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         )
         .await
         .expect("mark kickoff starting");
+
+    let in_flight = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state before the destroy");
+    assert!(
+        in_flight.member_kickoff_starting.contains(&dsl_member),
+        "the machine must hold the kickoff in flight when the destroy is admitted",
+    );
 
     handle.destroy().await.expect(
         "destroy must discharge every kickoff quiesce obligation before the \
@@ -101525,8 +101576,9 @@ async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
 
 #[tokio::test]
 async fn test_destroy_with_inflight_spawn_provisioning_quiesces_waiter() {
-    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
-    let (handle, service) = create_test_mob(sample_definition()).await;
+    let definition = sample_definition();
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(&definition.id, 500);
+    let (handle, service) = create_test_mob(definition).await;
     let member = AgentIdentity::from("w-destroy-pending-spawn");
     let comms_name = test_comms_name("worker", member.as_str());
 

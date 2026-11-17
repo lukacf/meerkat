@@ -5539,9 +5539,13 @@ fn autonomous_stop_phase(pending_kickoffs: usize, resolved_kickoffs: usize) -> A
 fn disposal_uses_host_release_authority(host_owned: bool) -> bool {
     host_owned
 }
+/// The delay a row asked for before a spawn's provisioned completion is sent,
+/// per mob. Only the spawns of the mob a row named are held back: rows that
+/// run side by side in one process neither end each other's delay nor sleep
+/// through it.
 #[cfg(test)]
-pub(super) static SPAWN_PROVISIONED_COMMAND_DELAY_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub(super) static SPAWN_PROVISIONED_COMMAND_DELAYS_MS: std::sync::Mutex<Vec<(MobId, u64)>> =
+    std::sync::Mutex::new(Vec::new());
 /// The sessions of the spawns whose completion the delay above is holding
 /// back: each is recorded once its pending slot names it, before the delay.
 #[cfg(test)]
@@ -39355,8 +39359,12 @@ impl MobActor {
                         }
                         #[cfg(test)]
                         {
-                            let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
-                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAYS_MS
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .iter()
+                                .find(|(delayed_mob_id, _)| *delayed_mob_id == panic_mob_id)
+                                .map_or(0, |(_, delay_ms)| *delay_ms);
                             if delay_ms > 0 {
                                 // The slot names the provisioned session from
                                 // here on. A row that holds the completion

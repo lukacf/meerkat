@@ -4,7 +4,7 @@ description: "Start a Meta application runtime with a matching gateway and SDK, 
 icon: "rocket"
 ---
 
-*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 This guide starts with the Meta application runtime. If you only need to run an
 agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
@@ -154,8 +154,36 @@ The console shows the agent sidebar, conversation workspace, signals rail, topol
 ## Keep agents available across sessions
 
 For durable agent identities, use a roster and the identity-first API. The
-following sketch shows how a personal agent connects to a triage agent;
-`MOB_TOML` supplies their profiles as described in [roster](/meta/concepts/roster):
+following sketch shows how a personal agent connects to a triage agent.
+`MOB_TOML` is the text of a mob definition that supplies their profiles (see
+[roster](/meta/concepts/roster)):
+
+```toml
+[mob]
+id = "quickstart"
+
+[profiles.personal]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.personal.tools]
+comms = true
+
+[profiles.triage]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.triage.tools]
+comms = true
+```
+
+Every profile a member is built from needs `comms = true` under
+`[profiles.<name>.tools]`, also for a single agent that has no peers: a
+member's identity and its place in the roster are keyed on its comms name.
+The default is `false`. A runtime whose profile leaves it out still starts,
+and the first send to a member of that profile fails with `profile
+'<name>' has tools.comms=false; mob meerkats require comms=true` (see
+[Mob profile tools](/meta/reference/configuration#mob-profile-tools)).
 
 ```python
 from meerkat_meta import Meta

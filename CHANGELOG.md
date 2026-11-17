@@ -224,6 +224,28 @@ them.
   for each session, the symbolic link edge and that the other servers were not
   affected are by reading; macOS and Windows were not run.)
 
+- Added 2026-11-17. Windows: when several tasks or processes open the same new
+  realm for the first time at the same moment, none of them fails any more
+  with "IO error: Access is denied. (os error 5)" (a Known limitation of
+  0.9.15). A realm that has no manifest yet is opened under a lock file, and a
+  realm that may live under more than one state root is reserved for its first
+  start by a marker file in each; the holder gives either back by removing the
+  file, and Windows keeps a file name until its removal completes and refuses
+  a create or a read of the name in that moment. The other openers took that
+  refusal as an error. On Windows they now read it as held and wait inside the
+  existing five-second deadline; a file that really cannot be created there
+  ends in the existing lock timeout or contention error instead of "Access is
+  denied". Nothing changes on other platforms. Affected: 0.9.15; earlier
+  releases failed on Windows at every first use of a realm (see Fixed in
+  0.9.15). (By a run on a Windows runner, image windows-2025-vs2026
+  20261103.298.1, with this release's store code: the test that opens one new
+  realm from many tasks at once failed with this error on the 0.9.15 tag in 13
+  of 25 runs by itself and in 12 of 25 runs of the whole realm module, and
+  passed 25 of 25 on this release's code, where the whole realm module passed.
+  The test for one realm under two state roots did not fail on the 0.9.15 tag
+  in 25 runs, so the wait on the first-start marker is shown only by tests
+  that take the platform as a parameter and run on every host.)
+
 ### Security
 
 - The shell job tools answered for jobs of other sessions (0.8.8 through
@@ -328,6 +350,15 @@ them.
   the retry by runs on the released 0.9.15 `rkat`; the cause and its two other
   faces by reading, in the same lines in every release from 0.9.0, where
   `realm govern` first shipped.)
+
+- Live channels (0.9.15 and 0.9.16; earlier releases not read; added
+  2026-11-17): wait for the channel to report `ready` before sending input.
+  Input sent before that is refused as not ready and is not held for later. A
+  turn commit that follows with nothing staged is an invalid request and ends
+  the channel; the client sees only the socket close, without the reason. Read
+  from the source of both releases; the close was seen in runs of a live
+  example whose first input went out before `ready`, on the published 0.9.15
+  and on a build of 0.9.16.
 
 ## [0.9.15] - 2026-11-15
 
@@ -4843,6 +4874,7 @@ them.
   source). A single start is not affected. Seen in a test on a Windows
   runner that creates one realm from 32 tasks at once. A fix is planned for
   the next release.
+  Added 2026-11-17: fixed in 0.9.16.
 
 - Added 2026-11-16, after the release. External events admitted without a
   wake (REST `POST /sessions/{id}/external-events`, JSON-RPC

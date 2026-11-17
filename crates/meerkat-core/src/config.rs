@@ -1051,6 +1051,7 @@ impl Config {
         if let Some(governance) = &self.governance {
             governance.validate()?;
         }
+        self.rest.validate()?;
         if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
                 "max_tokens must be greater than 0 when set".to_string(),
@@ -1993,6 +1994,23 @@ impl LimitsConfig {
 pub struct RestServerConfig {
     pub host: String,
     pub port: u16,
+    /// The origins of the browser pages the server answers. Each entry is
+    /// one origin as a browser sends it: a scheme, a host and an optional
+    /// port (`https://app.example.com`, `http://localhost:5173`). Empty, the
+    /// default: the server answers no page. A request that carries no
+    /// `Origin` header is not a page's request and is served whatever this
+    /// lists. The server reads the list when it starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
+    /// The host names the server answers for besides `localhost` and
+    /// address literals: the names it is reached under, such as the public
+    /// name a reverse proxy forwards (`api.example.com`) or a container or
+    /// service name. Whatever address the server is bound to, it refuses a
+    /// request whose `Host` names anything else. Entries are names: no
+    /// scheme, port, path or wildcard. The server reads the list when it
+    /// starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_hosts: Vec<String>,
 }
 
 impl Default for RestServerConfig {
@@ -2000,8 +2018,88 @@ impl Default for RestServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 8080,
+            allowed_origins: Vec::new(),
+            served_hosts: Vec::new(),
         }
     }
+}
+
+impl RestServerConfig {
+    /// Refuse an `allowed_origins` entry that is not one origin, and a
+    /// `served_hosts` entry that is not one host name. A wildcard and `null`
+    /// are not origins: no entry allows every page, and no entry allows a
+    /// page that has no origin of its own. No entry serves every host name.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(entry) = self.served_hosts.iter().find(|entry| !is_host_name(entry)) {
+            return Err(ConfigError::Validation(format!(
+                "rest.served_hosts: `{entry}` is not a host name; list each name the server is \
+                 reached under without a scheme, a port or a path, such as `api.example.com` \
+                 (a wildcard cannot be listed)"
+            )));
+        }
+        if let Some(entry) = self
+            .allowed_origins
+            .iter()
+            .find(|entry| !is_serialized_origin(entry))
+        {
+            return Err(ConfigError::Validation(format!(
+                "rest.allowed_origins: `{entry}` is not an origin; list each origin as a scheme, \
+                 a host and an optional port, such as `https://app.example.com` (`*` and `null` \
+                 cannot be listed)"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `entry` is one host name: a DNS name or an address literal, with
+/// no scheme, port, path or wildcard.
+fn is_host_name(entry: &str) -> bool {
+    entry.parse::<std::net::IpAddr>().is_ok()
+        || (!entry.is_empty()
+            && entry
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')))
+}
+
+/// Whether `entry` is one origin as a browser serializes it: a scheme,
+/// `://`, a host, an optional `:port`, and nothing else.
+fn is_serialized_origin(entry: &str) -> bool {
+    let Some((scheme, authority)) = entry.split_once("://") else {
+        return false;
+    };
+    let scheme_is_valid = scheme.starts_with(|first: char| first.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let (host, port, host_is_valid) = if let Some(bracketed) = authority.strip_prefix('[') {
+        // An IPv6 literal.
+        let Some((host, after)) = bracketed.split_once(']') else {
+            return false;
+        };
+        let port = match after.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if after.is_empty() => None,
+            None => return false,
+        };
+        let host_is_valid = host
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'));
+        (host, port, host_is_valid)
+    } else {
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        let host_is_valid = host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
+        (host, port, host_is_valid)
+    };
+    scheme_is_valid
+        && !host.is_empty()
+        && host_is_valid
+        && port.is_none_or(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Authentication mode for comms listeners.
@@ -7216,5 +7314,149 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             matches!(err, ConfigError::Validation(_)),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn rest_allowed_origins_default_to_none_and_round_trip() {
+        let default = Config::default();
+        assert!(default.rest.allowed_origins.is_empty());
+        let rendered = toml::to_string(&default).expect("the default config renders");
+        assert!(
+            !rendered.contains("allowed_origins"),
+            "a realm that lists no origin writes no key: {rendered}"
+        );
+
+        // A document written before the key existed.
+        let earlier = toml::from_str::<Config>("[rest]\nhost = \"127.0.0.1\"\nport = 8080\n")
+            .expect("a document without the key loads");
+        assert!(earlier.rest.allowed_origins.is_empty());
+
+        let listed = toml::from_str::<Config>(
+            "[rest]\nallowed_origins = [\"https://app.example.com\", \"http://localhost:5173\"]\n",
+        )
+        .expect("a document that lists origins loads");
+        assert_eq!(
+            listed.rest.allowed_origins,
+            ["https://app.example.com", "http://localhost:5173"]
+        );
+        let reloaded =
+            toml::from_str::<Config>(&toml::to_string(&listed).expect("the config renders"))
+                .expect("the rendered config loads");
+        assert_eq!(reloaded.rest, listed.rest);
+    }
+
+    #[test]
+    fn rest_allowed_origins_lists_origins_only() {
+        let with = |entry: &str| RestServerConfig {
+            allowed_origins: vec![entry.to_string()],
+            ..RestServerConfig::default()
+        };
+        for origin in [
+            "https://app.example.com",
+            "https://app.example.com:8443",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+            "http://[::1]",
+            "tauri://localhost",
+            "HTTPS://App.Example.com",
+        ] {
+            let checked = with(origin).validate();
+            assert!(checked.is_ok(), "`{origin}` is an origin: {checked:?}");
+        }
+        for entry in [
+            "*",
+            "null",
+            "",
+            "app.example.com",
+            "https://",
+            "https://app.example.com/",
+            "https://app.example.com/console",
+            "https://app.example.com?x=1",
+            "https://user@app.example.com",
+            "https://*.example.com",
+            "https://app.example.com:",
+            "https://app.example.com:https",
+            "https://a:b:80",
+            "http://[::1",
+            "http://[::1]x",
+            "https://app.example.com https://other.example.com",
+            "://app.example.com",
+        ] {
+            let error = with(entry)
+                .validate()
+                .expect_err("an entry that is not one origin is refused");
+            assert!(
+                error.to_string().contains("rest.allowed_origins"),
+                "`{entry}`: {error}"
+            );
+        }
+
+        // The whole config refuses it too, so a load and a write both do.
+        let mut config = Config::default();
+        config.rest.allowed_origins = vec!["*".to_string()];
+        let error = config
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect_err("a config that lists a wildcard origin is refused");
+        assert!(
+            error.to_string().contains("rest.allowed_origins"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rest_served_hosts_default_to_none_and_list_host_names_only() {
+        let default = Config::default();
+        assert!(default.rest.served_hosts.is_empty());
+        let rendered = toml::to_string(&default).expect("the default config renders");
+        assert!(
+            !rendered.contains("served_hosts"),
+            "a realm that lists no name writes no key: {rendered}"
+        );
+        let listed = toml::from_str::<Config>(
+            "[rest]\nserved_hosts = [\"api.example.com\", \"rkat-rest\"]\n",
+        )
+        .expect("a document that lists names loads");
+        assert_eq!(listed.rest.served_hosts, ["api.example.com", "rkat-rest"]);
+        let reloaded =
+            toml::from_str::<Config>(&toml::to_string(&listed).expect("the config renders"))
+                .expect("the rendered config loads");
+        assert_eq!(reloaded.rest, listed.rest);
+
+        let with = |entry: &str| RestServerConfig {
+            served_hosts: vec![entry.to_string()],
+            ..RestServerConfig::default()
+        };
+        for name in [
+            "api.example.com",
+            "API.Example.com",
+            "rkat-rest",
+            "rest_internal",
+            "10.0.0.7",
+            "::1",
+            "fd00::7",
+        ] {
+            let checked = with(name).validate();
+            assert!(checked.is_ok(), "`{name}` is a host name: {checked:?}");
+        }
+        for entry in [
+            "*",
+            "*.example.com",
+            "",
+            "https://api.example.com",
+            "api.example.com:443",
+            "api.example.com/console",
+            "api example.com",
+            "[::1]",
+            "user@api.example.com",
+        ] {
+            let error = with(entry)
+                .validate()
+                .expect_err("an entry that is not one host name is refused");
+            assert!(
+                error.to_string().contains("rest.served_hosts"),
+                "`{entry}`: {error}"
+            );
+        }
     }
 }

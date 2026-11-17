@@ -29999,6 +29999,210 @@ ORDER BY runtime_id";
             );
         }
 
+        /// A stored row of a peer input whose payload is JSON null: a peer
+        /// response sent without a result. The row is written with
+        /// `"payload":null`, and the typed decoder reads that back as no
+        /// payload.
+        fn peer_input_row_with_a_null_payload(input_id: InputId) -> StoredInputState {
+            use crate::input::{
+                Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
+                PeerInput, ResponseTerminalStatus,
+            };
+
+            let mut row = StoredInputState::new_accepted(input_id.clone());
+            row.state.persisted_input = Some(Input::Peer(PeerInput {
+                header: InputHeader {
+                    ingress_context: None,
+                    retained_resume: None,
+                    authority_association: None,
+                    id: input_id,
+                    timestamp: chrono::DateTime::from_timestamp(1_763_366_400, 0).unwrap(),
+                    source: InputOrigin::Peer {
+                        peer_id: "responder".into(),
+                        display_identity: None,
+                        runtime_id: None,
+                    },
+                    durability: InputDurability::Durable,
+                    visibility: InputVisibility::default(),
+                    idempotency_key: None,
+                    supersession_key: None,
+                    correlation_id: None,
+                    requester: None,
+                },
+                directed_interaction_id: None,
+                convention: Some(PeerConvention::ResponseTerminal {
+                    request_id: "request-1".to_string(),
+                    status: ResponseTerminalStatus::Completed,
+                }),
+                content: "a response without a result".into(),
+                payload: Some(serde_json::Value::Null),
+                handling_mode: None,
+                sender_taint: None,
+                objective_id: None,
+                system_prompts: Vec::new(),
+                injected_context: Vec::new(),
+                in_reply_to: None,
+            }));
+            row
+        }
+
+        fn stored_input_row_bytes(
+            store: &SqliteRuntimeStore,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Vec<u8> {
+            open_runtime_connection(store.path())
+                .unwrap()
+                .query_row(
+                    "SELECT state_json FROM runtime_input_states
+                     WHERE runtime_id = ?1 AND input_id = ?2",
+                    params![runtime_id_text(runtime_id), input_id.0.to_string()],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .unwrap()
+        }
+
+        /// The exact batch CAS takes the stored bytes as they are. A row whose
+        /// typed reading does not re-encode to its own bytes (a peer input
+        /// with a JSON-null payload) is still the row its writer holds: the
+        /// writer's image of it swaps, in the process that wrote it. Before,
+        /// a row with the baseline version stamp was compared only as the
+        /// typed decoder reads it, re-encoded, so that image was stale for
+        /// good and the input's completion could never be finalized.
+        #[tokio::test]
+        async fn input_state_batch_cas_sqlite_swaps_the_image_that_equals_the_stored_bytes() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-cas-null-payload");
+            let input_id = InputId::new();
+            let held = peer_input_row_with_a_null_payload(input_id.clone());
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(held.clone())])
+                .await
+                .unwrap();
+            let written = stored_input_row_bytes(&store, &runtime_id, &input_id);
+            assert_eq!(
+                written,
+                serde_json::to_vec(&held).unwrap(),
+                "the store holds the writer's image"
+            );
+            let reread = store
+                .load_input_state(&runtime_id, &input_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                serde_json::to_vec(&reread).unwrap(),
+                written,
+                "the row's typed reading does not re-encode to its own bytes"
+            );
+
+            let replacement = replacement_records(std::slice::from_ref(&held), 1);
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_id,
+                        std::slice::from_ref(&held),
+                        &replacement,
+                    )
+                    .await
+                    .unwrap(),
+                InputStateBatchCasOutcome::Swapped,
+                "the writer's image of the stored row must swap"
+            );
+            assert_eq!(
+                stored_input_row_bytes(&store, &runtime_id, &input_id),
+                serde_json::to_vec(replacement[0].as_stored()).unwrap()
+            );
+        }
+
+        /// The same through the fenced exclusive-writer CAS.
+        #[tokio::test]
+        async fn input_state_fenced_batch_cas_sqlite_swaps_the_image_that_equals_the_stored_bytes()
+        {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-fenced-cas-null-payload");
+            let input_id = InputId::new();
+            let held = peer_input_row_with_a_null_payload(input_id.clone());
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(held.clone())])
+                .await
+                .unwrap();
+            let replacement = replacement_records(std::slice::from_ref(&held), 1);
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically_with_fence(
+                        &runtime_id,
+                        std::slice::from_ref(&held),
+                        &replacement,
+                        Arc::new(AppliedWriteFence),
+                    )
+                    .await
+                    .unwrap(),
+                FencedInputStateBatchCasOutcome::Swapped,
+                "the writer's image of the stored row must swap"
+            );
+            assert_eq!(
+                stored_input_row_bytes(&store, &runtime_id, &input_id),
+                serde_json::to_vec(replacement[0].as_stored()).unwrap()
+            );
+        }
+
+        /// What already held before and still holds: after a restart the row
+        /// is held as the typed decoder read it (no payload), and that image
+        /// swaps against the stored bytes that still carry `"payload":null`;
+        /// a stored row whose content changed is stale for either image.
+        #[tokio::test]
+        async fn input_state_batch_cas_sqlite_keeps_the_typed_reading_and_refuses_changed_rows() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-cas-null-payload-reread");
+            let input_id = InputId::new();
+            let held = peer_input_row_with_a_null_payload(input_id.clone());
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(held.clone())])
+                .await
+                .unwrap();
+            let reread = store
+                .load_input_state(&runtime_id, &input_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let mut changed = held.clone();
+            changed.state.recovery_count = 7;
+            for image in [&held, &reread] {
+                assert_eq!(
+                    store
+                        .compare_and_swap_input_states_atomically(
+                            &runtime_id,
+                            std::slice::from_ref(&changed),
+                            &replacement_records(std::slice::from_ref(image), 1),
+                        )
+                        .await
+                        .unwrap(),
+                    InputStateBatchCasOutcome::Stale,
+                    "an image the store does not hold is stale"
+                );
+            }
+
+            let replacement = replacement_records(std::slice::from_ref(&reread), 1);
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_id,
+                        std::slice::from_ref(&reread),
+                        &replacement,
+                    )
+                    .await
+                    .unwrap(),
+                InputStateBatchCasOutcome::Swapped,
+                "the typed reading of the stored row swaps, as after a restart"
+            );
+            assert_eq!(
+                stored_input_row_bytes(&store, &runtime_id, &input_id),
+                serde_json::to_vec(replacement[0].as_stored()).unwrap()
+            );
+        }
+
         #[tokio::test]
         async fn commit_session_snapshot_does_not_write_boundary_receipt() {
             let (_dir, store) = temp_store();

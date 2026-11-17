@@ -78,15 +78,28 @@ pub enum RuntimeBootstrapError {
         "invalid explicit realm id: {0}; a realm id is the realm's directory name under the realms root: 1 to 64 ASCII letters, digits, '-' or '_', starting with a letter or digit (a Meta gateway's meerkat-level realm is `mobkit` under its state directory; `mob.<name>` from session metadata is a mob scope, not a store realm)"
     )]
     InvalidRealmId(String),
-    /// The same realm id is materialized under both candidate state roots.
-    /// Choosing either silently would deepen the split; resolution is an
-    /// operator decision.
+    /// The same realm id is materialized under more than one candidate
+    /// state root. Choosing one silently would deepen the split; resolution
+    /// is an operator decision, and the text prefers neither copy. `local`
+    /// is the nearest candidate root that holds the realm and `global` the
+    /// next one that holds it: another ancestor's root, or the user-global
+    /// root.
     #[error(
-        "realm '{realm_id}' exists under both candidate state roots \
-         ('{}' and '{}'); refusing to choose. Run `rkat storage doctor` to \
-         inspect both copies and `rkat storage migrate` to reconcile them, \
-         or pass --state-root to pick one explicitly.",
-        .local.display(), .global.display()
+        "realm '{realm_id}' exists under more than one candidate state root: {} (the nearer \
+         to the context root) and {} (the farther); refusing to choose. Look at both first \
+         with `rkat storage doctor --root {} --root {}`: a copy you did not create should \
+         not be adopted. To use one of them, add `--state-root {}` or `--state-root {}` to \
+         the command. To keep one and archive the other, run `rkat --realm {realm_id} \
+         storage migrate --root {} --root {} --apply --adopt-root <ROOT-TO-KEEP>` with the \
+         root to keep in place of <ROOT-TO-KEEP>.",
+        quoted(&realm_directory(.local, .realm_id)),
+        quoted(&realm_directory(.global, .realm_id)),
+        quoted(.local),
+        quoted(.global),
+        quoted(.local),
+        quoted(.global),
+        quoted(.local),
+        quoted(.global)
     )]
     RealmSplitBrain {
         realm_id: String,
@@ -207,6 +220,33 @@ pub struct DualRootResolution {
     /// so two surfaces with different defaults cannot each manufacture a
     /// manifest for the same realm.
     pub candidate_roots: Vec<PathBuf>,
+}
+
+/// A locator resolved over every project-local candidate root and the
+/// user-global root ([`RealmConfig::resolve_locator_among_roots`]).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RealmRootResolution {
+    pub locator: RealmLocator,
+    pub choice: RealmRootChoice,
+    /// The roots a first materialization reserves across (see
+    /// [`DualRootResolution::candidate_roots`]): the local root that holds
+    /// or would hold the realm, and the user-global root. The other
+    /// candidates were only read.
+    pub candidate_roots: Vec<PathBuf>,
+    /// Candidates after the nearest that this user may not read; each was
+    /// skipped.
+    pub unreadable_roots: Vec<PathBuf>,
+}
+
+/// The directory of `realm_id` under the realms root `root`.
+fn realm_directory(root: &Path, realm_id: &str) -> PathBuf {
+    root.join(sanitize_realm_id(realm_id))
+}
+
+/// `path` in single quotes, one word for a POSIX shell.
+fn quoted(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
 /// Minimal identity view of a persisted manifest. The manifest codec is
@@ -359,77 +399,156 @@ impl RealmConfig {
         global_candidate: &Path,
         default_root: RealmRootDefault,
     ) -> Result<DualRootResolution, RuntimeBootstrapError> {
+        let local_candidates: Vec<PathBuf> =
+            local_candidate.map(Path::to_path_buf).into_iter().collect();
+        let RealmRootResolution {
+            locator,
+            choice,
+            candidate_roots,
+            unreadable_roots: _,
+        } = self.resolve_locator_among_roots_with(
+            &local_candidates,
+            global_candidate,
+            default_root,
+        )?;
+        Ok(DualRootResolution {
+            locator,
+            choice,
+            candidate_roots,
+        })
+    }
+
+    /// Realm-id-first locator resolution over every project-local candidate
+    /// root (`StorageLayout::resolve` passes one per ancestor of the
+    /// invocation context that holds a `.rkat` entry, nearest first) and the
+    /// user-global root:
+    ///
+    /// 1. an explicit `state_root` (flag/config) wins: no probing;
+    /// 2. else the realm found under exactly one root is used where it lies,
+    ///    also where a nearer candidate exists;
+    /// 3. the realm found under more than one root is a typed
+    ///    [`RuntimeBootstrapError::RealmSplitBrain`] refusal naming the two
+    ///    nearest of them;
+    /// 4. found nowhere: the surface's documented default root applies (the
+    ///    nearest local candidate for [`RealmRootDefault::ProjectLocal`]).
+    ///
+    /// Every candidate is only read. A candidate after the first whose
+    /// probe answers "permission denied" from inside its `.rkat` is skipped
+    /// and listed in [`RealmRootResolution::unreadable_roots`]; the first
+    /// candidate and the user-global root refuse on it, as on every other
+    /// probe failure (see [`realm_exists_under`]).
+    pub fn resolve_locator_among_roots(
+        &self,
+        local_candidates: &[PathBuf],
+        default_root: RealmRootDefault,
+    ) -> Result<RealmRootResolution, RuntimeBootstrapError> {
+        self.resolve_locator_among_roots_with(local_candidates, &default_state_root(), default_root)
+    }
+
+    /// [`Self::resolve_locator_among_roots`] with an injected user-global
+    /// candidate (testability; production passes [`default_state_root`]).
+    pub fn resolve_locator_among_roots_with(
+        &self,
+        local_candidates: &[PathBuf],
+        global_candidate: &Path,
+        default_root: RealmRootDefault,
+    ) -> Result<RealmRootResolution, RuntimeBootstrapError> {
         let realm = self.resolve_realm_identity()?;
         if let Some(explicit) = &self.state_root {
-            return Ok(DualRootResolution {
+            return Ok(RealmRootResolution {
                 locator: RealmLocator {
                     state_root: explicit.clone(),
                     realm,
                 },
                 choice: RealmRootChoice::Explicit,
                 candidate_roots: vec![explicit.clone()],
+                unreadable_roots: Vec::new(),
             });
         }
-        let global_candidate = global_candidate.to_path_buf();
         // Symlink/bind-aliased candidates are one root, not two copies:
         // treating them as distinct would refuse a split brain that does
         // not exist (and that doctor, which canonicalizes, could never
-        // remediate). Collapse to the local spelling.
-        if let Some(local) = local_candidate
-            && physically_same_root(local, &global_candidate)
-        {
-            let exists = realm_exists_under(local, &realm)?;
-            let root = local.to_path_buf();
-            return Ok(DualRootResolution {
-                locator: RealmLocator {
-                    state_root: root.clone(),
-                    realm,
-                },
-                choice: if exists {
-                    RealmRootChoice::ExistingLocal
-                } else {
-                    RealmRootChoice::Default
-                },
-                candidate_roots: vec![root],
-            });
+        // remediate). Collapse to the nearest spelling.
+        let mut locals: Vec<&Path> = Vec::with_capacity(local_candidates.len());
+        for candidate in local_candidates {
+            if !locals
+                .iter()
+                .any(|kept| physically_same_root(kept, candidate))
+            {
+                locals.push(candidate);
+            }
         }
-        let in_local = match local_candidate {
-            Some(root) => realm_exists_under(root, &realm)?,
-            None => false,
-        };
-        let in_global = realm_exists_under(&global_candidate, &realm)?;
-        let candidate_roots: Vec<PathBuf> = local_candidate
-            .map(Path::to_path_buf)
-            .into_iter()
-            .chain(std::iter::once(global_candidate.clone()))
-            .collect();
-        let (state_root, choice) = match (in_local, in_global) {
-            (true, true) => {
-                // The (true, _) arm guarantees the candidate exists here.
-                let local = local_candidate.map(Path::to_path_buf).unwrap_or_default();
+        let global_alias = locals
+            .iter()
+            .copied()
+            .find(|local| physically_same_root(local, global_candidate));
+        let global_root = global_alias.unwrap_or(global_candidate).to_path_buf();
+
+        let mut local_holders: Vec<&Path> = Vec::new();
+        let mut unreadable_roots = Vec::new();
+        for (index, root) in locals.iter().copied().enumerate() {
+            match realm_exists_under(root, &realm) {
+                Ok(true) => local_holders.push(root),
+                Ok(false) => {}
+                // A farther root this user may not read cannot hold a realm
+                // this user could open: skipped, and reported.
+                Err(RuntimeBootstrapError::RootProbeFailed { source, .. })
+                    if index > 0 && source.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    tracing::warn!(
+                        root = %root.display(),
+                        realm = %realm,
+                        "a farther ancestor's realm state root cannot be read and is skipped"
+                    );
+                    unreadable_roots.push(root.to_path_buf());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let in_global = global_alias.is_none() && realm_exists_under(global_candidate, &realm)?;
+
+        let mut holders = local_holders
+            .iter()
+            .map(|root| root.to_path_buf())
+            .chain(in_global.then(|| global_root.clone()));
+        let (state_root, choice) = match (holders.next(), holders.next()) {
+            (Some(first), Some(second)) => {
                 return Err(RuntimeBootstrapError::RealmSplitBrain {
                     realm_id: realm.as_str().to_string(),
-                    local,
-                    global: global_candidate,
+                    local: first,
+                    global: second,
                 });
             }
-            (true, false) => (
-                local_candidate.map(Path::to_path_buf).unwrap_or_default(),
-                RealmRootChoice::ExistingLocal,
-            ),
-            (false, true) => (global_candidate, RealmRootChoice::ExistingGlobal),
-            (false, false) => {
-                let root = match (default_root, local_candidate) {
-                    (RealmRootDefault::ProjectLocal, Some(local)) => local.to_path_buf(),
-                    _ => global_candidate,
+            (Some(holder), None) => {
+                let choice = if local_holders.is_empty() {
+                    RealmRootChoice::ExistingGlobal
+                } else {
+                    RealmRootChoice::ExistingLocal
+                };
+                (holder, choice)
+            }
+            (None, _) => {
+                let root = match (default_root, locals.first()) {
+                    (RealmRootDefault::ProjectLocal, Some(nearest)) => nearest.to_path_buf(),
+                    _ => global_root.clone(),
                 };
                 (root, RealmRootChoice::Default)
             }
         };
-        Ok(DualRootResolution {
+        // The reservation roots: the local root that holds or would hold the
+        // realm, and the user-global root. No other ancestor's root is
+        // written at a first start.
+        let local_slot = local_holders.first().or(locals.first()).copied();
+        let mut candidate_roots: Vec<PathBuf> =
+            local_slot.map(Path::to_path_buf).into_iter().collect();
+        if !candidate_roots.contains(&global_root) {
+            candidate_roots.push(global_root);
+        }
+        Ok(RealmRootResolution {
             locator: RealmLocator { state_root, realm },
             choice,
             candidate_roots,
+            unreadable_roots,
         })
     }
 }

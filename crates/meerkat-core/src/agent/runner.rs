@@ -462,8 +462,9 @@ where
     S: AgentSessionStore + ?Sized,
 {
     /// Whether a call of `name` passes the visibility precheck to the dispatch
-    /// gate: the name is grant-gated and only its closed grant gate hides it.
-    /// The dispatch gate then adjudicates the grants, so every refusal of a
+    /// gate: the name is grant-gated, or stands on the grant of a gated tool
+    /// it is never wider than, and only a closed grant gate hides it. The
+    /// dispatch gate then adjudicates the grants, so every refusal of a
     /// gated name has one site.
     pub(crate) fn call_reaches_tool_grant_gate(&self, name: &str) -> bool {
         let Some(gate) = self.tool_grant_gate.as_ref() else {
@@ -471,13 +472,17 @@ where
         };
         // The call's provenance, from the dispatcher that serves it: a tool of
         // a gated MCP server is gated by it from the moment it appears.
-        let provenance = self
-            .tools
-            .tools()
-            .iter()
-            .find(|tool| tool.name == name)
-            .and_then(|tool| tool.provenance.clone());
-        gate.is_gated(name, provenance.as_ref())
+        let tools = self.tools.tools();
+        let gated = std::iter::once(name)
+            .chain(crate::tool_scope::tool_never_wider_than(name))
+            .any(|candidate| {
+                let provenance = tools
+                    .iter()
+                    .find(|tool| tool.name == candidate)
+                    .and_then(|tool| tool.provenance.clone());
+                gate.is_gated(candidate, provenance.as_ref())
+            });
+        gated
             && self
                 .tool_scope
                 .hidden_only_by_closed_grant_gate(name)

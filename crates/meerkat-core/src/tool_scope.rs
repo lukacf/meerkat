@@ -1593,6 +1593,24 @@ impl ToolScopeTurnOverlay {
     }
 }
 
+/// Tools that are never offered, and so never callable, more widely than
+/// another tool. Where a rule that works by name leaves the second out (a
+/// deny or an allow list, a session filter, a turn's block list, a grant gate
+/// that is closed for it), the first is out with it, whatever the rule says
+/// of the first's own name. `monitor_start` runs a script as `shell` runs a
+/// command, so a rule that closes `shell` must not leave it open.
+const NEVER_WIDER_THAN: &[(&str, &str)] = &[("monitor_start", "shell")];
+
+/// The tool that bounds `name`: `name` is never offered or callable where a
+/// rule by name leaves that tool out.
+#[must_use]
+pub fn tool_never_wider_than(name: &str) -> Option<&'static str> {
+    NEVER_WIDER_THAN
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, bound)| *bound)
+}
+
 /// Composed filter representation using most-restrictive semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedToolFilter {
@@ -1601,7 +1619,17 @@ pub struct ComposedToolFilter {
 }
 
 impl ComposedToolFilter {
+    /// Whether the composed filters let the model see and call `name`: its
+    /// own name is admitted, and so is the tool it is never wider than
+    /// ([`tool_never_wider_than`]). Every layer that works by name is
+    /// composed here, so this one rule holds for all of them.
     pub fn allows(&self, name: &str) -> bool {
+        self.admits_name(name)
+            && tool_never_wider_than(name).is_none_or(|bound| self.admits_name(bound))
+    }
+
+    /// Whether the composed filters admit `name` taken alone.
+    fn admits_name(&self, name: &str) -> bool {
         let allowed = self.allow.as_ref().is_none_or(|set| set.contains(name));
         allowed && !self.deny.contains(name)
     }
@@ -2597,7 +2625,10 @@ impl ToolScope {
     /// tool would be visible, or loadable from the deferred catalog. Such a
     /// call goes on to the dispatch gate, which adjudicates the grants and
     /// refuses it there, so a closed gated tool behind the deferred catalog
-    /// is refused as one the model sees would be.
+    /// is refused as one the model sees would be. A name that is never wider
+    /// than another ([`tool_never_wider_than`]) is closed by that tool's
+    /// gate too: `monitor_start` under a closed gate on `shell` goes on to
+    /// the dispatch gate likewise.
     pub fn hidden_only_by_closed_grant_gate(
         &self,
         name: &str,
@@ -2607,17 +2638,27 @@ impl ToolScope {
             .read()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let mut visibility_state = self.visibility_owner.visibility_state()?;
-        let provenance = state
-            .base_tools
-            .iter()
-            .find(|tool| tool.name == name)
-            .and_then(|tool| tool.provenance.clone());
-        if !visibility_state.tool_is_closed_by_grant_gate(name, provenance.as_ref()) {
+        // The gates that close the name: its own, and the gate of the tool
+        // it is never wider than, whose grant it stands on.
+        let closed: Vec<&str> = std::iter::once(name)
+            .chain(tool_never_wider_than(name))
+            .filter(|candidate| {
+                let provenance = state
+                    .base_tools
+                    .iter()
+                    .find(|tool| tool.name == *candidate)
+                    .and_then(|tool| tool.provenance.clone());
+                visibility_state.tool_is_closed_by_grant_gate(candidate, provenance.as_ref())
+            })
+            .collect();
+        if closed.is_empty() {
             return Ok(false);
         }
-        visibility_state
-            .tool_grant_open_names
-            .insert(ToolName::from(name));
+        for candidate in closed {
+            visibility_state
+                .tool_grant_open_names
+                .insert(ToolName::from(candidate));
+        }
         let composed = Self::compose_state_filters(
             &state,
             &visibility_state,
@@ -4419,6 +4460,156 @@ mod tests {
         let composed_precedence = ToolScope::compose(&[allow_a_b, deny_b]);
         assert!(composed_precedence.allows("a"));
         assert!(!composed_precedence.allows("b"));
+    }
+
+    /// `monitor_start` is never wider than `shell`: a filter that leaves
+    /// `shell` out by name leaves `monitor_start` out with it, whatever it
+    /// says of the monitor's own name. Nothing else changes: a filter that
+    /// names only the monitor leaves `shell` in, and other names are judged
+    /// alone.
+    #[test]
+    fn a_tool_is_never_allowed_where_the_tool_that_bounds_it_is_not() {
+        assert_eq!(super::tool_never_wider_than("monitor_start"), Some("shell"));
+        assert_eq!(super::tool_never_wider_than("shell"), None);
+        assert_eq!(super::tool_never_wider_than("shell_jobs"), None);
+
+        let open = ToolScope::compose(&[ToolFilter::All]);
+        assert!(open.allows("shell") && open.allows("monitor_start"));
+
+        let shell_denied = ToolScope::compose(&[ToolFilter::Deny(set(&["shell"]))]);
+        assert!(!shell_denied.allows("shell"));
+        assert!(!shell_denied.allows("monitor_start"));
+        assert!(shell_denied.allows("shell_jobs"));
+
+        let monitor_allowed_alone =
+            ToolScope::compose(&[ToolFilter::Allow(set(&["monitor_start", "shell_jobs"]))]);
+        assert!(!monitor_allowed_alone.allows("monitor_start"));
+        assert!(monitor_allowed_alone.allows("shell_jobs"));
+
+        let both_allowed =
+            ToolScope::compose(&[ToolFilter::Allow(set(&["monitor_start", "shell"]))]);
+        assert!(both_allowed.allows("shell") && both_allowed.allows("monitor_start"));
+
+        let monitor_denied = ToolScope::compose(&[ToolFilter::Deny(set(&["monitor_start"]))]);
+        assert!(monitor_denied.allows("shell"));
+        assert!(!monitor_denied.allows("monitor_start"));
+
+        // A later layer that closes `shell` closes the monitor an earlier
+        // layer allowed by name.
+        let layered = ToolScope::compose(&[
+            ToolFilter::Allow(set(&["monitor_start", "shell"])),
+            ToolFilter::Deny(set(&["shell"])),
+        ]);
+        assert!(!layered.allows("monitor_start"));
+    }
+
+    /// The rule holds through the scope for each layer it composes, not only
+    /// for the composed filter taken alone: the inherited base filter, the
+    /// session's own filter once a boundary applied it, and a turn's block
+    /// and allow lists each hide `monitor_start` when they hide `shell`.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn every_layer_that_hides_shell_hides_monitor_start() {
+        let family = ["shell", "shell_jobs", "monitor_start"];
+        let visible = |scope: &ToolScope| {
+            scope
+                .visible_tool_names()
+                .unwrap()
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let without_shell = vec!["shell_jobs".to_string()];
+
+        let open = scope_with_generated_visibility(tools(&family));
+        assert_eq!(visible(&open), ["monitor_start", "shell", "shell_jobs"]);
+
+        let inherited = scope_with_generated_visibility(tools(&family));
+        inherited
+            .set_base_filter(ToolFilter::Deny(set(&["shell"])))
+            .unwrap();
+        assert_eq!(visible(&inherited), without_shell);
+
+        let session_filter = scope_with_generated_visibility(tools(&family));
+        session_filter
+            .handle()
+            .stage_external_filter(ToolFilter::Deny(set(&["shell"])))
+            .unwrap();
+        session_filter.apply_staged(tools(&family)).unwrap();
+        assert_eq!(visible(&session_filter), without_shell);
+
+        let blocked = scope_with_generated_visibility(tools(&family));
+        blocked
+            .handle()
+            .set_turn_overlay(None, raw_set(&["shell"]))
+            .unwrap();
+        assert_eq!(visible(&blocked), without_shell);
+
+        let allowed_without_shell = scope_with_generated_visibility(tools(&family));
+        allowed_without_shell
+            .handle()
+            .set_turn_overlay(
+                Some(raw_set(&["monitor_start", "shell_jobs"])),
+                raw_set(&[]),
+            )
+            .unwrap();
+        assert_eq!(visible(&allowed_without_shell), without_shell);
+    }
+
+    /// A `monitor_start` that only the closed grant gate of `shell` hides
+    /// meets the dispatch gate, like a closed gated name: its call is
+    /// refused there, with the gate's refusal. Where something else hides
+    /// it too, or the grant is open, it does not.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn a_monitor_start_hidden_only_by_the_gate_of_shell_meets_the_dispatch_gate() {
+        use crate::tool_grant::InstalledToolGrantGate;
+        let family = ["shell", "shell_jobs", "monitor_start"];
+        let gate_on_shell =
+            || InstalledToolGrantGate::names(BTreeSet::from([ToolName::from("shell")]));
+
+        let closed = scope_with_generated_visibility(tools(&family));
+        closed.replace_tool_grant_gate(gate_on_shell()).unwrap();
+        assert_eq!(
+            closed.visible_tool_names().unwrap(),
+            BTreeSet::from(["shell_jobs".into()]),
+            "the closed gate of shell hides the monitor too"
+        );
+        assert!(closed.hidden_only_by_closed_grant_gate("shell").unwrap());
+        assert!(
+            closed
+                .hidden_only_by_closed_grant_gate("monitor_start")
+                .unwrap(),
+            "only the gate of shell hides the monitor"
+        );
+        assert!(
+            !closed
+                .hidden_only_by_closed_grant_gate("shell_jobs")
+                .unwrap()
+        );
+
+        let open = scope_with_generated_visibility(tools(&family));
+        open.replace_tool_grant_gate(gate_on_shell()).unwrap();
+        open.apply_tool_grant_open_set(BTreeSet::from(["shell".into()]))
+            .unwrap();
+        assert!(
+            !open
+                .hidden_only_by_closed_grant_gate("monitor_start")
+                .unwrap(),
+            "an open grant of shell hides nothing"
+        );
+
+        let denied = scope_with_generated_visibility(tools(&family));
+        denied.replace_tool_grant_gate(gate_on_shell()).unwrap();
+        denied
+            .set_base_filter(ToolFilter::Deny(set(&["monitor_start"])))
+            .unwrap();
+        assert!(
+            !denied
+                .hidden_only_by_closed_grant_gate("monitor_start")
+                .unwrap(),
+            "a deny hides the monitor whatever the gate says"
+        );
     }
 
     #[cfg(feature = "workspace-tests")]

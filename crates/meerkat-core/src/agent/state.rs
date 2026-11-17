@@ -25591,6 +25591,251 @@ mod tests {
         assert!(!follow_up_results[1].is_error);
     }
 
+    /// Under a gate on the name `shell`, a `monitor_start` call stands on
+    /// the grant of `shell`. A grant that is live at the model request and
+    /// ends before the calls are dispatched refuses the monitor as it
+    /// refuses `shell`: neither body runs, both are adjudicated as a use of
+    /// `shell`, and the ungated sibling still runs. With no grant at all the
+    /// monitor's call reaches the same gate and is refused there, with the
+    /// gate's refusal.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_monitor_start_call_under_a_gate_on_shell_is_adjudicated_as_a_use_of_shell() {
+        /// A session whose grant of every gated name is live at each model
+        /// request, when `live_at_the_request`, and has ended by the time a
+        /// call is adjudicated. It records every call it adjudicates.
+        struct EndedBeforeDispatch {
+            live_at_the_request: bool,
+            adjudicated: Mutex<Vec<(String, String)>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for EndedBeforeDispatch {
+            async fn open_names(
+                &self,
+                view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(if self.live_at_the_request {
+                    view.gated().iter().cloned().collect()
+                } else {
+                    crate::types::ToolNameSet::new()
+                })
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.adjudicated
+                    .lock()
+                    .unwrap()
+                    .push((call.call_id.to_string(), call.name.to_string()));
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched.lock().unwrap().push(call.name.to_string());
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls `shell`, `monitor_start` and an ungated sibling in one
+        /// response, then ends.
+        struct ShellFamilyCallClient {
+            call_count: Mutex<u32>,
+            observed_messages: Mutex<Vec<Vec<Message>>>,
+            observed_tools: Mutex<Vec<Vec<String>>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for ShellFamilyCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.observed_messages
+                    .lock()
+                    .unwrap()
+                    .push(messages.to_vec());
+                self.observed_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        ["call-shell", "call-monitor", "call-open"]
+                            .into_iter()
+                            .zip(["shell", "monitor_start", "open_tool"])
+                            .map(|(id, name)| AssistantBlock::ToolUse {
+                                id: id.to_string(),
+                                name: name.into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .expect("static raw value should parse"),
+                                meta: None,
+                            })
+                            .collect(),
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        for live_at_the_request in [true, false] {
+            let inner = Arc::new(RecordingDispatcher {
+                tools: ["shell", "monitor_start", "open_tool"]
+                    .into_iter()
+                    .map(|name| {
+                        Arc::new(ToolDef::new(
+                            name,
+                            format!("{name} fixture"),
+                            serde_json::json!({ "type": "object" }),
+                        ))
+                    })
+                    .collect(),
+                dispatched: Mutex::new(Vec::new()),
+            });
+            let grants = Arc::new(EndedBeforeDispatch {
+                live_at_the_request,
+                adjudicated: Mutex::new(Vec::new()),
+            });
+            let gate = crate::tool_grant::gate_over_names(
+                Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+                &["shell"],
+            );
+            let dispatcher = Arc::new(
+                crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::clone(&inner),
+                    crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+                )
+                .with_tool_grant_gate(gate.clone()),
+            );
+            let client = Arc::new(ShellFamilyCallClient {
+                call_count: Mutex::new(0),
+                observed_messages: Mutex::new(Vec::new()),
+                observed_tools: Mutex::new(Vec::new()),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(explicit_test_visibility_owner())
+                .with_tool_grant_gate(gate)
+                .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+                .await;
+
+            let (tx, mut rx) = mpsc::channel(256);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                agent.run_with_events("watch it".to_string().into(), tx),
+            )
+            .await
+            .expect("run must complete promptly after the refusals")
+            .expect("a refused gated call is operation-local feedback");
+            while rx.try_recv().is_ok() {}
+            assert_eq!(result.text, "done");
+
+            let first_request = client.observed_tools.lock().unwrap()[0].clone();
+            assert_eq!(
+                first_request.iter().any(|name| name == "monitor_start"),
+                live_at_the_request,
+                "the monitor is offered exactly while the grant of shell is open: {first_request:?}"
+            );
+            assert_eq!(
+                *inner.dispatched.lock().unwrap(),
+                ["open_tool"],
+                "neither shell nor the monitor runs once the grant of shell ended \
+                 (live at the request: {live_at_the_request})"
+            );
+            assert_eq!(
+                *grants.adjudicated.lock().unwrap(),
+                [
+                    ("call-shell".to_string(), "shell".to_string()),
+                    ("call-monitor".to_string(), "shell".to_string()),
+                ],
+                "both calls are adjudicated as a use of the grant of shell \
+                 (live at the request: {live_at_the_request})"
+            );
+
+            let observations = client.observed_messages.lock().unwrap();
+            let follow_up_results = observations[1]
+                .iter()
+                .filter_map(|message| match message {
+                    Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                follow_up_results
+                    .iter()
+                    .map(|result| result.tool_use_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["call-shell", "call-monitor", "call-open"]
+            );
+            for refused in &follow_up_results[..2] {
+                assert!(refused.is_error);
+                let payload: serde_json::Value =
+                    serde_json::from_str(&crate::types::text_content(&refused.content))
+                        .expect("a grant refusal uses the canonical feedback envelope");
+                assert_eq!(payload["error"], "policy_denied");
+                assert_eq!(payload["data"]["code"], "tool_grant_required");
+            }
+            assert!(!follow_up_results[2].is_error);
+        }
+    }
+
     /// A generated visibility owner that refuses every extension of the grant
     /// gate and applies everything else as its inner owner does.
     #[cfg(feature = "workspace-tests")]

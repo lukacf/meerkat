@@ -346,6 +346,11 @@ impl CompositeDispatcher {
                 if let Some(runtime) = durable_shell_runtime.clone() {
                     manager = manager.with_durable_job_runtime(runtime);
                 }
+                // A session whose policy does not enable `monitor_start`
+                // cannot start a monitor, so its manager runs no recorded one
+                // again either.
+                manager = manager
+                    .with_monitor_tool_enabled(config.resolve().is_enabled("monitor_start", false));
                 let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
                     MonitorStartTool, ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool,

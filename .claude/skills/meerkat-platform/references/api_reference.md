@@ -533,7 +533,7 @@ durable realm):
 - `jobs/get`, `jobs/list`, `jobs/progress`, `jobs/result`, `jobs/artifacts`, `jobs/health` — read projections
 - `jobs/cancel`, `jobs/retry` — machine-authorized mutations
 - `jobs/subscribe`, `jobs/unsubscribe` — durable delivery subscriptions
-- `monitors/start` — high-trust durable script monitor with explicit restart/output contracts
+- `monitors/start` - durable script monitor with explicit restart/output contracts
 - `meta/jobs/{heartbeat,progress,checkpoint,complete,fail,cancel_ack}` — host-worker lease surface (exact attempt/fence authority)
 
 Wire types live in `meerkat_contracts::wire::jobs`; the generated method

@@ -29,7 +29,7 @@ Rust-embedder-only APIs. MCP servers and the deferred tool catalog are in
 | Family | Tools | Enabled by |
 |---|---|---|
 | Builtins | `task_list`, `task_create`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `blob_save_file`, `blob_load_file`, `blob_inspect` (blob tools need a blob store) | CLI `--tools safe` and up; `enable_builtins`; `tools.builtins_enabled` |
-| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` (`monitor_start` only by explicit host policy) | CLI `--tools workspace` or `full`; `enable_shell`; `tools.shell_enabled` |
+| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`, `monitor_start` (where the session has a durable job store; a mob profile keeps it off with `deny = ["monitor_start"]`) | CLI `--tools workspace` or `full`; `enable_shell`; `tools.shell_enabled` |
 | Image generation | `generate_image` | Visible when the runtime wires it (default CLI, RPC, REST) |
 | Web search | Provider-native search, or the `web_search` fallback | Native is on where the model supports it, unless `--no-web-search` or a restricting tool policy turns it off; fallback only with `enable_web_search: true` |
 | Memory | `memory_search` | `--tools full`; `enable_memory` |

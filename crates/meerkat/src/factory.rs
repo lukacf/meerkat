@@ -2371,6 +2371,150 @@ impl RecordedToolOverrides {
     }
 }
 
+/// The session's say on running one of its recorded monitors again after a
+/// host restart, as its build resolves it: the execution policy (a denied
+/// name, a read-only profile, an allow list that leaves the name out), the
+/// session's durable visibility layers (its own tool filter, an inherited
+/// filter) and the tool grant gate. The gate and the visibility owner exist
+/// only after the tool dispatcher, so the build binds them then; until then
+/// nothing is admitted.
+#[cfg(not(target_arch = "wasm32"))]
+struct BuildMonitorRerunAdmission {
+    policy: Option<meerkat_core::ToolExecutionPolicy>,
+    bound: std::sync::OnceLock<MonitorRerunBindings>,
+}
+
+/// What the build binds to the re-run admission once it exists.
+#[cfg(not(target_arch = "wasm32"))]
+struct MonitorRerunBindings {
+    /// The build's grant gate (`None` for a build without one).
+    gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
+    /// The owner of the session's visibility state (`None` for a build
+    /// that is not session-owned and so has no durable filters).
+    visibility: Option<meerkat_core::GeneratedToolVisibilityOwner>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BuildMonitorRerunAdmission {
+    const MONITOR_START: &'static str = "monitor_start";
+
+    fn new(policy: Option<meerkat_core::ToolExecutionPolicy>) -> Self {
+        Self {
+            policy,
+            bound: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Bind the build's grant gate and the owner of the session's
+    /// visibility state.
+    fn bind(&self, bindings: MonitorRerunBindings) {
+        if self.bound.set(bindings).is_err() {
+            tracing::warn!("the monitor re-run admission is already bound");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl meerkat_tools::builtin::shell::MonitorRerunAdmission for BuildMonitorRerunAdmission {
+    async fn answer(&self) -> meerkat_tools::builtin::shell::MonitorRerunAnswer {
+        use meerkat_tools::builtin::shell::MonitorRerunAnswer;
+        if self.policy.as_ref().is_some_and(|policy| {
+            !policy.permits_call(
+                Self::MONITOR_START,
+                meerkat_core::ToolMutationClass::Mutating,
+            )
+        }) {
+            return MonitorRerunAnswer::Refused;
+        }
+        // Nothing bound yet: the build has not said what the session may
+        // do, so nothing is decided.
+        let Some(bound) = self.bound.get() else {
+            return MonitorRerunAnswer::NotKnown;
+        };
+        // The session's durable visibility layers. Where they hide the
+        // monitor, or `shell`, which bounds it, the session cannot call
+        // it, so its recorded monitor is not run again. The turn's own
+        // overlay is not a durable layer and is not asked. The filters are
+        // composed as they are stored; the tool scope drops an entry whose
+        // witness no longer applies, which no built-in shell name has.
+        if let Some(owner) = &bound.visibility {
+            let state = match owner.visibility_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "the session's tool filters could not be read for a monitor's re-run"
+                    );
+                    return MonitorRerunAnswer::NotKnown;
+                }
+            };
+            let layers = meerkat_core::ToolScope::compose(&[
+                state.capability_base_filter,
+                state.inherited_base_filter,
+                state.policy_base_filter,
+                state.active_filter,
+            ]);
+            if !layers.allows(Self::MONITOR_START) {
+                return MonitorRerunAnswer::Refused;
+            }
+        }
+        let Some(gate) = &bound.gate else {
+            return MonitorRerunAnswer::Admitted;
+        };
+        // The monitor is never wider than `shell`: a grant gate that is
+        // closed for either name closes the re-run. (The execution policy
+        // above already refuses the monitor where its name lists leave
+        // `shell` out.)
+        for name in std::iter::once(Self::MONITOR_START).chain(
+            meerkat_core::tool_scope::tool_never_wider_than(Self::MONITOR_START),
+        ) {
+            match Self::gate_is_open_for(gate, name).await {
+                MonitorRerunAnswer::Admitted => {}
+                closed_or_not_known => return closed_or_not_known,
+            }
+        }
+        MonitorRerunAnswer::Admitted
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BuildMonitorRerunAdmission {
+    /// Whether `gate` leaves the shell tool `name` open at this moment: not
+    /// gated, or gated and opened by a live grant. Grants that cannot be
+    /// read are not an answer.
+    async fn gate_is_open_for(
+        gate: &meerkat_core::tool_grant::ToolGrantGate,
+        name: &str,
+    ) -> meerkat_tools::builtin::shell::MonitorRerunAnswer {
+        use meerkat_tools::builtin::shell::MonitorRerunAnswer;
+        let provenance = meerkat_core::ToolProvenance {
+            kind: meerkat_core::ToolSourceKind::Shell,
+            source_id: name.into(),
+            artifact: None,
+        };
+        if !gate.is_gated(name, Some(&provenance)) {
+            return MonitorRerunAnswer::Admitted;
+        }
+        let view = meerkat_core::tool_grant::GatedToolView::new(
+            BTreeSet::from([meerkat_core::ToolName::new(name)]),
+            BTreeMap::new(),
+        );
+        match gate.open_names(&view, None).await {
+            Ok(open) if open.contains(name) => MonitorRerunAnswer::Admitted,
+            Ok(_) => MonitorRerunAnswer::Refused,
+            Err(refusal) => {
+                tracing::warn!(
+                    tool = name,
+                    code = refusal.code(),
+                    "the session's tool grants could not be read for a monitor's re-run"
+                );
+                MonitorRerunAnswer::NotKnown
+            }
+        }
+    }
+}
+
 /// A build's grant gate, rules 1 and 2: every gated family is a built-in
 /// tool family, and a gated family whose category override mounts it is
 /// mounted as if enabled; the build may not disable it. A family that shares
@@ -9997,6 +10141,12 @@ impl AgentFactory {
             }
             None => None,
         };
+        // A recorded resumable monitor is run again after a host restart
+        // only while this build would admit a `monitor_start` call.
+        #[cfg(not(target_arch = "wasm32"))]
+        let monitor_rerun_admission = Arc::new(BuildMonitorRerunAdmission::new(
+            tool_execution_policy.clone(),
+        ));
         #[cfg(not(target_arch = "wasm32"))]
         let durable_shell_runtime = if effective_shell {
             match (
@@ -10016,7 +10166,9 @@ impl AgentFactory {
                             blob_store,
                             projector,
                         )
-                        .map_err(|error| BuildAgentError::Config(error.to_string()))?,
+                        .map_err(|error| BuildAgentError::Config(error.to_string()))?
+                        .with_monitor_rerun_admission(Arc::clone(&monitor_rerun_admission)
+                            as Arc<dyn meerkat_tools::builtin::shell::MonitorRerunAdmission>),
                     )
                 }
                 _ => None,
@@ -11930,6 +12082,8 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.tool_visibility_owner()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let monitor_rerun_visibility = grant_gate_owner.cloned();
         let ResolvedGrantGate {
             gate: tool_grant_gate,
             recorded: recorded_grant_gate,
@@ -11948,6 +12102,13 @@ impl AgentFactory {
         // build installed.
         let mut factory_metadata = factory_metadata;
         factory_metadata.tooling.grant_gated = recorded_grant_gate;
+        // A grant gate that closes `monitor_start`, and a session filter
+        // that hides it, close the re-run of a recorded monitor too.
+        #[cfg(not(target_arch = "wasm32"))]
+        monitor_rerun_admission.bind(MonitorRerunBindings {
+            gate: tool_grant_gate.clone(),
+            visibility: monitor_rerun_visibility,
+        });
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
             let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(
@@ -28274,7 +28435,7 @@ auth_profile = "openai_key"
 
         assert_eq!(
             visible_names, expected_names,
-            "shell-only builtin composition must expose exactly four shell tools while preserving the external dispatcher unchanged"
+            "shell-only builtin composition without a durable job runtime must expose exactly the four standard shell tools, no monitor_start, while preserving the external dispatcher unchanged"
         );
     }
 
@@ -28506,17 +28667,23 @@ impl AgentFactory {
         // own tool(s). This keeps profile category intent one-owner: enabling
         // `image_generation` must not also expose task/patch/skill utilities.
         let builtin_config = if effective_shell {
+            let mut policy = ToolPolicyLayer::new()
+                .enable_tool("shell")
+                .enable_tool("shell_job_status")
+                .enable_tool("shell_jobs")
+                .enable_tool("shell_job_cancel");
+            // Shell turns on its whole family. A monitor is a durable job,
+            // so a session without a durable job runtime is not offered
+            // `monitor_start`, as its `shell` offers no `background`.
+            if durable_shell_runtime.is_some() {
+                policy = policy.enable_tool("monitor_start");
+            }
             BuiltinToolConfig {
-                policy: ToolPolicyLayer::new()
-                    .enable_tool("shell")
-                    .enable_tool("shell_job_status")
-                    .enable_tool("shell_jobs")
-                    .enable_tool("shell_job_cancel")
-                    .with_mode(if effective_builtins {
-                        ToolMode::AllowAll
-                    } else {
-                        ToolMode::AllowList
-                    }),
+                policy: policy.with_mode(if effective_builtins {
+                    ToolMode::AllowAll
+                } else {
+                    ToolMode::AllowList
+                }),
                 ..Default::default()
             }
         } else if effective_builtins {

@@ -337,6 +337,28 @@ such as a typo, fails the member's build with `DeclaredToolUnknown`, unless the
 profile declares an MCP server that maps no `tool_names` or opts into a bundle
 the build withholds; then the name is checked only at call time.
 
+`shell = true` turns on the whole shell family, the script monitor
+`monitor_start` included. A profile that wants `shell` and its three job tools
+without the monitor says so by name:
+
+```toml
+[profiles.worker.tools]
+comms = true
+shell = true
+deny = ["monitor_start"]
+```
+
+The deny also holds for a monitor the member started earlier: after a host
+restart, at the member's next shell job call, it is not run again and its
+job ends as `needs_attention` (`monitor_start_not_permitted`). An operator's
+own monitor for the member is not the member's to end and is left as it is,
+until an operator calls `monitors/start` or `jobs/cancel` for the member's
+session.
+The host's
+own monitor route is not bound by the deny; the `monitor_start` entry of the
+built-in tools reference says what it does. A deny that names `shell` closes
+`monitor_start` with it.
+
 ### Granting tools to a member at run time
 
 `tools.grant_gated` mounts built-in tool families, tool names and the tools of

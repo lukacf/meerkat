@@ -526,8 +526,9 @@ them.
   credential no longer takes the credential it leaves away from the host's
   other sessions (by a live model switch since 0.6.0 at the
   latest: the lines are in the source at 0.6.0 and not at 0.5.2, and were
-  not traced end to end below 0.7.0; by a fallback from a release between
-  0.8.30 and 0.8.51): sessions on that sign-in go on, new ones
+  not traced end to end below 0.7.0; by a fallback since 0.7.2: the call is
+  in the source at every release tag from 0.7.2 and not at 0.7.1): sessions
+  on that sign-in go on, new ones
   can be started, and a session that runs on, or falls back to, the
   credential another session left is no longer held. A sign-out, or the
   removal of a credential, still withdraws it for every session.
@@ -596,6 +597,8 @@ them.
   naming that key. The record census still counts a healthy adopted member
   as a stale seat until its next seat row.
 
+- A structured output that is JSON null no longer leaves a record that cannot be read. When a run's output schema admits null at its root and the model answered null, the run completed and answered, and the stored record of its input could not be read again (one record per such run). With the SQLite runtime store that alone did no harm in runs on 0.9.16: the session and its history read whole, and by the source a start skips the record with the ERROR line `durable input row no longer decodes; recovering the runtime's remaining inputs without it` (not logged in our runs through `rkat-rpc`). But where the host process ended between such a run's commit and the finalization of its completion (typically 20 to 40 ms; 1 to 260 ms seen; over before the client has the answer), the session could not be registered at the next start (`failed to recover runtime driver during registration` with `pending terminal owner row read failed: Store read failed: terminal completion candidate digest mismatch`) and a new prompt was refused, through `rkat-rpc` with that same text; and on a runtime store of the host's own implementation, read from the source, any such finished run was enough: the session's state failed to load at its next use. Now the read form of three fields keeps an explicit null as a present value: the run result's structured output and the structured output of the run-completed and interaction-complete events. Nothing is written differently. Records already stored read again as they are, with no repair and no rewrite, and a session whose host ended at that moment is recovered at the next start and its completion is finalized. One difference a reader of events can see: a replayed or recovered `run_completed` or `interaction_complete` event, or a recovered result, of such a run now carries `"structured_output": null`, as the live one always did; before, the member was gone after a reread (the Python SDK gives `None` either way; the TypeScript and Web SDKs see `null` where they saw no member). Schema files and generated SDK types are unchanged. Going back to 0.9.16 on a store this release has used: the same bytes are written; a record with a null is skipped there as before, and one that this release finalized no longer refuses the session. Affected: 0.8.11 through 0.9.16 (the check is in the source at every release tag from 0.8.11, by a walk of all tags by content; 0.8.0 to 0.8.10 were not read; run on 0.9.16 only); a Meta gateway keeps its runtime state in the same store (read from the source; not run). This ends the Known limitation of that name added under 0.9.16 on 2026-11-17. (Shown by tests: the two records that 0.9.16 wrote are read and written back byte-equal, and the recovery at the driver on a record the test builds. Shown by runs on 0.9.16: the unreadable record; and the refused session, on the published `rkat-rpc` ten of ten hosts killed at that moment. Shown by a run on a build of the fix's own commit: a new process over a copy of the store that 0.9.16 left at such a host end registered the session, answered a new prompt and finalized the old record, which still holds its null, with no error or warning line; the store that the refused start of 0.9.16 itself leaves is byte-equal to that one, so a session 0.9.16 has already refused comes back the same way. Limits of that run: the host end was made by a test executor that held the acknowledgement, at the runtime's own machine and not through a host's session service, and one start was run. Read from the source, not run: a runtime store of the host's own implementation, roots that admit null other than an object-or-null root, and going back.)
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)
@@ -653,8 +656,9 @@ them.
   a filter, a block list or a grant gate on `shell` closes it; what a live
   session with shell is offered; which recorded monitors are run again; an
   operator's monitor on a session that may not start one. Read from the
-  source: the guards that go by the tool's name, and going back to an
-  earlier release, read at 0.9.15.)
+  source: the guards that go by the tool's name; a tool exposed under the
+  name and the built-in taking it; and going back to an earlier release,
+  read at 0.9.15.)
 - A pre-tool hook or a host's dispatch admission that refuses or inspects
   `shell` calls by the tool's name does not take a `monitor_start` call for
   one, and nothing in Meerkat can teach it the name: add `monitor_start` to
@@ -663,7 +667,12 @@ them.
   A tool permission rule is such a guard: a rule that refuses `shell` by
   name does not refuse a `monitor_start` call, and a rule that permits
   `shell` by name does not permit it. A monitor's command does pass the
-  `[shell]` section's command rules when it is started.
+  `[shell]` section's command rules when it is started. (Read from the
+  source: traced by lines for a governed application tool policy; for
+  Meta's gating rules and a governed realm's permissions by a search of
+  the source that found no binding of the two names; that a monitor's
+  command passes the `[shell]` rules at its start: by lines, not shown by
+  a test.)
 - A live session of an agent with shell is offered `monitor_start` from its
   next build. Its stored session and its stored system prompt are not
   rewritten; the tool list sent to the provider gains one definition.
@@ -727,7 +736,8 @@ them.
   does not stop that monitor's re-run after a restart: the recorded
   command is started again with no new check of the rules, as in earlier
   releases. A deny, a grant gate, a read-only profile or a tool filter
-  does stop the re-run. Read from the source.
+  does stop the re-run. The first is read from the source; the second is
+  shown by tests of this release.
 
 ## [0.9.16] - 2026-11-16
 

@@ -202,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Mob members: a response to a peer request without a result no longer stops the member that sent the request (a gateway whose state is on disk; 0.9.5 through 0.9.16; see the Known limitation printed under 0.9.16). The change is in Meerkat's runtime: see Meerkat's changelog for this release, Fixed, "Peer requests: a response to a peer request without a result no longer stops the requester", for what changes, what it does not do for a member that an earlier release stopped, and the case that stays. (Shown by tests and by runs on an `rkat-rpc` built from the change; not yet run on a Meta gateway built from it.)
 - Console: the decision card of a set of questions that the list of
   questions does not hold (it was read without the set, or could not be
   read) says why it has no answer form and where the set is answered: the

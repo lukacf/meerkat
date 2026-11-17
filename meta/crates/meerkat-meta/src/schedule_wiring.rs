@@ -1030,8 +1030,10 @@ impl ScheduleMobTargetRegistry {
     /// out of reach. A target that has the host act in a mob (a helper to
     /// spawn, a flow) is accepted for the writer's own mob and for a mob
     /// its session created ([`MobMcpState::member_may_schedule_in_mob`]). A
-    /// turn of a session no member holds is not a member's write, and a
-    /// target that names neither a member nor a mob is not judged here.
+    /// turn of a session no member holds is not a member's write: the
+    /// answer is that the writer is no member, whatever the target. A
+    /// member's target that names neither a member nor a mob is not judged
+    /// here.
     /// Member names are compared as roster ids, whichever form the target
     /// wrote.
     ///
@@ -1043,10 +1045,10 @@ impl ScheduleMobTargetRegistry {
         writer_session: &meerkat_core::types::SessionId,
         target: &TargetBinding,
     ) -> meerkat::ScheduleWriteVerdict {
-        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
         let state = match self.state.read().as_deref() {
             Ok(AdoptedMobState::Adopted(state)) => state.upgrade(),
-            Ok(AdoptedMobState::Unset) => return Accepted,
+            Ok(AdoptedMobState::Unset) => return NotAMember,
             Err(_) => None,
         };
         let Some(state) = state else {
@@ -1056,7 +1058,7 @@ impl ScheduleMobTargetRegistry {
             return Unavailable;
         };
         let Some((writer_mob, writer)) = session_holder(&handles, writer_session).await else {
-            return Accepted;
+            return NotAMember;
         };
         let (target_mob, named) = match target {
             TargetBinding::Mob(binding) => match binding.as_ref() {

@@ -276,14 +276,16 @@ impl ScheduleService {
     }
 
     /// Say whether this host's agents may write a schedule that creates a
-    /// session when it fires (a target that is a session created on
-    /// demand). Off until a host says otherwise, from its own configuration
+    /// session or a helper when it fires (a target that is a session
+    /// created on demand; a target that spawns or forks a helper), or that
+    /// sends into a session other than the writer's own. Off until a host
+    /// says otherwise, from its own configuration
     /// (`[tools] agent_schedules_may_create_sessions`): the session a fire
-    /// creates is built with the host's own tools and none of the writer's
-    /// restrictions, so the agent-facing schedule tools over any clone of
-    /// this service refuse such a write from a session's turn unless the
-    /// dispatch carries the host's own statements that the writer is under
-    /// no restriction the created session would not be under. The
+    /// creates is built as the host builds a session by default and not as
+    /// the writer's was built, so the agent-facing schedule tools over any
+    /// clone of this service refuse such a write from a session's turn
+    /// unless the dispatch carries the host's own statements about the
+    /// writer (for a helper: that its build mounts the mob tools). The
     /// service's own `create` and `update`, a host's writes, are never
     /// asked.
     pub fn allow_agent_session_creation(&self, allowed: bool) {

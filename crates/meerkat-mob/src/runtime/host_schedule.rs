@@ -248,7 +248,7 @@ impl HostResidentScheduleWriteJudge {
     }
 
     fn judge(&self, writer_session: &SessionId, target: &TargetBinding) -> ScheduleWriteVerdict {
-        use ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        use ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
         let Some(residents) = self.residents.get() else {
             return Unavailable;
         };
@@ -269,7 +269,7 @@ impl HostResidentScheduleWriteJudge {
                 OutOfReach
             }
         };
-        match target {
+        let verdict = match target {
             TargetBinding::Identity(binding) => {
                 match parse_mob_member_schedule_identity(binding.identity()) {
                     Some(named) => only_itself(&named.mob_id, &named.member),
@@ -302,7 +302,13 @@ impl HostResidentScheduleWriteJudge {
                     SessionTargetBinding::MaterializeOnDemandSession {
                         bound_session_id: None,
                         ..
-                    } => return Accepted,
+                    } => {
+                        return if writer.is_some() {
+                            Accepted
+                        } else {
+                            NotAMember
+                        };
+                    }
                 };
                 if session_id == writer_session {
                     Accepted
@@ -315,6 +321,13 @@ impl HostResidentScheduleWriteJudge {
                 }
             }
             TargetBinding::HostRunnable(_) => Accepted,
+        };
+        // A session that is no resident member is no member here: what this
+        // host would have taken from it is answered as no member's write.
+        if writer.is_none() && verdict == Accepted {
+            NotAMember
+        } else {
+            verdict
         }
     }
 }
@@ -361,9 +374,17 @@ mod tests {
     #[tokio::test]
     async fn the_resident_judge_takes_a_mob_target_for_the_writer_itself_only() {
         use meerkat::ScheduleWriteJudge as _;
-        use meerkat::ScheduleWriteVerdict::{Accepted, OutOfReach, Unavailable};
+        use meerkat::ScheduleWriteVerdict::{Accepted, NotAMember, OutOfReach, Unavailable};
 
         let (anna, boris, visitor) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let session = |session_id: &SessionId| {
+            mob_target(serde_json::json!({
+                "target_kind": "session",
+                "type": "resumable_session",
+                "session_id": session_id.to_string(),
+                "action": { "type": "prompt", "prompt": "Run the report." },
+            }))
+        };
         let member = |mob: &str, member: &str| {
             mob_target(serde_json::json!({
                 "target_kind": "mob",
@@ -438,6 +459,22 @@ mod tests {
             OutOfReach,
             "a session that is no resident member names no member"
         );
+        assert_eq!(
+            judge.judge_schedule_write(&visitor, &session(&anna)).await,
+            OutOfReach,
+            "nor a resident member's session"
+        );
+        for (target, case) in [
+            (session(&visitor), "its own session"),
+            (session(&SessionId::new()), "a session no resident holds"),
+            (flow("desk"), "a flow"),
+        ] {
+            assert_eq!(
+                judge.judge_schedule_write(&visitor, &target).await,
+                NotAMember,
+                "a session that is no resident member is no member here: {case}"
+            );
+        }
 
         let mut unmatched = observation_row(&anna, "desk", "anna");
         unmatched.generation += 1;

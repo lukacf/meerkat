@@ -164,12 +164,18 @@ pub trait ScheduleIdentityTargetProbe: Send + Sync {
 /// ([`ScheduleWriteJudge`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleWriteVerdict {
-    /// The write stands: the turn belongs to nobody the host judges, the
-    /// target names nobody a message could go to, or the writer could
-    /// message whom the target names.
+    /// The write stands for a writer the host judges: the target names
+    /// nobody a message could go to, or the writer could message whom the
+    /// target names.
     Accepted,
     /// The writer could not message whom the schedule's target names.
     OutOfReach,
+    /// The turn belongs to nobody the host judges (no member of a mob it
+    /// holds): the host says nothing of this writer's reach. The schedule
+    /// tools then take the write, except a schedule into a session other
+    /// than the writer's own, which they hold to the host's statements
+    /// about the writer.
+    NotAMember,
     /// Whether it could cannot be read now. Never read as "it could".
     Unavailable,
 }

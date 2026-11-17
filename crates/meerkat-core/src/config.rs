@@ -2742,14 +2742,19 @@ pub struct ToolsConfig {
     pub schedule_enabled: bool,
     /// WorkGraph tools enabled
     pub workgraph_enabled: bool,
-    /// Whether an agent's schedule may create a session when it fires.
+    /// Whether an agent's schedule may create a session or a helper when it
+    /// fires, or send into another session.
     ///
     /// A schedule whose target is a session created on demand has the host
     /// build a fresh session at the fire, as the host builds a session by
     /// default and not as the writer's was built. Off (the default), only
     /// the host writes such a schedule, and an agent whose own session is
     /// built as the host builds one by default and whose tools nothing
-    /// narrows. On, every agent that holds the schedule tools may. Read
+    /// narrows. The same holds for a schedule that sends into a session
+    /// other than the writer's own, written by an agent that is no mob
+    /// member. A schedule that spawns or forks a helper is written, when
+    /// off, only by the host and by an agent that holds the mob tools. On,
+    /// every agent that holds the schedule tools may write all three. Read
     /// when the host composes its schedule tools; written only when on.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agent_schedules_may_create_sessions: bool,

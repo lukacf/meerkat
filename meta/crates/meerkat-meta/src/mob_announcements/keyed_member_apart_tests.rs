@@ -35,6 +35,9 @@ const OPEN: &str = "agent:lobby";
 const APART: &str = "agent:vault";
 /// A name no identity has.
 const NOBODY: &str = "agent:nobody";
+/// An identity whose registered row does not say it is kept apart: a row
+/// has the runtime's record of its members say so.
+const RECORDED: &str = "agent:shelf";
 
 const NOW_MS: u64 = 1_800_000_000_000;
 const WINDOW_MS: u64 = 300_000;
@@ -69,6 +72,7 @@ impl crate::identity_first::contracts::RosterProvider for TwoIdentities {
         };
         Ok(vec![
             agent(OPEN, BTreeMap::new()),
+            agent(RECORDED, BTreeMap::new()),
             agent(
                 APART,
                 BTreeMap::from([(
@@ -377,5 +381,85 @@ async fn a_generated_alias_of_an_identity_kept_apart_answers_as_that_of_a_name_n
             );
         }
     }
+    runtime.shutdown().await;
+}
+
+/// An identity the runtime's record of its members keeps apart, whose
+/// registered row does not say so, is answered by the keyed verbs exactly
+/// as a name no identity has: its delivery is refused as that name's, and
+/// its status reads as that name's. An identity neither the record nor its
+/// row keeps apart is not refused as unknown.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_the_record_keeps_apart_answers_the_keyed_verbs_as_a_name_no_identity_has() {
+    let state = tempfile::tempdir().expect("state dir");
+    let (runtime, server) = server(state.path(), "mob-k-record").await;
+    let scope = KeyedInjectCallerScope::for_grant_label("peer-gateway");
+    let digest = content_digest("a body");
+    let deadline = NOW_MS + WINDOW_MS;
+
+    runtime.mob_runtime().private_owners().record(
+        &runtime.mob_id(),
+        crate::member_comms_id::mob_member_id(RECORDED).as_str(),
+        Some(&BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "someone".to_string(),
+        )])),
+    );
+    let recorded = crate::identity_first::AgentIdentity::parse(RECORDED).expect("parse identity");
+    assert!(
+        runtime
+            .identity_runtime_ref()
+            .expect("an identity-first runtime")
+            .registered_spec(&recorded)
+            .await
+            .is_ok_and(|registered| {
+                crate::access::private_owner(&registered.spec.labels).is_none()
+            }),
+        "the identity is registered, and its registered row does not say it is kept apart"
+    );
+
+    let to_the_identity = server
+        .deliver(&scope, delivery(RECORDED, &digest), deadline)
+        .await;
+    let to_no_identity = server
+        .deliver(&scope, delivery(NOBODY, &digest), deadline)
+        .await;
+    let refusal_of_no_identity = format!("{:?}", to_no_identity.as_ref().err());
+    assert!(
+        to_no_identity.is_err(),
+        "a delivery to a name no identity has is refused: {to_no_identity:?}"
+    );
+    assert_eq!(
+        format!("{:?}", to_the_identity.as_ref().err()).replace(RECORDED, "<identity>"),
+        refusal_of_no_identity.replace(NOBODY, "<identity>"),
+        "a delivery to the identity the record keeps apart is refused as one to a name no \
+         identity has"
+    );
+
+    let of_the_identity = server
+        .status(&scope, RECORDED, "batch-1", true)
+        .await
+        .map(|answer| (answer.status, answer.input));
+    let of_no_identity = server
+        .status(&scope, NOBODY, "batch-1", true)
+        .await
+        .map(|answer| (answer.status, answer.input));
+    assert_eq!(
+        format!("{of_the_identity:?}").replace(RECORDED, "<identity>"),
+        format!("{of_no_identity:?}").replace(NOBODY, "<identity>"),
+        "the status of the identity the record keeps apart reads as that of a name no identity \
+         has"
+    );
+
+    // An identity neither the record nor its row keeps apart is not
+    // answered as unknown.
+    let to_the_open_identity = server
+        .deliver(&scope, delivery(OPEN, &digest), deadline)
+        .await;
+    assert_ne!(
+        format!("{:?}", to_the_open_identity.as_ref().err()).replace(OPEN, "<identity>"),
+        refusal_of_no_identity.replace(NOBODY, "<identity>"),
+        "an identity every caller may reach is not refused as unknown: {to_the_open_identity:?}"
+    );
     runtime.shutdown().await;
 }

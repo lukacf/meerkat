@@ -41,22 +41,7 @@ them.
 
 ### Fixed
 
-- `meerkat-runtime`: a session whose finished run was still unsettled
-  when its runtime was registered again (a restart of the host, for one)
-  now has that run finalized at its first drain when the run had consumed
-  an input the runtime marks ephemeral: a peer's progress notice (a
-  response that is not the final one) to a request the session had sent.
-  The registration keeps that input's row, and the first drain records
-  the run's completion with its outcome and takes the session checkpoint
-  the run still owed. Before, the registration left the row out of the
-  recovered session while the store went on naming it, and the session's
-  first drain, a stop, an unregister, and after one of those every later
-  registration were refused with
-  `Recovery corruption: pending terminal owner <id> is absent from the live shell`;
-  a mob marked such a member `broken`. A batch in which one run had
-  consumed such a notice together with a durable input was refused the
-  same way and is finalized as well. An ephemeral input that had not run
-  is still dropped at a restart. The refusal is in 0.8.11 through 0.9.16.
+- `meerkat-runtime`: a session whose finished run was still unsettled when its runtime was registered again (a restart of the host, for one) now has that run finalized at its first drain when the run had consumed an input the runtime marks ephemeral: a peer's progress notice (a response that is not the final one) to a request the session had sent. The registration keeps that input's row, and the first drain records the run's completion with its outcome and takes the session checkpoint the run still owed. Before, the registration left the row out of the recovered session while the store went on naming it, and the session's first drain, a stop and an unregister were refused with `Recovery corruption: pending terminal owner <id> is absent from the live shell`; after a refused stop or unregister every later registration was refused too; a mob marked such a member `broken`. A batch in which one run had consumed such a notice together with a durable input was refused the same way and is finalized as well. An ephemeral input that had not run is still dropped at a restart. A store that already holds such a row is finalized at the next registration and first drain (shown by a row on a store the test builds; no kept state of an earlier release was run). Not shown: that a member a mob has already marked `broken`, or a session whose stop or unregister was already refused, comes back by this change. The refusal is in 0.8.11 through 0.9.16 (by the source at the release tags).
 
 ## [0.9.16] - 2026-11-16
 

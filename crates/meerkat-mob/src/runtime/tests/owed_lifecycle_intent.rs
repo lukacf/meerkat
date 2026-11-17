@@ -381,6 +381,14 @@ async fn a_live_stop_parked_on_a_member_is_owed_like_a_recovered_one() {
         .expect("session-backed autonomous member");
     service.set_session_active(&session, true).await;
     service.hold_wind_down_after_interrupt(&session).await;
+    // The member's kickoff turn is running: the runtime has its run current,
+    // so the Stop parks on a turn it interrupted.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        service.wait_keep_alive_turn_entered(&session),
+    )
+    .await
+    .expect("the kickoff turn starts");
 
     let stop = tokio::spawn({
         let handle = handle.clone();
@@ -843,6 +851,12 @@ async fn a_refused_stop_stays_owed_until_a_stop_is_issued_again() {
         .expect("session-backed autonomous member");
     service.set_session_active(&session, true).await;
     service.hold_wind_down_after_interrupt(&session).await;
+    // The member's kickoff turn is running: the runtime has its run current,
+    // so the first Stop ends that run. A Stop that lands while the kickoff
+    // input is still queued cancels nothing, and the run that starts once the
+    // refused Stop releases its hold is one the Stop issued again waits on.
+    // No timeout: the clock is paused.
+    service.wait_keep_alive_turn_entered(&session).await;
 
     let refused = handle
         .stop()

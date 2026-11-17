@@ -140,7 +140,7 @@ impl Config {
 
     /// Parse the config template into a Config value.
     pub fn template() -> Result<Self, ConfigError> {
-        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::Parse)
+        toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::from)
     }
 
     /// Parse one persisted config document (a realm or user `config.toml`).
@@ -322,7 +322,7 @@ impl Config {
         let skills_layer = file_config.skills.clone();
         // Merge (file values override defaults)
         self.merge(file_config);
-        let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::Parse)?;
+        let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::from)?;
         self.merge_tools_from_toml_presence(&parsed, &tools_layer);
         self.merge_retry_from_toml_presence(&parsed, &retry_layer);
         self.merge_self_hosted_from_toml_presence(&parsed, &self_hosted_layer);
@@ -3333,8 +3333,12 @@ pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Parse error: {0}")]
-    Parse(#[from] toml::de::Error),
+    /// A document that does not parse. The text says where the error sits
+    /// (line and column) and what is wrong, never the reader's own display,
+    /// which quotes the line of the document; an error converted with `?`
+    /// or [`From`] no longer holds the document either.
+    #[error("Parse error: {}", crate::redact::toml_error_text(.0))]
+    Parse(toml::de::Error),
 
     #[error("TOML serialization error: {0}")]
     TomlSerialize(#[from] toml::ser::Error),
@@ -3504,6 +3508,14 @@ impl From<crate::realm_admission::AdmissionRefusal> for ConfigError {
     }
 }
 
+/// A TOML reader's error becomes [`ConfigError::Parse`] without the
+/// document it was read from: the place and the message stay.
+impl From<toml::de::Error> for ConfigError {
+    fn from(error: toml::de::Error) -> Self {
+        Self::Parse(crate::redact::toml_error_without_document(&error))
+    }
+}
+
 impl ConfigError {
     /// The administered section a refused write would change, when this
     /// error is such a refusal ([`Self::ConfinementAdministration`],
@@ -3563,6 +3575,19 @@ pub enum ConfigWarning {
     /// ignored and the threshold is inherited from the parent realm, or the
     /// default if there is none.
     OutOfRangeBudgetWarningThreshold,
+    /// A binding whose auth profile holds an inline secret was left out of
+    /// the realm's composition: the `[self_hosted.servers]` entry its
+    /// backend names (or, when the backend names no server, the
+    /// `[self_hosted]` section) is stated or changed by another config
+    /// document on the realm's chain, so the secret would go to a server
+    /// its own document does not state. The realm composes without the
+    /// binding, which the warning names with its auth profile.
+    InlineSecretBindingLeftOut {
+        /// The binding the composition left out.
+        binding: &'static str,
+        /// The auth profile it names, which holds the inline secret.
+        profile: &'static str,
+    },
 }
 
 impl std::fmt::Display for ConfigWarning {
@@ -3599,8 +3624,41 @@ impl std::fmt::Display for ConfigWarning {
                  in that range or delete the key",
                 AgentConfig::default().budget_warning_threshold
             ),
+            Self::InlineSecretBindingLeftOut { binding, profile } => write!(
+                f,
+                "binding '{binding}' was left out of this realm: its auth profile \
+                 '{profile}' holds an inline secret, and the [self_hosted.servers] entry \
+                 its backend names (or, when the backend names no server, the \
+                 [self_hosted] section) is stated or changed by another config document \
+                 on the realm's chain. State the whole entry in the document that holds \
+                 the secret and in no other document on the chain, or declare \
+                 server = \"<id>\" on the backend; until then a session that names the \
+                 binding gets the binding of that id from an ancestor realm if one defines \
+                 it, with that realm's credential and backend, and fails as an unknown \
+                 binding otherwise, and a session that names none uses another binding \
+                 of the realm or of an ancestor if there is one"
+            ),
         }
     }
+}
+
+/// `name` with a `'static` lifetime, kept once per distinct name. Load
+/// warnings are small `Copy` values; the names they carry are the few
+/// bindings and auth profiles a composition leaves out, so the names kept
+/// are bounded by what the host's documents state.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn warning_name(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut names = NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(kept) = names.get(name) {
+        return kept;
+    }
+    let kept: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.insert(kept);
+    kept
 }
 
 /// One persisted config document as written on disk, parsed strictly except
@@ -3654,7 +3712,7 @@ impl LegacyModelFallbackKeys {
             .remove(Self::USE_CATALOG_DEFAULT_CHAIN)
             .map(toml::Value::try_into::<bool>)
             .transpose()
-            .map_err(ConfigError::Parse)?;
+            .map_err(ConfigError::from)?;
         // Through 0.8.36 `use_catalog_default_chain = true` replaced the
         // whole table with the catalog default, so its sibling values never
         // took effect. The catalog chain no longer exists; the faithful
@@ -3704,7 +3762,7 @@ impl LegacyModelFallbackKeys {
 
 impl PersistedConfigDocument {
     pub(crate) fn parse(content: &str) -> Result<Self, ConfigError> {
-        let mut document: toml::Table = toml::from_str(content).map_err(ConfigError::Parse)?;
+        let mut document: toml::Table = toml::from_str(content).map_err(ConfigError::from)?;
         let legacy_keys = LegacyModelFallbackKeys::take_from(&mut document)
             .map_err(ConfigError::in_persisted_document)?;
         // Without legacy keys, parse the original text so errors keep their
@@ -3714,7 +3772,7 @@ impl PersistedConfigDocument {
         } else {
             document.try_into()
         }
-        .map_err(ConfigError::Parse)?;
+        .map_err(ConfigError::from)?;
         config
             .reject_unwired_agent_provider_params()
             .map_err(ConfigError::in_persisted_document)?;
@@ -3939,51 +3997,72 @@ pub(crate) fn check_composed_confinement(
     )
 }
 
-/// Refuse a composition in which a binding whose auth profile runs a
-/// credential command does not keep the command's token where its document
-/// sends it: its backend is self-hosted and declares no server
+/// Keep the credential of a binding whose auth profile runs a credential
+/// command, or holds an inline secret, where its document sends it.
+///
+/// A binding with a credential command refuses the composition: when its
+/// backend is self-hosted and declares no server
 /// ([`ConfigError::CredentialCommandServerUndeclared`]; such a backend's
-/// endpoint is the server that serves a request's model), or it takes the
-/// `[self_hosted.servers]` entry its backend names from a document other
-/// than the one that states the binding
-/// ([`ConfigError::CredentialCommandServer`]). A composed realm section is
-/// the section of the chain member nearest the head whose document states
-/// it, whole, so the binding, its auth profile and its backend all come
-/// from that document; the server entry composes field by field across the
-/// chain and must equal that document's own.
+/// endpoint is the server that serves a request's model), or when it takes
+/// the `[self_hosted.servers]` entry its backend names from a document
+/// other than the one that states the binding
+/// ([`ConfigError::CredentialCommandServer`]).
+///
+/// A binding with an inline secret is judged by the same rule for the entry
+/// its backend names; and when its self-hosted backend declares no server,
+/// the `[self_hosted]` section, which then decides the server through a
+/// request's model, must be that of the document that states the binding.
+/// Such a binding does not refuse the composition: it is returned, by realm,
+/// binding id and auth profile, for the composer to leave out of the composed realm
+/// section, so the realm composes and only that binding does not resolve.
+/// One document, and a chain whose other documents leave `[self_hosted]`
+/// alone, keep every binding.
+///
+/// A composed realm section is the section of the chain member nearest the
+/// head whose document states it, whole, so the binding, its auth profile
+/// and its backend all come from that document; `[self_hosted]` composes
+/// field by field across the chain and must equal that document's own where
+/// the credential goes by it.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn check_composed_command_servers(
     docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
     chain: &crate::connection::RealmChain,
     composed: &Config,
-) -> Result<(), ConfigError> {
+) -> Result<Vec<(String, String, String)>, ConfigError> {
+    use crate::connection::CredentialSourceSpec;
+
+    let mut left_out = Vec::new();
     for (realm, section) in &composed.realm {
         let stated_by = chain
             .realms()
             .iter()
             .find_map(|member| docs.get(member).filter(|doc| doc.realm.contains_key(realm)));
         for (binding_id, binding) in &section.binding {
-            let commanded = section.auth.get(&binding.auth_profile).is_some_and(|auth| {
-                matches!(
-                    auth.source,
-                    crate::connection::CredentialSourceSpec::Command { .. }
-                )
-            });
-            if !commanded {
-                continue;
-            }
+            let profile = &binding.auth_profile;
+            let commanded = match section.auth.get(profile).map(|auth| &auth.source) {
+                Some(CredentialSourceSpec::Command { .. }) => true,
+                Some(CredentialSourceSpec::InlineSecret { .. }) => false,
+                _ => continue,
+            };
             let Some(backend) = section.backend.get(&binding.backend_profile) else {
                 continue;
             };
             let Some(server) = backend.server.as_ref() else {
                 if crate::provider::Provider::parse_strict(&backend.provider)
-                    == Some(crate::provider::Provider::SelfHosted)
+                    != Some(crate::provider::Provider::SelfHosted)
                 {
+                    continue;
+                }
+                if commanded {
                     return Err(ConfigError::CredentialCommandServerUndeclared {
                         realm: realm.clone(),
                         binding: binding_id.clone(),
                         backend: binding.backend_profile.clone(),
                     });
+                }
+                if stated_by.is_some_and(|stated_by| stated_by.self_hosted != composed.self_hosted)
+                {
+                    left_out.push((realm.clone(), binding_id.clone(), profile.clone()));
                 }
                 continue;
             };
@@ -3991,16 +4070,19 @@ pub(crate) fn check_composed_command_servers(
                 && stated_by.self_hosted.servers.get(server)
                     != composed.self_hosted.servers.get(server)
             {
-                return Err(ConfigError::CredentialCommandServer {
-                    realm: realm.clone(),
-                    binding: binding_id.clone(),
-                    profile: binding.auth_profile.clone(),
-                    server: server.clone(),
-                });
+                if commanded {
+                    return Err(ConfigError::CredentialCommandServer {
+                        realm: realm.clone(),
+                        binding: binding_id.clone(),
+                        profile: profile.clone(),
+                        server: server.clone(),
+                    });
+                }
+                left_out.push((realm.clone(), binding_id.clone(), profile.clone()));
             }
         }
     }
-    Ok(())
+    Ok(left_out)
 }
 
 /// The chain [`compose_effective_config`] folds for `head`, resolved by the

@@ -199,6 +199,32 @@ rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.5"}}' --ex
 Without `--realm`, CLI derives a stable workspace realm (`ws-...`) from the
 current directory, or from `--context-root` when supplied.
 
+## Secret values in config answers
+
+A config answer shows `<redacted>` in place of each stored secret value: an
+auth profile's inline secret, a credential command's `env` values, the `env`
+and `headers` values of MCP servers and hooks, and a skills repository's
+`env`, token or header value. That holds for `rkat config get` in every
+output form, for `GET /config`, `config/get` and the `meerkat_config` tool,
+and for the answer to a config write on REST, RPC and the tool
+(`rkat config set` and `rkat config patch` print only the generation). The
+document file holds the values.
+
+A write may send such an answer back. `<redacted>` in a place keeps the
+value stored at the same place; a list entry is matched by its own key (an
+MCP server's name, a hook's id, a skills repository's source id together
+with its stored name), in any order. Where nothing is stored for it, the
+write is refused as invalid and nothing is written, so `<redacted>` is never
+stored as a value: an entry under a new key, or a document written into
+another realm, takes the values themselves. An entry whose `url` the write
+changes takes its secret values again in that write.
+
+Argument lists, addresses (`url`, `base_url`) and free `options` values are
+shown whole. An error about a config document gives the place (line, column
+and key path) and what is wrong on one line. It never quotes the document's
+line, and for a value of the wrong type or an unknown choice it names the
+kind of value, not the value.
+
 ## What About `~/.rkat/config.toml` And `.rkat/config.toml`?
 
 `~/.rkat/config.toml` is the home-rooted config document for the reserved
@@ -957,6 +983,36 @@ document and nowhere else on the chain. Credentials that do not come from a
 command (the managed store, credential accounts, environment variables,
 platform defaults, external resolvers, file descriptors) are outside these
 rules: where they are sent stays ordinary config.
+
+An inline secret (an auth profile's `source = { kind = "inline_secret" }`)
+is a value stored in the config document, and it stays where its document
+sends it. A config write that changes where it is sent is refused as
+invalid unless the same write states the secret as a value: that is the
+profile's `provider` and `auth_method` and, for each binding of the same
+realm section that names the profile, the binding's backend, that backend's
+entry, the `[self_hosted.servers]` entry the backend names and the binding's
+`default_model`. A patch that makes a profile an inline secret states the
+secret in the same patch. The three rules above hold for it in this form. A binding
+that uses an inline secret on a self-hosted backend may leave the server
+undeclared; the `[self_hosted]` section then decides the server, so the
+whole section belongs to where the secret is sent and must be the one the
+binding's own document states. A request may not override a binding's auth
+profile with an inline secret profile other than the binding's own
+(`inline_secret_profile_override`): to choose among several keys for one
+backend, give each key a binding of its own and name the binding. And a
+composition in which the `[self_hosted.servers]` entry the binding's backend
+names, or with no declared server the `[self_hosted]` section, differs from
+what the binding's own document states is not refused: the realm composes
+without that one binding and reports a load warning that names the binding
+and its auth profile. A session that names the binding gets the binding of
+that id from an ancestor realm if one defines it, with that realm's
+credential and backend, and fails as an unknown binding otherwise; one that
+names no binding gets another binding of the realm, or of an ancestor, for
+the provider if there is one, so when the binding left out was the realm's
+default such a request goes by another binding. State the whole entry in the
+document that holds the secret and nowhere else on the chain; for an
+undeclared server, `server = "<id>"` on the backend narrows what must be
+that document's own to the one entry.
 
 The user document decides for other realms too: its `[realm.global]`
 section puts `global`, and with it the user document's `[governance]`, on

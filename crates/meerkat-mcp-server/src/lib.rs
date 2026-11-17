@@ -2977,7 +2977,9 @@ fn base_tool_descriptors() -> Vec<BaseToolDescriptor> {
         },
         BaseToolDescriptor {
             name: "meerkat_config",
-            description: "Get or update Meerkat config for this MCP server instance.",
+            description: "Get or update Meerkat config for this MCP server instance. Secret \
+                          values are shown as `<redacted>`; send `<redacted>` back unchanged \
+                          to keep a stored value.",
             input_schema: || meerkat_tools::schema_for::<MeerkatConfigInput>(),
             request_lifecycle: RequestLifecycle::LongRunningObservation,
         },
@@ -3583,8 +3585,18 @@ async fn handle_meerkat_config(
             let config: Config = serde_json::from_value(config_value.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
             reject_config_payload_defaulting(&config_value, &config)?;
-            refuse_launching_entries(state, &config).await?;
-            validate_config_for_commit(&config)?;
+            // The document the write would commit: a marker the request
+            // carries in place of a stored secret value is the stored value
+            // here, so an entry restated with markers compares as the
+            // stored entry. The request is committed as it was sent: the
+            // write resolves it again under its own custody.
+            let resolved = state
+                .config_runtime
+                .set_preview(&config)
+                .await
+                .map_err(map_config_runtime_error)?;
+            refuse_launching_entries(state, &resolved).await?;
+            validate_config_for_commit(&resolved)?;
             let snapshot = state
                 .config_runtime
                 .set(config, input.expected_generation)
@@ -4183,6 +4195,10 @@ async fn refuse_launching_entries(
     ))
 }
 
+/// The answer of the config tool: the configuration envelope, which shows
+/// a marker in place of every stored secret value
+/// ([`ConfigEnvelope::from_snapshot`]). A write may send the marker back
+/// where the answer showed it.
 fn config_envelope_value(
     snapshot: meerkat_core::ConfigSnapshot,
     expose_paths: bool,
@@ -12175,6 +12191,1496 @@ mod tests {
         }
         assert_eq!(document["shell"]["program"], json!("/synthetic/shell"));
         assert_eq!(document["shell"]["timeout_secs"], json!(60));
+    }
+
+    /// The words every stored value of the fixture below starts with.
+    const STORED_VALUE_WORDS: &str = "synthetic stored value";
+
+    /// The stored value of the fixture's place `n`: plain synthetic words,
+    /// put together at run time.
+    fn stored_value(n: u8) -> String {
+        format!("{STORED_VALUE_WORDS} {n:02}")
+    }
+
+    const FOURTH_SOURCE: &str = "44444444-4444-4444-8444-444444444444";
+
+    /// The sections of the `team` realm's document that hold a value at
+    /// every secret-bearing place of the document: an auth profile's inline
+    /// source and a credential command's environment; the environment of a
+    /// stdio MCP server and the headers of two HTTP ones; the environment
+    /// of a command hook and the headers of an HTTP one; the environment of
+    /// a stdio skills repository, the bearer token and the header value of
+    /// two HTTP ones and the token of a git one.
+    fn secret_sections() -> String {
+        let value = stored_value;
+        let hook = |id: &str, runtime: String| {
+            format!(
+                "[[hooks.entries]]\nid = \"{id}\"\nenabled = true\npoint = \"run_started\"\n\
+                 mode = \"foreground\"\ncapability = \"observe\"\npriority = 0\n\
+                 runtime = {runtime}\n\n"
+            )
+        };
+        let repository = |name: &str, source: &str, transport: String| {
+            format!(
+                "[[skills.repositories]]\nname = \"{name}\"\nsource_uuid = \"{source}\"\n\
+                 {transport}\n\n"
+            )
+        };
+        [
+            format!(
+                "[realm.team.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n",
+                value(1)
+            ),
+            format!(
+                "[realm.team.auth.minted]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {{ kind = \"command\", program = \"/synthetic/credential\", \
+                 env = {{ SYNTHETIC_SEED = \"{}\" }} }}\n\n",
+                value(2)
+            ),
+            format!(
+                "[[tools.mcp_servers]]\nname = \"stdio-server\"\ncommand = \"/synthetic/server\"\n\
+                 env = {{ SYNTHETIC_SERVER = \"{}\" }}\n\n",
+                value(3)
+            ),
+            format!(
+                "[[tools.mcp_servers]]\nname = \"http-server\"\n\
+                 url = \"http://synthetic.invalid/mcp\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n",
+                value(4)
+            ),
+            format!(
+                "[[tools.mcp_servers]]\nname = \"http-server-two\"\n\
+                 url = \"http://two.synthetic.invalid/mcp\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n",
+                value(11)
+            ),
+            hook(
+                "command-hook",
+                format!(
+                    "{{ type = \"command\", command = \"/synthetic/hook\", \
+                     env = {{ SYNTHETIC_HOOK = \"{}\" }} }}",
+                    value(5)
+                ),
+            ),
+            hook(
+                "http-hook",
+                format!(
+                    "{{ type = \"http\", url = \"http://synthetic.invalid/hook\", \
+                     headers = {{ X-Synthetic = \"{}\" }} }}",
+                    value(6)
+                ),
+            ),
+            repository(
+                "stdio-skills",
+                FIRST_SOURCE,
+                format!(
+                    "type = \"stdio\"\ncommand = \"/synthetic/skills\"\n\
+                     env = {{ SYNTHETIC_SKILLS = \"{}\" }}",
+                    value(7)
+                ),
+            ),
+            repository(
+                "bearer-skills",
+                SECOND_SOURCE,
+                format!(
+                    "type = \"http\"\nurl = \"http://synthetic.invalid/skills\"\n\
+                     auth = {{ scheme = \"bearer\", token = \"{}\" }}",
+                    value(8)
+                ),
+            ),
+            repository(
+                "header-skills",
+                THIRD_SOURCE,
+                format!(
+                    "type = \"http\"\nurl = \"http://two.synthetic.invalid/skills\"\n\
+                     auth = {{ scheme = \"header\", name = \"X-Synthetic\", value = \"{}\" }}",
+                    value(9)
+                ),
+            ),
+            repository(
+                "git-skills",
+                FOURTH_SOURCE,
+                format!(
+                    "type = \"git\"\nurl = \"https://synthetic.invalid/skills.git\"\n\
+                     auth = {{ scheme = \"token\", token = \"{}\" }}",
+                    value(10)
+                ),
+            ),
+        ]
+        .concat()
+    }
+
+    /// Where each value of the fixture sits in the document, with the
+    /// value.
+    fn stored_places() -> Vec<(&'static str, String)> {
+        vec![
+            ("/realm/team/auth/inline/source/secret", stored_value(1)),
+            (
+                "/realm/team/auth/minted/source/env/SYNTHETIC_SEED",
+                stored_value(2),
+            ),
+            ("/tools/mcp_servers/0/env/SYNTHETIC_SERVER", stored_value(3)),
+            ("/tools/mcp_servers/1/headers/X-Synthetic", stored_value(4)),
+            ("/tools/mcp_servers/2/headers/X-Synthetic", stored_value(11)),
+            (
+                "/hooks/entries/0/runtime/env/SYNTHETIC_HOOK",
+                stored_value(5),
+            ),
+            (
+                "/hooks/entries/1/runtime/headers/X-Synthetic",
+                stored_value(6),
+            ),
+            (
+                "/skills/repositories/0/env/SYNTHETIC_SKILLS",
+                stored_value(7),
+            ),
+            ("/skills/repositories/1/auth/token", stored_value(8)),
+            ("/skills/repositories/2/auth/value", stored_value(9)),
+            ("/skills/repositories/3/auth/token", stored_value(10)),
+        ]
+    }
+
+    /// A state that serves the realm `team`, whose own document is the
+    /// fixture above. The directory lives as long as the state is used.
+    async fn state_with_stored_values() -> (tempfile::TempDir, MeerkatMcpState) {
+        state_for_team_realm(&secret_sections(), &[("org", "")]).await
+    }
+
+    /// The fixture's committed document as the config runtime reads it:
+    /// with every stored value.
+    async fn document_with_stored_values() -> Value {
+        let (_directory, state) = state_with_stored_values().await;
+        let document = committed_config_document(&state).await;
+        for (pointer, value) in stored_places() {
+            assert_eq!(
+                document.pointer(pointer),
+                Some(&json!(value)),
+                "the fixture holds its value at {pointer}"
+            );
+        }
+        document
+    }
+
+    /// The places of the fixture, other than those under `except`, at which
+    /// `document` does not hold its stored value.
+    fn places_without_their_stored_value(document: &Value, except: &[&str]) -> Vec<String> {
+        stored_places()
+            .into_iter()
+            .filter(|(pointer, _)| !except.iter().any(|except| pointer.starts_with(except)))
+            .filter(|(pointer, value)| document.pointer(pointer) != Some(&json!(value)))
+            .map(|(pointer, _)| format!("{pointer} holds {:?}", document.pointer(pointer)))
+            .collect()
+    }
+
+    /// The patch that restates the list at `pointer` of `document` after
+    /// `change` has been applied to the list.
+    fn list_patch(document: &Value, pointer: &str, change: impl FnOnce(&mut Vec<Value>)) -> Value {
+        let mut entries = document
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("the document's {pointer}"))
+            .clone();
+        change(&mut entries);
+        json!({"action": "patch", "patch": patch_at(pointer, json!(entries))})
+    }
+
+    /// The set of the whole document that `patch` (the arguments of a patch
+    /// through the tool) would write on the fixture: the patch merged onto
+    /// the stored document as it is written, a marker included (the
+    /// runtime's own preview would resolve or refuse it).
+    async fn set_twin(patch: &Value) -> Value {
+        let (_directory, state) = state_with_stored_values().await;
+        let stored = state
+            .config_runtime
+            .get()
+            .await
+            .expect("the stored document")
+            .config;
+        let replaced = meerkat_core::apply_config_patch_preview(&stored, patch["patch"].clone())
+            .expect("the document the patch would write");
+        json!({"action": "set", "config": replaced})
+    }
+
+    const OTHER_ADDRESS: &str = "http://other.synthetic.invalid/";
+
+    /// A stored secret value stays with the address it was stored for. A
+    /// write that changes the URL of an HTTP MCP server, an HTTP hook or an
+    /// HTTP skills repository that holds stored header values or a stored
+    /// token, and states no secret value for the entry, commits and keeps
+    /// none of them: no stored value stands under the entry, in the stored
+    /// document and in the tool's answer, and the entry goes to the new
+    /// address without one until a value is set again. Every other entry
+    /// keeps its values. By a patch and by a set. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_that_change_an_address_and_state_no_secret_value_keep_none() {
+        let document = document_with_stored_values().await;
+        let server = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers[1] = json!({"name": "http-server", "url": OTHER_ADDRESS});
+        });
+        let server_by_set = set_twin(&server).await;
+        let mut otherwise = Vec::new();
+        for (what, entry, url, arguments) in [
+            (
+                "a patch of an HTTP MCP server's URL",
+                "/tools/mcp_servers/1",
+                "/url",
+                server,
+            ),
+            (
+                "a set of an HTTP MCP server's URL",
+                "/tools/mcp_servers/1",
+                "/url",
+                server_by_set,
+            ),
+            (
+                "a patch of an HTTP hook's URL",
+                "/hooks/entries/1",
+                "/runtime/url",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] =
+                        hook_entry("http-hook", json!({"type": "http", "url": OTHER_ADDRESS}));
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a bearer token",
+                "/skills/repositories/1",
+                "/url",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] = json!({
+                        "name": "bearer-skills",
+                        "source_uuid": SECOND_SOURCE,
+                        "type": "http",
+                        "url": OTHER_ADDRESS,
+                    });
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a header value",
+                "/skills/repositories/2",
+                "/url",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[2] = json!({
+                        "name": "header-skills",
+                        "source_uuid": THIRD_SOURCE,
+                        "type": "http",
+                        "url": OTHER_ADDRESS,
+                    });
+                }),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            assert!(
+                document
+                    .pointer(entry)
+                    .is_some_and(|stored| stored.to_string().contains(STORED_VALUE_WORDS)),
+                "{what}: the fixture's {entry} holds a stored value"
+            );
+            let answer =
+                match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                    Ok(payload) => serde_json::from_str::<Value>(
+                        payload["content"][0]["text"]
+                            .as_str()
+                            .expect("config payload text"),
+                    )
+                    .expect("config payload json"),
+                    Err(refused) => {
+                        otherwise.push(format!(
+                            "{what}: refused: {} {:?}",
+                            refused.message, refused.data
+                        ));
+                        continue;
+                    }
+                };
+            let written = committed_config_document(&state).await;
+            for (shown_by, shown) in [
+                ("the stored document", &written),
+                ("the tool's answer", &answer["config"]),
+            ] {
+                let Some(moved) = shown.pointer(entry) else {
+                    otherwise.push(format!("{what}: {shown_by} holds no {entry}"));
+                    continue;
+                };
+                if moved.pointer(url) != Some(&json!(OTHER_ADDRESS)) {
+                    otherwise.push(format!("{what}: {shown_by} does not hold the new address"));
+                }
+                if moved.to_string().contains(STORED_VALUE_WORDS) {
+                    otherwise.push(format!(
+                        "{what}: {shown_by} holds a stored value under the entry"
+                    ));
+                }
+            }
+            otherwise.extend(
+                places_without_their_stored_value(&written, &[entry])
+                    .into_iter()
+                    .map(|place| format!("{what}: {place}")),
+            );
+        }
+        assert!(
+            otherwise.is_empty(),
+            "a write that changes an address and states no secret value did otherwise: \
+             {otherwise:#?}"
+        );
+    }
+
+    /// A write that changes an HTTP entry's URL and states the entry's
+    /// secret values itself commits, with the stored value restated or
+    /// with another one. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_that_state_the_secret_values_for_another_address_still_commit() {
+        let document = document_with_stored_values().await;
+        let stated = "a value the writer states";
+        let mut not_committed = Vec::new();
+        for (what, arguments, pointer, value) in [
+            (
+                "an HTTP MCP server's URL with its header value restated",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1]["url"] = json!(OTHER_ADDRESS);
+                }),
+                "/tools/mcp_servers/1/headers/X-Synthetic",
+                stored_value(4),
+            ),
+            (
+                "an HTTP hook's URL with another header value",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1]["runtime"]["url"] = json!(OTHER_ADDRESS);
+                    hooks[1]["runtime"]["headers"]["X-Synthetic"] = json!(stated);
+                }),
+                "/hooks/entries/1/runtime/headers/X-Synthetic",
+                stated.to_string(),
+            ),
+            (
+                "an HTTP skills repository's URL with another token",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1]["url"] = json!(OTHER_ADDRESS);
+                    repositories[1]["auth"]["token"] = json!(stated);
+                }),
+                "/skills/repositories/1/auth/token",
+                stated.to_string(),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    let written = committed_config_document(&state).await;
+                    if written.pointer(pointer) != Some(&json!(value)) {
+                        not_committed.push(format!("{what}: the stated value was not written"));
+                    }
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take: {not_committed:#?}"
+        );
+    }
+
+    /// A write that leaves an entry's address as stored is not this rule's:
+    /// a patch of another key keeps every stored secret value; an entry
+    /// restated at its address with another setting keeps the values it
+    /// restates; an entry restated at its address without its headers
+    /// loses them (a writer may remove a secret value); an entry removed,
+    /// and an entry written under another name at another address, commit.
+    /// Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_that_keep_an_entrys_address_are_not_refused_for_its_secret_values()
+    {
+        let document = document_with_stored_values().await;
+        let mut otherwise = Vec::new();
+        for (what, arguments, changed) in [
+            (
+                "a patch of another key",
+                json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+                None,
+            ),
+            (
+                "an HTTP MCP server restated with another connect timeout",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1]["connect_timeout_secs"] = json!(30);
+                }),
+                None,
+            ),
+            (
+                "an HTTP MCP server restated at its address without its headers",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] =
+                        json!({"name": "http-server", "url": "http://synthetic.invalid/mcp"});
+                }),
+                Some("/tools/mcp_servers/1"),
+            ),
+            (
+                "an HTTP hook removed",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks.remove(1);
+                }),
+                Some("/hooks/entries/1"),
+            ),
+            (
+                "an HTTP MCP server written under another name at another address",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = json!({"name": "renamed-server", "url": OTHER_ADDRESS});
+                }),
+                Some("/tools/mcp_servers/1"),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => {
+                    if config_generation(&state).await <= generation {
+                        otherwise.push(format!("{what}: nothing was committed"));
+                    }
+                    let written = committed_config_document(&state).await;
+                    let except: Vec<&str> = changed.into_iter().collect();
+                    otherwise.extend(
+                        places_without_their_stored_value(&written, &except)
+                            .into_iter()
+                            .map(|place| format!("{what}: {place}")),
+                    );
+                    if let Some(changed) = changed
+                        && written
+                            .pointer(changed)
+                            .is_some_and(|entry| entry.to_string().contains(STORED_VALUE_WORDS))
+                    {
+                        otherwise.push(format!("{what}: {changed} still holds a stored value"));
+                    }
+                }
+                Err(refused) => otherwise.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+        }
+        assert!(
+            otherwise.is_empty(),
+            "the config tool did otherwise: {otherwise:#?}"
+        );
+    }
+
+    /// A provider route whose credential the host holds outside the
+    /// document (an auth profile that reads a variable, or one that reads
+    /// the credential store) is the host's to administer like any other:
+    /// the config tool does not change the address of its backend. Refused
+    /// as host administration, nothing written. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_cannot_change_the_route_of_a_credential_the_host_holds() {
+        let mut not_refused = Vec::new();
+        for (held_in, source) in [
+            (
+                "a variable",
+                "{ kind = \"env\", env = \"MEERKAT_CONFIG_TOOL_ROW_VALUE\" }",
+            ),
+            ("the credential store", "{ kind = \"managed_store\" }"),
+        ] {
+            let own = format!(
+                "[realm.team.backend.main]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+                 base_url = \"http://synthetic.invalid/v1\"\n\n\
+                 [realm.team.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+                 source = {source}\n\n\
+                 [realm.team.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n"
+            );
+            not_refused.extend(
+                refused_in_team_realm(
+                    &format!(
+                        "a patch of the address of a backend whose credential is in {held_in}"
+                    ),
+                    &own,
+                    &[("org", "")],
+                    team_section_patch(
+                        "/backend/main/base_url",
+                        json!("http://other.synthetic.invalid/v1"),
+                    ),
+                    &[],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// The marker a configuration answer shows in place of a stored secret
+    /// value, spelled out here: the documentation names this text.
+    const SECRET_MARKER: &str = "<redacted>";
+
+    const FIFTH_SOURCE: &str = "55555555-5555-4555-8555-555555555555";
+
+    /// `document` with the marker at every place of the fixture: the
+    /// document a configuration answer shows.
+    fn with_markers(mut document: Value) -> Value {
+        for (pointer, _) in stored_places() {
+            *document
+                .pointer_mut(pointer)
+                .unwrap_or_else(|| panic!("the document's {pointer}")) = json!(SECRET_MARKER);
+        }
+        document
+    }
+
+    /// One call of the config tool: the answer's text and the answer.
+    async fn config_tool_answer(
+        state: &MeerkatMcpState,
+        arguments: &Value,
+    ) -> Result<(String, Value), ToolCallError> {
+        let payload = Box::pin(handle_tools_call(state, "meerkat_config", arguments)).await?;
+        let text = payload["content"][0]["text"]
+            .as_str()
+            .expect("config payload text")
+            .to_string();
+        let answer = serde_json::from_str::<Value>(&text).expect("config payload json");
+        Ok((text, answer))
+    }
+
+    /// What an answer of the config tool shows otherwise than a marker in
+    /// place of each stored value of the fixture: a stored value anywhere
+    /// in its text, or a place of the fixture that does not hold the marker.
+    fn shown_otherwise_than_as_markers(what: &str, text: &str, answer: &Value) -> Vec<String> {
+        let mut otherwise = Vec::new();
+        if text.contains(STORED_VALUE_WORDS) {
+            otherwise.push(format!("{what}: the answer's text holds a stored value"));
+        }
+        for (pointer, _) in stored_places() {
+            if answer["config"].pointer(pointer) != Some(&json!(SECRET_MARKER)) {
+                otherwise.push(format!("{what}: {pointer} does not show the marker"));
+            }
+        }
+        otherwise
+    }
+
+    /// An answer of the config tool that returns the configuration document
+    /// shows a marker in place of each stored secret value: an auth
+    /// profile's inline secret, a credential command's environment values,
+    /// the environment and header values of MCP servers and hooks, and a
+    /// skills repository's environment values, tokens and header value. The
+    /// names stay, and so does what is not a secret value (an argument
+    /// list, a URL). That holds for the answer to a `get` and for the
+    /// answers after a `patch` and a `set`; the stored document keeps its
+    /// values.
+    #[tokio::test]
+    async fn test_config_answers_show_a_marker_in_place_of_stored_secret_values() {
+        let (_directory, state) = state_with_stored_values().await;
+        let mut restated = document_with_stored_values().await;
+        restated["max_tokens"] = json!(4096);
+        let mut otherwise = Vec::new();
+        for (what, arguments) in [
+            ("the answer to a get", json!({"action": "get"})),
+            (
+                "the answer after a patch",
+                json!({"action": "patch", "patch": {"max_tokens": 2048}}),
+            ),
+            (
+                "the answer after a set",
+                json!({"action": "set", "config": restated}),
+            ),
+        ] {
+            match config_tool_answer(&state, &arguments).await {
+                Ok((text, answer)) => {
+                    otherwise.extend(shown_otherwise_than_as_markers(what, &text, &answer));
+                    // The names of a value map stay in the answer.
+                    for pointer in [
+                        "/tools/mcp_servers/0/env",
+                        "/tools/mcp_servers/1/headers",
+                        "/hooks/entries/0/runtime/env",
+                        "/skills/repositories/0/env",
+                        "/realm/team/auth/minted/source/env",
+                    ] {
+                        assert_eq!(
+                            answer["config"]
+                                .pointer(pointer)
+                                .and_then(Value::as_object)
+                                .map(serde_json::Map::len),
+                            Some(1),
+                            "{what}: {pointer} keeps its name"
+                        );
+                    }
+                    // What is not a secret value is shown as written.
+                    for (pointer, written) in [
+                        ("/tools/mcp_servers/0/command", "/synthetic/server"),
+                        ("/tools/mcp_servers/1/url", "http://synthetic.invalid/mcp"),
+                        (
+                            "/realm/team/auth/minted/source/program",
+                            "/synthetic/credential",
+                        ),
+                        ("/skills/repositories/2/auth/name", "X-Synthetic"),
+                    ] {
+                        assert_eq!(
+                            answer["config"].pointer(pointer),
+                            Some(&json!(written)),
+                            "{what}: {pointer}"
+                        );
+                    }
+                }
+                Err(refused) => otherwise.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+            let lost =
+                places_without_their_stored_value(&committed_config_document(&state).await, &[]);
+            assert!(
+                lost.is_empty(),
+                "{what}: the stored document keeps its values: {lost:#?}"
+            );
+        }
+        assert!(
+            otherwise.is_empty(),
+            "the config tool's answers show stored values: {otherwise:#?}"
+        );
+    }
+
+    /// How a write that carries the marker must be refused.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MarkerRefusal {
+        /// As a write that is invalid for its marker: the refusal names the
+        /// marker.
+        NamesTheMarker,
+        /// By this rule or by another one of the tool.
+        Any,
+    }
+
+    /// One write through the config tool on `state`, which must be refused
+    /// as invalid params with nothing written, in a text that holds each
+    /// of `says` and no stored value. Answers what went otherwise, if
+    /// anything.
+    async fn marker_write_refused_on(
+        state: &MeerkatMcpState,
+        what: &str,
+        arguments: &Value,
+        refusal: MarkerRefusal,
+        says: &[&str],
+    ) -> Option<String> {
+        let generation = config_generation(state).await;
+        let document = committed_config_document(state).await;
+        match Box::pin(handle_tools_call(state, "meerkat_config", arguments)).await {
+            Ok(_) => {
+                let written = committed_config_document(state).await.to_string();
+                Some(format!(
+                    "{what}: the write was accepted (the stored document holds the marker text: \
+                     {})",
+                    written.contains(SECRET_MARKER)
+                ))
+            }
+            Err(refused) => {
+                assert_eq!(config_generation(state).await, generation, "{what}");
+                assert_eq!(committed_config_document(state).await, document, "{what}");
+                assert!(
+                    !refused.message.contains(STORED_VALUE_WORDS),
+                    "{what}: a refusal names no value"
+                );
+                (refused.code != -32602
+                    || (refusal == MarkerRefusal::NamesTheMarker
+                        && !(refused.message.contains(SECRET_MARKER)
+                            && says.iter().all(|says| refused.message.contains(says)))))
+                .then(|| {
+                    format!(
+                        "{what}: refused otherwise: {} {} {:?}",
+                        refused.code, refused.message, refused.data
+                    )
+                })
+            }
+        }
+    }
+
+    /// As above, on a state of its own that holds the fixture.
+    async fn marker_write_refused(
+        what: &str,
+        arguments: &Value,
+        refusal: MarkerRefusal,
+    ) -> Option<String> {
+        let (_directory, state) = state_with_stored_values().await;
+        marker_write_refused_on(&state, what, arguments, refusal, &[]).await
+    }
+
+    fn http_server_with_marker(name: &str, url: &str) -> Value {
+        json!({"name": name, "url": url, "headers": {"X-Synthetic": SECRET_MARKER}})
+    }
+
+    fn http_hook_with_marker(id: &str, url: &str) -> Value {
+        hook_entry(
+            id,
+            json!({"type": "http", "url": url, "headers": {"X-Synthetic": SECRET_MARKER}}),
+        )
+    }
+
+    fn bearer_skills_with_marker(name: &str, source: &str, url: &str) -> Value {
+        json!({
+            "name": name,
+            "source_uuid": source,
+            "type": "http",
+            "url": url,
+            "auth": {"scheme": "bearer", "token": SECRET_MARKER},
+        })
+    }
+
+    fn header_skills_with_marker(name: &str, source: &str, url: &str) -> Value {
+        json!({
+            "name": name,
+            "source_uuid": source,
+            "type": "http",
+            "url": url,
+            "auth": {"scheme": "header", "name": "X-Synthetic", "value": SECRET_MARKER},
+        })
+    }
+
+    /// The marker stands for a value the document already holds at the same
+    /// place. A write that carries it where nothing is stored (an added
+    /// entry, a new name inside an entry's value map, another setting's
+    /// whole value) is refused as invalid, and the marker text is never
+    /// stored as a value: by a patch and by a set. Each case on a state of
+    /// its own.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_where_no_value_is_stored() {
+        let document = document_with_stored_values().await;
+        let added_server = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers.push(http_server_with_marker(
+                "added-server",
+                "http://added.synthetic.invalid/mcp",
+            ));
+        });
+        let added_server_by_set = set_twin(&added_server).await;
+        let added_header = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers[1]["headers"]["X-Added"] = json!(SECRET_MARKER);
+        });
+        let added_header_by_set = set_twin(&added_header).await;
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            ("a patch adds an HTTP MCP server", added_server),
+            ("a set adds an HTTP MCP server", added_server_by_set),
+            (
+                "a patch adds a header name to an HTTP MCP server",
+                added_header,
+            ),
+            (
+                "a set adds a header name to an HTTP MCP server",
+                added_header_by_set,
+            ),
+            (
+                "a patch adds an HTTP hook",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks.push(http_hook_with_marker(
+                        "added-hook",
+                        "http://added.synthetic.invalid/hook",
+                    ));
+                }),
+            ),
+            (
+                "a patch adds an HTTP skills repository with a bearer token",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories.push(bearer_skills_with_marker(
+                        "added-skills",
+                        FIFTH_SOURCE,
+                        "http://added.synthetic.invalid/skills",
+                    ));
+                }),
+            ),
+            (
+                "a patch adds an HTTP skills repository with a header value",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories.push(header_skills_with_marker(
+                        "added-skills",
+                        FIFTH_SOURCE,
+                        "http://added.synthetic.invalid/skills",
+                    ));
+                }),
+            ),
+            (
+                "a patch gives an HTTP skills repository another kind of credential",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] = header_skills_with_marker(
+                        "bearer-skills",
+                        SECOND_SOURCE,
+                        "http://synthetic.invalid/skills",
+                    );
+                }),
+            ),
+            (
+                "a patch writes the marker text as another setting's value",
+                json!({"action": "patch", "patch": {"agent": {"system_prompt": SECRET_MARKER}}}),
+            ),
+        ] {
+            not_refused.extend(
+                marker_write_refused(what, &arguments, MarkerRefusal::NamesTheMarker).await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse a marker where nothing is stored: {not_refused:#?}"
+        );
+    }
+
+    /// A marker in an entry that the tool does not add or change anyway (an
+    /// entry that launches a process, an auth profile, an entry written as
+    /// another kind that launches a process) is refused as well, by either
+    /// rule, and nothing is written.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_in_an_entry_the_tool_does_not_add() {
+        let document = document_with_stored_values().await;
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            (
+                "a patch adds an environment name to a stdio MCP server",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[0]["env"]["SYNTHETIC_ADDED"] = json!(SECRET_MARKER);
+                }),
+            ),
+            (
+                "a patch adds a stdio MCP server",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    let mut added = stdio_server_entry("added-server", "/synthetic/added", &[]);
+                    added["env"] = json!({"SYNTHETIC_ADDED": SECRET_MARKER});
+                    servers.push(added);
+                }),
+            ),
+            (
+                "a patch adds an auth profile with an inline source",
+                team_section_patch(
+                    "/auth/added",
+                    json!({
+                        "provider": "openai",
+                        "auth_method": "api_key",
+                        "source": {"kind": "inline_secret", "secret": SECRET_MARKER},
+                    }),
+                ),
+            ),
+            (
+                "a patch adds an environment name to a credential command",
+                team_section_patch(
+                    "/auth/minted/source/env/SYNTHETIC_ADDED",
+                    json!(SECRET_MARKER),
+                ),
+            ),
+            (
+                "an HTTP MCP server written as a stdio one of its name",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    let mut stdio = stdio_server_entry("http-server", "/synthetic/added", &[]);
+                    stdio["env"] = json!({"X-Synthetic": SECRET_MARKER});
+                    servers[1] = stdio;
+                }),
+            ),
+            (
+                "an HTTP hook written as a command hook of its id",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] = hook_entry(
+                        "http-hook",
+                        json!({"type": "command", "command": "/synthetic/added",
+                            "env": {"X-Synthetic": SECRET_MARKER}}),
+                    );
+                }),
+            ),
+            (
+                "an HTTP skills repository written as a git one of its source id",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] = json!({
+                        "name": "bearer-skills",
+                        "source_uuid": SECOND_SOURCE,
+                        "type": "git",
+                        "url": "http://synthetic.invalid/skills",
+                        "auth": {"scheme": "token", "token": SECRET_MARKER},
+                    });
+                }),
+            ),
+        ] {
+            not_refused.extend(marker_write_refused(what, &arguments, MarkerRefusal::Any).await);
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse: {not_refused:#?}"
+        );
+    }
+
+    /// Inside a list the marker stands only for the stored value of the
+    /// same entry: the one stored entry that carries the written entry's
+    /// own key (an MCP server's name, a hook's id, a skills repository's
+    /// source id with its name). An entry written under another key, two
+    /// entries written under one key and entries written under each
+    /// other's keys are refused when they carry the marker: no entry ever
+    /// gets another entry's value. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_bind_a_marker_only_to_the_entry_of_its_own_key() {
+        const FIRST_URL: &str = "http://synthetic.invalid/mcp";
+        const SECOND_URL: &str = "http://two.synthetic.invalid/mcp";
+        const HOOK_URL: &str = "http://synthetic.invalid/hook";
+        const SKILLS_URL: &str = "http://synthetic.invalid/skills";
+        let document = document_with_stored_values().await;
+        let mut not_refused = Vec::new();
+        for (what, arguments) in [
+            (
+                "an HTTP MCP server written under another name",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = http_server_with_marker("renamed-server", FIRST_URL);
+                }),
+            ),
+            (
+                "two HTTP MCP servers written under each other's names",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = http_server_with_marker("http-server", SECOND_URL);
+                    servers[2] = http_server_with_marker("http-server-two", FIRST_URL);
+                }),
+            ),
+            (
+                "an HTTP MCP server written twice under its name",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers[1] = http_server_with_marker("http-server", FIRST_URL);
+                    servers.push(http_server_with_marker("http-server", FIRST_URL));
+                }),
+            ),
+            (
+                "an HTTP MCP server written under the name of another stored one",
+                list_patch(&document, "/tools/mcp_servers", |servers| {
+                    servers.remove(2);
+                    servers[1] = http_server_with_marker("http-server-two", FIRST_URL);
+                }),
+            ),
+            (
+                "an HTTP hook written under another id",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] = http_hook_with_marker("renamed-hook", HOOK_URL);
+                }),
+            ),
+            (
+                "an HTTP hook written twice under its id",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    let hook = http_hook_with_marker("http-hook", HOOK_URL);
+                    hooks[1] = hook.clone();
+                    hooks.push(hook);
+                }),
+            ),
+            (
+                "an HTTP skills repository written under another source id and name",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("renamed-skills", FIFTH_SOURCE, SKILLS_URL);
+                }),
+            ),
+            (
+                "an HTTP skills repository written under another source id",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("bearer-skills", FIFTH_SOURCE, SKILLS_URL);
+                }),
+            ),
+            (
+                "an HTTP skills repository written under another name",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("renamed-skills", SECOND_SOURCE, SKILLS_URL);
+                }),
+            ),
+        ] {
+            not_refused.extend(
+                marker_write_refused(what, &arguments, MarkerRefusal::NamesTheMarker).await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool bound a marker to another entry: {not_refused:#?}"
+        );
+    }
+
+    /// A key that several stored entries share is no entry's own: a marker
+    /// under it is refused, and the refusal says why. Two stored HTTP MCP
+    /// servers of one name; and two stored HTTP hooks written without an
+    /// id, which both take the id `hook`. Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_under_a_key_that_stored_entries_share() {
+        let twin = |url: &str, n: u8| {
+            format!(
+                "[[tools.mcp_servers]]\nname = \"twin\"\nurl = \"{url}\"\n\
+                 headers = {{ X-Synthetic = \"{}\" }}\n\n",
+                stored_value(n)
+            )
+        };
+        let hook = |url: &str, n: u8| {
+            format!(
+                "[[hooks.entries]]\npoint = \"run_started\"\nmode = \"foreground\"\n\
+                 capability = \"observe\"\npriority = 0\n\
+                 runtime = {{ type = \"http\", url = \"{url}\", \
+                 headers = {{ X-Synthetic = \"{}\" }} }}\n\n",
+                stored_value(n)
+            )
+        };
+        let sections = [
+            twin("http://synthetic.invalid/mcp", 1),
+            twin("http://two.synthetic.invalid/mcp", 2),
+            hook("http://synthetic.invalid/hook", 3),
+            hook("http://two.synthetic.invalid/hook", 4),
+        ]
+        .concat();
+        let mut not_refused = Vec::new();
+        for (what, list, places, says) in [
+            (
+                "two stored HTTP MCP servers of one name",
+                "/tools/mcp_servers",
+                ["/0/headers/X-Synthetic", "/1/headers/X-Synthetic"],
+                "twin",
+            ),
+            (
+                "two stored HTTP hooks without an id",
+                "/hooks/entries",
+                [
+                    "/0/runtime/headers/X-Synthetic",
+                    "/1/runtime/headers/X-Synthetic",
+                ],
+                "without an id",
+            ),
+        ] {
+            let (_directory, state) = state_for_team_realm(&sections, &[("org", "")]).await;
+            let document = committed_config_document(&state).await;
+            let mut entries = document.pointer(list).expect("the stored list").clone();
+            for place in places {
+                let value = entries.pointer_mut(place).expect("a stored value");
+                assert!(
+                    value
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(STORED_VALUE_WORDS)),
+                    "{what}: the fixture holds a value at {place}"
+                );
+                *value = json!(SECRET_MARKER);
+            }
+            let arguments = json!({"action": "patch", "patch": patch_at(list, entries)});
+            not_refused.extend(
+                marker_write_refused_on(
+                    &state,
+                    what,
+                    &arguments,
+                    MarkerRefusal::NamesTheMarker,
+                    &[says],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool bound a marker under a shared key: {not_refused:#?}"
+        );
+    }
+
+    /// The entries of the list at `pointer` of `document`, by the value of
+    /// each entry's `key`.
+    fn entries_by_key(document: &Value, pointer: &str, key: &str) -> BTreeMap<String, Value> {
+        document
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("the document's {pointer}"))
+            .iter()
+            .map(|entry| {
+                (
+                    entry[key].as_str().expect("an entry's key").to_string(),
+                    entry.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// A list written in another order resolves each marker by its entry's
+    /// own key, never by position: the write commits, every entry is the
+    /// stored entry of its key with every stored value as before, and the
+    /// list is stored in the written order. For the three lists at once.
+    #[tokio::test]
+    async fn test_config_writes_resolve_a_marker_by_the_entrys_key_in_another_order() {
+        const LISTS: [(&str, &str); 3] = [
+            ("/tools/mcp_servers", "name"),
+            ("/hooks/entries", "id"),
+            ("/skills/repositories", "source_uuid"),
+        ];
+        let (_directory, state) = state_with_stored_values().await;
+        let before = committed_config_document(&state).await;
+        let shown = with_markers(before.clone());
+        let reversed = |pointer: &str| {
+            let mut entries = shown
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .expect("a list")
+                .clone();
+            entries.reverse();
+            json!(entries)
+        };
+        let patch = json!({
+            "tools": {"mcp_servers": reversed("/tools/mcp_servers")},
+            "hooks": {"entries": reversed("/hooks/entries")},
+            "skills": {"repositories": reversed("/skills/repositories")},
+        });
+        let outcome = config_tool_answer(&state, &json!({"action": "patch", "patch": patch})).await;
+        let after = committed_config_document(&state).await;
+        assert!(
+            !after.to_string().contains(SECRET_MARKER),
+            "the stored document holds the marker text after the lists were written in another \
+             order"
+        );
+        if let Err(refused) = &outcome {
+            panic!(
+                "lists written in another order with markers were refused: {} {:?}",
+                refused.message, refused.data
+            );
+        }
+        for (pointer, key) in LISTS {
+            assert_eq!(
+                entries_by_key(&after, pointer, key),
+                entries_by_key(&before, pointer, key),
+                "{pointer}: each entry is the stored entry of its {key}"
+            );
+            let order = |document: &Value| -> Vec<Value> {
+                document
+                    .pointer(pointer)
+                    .and_then(Value::as_array)
+                    .expect("a list")
+                    .iter()
+                    .map(|entry| entry[key].clone())
+                    .collect()
+            };
+            let mut written = order(&before);
+            written.reverse();
+            assert_eq!(order(&after), written, "{pointer} is in the written order");
+        }
+    }
+
+    /// A write that restates the entries as an answer shows them, with the
+    /// marker in place of each stored value, changes none of them: the
+    /// marker is resolved to the stored value before the entries are
+    /// compared, so the write commits, by a patch and by a set, and the
+    /// stored document keeps every value. The answer shows markers again.
+    #[tokio::test]
+    async fn test_config_writes_that_restate_entries_with_markers_still_commit() {
+        let shown = with_markers(document_with_stored_values().await);
+        let patch = json!({"action": "patch", "patch": {
+            "max_tokens": 2048,
+            "tools": {"mcp_servers": shown["tools"]["mcp_servers"]},
+            "hooks": {"entries": shown["hooks"]["entries"]},
+            "skills": {"repositories": shown["skills"]["repositories"]},
+            "realm": {"team": {"auth": shown["realm"]["team"]["auth"]}},
+        }});
+        let mut set = shown.clone();
+        set["max_tokens"] = json!(4096);
+        let set = json!({"action": "set", "config": set});
+        let mut not_committed = Vec::new();
+        for (what, arguments, max_tokens) in [
+            (
+                "a patch that restates the entries with markers",
+                patch,
+                2048,
+            ),
+            ("a set of the document with markers", set, 4096),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            match config_tool_answer(&state, &arguments).await {
+                Ok((text, answer)) => {
+                    if config_generation(&state).await <= generation {
+                        not_committed.push(format!("{what}: nothing was committed"));
+                    }
+                    not_committed.extend(shown_otherwise_than_as_markers(what, &text, &answer));
+                    assert_eq!(
+                        committed_config_document(&state).await["max_tokens"],
+                        json!(max_tokens),
+                        "{what}"
+                    );
+                }
+                Err(refused) => not_committed.push(format!(
+                    "{what}: refused: {} {:?}",
+                    refused.message, refused.data
+                )),
+            }
+            let lost =
+                places_without_their_stored_value(&committed_config_document(&state).await, &[]);
+            assert!(
+                lost.is_empty(),
+                "{what}: the stored document keeps its values: {lost:#?}"
+            );
+        }
+        assert!(
+            not_committed.is_empty(),
+            "the config tool did not take a write that restates the entries with markers: \
+             {not_committed:#?}"
+        );
+    }
+
+    /// The marker does not loosen the tool's rule for entries that launch a
+    /// process: an entry restated with markers and changed besides is
+    /// still refused as host administration, with nothing written (the
+    /// entry is compared whole after the marker is resolved).
+    #[tokio::test]
+    async fn test_config_writes_that_change_a_launching_entry_with_markers_are_refused() {
+        let shown = with_markers(document_with_stored_values().await);
+        let cases = vec![
+            patch_case("a stdio MCP server's arguments", "/tools/mcp_servers", {
+                let mut servers = shown["tools"]["mcp_servers"].clone();
+                servers[0]["args"] = json!(["--more"]);
+                servers
+            }),
+            patch_case(
+                "a stdio MCP server's connect timeout",
+                "/tools/mcp_servers",
+                {
+                    let mut servers = shown["tools"]["mcp_servers"].clone();
+                    servers[0]["connect_timeout_secs"] = json!(30);
+                    servers
+                },
+            ),
+            patch_case("a command hook's command", "/hooks/entries", {
+                let mut hooks = shown["hooks"]["entries"].clone();
+                hooks[0]["runtime"]["command"] = json!("/synthetic/other");
+                hooks
+            }),
+            patch_case(
+                "a stdio skills repository's arguments",
+                "/skills/repositories",
+                {
+                    let mut repositories = shown["skills"]["repositories"].clone();
+                    repositories[0]["args"] = json!(["--more"]);
+                    repositories
+                },
+            ),
+            patch_case("a git skills repository's ref", "/skills/repositories", {
+                let mut repositories = shown["skills"]["repositories"].clone();
+                repositories[3]["git_ref"] = json!("other");
+                repositories
+            }),
+        ];
+        let mut not_refused = Vec::new();
+        for (what, arguments) in cases {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            let document = committed_config_document(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => not_refused.push(format!("{what}: the write was accepted")),
+                Err(refused) => {
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(committed_config_document(&state).await, document, "{what}");
+                    if refused.code != -32602
+                        || refused.data
+                            != Some(json!({"type": "confinement_administration_required"}))
+                    {
+                        not_refused.push(format!(
+                            "{what}: refused otherwise: {} {} {:?}",
+                            refused.code, refused.message, refused.data
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool did not refuse a changed launching entry: {not_refused:#?}"
+        );
+    }
+
+    /// The marker stands for a stored value only in an entry that still
+    /// goes to the stored address. A write that keeps an entry's key,
+    /// changes its URL and carries the marker in the entry's headers or
+    /// token is refused, with nothing written: for an HTTP MCP server, an
+    /// HTTP hook and an HTTP skills repository. The refusal names the
+    /// entry and says to send the secret values again in the same write.
+    /// Each case on a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_refuse_a_marker_in_an_entry_that_goes_to_another_address() {
+        let document = document_with_stored_values().await;
+        let server = list_patch(&document, "/tools/mcp_servers", |servers| {
+            servers[1] = http_server_with_marker("http-server", OTHER_ADDRESS);
+        });
+        let server_by_set = set_twin(&server).await;
+        let mut not_refused = Vec::new();
+        for (what, entry, arguments) in [
+            ("a patch of an HTTP MCP server's URL", "http-server", server),
+            (
+                "a set of an HTTP MCP server's URL",
+                "http-server",
+                server_by_set,
+            ),
+            (
+                "a patch of an HTTP hook's URL",
+                "http-hook",
+                list_patch(&document, "/hooks/entries", |hooks| {
+                    hooks[1] = http_hook_with_marker("http-hook", OTHER_ADDRESS);
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a bearer token",
+                "bearer-skills",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[1] =
+                        bearer_skills_with_marker("bearer-skills", SECOND_SOURCE, OTHER_ADDRESS);
+                }),
+            ),
+            (
+                "a patch of the URL of an HTTP skills repository with a header value",
+                "header-skills",
+                list_patch(&document, "/skills/repositories", |repositories| {
+                    repositories[2] =
+                        header_skills_with_marker("header-skills", THIRD_SOURCE, OTHER_ADDRESS);
+                }),
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            not_refused.extend(
+                marker_write_refused_on(
+                    &state,
+                    what,
+                    &arguments,
+                    MarkerRefusal::NamesTheMarker,
+                    &[entry, "again in the same write"],
+                )
+                .await,
+            );
+        }
+        assert!(
+            not_refused.is_empty(),
+            "the config tool resolved a marker for another address: {not_refused:#?}"
+        );
+    }
+
+    /// The refusal of a patch whose document would no longer load names
+    /// what is wrong and where, and holds no value: neither the line of
+    /// the stored document the error sits on, nor the unexpected value
+    /// itself (the kind of the value and what was expected stay). A patch
+    /// of an auth profile's inline source to an unknown kind; a patch that
+    /// adds a member of the wrong type to a credential command's
+    /// environment (both stored on one line with a secret value); and a
+    /// patch that writes a string where a table, and where a number, is
+    /// expected. Refused as invalid params, nothing written. Each case on
+    /// a state of its own.
+    #[tokio::test]
+    async fn test_config_writes_refused_for_a_document_that_does_not_load_show_no_stored_value() {
+        const WRITTEN: &str = "a written value 77";
+        let mut otherwise = Vec::new();
+        for (what, arguments, says) in [
+            (
+                "an unknown kind of source beside an inline secret",
+                team_section_patch("/auth/inline/source/kind", json!(WRITTEN)),
+                "unknown variant, expected",
+            ),
+            (
+                "a number in a credential command's environment",
+                team_section_patch("/auth/minted/source/env/SYNTHETIC_ADDED", json!(5)),
+                "invalid type: integer, expected",
+            ),
+            (
+                "a string where a source is expected",
+                team_section_patch("/auth/inline/source", json!(WRITTEN)),
+                "invalid type: string, expected",
+            ),
+            (
+                "a string where a number is expected",
+                team_section_patch("/auth/minted/source/timeout_ms", json!(WRITTEN)),
+                "invalid type: string, expected",
+            ),
+        ] {
+            let (_directory, state) = state_with_stored_values().await;
+            let generation = config_generation(&state).await;
+            let document = committed_config_document(&state).await;
+            match Box::pin(handle_tools_call(&state, "meerkat_config", &arguments)).await {
+                Ok(_) => otherwise.push(format!("{what}: the write was accepted")),
+                Err(refused) => {
+                    assert_eq!(config_generation(&state).await, generation, "{what}");
+                    assert_eq!(committed_config_document(&state).await, document, "{what}");
+                    if refused.code != -32602 {
+                        otherwise.push(format!(
+                            "{what}: refused otherwise: {} {:?}",
+                            refused.code, refused.data
+                        ));
+                    }
+                    if refused.message.contains(STORED_VALUE_WORDS) {
+                        otherwise.push(format!("{what}: the refusal holds a stored value"));
+                    } else if refused.message.contains("written value") {
+                        otherwise.push(format!("{what}: the refusal holds the unexpected value"));
+                    } else if !(refused.message.contains("line ")
+                        && refused.message.contains("column ")
+                        && refused.message.contains(says))
+                    {
+                        otherwise.push(format!(
+                            "{what}: the refusal does not say where and what (`{says}`): {}",
+                            refused.message
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            otherwise.is_empty(),
+            "the refusal of a patch whose document does not load did otherwise: {otherwise:#?}"
+        );
+    }
+
+    /// An answer about a stored document that no longer parses says what
+    /// is wrong and where (line and column), and holds no value of the
+    /// document: neither the line the error sits on nor the unexpected
+    /// value itself. The realm's document is broken on the line that holds
+    /// an inline secret: text after the closed table; the secret's string
+    /// where the source's table is expected; the secret's string as the
+    /// kind of source. The config tool's `get`, the capabilities tool and
+    /// the models catalog tool each answer such an error. The name of an
+    /// unknown key is still named.
+    #[tokio::test]
+    async fn test_answers_about_a_stored_document_that_does_not_parse_show_no_stored_value() {
+        let (directory, state) = state_with_stored_values().await;
+        let path =
+            meerkat_store::realm_paths_in(&directory.path().join("realms"), "team").config_path;
+        let text = std::fs::read_to_string(&path).expect("the realm's document");
+        let secret = stored_value(1);
+        let whole = format!("source = {{ kind = \"inline_secret\", secret = \"{secret}\" }}");
+        assert!(text.contains(&whole), "the fixture's inline secret line");
+        let mut otherwise = Vec::new();
+        for (what, broken, says) in [
+            (
+                "text after the closed table",
+                text.replace(&whole, &format!("{whole} }}")),
+                "",
+            ),
+            (
+                "a string where the source is expected",
+                text.replace(&whole, &format!("source = \"{secret}\"")),
+                "invalid type: string, expected",
+            ),
+            (
+                "a string as the kind of source",
+                text.replace(&whole, &format!("source = {{ kind = \"{secret}\" }}")),
+                "unknown variant, expected",
+            ),
+            (
+                "an unknown key",
+                format!("{text}\n[self_hosted.servers.local]\nbearer_token_env = \"NAME\"\n"),
+                "bearer_token_env",
+            ),
+        ] {
+            assert_ne!(broken, text, "{what}");
+            std::fs::write(&path, broken).expect("the broken document");
+            for (tool, arguments) in [
+                ("meerkat_config", json!({"action": "get"})),
+                ("meerkat_capabilities", json!({})),
+                ("meerkat_models_catalog", json!({})),
+            ] {
+                match Box::pin(handle_tools_call(&state, tool, &arguments)).await {
+                    Ok(_) => otherwise.push(format!(
+                        "{what}: {tool} answered a document that does not parse"
+                    )),
+                    Err(refused) => {
+                        if refused.message.contains(STORED_VALUE_WORDS) {
+                            otherwise
+                                .push(format!("{what}: {tool}: the error holds a stored value"));
+                        } else if !(refused.message.contains("line ")
+                            && refused.message.contains("column ")
+                            && refused.message.contains(says))
+                        {
+                            otherwise.push(format!(
+                                "{what}: {tool}: the error does not say where and what \
+                                 (`{says}`): {}",
+                                refused.message
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            otherwise.is_empty(),
+            "an answer about a stored document that does not parse did otherwise: {otherwise:#?}"
+        );
     }
 
     /// Which configuration entries feed a kind of process the host launches.

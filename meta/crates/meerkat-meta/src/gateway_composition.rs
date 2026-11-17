@@ -1610,9 +1610,10 @@ pub fn open_provider_credentials_root(
 // Declared host paths
 // ---------------------------------------------------------------------------
 
-/// Declare to the in-process file tools (`apply_patch`, `blob_save_file`) of
-/// every agent `factory` builds the paths a composition keeps its state and
-/// configuration in, as Meerkat's own hosts do
+/// Declare to the in-process file tools (`apply_patch`, `blob_save_file`,
+/// `blob_load_file`, `view_image`) of every agent `factory` builds the paths
+/// a composition keeps its state and configuration in, as Meerkat's own
+/// hosts do
 /// ([`meerkat::AgentFactory::with_protected_host_inputs`]): `state` are the
 /// directories its stores live in (the state directory, the gateway home),
 /// `named` the configuration files and roots its launch names or adopts. The
@@ -1626,8 +1627,9 @@ pub fn open_provider_credentials_root(
 /// and nowhere else: a path outside that directory is already out of the
 /// tools' reach, and one that contains it is not applied. A `.rkat`
 /// directory under the root is refused without a declaration. The
-/// declaration is about these two tools' writes only: it does not reach a
-/// shell, a hook, an MCP server, or a tool that reads a file.
+/// declaration holds for these tools' writes and reads alike: the two
+/// writing tools write nothing in a declared path and the two reading tools
+/// read nothing in it. It does not reach a shell, a hook or an MCP server.
 pub fn declare_host_paths(
     factory: meerkat::AgentFactory,
     state: impl IntoIterator<Item = PathBuf>,

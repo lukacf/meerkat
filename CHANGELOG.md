@@ -299,6 +299,8 @@ them.
   The TCP listeners are unchanged: a second bind of a taken fixed address
   already failed.
 
+- Mobs: one create of a mob id at a time. While a create of a mob id is under way, another create of that id is refused at once, with nothing built, although the mob is not listed yet: a definition create with `mob already exists: <id>`, a mobpack create with the existing `duplicate mobpack create raced for mob id '<id>' ...` answer. This holds on every surface that creates mobs (the agent mob tools, `mob/create` on `rkat-rpc`, the MCP create, the CLI). The id is free again as soon as that create ends, with or without its mob. If a create never ends, its id stays taken until the host process is restarted; nothing about it is stored, so a restart frees it.
+
 ### Fixed
 
 - `apply_patch`: the tool's description, which the model reads, said that absolute paths are rejected; the tool applies an absolute path that lies inside the project root (on Unix). The description now reads "Paths are relative to the project root; a path that leaves the root, absolute or via '..', is rejected." No behaviour changes.

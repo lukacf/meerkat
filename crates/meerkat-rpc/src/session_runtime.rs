@@ -4815,6 +4815,16 @@ impl SessionRuntime {
         self.runtime_adapter.parked_queued_input_session_count()
     }
 
+    /// Sessions holding a run whose terminal commit landed and whose
+    /// terminal work has stayed unsettled past the notice bound.
+    ///
+    /// Pass-through to the runtime adapter, which is private to this type.
+    /// `None` carries the same report-it-as-unreadable obligation as its
+    /// siblings.
+    pub(crate) fn unsettled_run_session_count(&self) -> Option<usize> {
+        self.runtime_adapter.unsettled_run_session_count()
+    }
+
     /// Active instance id for this runtime, if configured.
     pub fn instance_id(&self) -> Option<String> {
         self.inner.instance_id()

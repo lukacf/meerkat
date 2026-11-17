@@ -1141,6 +1141,11 @@ dimensions. It has no detached-job service probe, so it reports
 `unmeasured:jobs` as a coverage marker and leaves that marker out of the status
 rollup.
 
+REST also measures `session_run_settlement`: `degraded` while a registered
+session holds a run whose terminal commit landed and whose completion has
+stayed unsettled for a minute. Such a session accepts input and runs none of
+it; the host logs an error naming the session and the run.
+
 A plain dimension key is a measured result. `unreadable:<dimension>` means the
 probe ran but could not obtain a reading and rolls the overall status up to at
 least `degraded`. `unmeasured:<dimension>` means this surface has no probe and

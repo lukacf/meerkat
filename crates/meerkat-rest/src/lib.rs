@@ -4814,6 +4814,12 @@ fn rest_runtime_health(state: &AppState) -> meerkat_contracts::RuntimeHostHealth
                 state.runtime_adapter.parked_queued_input_session_count(),
             ),
         ),
+        // Outside the declared dimensions: published as an extra observation
+        // and rolled up like any other.
+        (
+            "session_run_settlement".to_string(),
+            rest_observed_session_population(state.runtime_adapter.unsettled_run_session_count()),
+        ),
     ])
 }
 
@@ -17706,6 +17712,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ] {
             assert_eq!(
                 health["checks"][measured], "ok",

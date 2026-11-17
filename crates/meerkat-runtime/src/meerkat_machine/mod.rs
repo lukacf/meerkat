@@ -2461,6 +2461,20 @@ struct RuntimeExecutorAttachmentMaterializationClaim {
     epoch_id: meerkat_core::RuntimeEpochId,
 }
 
+/// A run whose terminal commit landed and whose terminal work (the completion
+/// receipt of its inputs, or the publication of its interaction terminals)
+/// has stood unsettled for the run settlement notice. The session that holds
+/// it starts nothing further until the work is settled. An observation, read
+/// by [`MeerkatMachine::unsettled_run`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsettledRun {
+    /// The run whose terminal work is unsettled.
+    pub run_id: RunId,
+    /// How long the work has stood unsettled.
+    pub unsettled_for: std::time::Duration,
+}
+
 /// What a run-start hold (#1500) found when it took effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunStartsHold {
@@ -7266,6 +7280,24 @@ impl RuntimeSessionEntry {
         )
     }
 
+    /// Recompute this session's run settlement health from machine lane
+    /// truth and its input ledger.
+    ///
+    /// Nothing is latched and no state exists for this probe on the entry:
+    /// the machine's input phases say whether any row can own a run's
+    /// unsettled terminal work, and those rows and their clocks live in the
+    /// driver's ledger, each read with a non-blocking try in strict
+    /// sequence. No runtime loop has to be alive for it. See
+    /// [`crate::run_progress::observe_run_settlement`] for the predicate
+    /// and the void condition.
+    fn run_settlement_health(
+        &self,
+        notice: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::run_progress::RunSettlementHealth {
+        crate::run_progress::observe_run_settlement(&self.dsl_authority, &self.driver, notice, now)
+    }
+
     fn generated_executor_registration_has_viable_attachment(&self) -> bool {
         self.generated_executor_registration_active()
             && match &self.attachment_slot {
@@ -7848,6 +7880,120 @@ impl MeerkatMachine {
             None
         } else {
             Some(parked)
+        }
+    }
+
+    /// How many registered sessions hold a run whose terminal work has stood
+    /// unsettled for `run_progress::RUN_SETTLEMENT_NOTICE`: the run's
+    /// terminal commit landed, and the completion receipt of its inputs (or,
+    /// for a directed run, the publication of its interaction terminals) did
+    /// not follow.
+    ///
+    /// Such a session starts nothing further: input it is handed is accepted
+    /// and never run. It is counted whether or not a runtime loop is alive
+    /// for it, because both shapes exist: a settling step that does not
+    /// return, and a settling step that failed so that the loop left with
+    /// the work unsettled and the registration kept. The census reads the
+    /// input rows that own the work, so neither shape needs the loop's
+    /// cooperation. It logs nothing: the line that names the session and the
+    /// run is `run_progress::RunSettlementWatchdog`'s, one per unsettled run.
+    ///
+    /// **A lock miss alone is never published as a failed read.** Unlike its
+    /// siblings' reads, a miss on a session's authority or driver is what a
+    /// healthy session in the middle of a commit looks like, and it is tried
+    /// on every session the machine pre-stage leaves open. A read in which
+    /// some session could not be read and no session was positively
+    /// unsettled therefore answers with the last completed reading (a read
+    /// in which every session was read) instead of `None`, so a busy healthy
+    /// host does not read degraded for a scrape. When some session IS
+    /// positively unsettled, the observed fault wins and publishes. What
+    /// that leaves unseen is a session whose driver stays held for good: it
+    /// reads as the last completed reading, and its report is the watchdog's
+    /// line.
+    ///
+    /// `None` only when the session registry itself was not readable, as on
+    /// its siblings, which read the same registry.
+    ///
+    /// Not `async` on purpose, like its siblings: every lock this touches is
+    /// a non-blocking try, so the signature proves the probe cannot park
+    /// behind the state it is trying to report.
+    pub fn unsettled_run_session_count(&self) -> Option<usize> {
+        self.unsettled_run_session_count_at(
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            chrono::Utc::now(),
+        )
+    }
+
+    /// [`Self::unsettled_run_session_count`] for a given notice bound and
+    /// clock reading.
+    fn unsettled_run_session_count_at(
+        &self,
+        notice: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<usize> {
+        let sessions = self.sessions.try_read().ok()?;
+        let mut unsettled = 0_usize;
+        let mut entry_unreadable = false;
+        for entry in sessions.values() {
+            match entry.run_settlement_health(notice, now) {
+                crate::run_progress::RunSettlementHealth::Unsettled { .. } => unsettled += 1,
+                crate::run_progress::RunSettlementHealth::Unreadable => entry_unreadable = true,
+                crate::run_progress::RunSettlementHealth::Clear => {}
+            }
+        }
+        if !entry_unreadable {
+            // Every session was read: this is a completed reading.
+            self.unsettled_run_last_completed_count
+                .store(unsettled, std::sync::atomic::Ordering::Relaxed);
+            return Some(unsettled);
+        }
+        if unsettled > 0 {
+            return Some(unsettled);
+        }
+        Some(
+            self.unsettled_run_last_completed_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// The run of `session_id` whose terminal work has stood unsettled for
+    /// `run_progress::RUN_SETTLEMENT_NOTICE`, if the session holds one: the
+    /// per-session form of [`Self::unsettled_run_session_count`], for an
+    /// owner that knows whose session this is and reports it under that
+    /// name.
+    ///
+    /// `None` when the session is not registered, holds no such run, or
+    /// could not be read without blocking. An observation only: nothing may
+    /// branch on it (see the void condition on
+    /// `run_progress::observe_run_settlement`).
+    ///
+    /// Not `async` on purpose, like the census.
+    pub fn unsettled_run(&self, session_id: &SessionId) -> Option<UnsettledRun> {
+        self.unsettled_run_at(
+            session_id,
+            crate::run_progress::RUN_SETTLEMENT_NOTICE,
+            chrono::Utc::now(),
+        )
+    }
+
+    /// [`Self::unsettled_run`] for a given notice bound and clock reading.
+    fn unsettled_run_at(
+        &self,
+        session_id: &SessionId,
+        notice: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<UnsettledRun> {
+        let sessions = self.sessions.try_read().ok()?;
+        match sessions.get(session_id)?.run_settlement_health(notice, now) {
+            crate::run_progress::RunSettlementHealth::Unsettled {
+                run_id,
+                unsettled_for,
+            } => Some(UnsettledRun {
+                run_id,
+                unsettled_for,
+            }),
+            crate::run_progress::RunSettlementHealth::Clear
+            | crate::run_progress::RunSettlementHealth::Unreadable => None,
         }
     }
 
@@ -11907,6 +12053,11 @@ pub struct MeerkatMachineShared {
     /// reasons still outstanding.
     registration_run_start_holds:
         std::sync::Mutex<HashMap<SessionId, std::collections::BTreeSet<dsl::RunStartHoldReason>>>,
+    /// The count [`MeerkatMachine::unsettled_run_session_count`] last
+    /// published from a read in which every session was read. A later read
+    /// that misses a session's lock and finds nothing unsettled answers with
+    /// it. A cache of one published number: nothing branches on it.
+    unsettled_run_last_completed_count: std::sync::atomic::AtomicUsize,
     /// One-shot deterministic gate after the runtime loop's terminal run
     /// commit landed in the store but before the committed boundary is
     /// acknowledged to the session executor (the turn-finalization boundary
@@ -13769,6 +13920,7 @@ impl MeerkatMachine {
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
                 hosting_owner: meerkat_core::session_hosting::HostingOwner::mint(),
                 sessions: RwLock::new(HashMap::new()),
+                unsettled_run_last_completed_count: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(not(target_arch = "wasm32"))]
                 credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
@@ -14039,6 +14191,7 @@ impl MeerkatMachine {
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
                 hosting_owner: meerkat_core::session_hosting::HostingOwner::mint(),
                 sessions: RwLock::new(HashMap::new()),
+                unsettled_run_last_completed_count: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(not(target_arch = "wasm32"))]
                 credential_release_observer: std::sync::OnceLock::new(),
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(

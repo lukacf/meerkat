@@ -13,4 +13,4 @@
   unknown-outcome error. After a refused start the stop record's native
   shutdown value reads `not_negotiated` where it read `unanswered`: the
   SDKs send a gateway that settled failed no shutdown request; they end
-  its input and reap it.
+  its input and wait for its exit.

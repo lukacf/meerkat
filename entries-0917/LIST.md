@@ -6,7 +6,7 @@ Second edits of the release pages (with the dated limitations) are not here yet:
 
 | Item | File | Where it goes | Now | Size | sha256 | Replaces |
 |---|---|---|---|---|---|---|
-| B17-01 (form 4) | B17-01.txt | replaces the placed item of this key (Meta changelog, Unreleased, Breaking) | place now | 1115 | 8b2eb34f69d0baea69dc36a876fb12297e5296925a97f68b729e62628f5362db | form 3 55025f0d |
+| B17-01 (form 5) | B17-01.txt | replaces the placed item of this key (Meta changelog, Unreleased, Breaking) | place now: one word against form 4 (the author look: the gateway Python adopts is not reaped by the SDK) | 1125 | 88096747749e689cc4d43da027cadd413ae445de50d2505f1b46d758dbf02faf | form 4 8b2eb34f |
 | R01-02 (form 4) | R01-02.txt | replaces the placed item of this key (CHANGELOG.md, Unreleased, Fixed) | place now: replaces the placed form 3; the fallback leg starts at 0.7.2 by a walk of all tags by content | 675 | 6d66cbd0a115648daf7dc8d6a1baae818171512cfc5dccfa69fb71ccbb16b64e | form 3 e6bfcff6 |
 | R03-01 (form 2) | R03-01.txt | replaces the placed item of this key | stands; no later form is owed unless a look asks for one | 1973 | 48172b8793961ffa67530e8ee639cfb02477153ebadb00c55d5a35c382dc0a69 | form 1 |
 | R08-01 (form 2) | R08-01.txt | replaces the placed item of this key (CHANGELOG.md, Unreleased, Fixed) | placed (cda289d72f) | 1383 | 416f67b1507a183d0d973f30a1f0f7e55cfb0b7c6447af6be98b832fe0f3292b | form 1 |

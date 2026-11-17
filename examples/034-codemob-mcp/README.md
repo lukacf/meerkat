@@ -60,7 +60,7 @@ roll back shell/file side effects that already occurred.
 
 ```
 consult(question: "Should I use a B-tree or hash map for this index?")
-consult(question: "Review this function", context: "<code>", model: "claude-opus-4-8")
+consult(question: "Review this function", context: "<code>", model: "claude-opus-5-5")
 
 # Custom persona
 consult(
@@ -84,11 +84,11 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 **Parameters:**
 - `question` (required) — The question or topic
 - `context` — Background information, code snippets, file contents
-- `model` — LLM model (default: `gpt-5.5`; GPT-5.6 requires preview access)
+- `model` — LLM model (default: `gpt-6-astra`)
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
-- `provider_params`: typed **new-session-only** provider settings (e.g. `{"temperature": 0.2}`, or `{"reasoning_effort": "high"}`). Continuation inherits these settings; passing this field with `session_id` is rejected rather than silently ignored.
+- `provider_params`: typed **new-session-only** provider settings (e.g. `{"reasoning_effort": "high"}`, a level every listed model accepts). Continuation inherits these settings; passing this field with `session_id` is rejected rather than silently ignored.
 - `session_id` — Continue a previous session (model/system prompt/shell/provider settings inherited)
 
 ### `deliberate`
@@ -129,14 +129,14 @@ CRUD for user-created mob definitions. Saved to `.codemob-mcp/mobs/` and immedia
 
 | Pack | Agents | Pattern | Default Models |
 |------|--------|---------|---------------|
-| **advisor** | 1 | Single opinion | GPT-5.5 |
-| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Opus |
-| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-5.5, Gemini 3.1 Pro |
-| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Opus |
-| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.1 Flash Lite, GPT-5.5, Opus |
-| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-5.5, Gemini 3.1 Pro, GPT-5.5 Pro, Gemini 3.1 Flash Lite, Sonnet |
-| **implement** | 2 | Implement once, then emit one reviewer gate verdict | Sonnet, GPT-5.5 |
-| **panel** | 5 | Moderator brief, 4 parallel viewpoints, moderator synthesis | Opus, Gemini 3.1 Pro, GPT-5.5, Gemini 3.1 Flash Lite, Sonnet |
+| **advisor** | 1 | Single opinion | GPT-6 Astra |
+| **review** | 4 | 3 parallel reviewers → synthesis | Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Opus |
+| **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-6 Astra, Gemini 4 Argon |
+| **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Opus |
+| **red-team** | 3 | Advocate + adversary → judge | Gemini 3.5 Flash Lite, GPT-6 Astra, Opus |
+| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-6 Astra, Gemini 4 Argon, GPT-6.1 Sol, Gemini 3.5 Flash Lite, Sonnet |
+| **implement** | 2 | Implement once, then emit one reviewer gate verdict | Sonnet, GPT-6 Astra |
+| **panel** | 5 | Moderator brief, 4 parallel viewpoints, moderator synthesis | Opus, Gemini 4 Argon, GPT-6 Astra, Gemini 3.5 Flash Lite, Sonnet |
 
 Each pack uses a diverse set of models by default so its roles can contribute
 different perspectives.
@@ -145,17 +145,15 @@ different perspectives.
 
 | Model | Provider | Strengths | Used as default for |
 |-------|----------|-----------|-------------------|
-| `claude-opus-5` | Anthropic | Latest Anthropic reasoning model | Available for override |
-| `claude-opus-4-8` | Anthropic | Advanced reasoning | Judge, moderator, synthesizer, orchestrator |
-| `gpt-5.6-sol` | OpenAI | Frontier capability and quality | Preview-enabled override |
-| `gpt-5.6-terra` | OpenAI | Balanced intelligence and cost | Preview-enabled override |
-| `gpt-5.6-luna` | OpenAI | Efficient high-volume work | Preview-enabled override |
-| `gpt-5.5` | OpenAI | Broadly available general + code | Standalone consult, implementer, critic, advisor, security reviewer |
-| `gemini-3.1-pro-preview` | Google | Strong general | General reviewer, purist, guardian |
-| `gemini-3.1-flash-lite-preview` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
-| `gemini-3.5-flash` | Google | Current fast model | Available for override |
-| `claude-sonnet-4-6` | Anthropic | Fast + capable | RCT aggregator, implementer |
-| `gpt-5.5-pro` | OpenAI | Deepest reasoning | RCT `integration_sheriff` (slow — use sparingly) |
+| `claude-opus-5-5` | Anthropic | Advanced reasoning | Judge, moderator, synthesizer, orchestrator |
+| `claude-sonnet-5-5` | Anthropic | Fast + capable | RCT aggregator, implementer |
+| `gpt-6-astra` | OpenAI | General + code | Standalone consult, implementer, critic, advisor, security reviewer |
+| `gpt-6.1-sol` | OpenAI | Frontier capability and quality | RCT `integration_sheriff` |
+| `gpt-6.1-terra` | OpenAI | Balanced intelligence and cost | Available for override |
+| `gpt-6-luna` | OpenAI | Efficient high-volume work | Available for override |
+| `gemini-4-argon` | Google | Strong general | General reviewer, purist, guardian |
+| `gemini-3.5-flash-lite` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
+| `gemini-4-hydrogen` | Google | Current fast model | Available for override |
 
 ## Skills
 
@@ -196,7 +194,7 @@ Override the default model for any role in a pack:
 deliberate(
   pack: "review",
   task: "...",
-  model_overrides: {"security": "claude-opus-4-8", "perf": "gpt-5.5-pro"}
+  model_overrides: {"security": "claude-opus-5-5", "perf": "gpt-6.1-sol"}
 )
 ```
 
@@ -233,7 +231,7 @@ deliberate(
 
 consult(
   question: "...",
-  model: "gpt-5.5-pro",
+  model: "gpt-6.1-sol",
   provider_params: {"reasoning_effort": "high"}
 )
 ```

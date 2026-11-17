@@ -90,7 +90,7 @@ async fn assert_two_turns(initial_turn: InitialTurnPolicy) {
     let created = tokio::time::timeout(
         Duration::from_secs(15),
         service.create_session(CreateSessionRequest {
-            model: "gemini-3.5-flash".into(),
+            model: "gemini-4-hydrogen".into(),
             prompt: "Reply with the synthetic marker.".into(),
             injected_context: Vec::new(),
             system_prompt: SystemPromptOverride::Set(

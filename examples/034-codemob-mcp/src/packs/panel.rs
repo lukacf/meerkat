@@ -42,31 +42,31 @@ impl Pack for PanelPack {
                 "moderator",
                 "moderator-skill",
                 "Neutral moderator — keeps discussion productive",
-                resolve_model(overrides, "moderator", "claude-opus-4-8"),
+                resolve_model(overrides, "moderator", "claude-opus-5-5"),
             ),
             (
                 "purist",
                 "purist-skill",
                 "Architecture purist — demands clean design",
-                resolve_model(overrides, "purist", "gemini-3.1-pro-preview"),
+                resolve_model(overrides, "purist", "gemini-4-argon"),
             ),
             (
                 "pragmatist",
                 "pragmatist-skill",
                 "Pragmatist — ship it and iterate",
-                resolve_model(overrides, "pragmatist", "gpt-5.5"),
+                resolve_model(overrides, "pragmatist", "gpt-6-astra"),
             ),
             (
                 "skeptic",
                 "skeptic-skill",
                 "Skeptic — doubts everything, finds edge cases",
-                resolve_model(overrides, "skeptic", "gemini-3.1-flash-lite-preview"),
+                resolve_model(overrides, "skeptic", "gemini-3.5-flash-lite"),
             ),
             (
                 "veteran",
                 "veteran-skill",
                 "Industry veteran — 20 years of war stories",
-                resolve_model(overrides, "veteran", "claude-sonnet-4-6"),
+                resolve_model(overrides, "veteran", "claude-sonnet-5-5"),
             ),
         ];
 

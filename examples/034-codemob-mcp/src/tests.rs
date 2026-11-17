@@ -82,7 +82,7 @@ fn fixture() -> tempfile::TempDir {
 
 fn request() -> CreateSessionRequest {
     CreateSessionRequest {
-        model: "gemini-3.5-flash".into(),
+        model: "gemini-4-hydrogen".into(),
         prompt: "".into(),
         injected_context: vec![],
         system_prompt: SystemPromptOverride::Set(
@@ -134,7 +134,7 @@ async fn new_consult_applies_provider_params_before_first_request() {
     let state = ForceState::with_test_client(dir.path(), client.clone());
     let result = consult::handle(
         &state,
-        &json!({"question":"synthetic", "model":"gemini-3.5-flash", "provider_params":{"temperature":0.2}}),
+        &json!({"question":"synthetic", "model":"gemini-4-hydrogen", "provider_params":{"temperature":0.2}}),
         None,
     ).await.unwrap();
     assert_eq!(client.requests.lock().unwrap()[0].temperature, Some(0.2));
@@ -160,7 +160,7 @@ async fn reasoning_effort_is_one_named_level_and_is_never_sent_unchecked() {
     // A level outside the seven names is refused as invalid params.
     let error = consult::handle(
         &state,
-        &json!({"question":"synthetic", "model":"gemini-3.5-flash", "provider_params":{"reasoning_effort":"extreme"}}),
+        &json!({"question":"synthetic", "model":"gemini-4-hydrogen", "provider_params":{"reasoning_effort":"extreme"}}),
         None,
     )
     .await
@@ -173,7 +173,7 @@ async fn reasoning_effort_is_one_named_level_and_is_never_sent_unchecked() {
     // sending a level nobody checked.
     let error = consult::handle(
         &state,
-        &json!({"question":"synthetic", "model":"gemini-3.5-flash", "provider_params":{"reasoning_effort":"high"}}),
+        &json!({"question":"synthetic", "model":"gemini-4-hydrogen", "provider_params":{"reasoning_effort":"high"}}),
         None,
     )
     .await
@@ -190,7 +190,7 @@ async fn consult_preserves_creation_params_and_publishes_continuable_session() {
     let state = ForceState::with_test_client(dir.path(), client.clone());
     let executor = executor();
     let context = executor.begin_request("create", noop_request_action());
-    let result = consult::handle(&state, &json!({"question":"synthetic", "model":"gemini-3.5-flash", "provider_params":{"temperature":0.2}}), Some(context)).await.unwrap();
+    let result = consult::handle(&state, &json!({"question":"synthetic", "model":"gemini-4-hydrogen", "provider_params":{"temperature":0.2}}), Some(context)).await.unwrap();
     assert_eq!(
         executor.publish_or_cancelled("create").await.unwrap(),
         PublishOutcome::Published
@@ -287,7 +287,7 @@ async fn assert_pack_templates(name: &str) {
     let overrides: BTreeMap<_, _> = pack
         .roles()
         .into_keys()
-        .map(|name| (name, "gemini-3.5-flash"))
+        .map(|name| (name, "gemini-4-hydrogen"))
         .collect();
     let before = client.requests.lock().unwrap().len();
     let progress = Arc::new(Mutex::new(Vec::new()));
@@ -369,7 +369,7 @@ async fn custom_modes_admit_members_and_preserve_task_aliases_as_opaque_data() {
     for mode in ["comms", "flow"] {
         let mut config = json!({
             "name":mode, "description":"synthetic",
-            "agents": {"lead":{"model":"gemini-3.5-flash", "skill":"Return the requested artifact."}},
+            "agents": {"lead":{"model":"gemini-4-hydrogen", "skill":"Return the requested artifact."}},
         });
         if mode == "flow" {
             config["mode"] = json!("flow");
@@ -423,7 +423,7 @@ async fn already_cancelled_consult_and_deliberate_admit_nothing() {
         } else {
             consult::handle(
                 &state,
-                &json!({"question":"synthetic", "model":"gemini-3.5-flash"}),
+                &json!({"question":"synthetic", "model":"gemini-4-hydrogen"}),
                 Some(context),
             )
             .await
@@ -588,7 +588,7 @@ async fn admitted_consult_cancel_joins_turn_and_discards_unpublished_actor() {
     let state = ForceState::with_test_client(dir.path(), client.clone());
     let executor = executor();
     let context = executor.begin_request("running", noop_request_action());
-    let arguments = json!({"question":"synthetic", "model":"gemini-3.5-flash"});
+    let arguments = json!({"question":"synthetic", "model":"gemini-4-hydrogen"});
     let work = consult::handle(&state, &arguments, Some(context));
     let cancel = async {
         client.started.notified().await;
@@ -619,7 +619,7 @@ async fn cancel_between_consult_completion_and_publication_discards_actor() {
     let context = executor.begin_request("publish", noop_request_action());
     consult::handle(
         &state,
-        &json!({"question":"synthetic", "model":"gemini-3.5-flash"}),
+        &json!({"question":"synthetic", "model":"gemini-4-hydrogen"}),
         Some(context),
     )
     .await
@@ -645,7 +645,7 @@ async fn reload_restores_builtin_after_override_and_removes_ordinary_custom_pack
     std::fs::create_dir_all(&mobs_dir).unwrap();
     for name in ["review", "ordinary"] {
         let path = mobs_dir.join(format!("{name}.json"));
-        std::fs::write(&path, json!({"name":name, "description":"override", "agents":{"custom_role":{"model":"gemini-3.5-flash", "skill":"Synthetic role"}}}).to_string()).unwrap();
+        std::fs::write(&path, json!({"name":name, "description":"override", "agents":{"custom_role":{"model":"gemini-4-hydrogen", "skill":"Synthetic role"}}}).to_string()).unwrap();
         state.reload_user_packs();
         assert_eq!(
             state.pack_registry().get(name).unwrap().description(),
@@ -653,7 +653,7 @@ async fn reload_restores_builtin_after_override_and_removes_ordinary_custom_pack
         );
         assert_eq!(
             state.pack_registry().get(name).unwrap().roles(),
-            BTreeMap::from([("custom_role".into(), "gemini-3.5-flash".into())])
+            BTreeMap::from([("custom_role".into(), "gemini-4-hydrogen".into())])
         );
         std::fs::remove_file(path).unwrap();
         state.reload_user_packs();

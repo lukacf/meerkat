@@ -38,25 +38,25 @@ impl Pack for ReviewPack {
                 "reviewer",
                 "reviewer-skill",
                 "General code reviewer",
-                "gemini-3.1-pro-preview",
+                "gemini-4-argon",
             ),
             (
                 "security",
                 "security-skill",
                 "Security-focused reviewer",
-                "gpt-5.5",
+                "gpt-6-astra",
             ),
             (
                 "perf",
                 "perf-skill",
                 "Performance-focused reviewer",
-                "gemini-3.1-flash-lite-preview",
+                "gemini-3.5-flash-lite",
             ),
             (
                 "synthesizer",
                 "synthesizer-skill",
                 "Review synthesizer",
-                "claude-opus-4-8",
+                "claude-opus-5-5",
             ),
         ];
 

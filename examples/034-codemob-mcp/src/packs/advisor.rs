@@ -35,7 +35,7 @@ impl Pack for AdvisorPack {
         profiles.insert(
             ProfileName::from("advisor"),
             turn_driven_profile(
-                resolve_model(overrides, "advisor", "gpt-5.5"),
+                resolve_model(overrides, "advisor", "gpt-6-astra"),
                 "advisor-skill",
                 "Technical advisor",
                 pp,

@@ -315,6 +315,48 @@ them.
   governed application tool policy and a host's dispatch admission are not
   asked.
 
+- `rkat`, `meerkat-mcp`, `meerkat-core`: a stdio MCP server that fails during
+  setup now shows why. Since 0.9.3 the host captures such a server's stderr
+  as a bounded, redacted tail and records the phase, the class of the failure
+  and the server's own exit status, but `rkat` showed none of it: its
+  operator read only the transport's text, such as
+  `connection closed: initialize response`.
+  - The `detail` of the server's `Failed` lifecycle notice (the
+    `tool_config_changed` event, and the CLI's `--wait-for-mcp` warning)
+    keeps the transport's text and adds, in fixed words, the phase (`launch`,
+    `initialize` or `tool discovery`) and what the transport established,
+    with the server's own exit status or signal where its close proved it.
+    For example: `...; stdio setup failed during initialize: the server
+    process ended, exit status 3`. A signal reads
+    `killed by signal 9 (SIGKILL)`.
+  - `rkat` also tells its operator, on its own stderr only and once per
+    failed server, that sentence and the last lines the server wrote to
+    stderr: at most 40 lines and 4 KiB of the retained tail, marked when
+    earlier output is not shown and when the end of the server's stderr was
+    not reached. It does so after the `--wait-for-mcp` wait, also when that
+    wait refuses the run, and otherwise when the run ends. A confined
+    server's last stderr lines are shown this way too; `rkat` showed them
+    nowhere before. A trusted-host server's stderr is still also written to
+    `rkat`'s stderr as it arrives.
+  - What the shown tail can hold: values of 8 bytes or more that the host
+    passed in the server's environment (the first 64, declared secrets
+    first) are removed from it exactly, and secret-shaped text is removed.
+    Launch arguments are not removed exactly, only where they are
+    secret-shaped: a secret belongs in `secret_env`, not in an argument.
+  - The stderr tail still never reaches the model, lifecycle notices, events
+    or errors, and the model's setup-failure notice is unchanged and carries
+    no class. Only the phase, the class and the exit status are added to the
+    notice's detail.
+  - Other hosts (`rkat-rpc`, `rkat-rest`, a governed realm's sessions) show
+    the phase and the exit status in that event's detail and do not print
+    the tail. A host built on the Rust API reads it with
+    `McpRouterAdapter::stdio_stderr_tail`, or with the new
+    `McpRouterAdapter::claim_stdio_failure_reports`, which returns each
+    retained failure once with its tail (sensitive: host and operator
+    only). `McpStdioSetupFailure`, `McpStdioSetupPhase`,
+    `McpStdioSetupFailureClass` and `McpStdioExit` implement `Display`.
+  - Not covered: a server that dies during a call, after a good setup.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

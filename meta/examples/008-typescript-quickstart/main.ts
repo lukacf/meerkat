@@ -15,7 +15,6 @@
  * Step 1 needs no provider key. Steps 2 and 3 run when OPENAI_API_KEY is set;
  * without it they say so.
  */
-import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,9 +54,9 @@ async function main(): Promise<number> {
     return 2;
   }
   // `persistentState` is what makes the agent outlive this process: its
-  // session and its history are kept under that directory.
+  // session and its history are kept under that directory, which the
+  // gateway creates.
   const stateDir = process.env.EXAMPLE_STATE_DIR ?? join(HERE, ".meta", "state");
-  mkdirSync(stateDir, { recursive: true });
 
   const runtime = await Meta.builder()
     .mob(join(HERE, "config", "mob.toml"))

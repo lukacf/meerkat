@@ -11883,6 +11883,11 @@ impl MobRuntime {
             }
             handle
         };
+        // A side chat's `memory` tool is gated as its source agent's own is:
+        // by the definition this mob runs (a resumed mob runs its stored
+        // one), which is the handle's.
+        spec.side_chat_memory_slot
+            .bind_definition(handle.definition());
         if let Some(state) = agent_mob_mcp_state.as_ref() {
             state.mob_insert_handle(mob_id, handle.observer()).await;
             match child_mob_root_claim.as_ref() {

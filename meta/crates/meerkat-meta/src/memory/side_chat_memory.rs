@@ -11,17 +11,48 @@
 //! over the overlay the build carries, at the one seam every member session
 //! create passes (the pre-build service wrapper, which the fork's seating
 //! and every rebuild of the side chat go through). The `fork_off` children of
-//! a side chat carry the marker too, so their memory is theirs. The tools
-//! list keeps its order and shape: a side chat whose overlay has no `memory`
-//! tool (memory is not configured, the recorder is off, or the profile has
-//! no memory) gains none. A forged marker on another member only binds that
+//! a side chat carry the marker too, so their memory is theirs.
+//!
+//! The rebinding is late-bound. The overlay a side chat is built over is its
+//! source's, and its source's build publishes into it at any time: after a
+//! restart an agent's tools are published in the new process only once the
+//! agent is built there, which may be after its side chat's build. And a
+//! side chat may be built before its composition has bound its recorder at
+//! all: a member that owes work when its mob starts is built while the mob
+//! starts. So the seam never looks at what the overlay holds, or at what is
+//! bound, when the side chat is built. In a composition that says it binds
+//! a recorder ([`SideChatMemorySlot::expect_recorder`], or a fill), a side
+//! chat's overlay is always wrapped ([`RecorderToolDispatcher::rebinding`]),
+//! and the wrapper decides at every read of the side chat's tools:
+//!
+//! - it never passes a `memory` tool of the overlay through;
+//! - while the recorder is not bound yet, it offers no `memory` tool;
+//! - once it is bound, it offers the side chat's own `memory` tool when its
+//!   source's build has one, by the source's own gate
+//!   ([`SideChatMemoryGate`]): whether or not its source was built in this
+//!   process yet, and nothing wakes the source for it;
+//! - else it offers the side chat's own while the overlay holds a `memory`
+//!   tool (a tool of that name a host gave the source).
+//!
+//! The gate is the source's: where an agent's recorder is attached per
+//! profile, a side chat is offered `memory` up front only when the member
+//! it was forked from is a registered agent's member (Core's identity
+//! entries tell, as below) on a profile that enables agent memory. A side
+//! chat of any other member, which has no recorder of its own, is offered
+//! `memory` only while the tools it carries hold one.
+//!
+//! A side chat whose source's build has no `memory` tool (memory is not
+//! configured, the recorder is off, or the source's profile has no agent
+//! memory) gains none. A forged marker on another member only binds that
 //! member's memory tool to its own identity, as its own build does.
 //!
 //! A member private to a person ([`crate::access::PRIVATE_TO_LABEL`]: a
 //! private side chat and every member it creates) keeps its memory to
 //! itself the same way, and its recorder runs inside no mob: its
 //! `propose_to_mob`, which would move its memory into a scope its mob
-//! shares, is refused as the tool's call outside a mob.
+//! shares, is refused as the tool's call outside a mob. A private member
+//! that is no side chat keeps a `memory` tool only while the tools it
+//! carries hold one.
 //!
 //! Where such a member's records are kept depends on what it is. A member
 //! that is no registered agent's keeps them in the identity scope of its
@@ -46,63 +77,285 @@
 //! would be every council's.
 //!
 //! The slot is late-bound: a composition fills it when its memory stack
-//! attaches a recorder, as it fills the dispatch-time taint slot.
+//! attaches a recorder, as it fills the dispatch-time taint slot, and the
+//! mob's bootstrap binds the definition the mob runs.
 
-use std::sync::{Arc, RwLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use meerkat_core::service::CreateSessionRequest;
 
 use crate::identity_first::agent_memory::{
-    AgentMemoryConfig, AgentMemoryProvider, COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY, MEMORY_TOOL_NAME,
-    MemberMemoryKept, MemoryRecorder, RecorderToolDispatcher,
+    AgentMemoryConfig, AgentMemoryProvider, COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY, MemberMemoryKept,
+    MemoryRecorder, ReboundMemory, ReboundRecorder, RecorderToolDispatcher,
+    definition_profile_enables_agent_memory,
 };
 
+/// Whether the build of a side chat's source has the recorder: the gate the
+/// composition's own recorders are attached by.
+#[derive(Clone)]
+pub(crate) enum SideChatMemoryGate {
+    /// Every member's build has the recorder: the composition attaches it
+    /// to each member spawn (`crate::memory::MemorySpawnCustomizer`).
+    EveryMember,
+    /// A registered agent's build has the recorder when its profile enables
+    /// agent memory (`definition_profile_enables_agent_memory`): the host's
+    /// explicit answers per profile, else the mob definition's inline
+    /// profile. No other member's build has it.
+    AgentProfiles(BTreeMap<meerkat_mob::ProfileName, bool>),
+}
+
 /// The memory surface a side chat's own recorder is built from: the
-/// provider and configuration the composition's recorders use.
+/// provider and configuration the composition's recorders use, and their
+/// gate.
 #[derive(Clone)]
 struct SideChatRecorderSource {
     provider: Arc<dyn AgentMemoryProvider>,
     config: AgentMemoryConfig,
+    gate: SideChatMemoryGate,
+}
+
+/// What a composition has said of the recorder its side chats are bound to.
+#[derive(Clone, Default)]
+enum RecorderSourceState {
+    /// The composition binds no recorder (it has no agent memory, its
+    /// recorder is off, or its provider takes no authored writes): no build
+    /// is touched, and a build wrapped before this was known serves its
+    /// tools as they are.
+    #[default]
+    Unbound,
+    /// The composition binds a recorder and has not yet: a build is
+    /// wrapped and offers no `memory` tool until it is bound.
+    Awaited,
+    /// The recorder is bound.
+    Bound(SideChatRecorderSource),
 }
 
 /// Late-bound recorder source for side chat builds; empty until the
 /// composition's memory stack attaches a recorder.
 #[derive(Clone, Default)]
 pub(crate) struct SideChatMemorySlot {
-    source: Arc<RwLock<Option<SideChatRecorderSource>>>,
+    source: Arc<RwLock<RecorderSourceState>>,
+    /// The definition of the mob these builds are members of, bound when
+    /// the mob is built: what [`SideChatMemoryGate::AgentProfiles`] reads a
+    /// profile from, as an agent's own recorder does.
+    definition: Arc<RwLock<Option<Arc<meerkat_mob::MobDefinition>>>>,
     /// What tells a registered agent's member from every other member.
     entries: Arc<RwLock<IdentityEntriesReader>>,
 }
 
 impl std::fmt::Debug for SideChatMemorySlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let recorder = match self.recorder_state() {
+            RecorderSourceState::Unbound => "unbound",
+            RecorderSourceState::Awaited => "awaited",
+            RecorderSourceState::Bound(_) => "bound",
+        };
         f.debug_struct("SideChatMemorySlot")
-            .field("filled", &self.recorder_source().is_some())
+            .field("recorder", &recorder)
+            .field("definition_bound", &self.bound_definition().is_some())
             .finish()
     }
 }
 
-impl SideChatMemorySlot {
-    /// Fill the slot with the provider and configuration the composition's
-    /// member recorders use. A configuration whose recorder is off, or a
-    /// provider without authored writes, gives side chats no recorder, as it
-    /// gives no member one.
-    pub(crate) fn fill(&self, provider: Arc<dyn AgentMemoryProvider>, config: AgentMemoryConfig) {
-        if !(config.recorder_tool && provider.supports_authored_writes()) {
-            return;
+/// What the seam reads of a member's build for its late-bound recorder.
+struct MemberRecorderFacts {
+    /// The member's own memory identity.
+    identity: crate::identity_first::AgentIdentity,
+    /// The person the member is private to, if it is private.
+    owner: Option<String>,
+    /// Whether the member is a temporary council's participant.
+    council_participant: bool,
+    /// The member's roster id.
+    member_id: meerkat_mob::ids::AgentIdentity,
+    /// The mob the member is built in.
+    mob_id: String,
+    /// The member's profile.
+    profile: String,
+    /// The roster id of the member a side chat was forked from; `None` for
+    /// a member that is no side chat.
+    side_chat_of: Option<meerkat_mob::ids::AgentIdentity>,
+}
+
+/// The late-bound recorder of one wrapped member build: asked at every read
+/// of the member's tools, it answers from what the slot holds then.
+struct MemberRebinding {
+    slot: SideChatMemorySlot,
+    member: MemberRecorderFacts,
+    /// The member's recorder, built at the first read that offers it.
+    recorder: OnceLock<MemoryRecorder>,
+}
+
+impl ReboundRecorder for MemberRebinding {
+    fn memory(&self, inner_holds_memory: bool) -> ReboundMemory<'_> {
+        let source = match self.slot.recorder_state() {
+            RecorderSourceState::Unbound => return ReboundMemory::Untouched,
+            RecorderSourceState::Awaited => return ReboundMemory::Withheld,
+            RecorderSourceState::Bound(source) => source,
+        };
+        if !(inner_holds_memory
+            || self
+                .slot
+                .source_build_has_memory(&source.gate, &self.member))
+        {
+            return ReboundMemory::Withheld;
         }
+        ReboundMemory::Own(
+            self.recorder
+                .get_or_init(|| self.slot.member_recorder(source, &self.member)),
+        )
+    }
+}
+
+impl SideChatMemorySlot {
+    /// From now on this slot's composition binds a recorder: a side chat
+    /// built before the fill is wrapped and offers no `memory` tool until
+    /// then. What a composition says before its mob is built when it fills
+    /// the slot only afterwards. A slot that is filled stays filled.
+    pub(crate) fn expect_recorder(&self) {
+        let mut source = self
+            .source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*source, RecorderSourceState::Unbound) {
+            *source = RecorderSourceState::Awaited;
+        }
+    }
+
+    /// Fill the slot with the provider and configuration the composition's
+    /// agent recorders use, gated per agent profile by the mob definition
+    /// alone ([`Self::fill_gated`] with no explicit answer).
+    pub(crate) fn fill(&self, provider: Arc<dyn AgentMemoryProvider>, config: AgentMemoryConfig) {
+        self.fill_gated(
+            provider,
+            config,
+            SideChatMemoryGate::AgentProfiles(BTreeMap::new()),
+        );
+    }
+
+    /// Fill the slot with the provider and configuration the composition's
+    /// member recorders use and the gate they are attached by. A
+    /// configuration whose recorder is off, or a provider without authored
+    /// writes, gives side chats no recorder, as it gives no member one: the
+    /// slot then says that the composition binds none.
+    pub(crate) fn fill_gated(
+        &self,
+        provider: Arc<dyn AgentMemoryProvider>,
+        config: AgentMemoryConfig,
+        gate: SideChatMemoryGate,
+    ) {
+        let state = if config.recorder_tool && provider.supports_authored_writes() {
+            RecorderSourceState::Bound(SideChatRecorderSource {
+                provider,
+                config,
+                gate,
+            })
+        } else {
+            RecorderSourceState::Unbound
+        };
         *self
             .source
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(SideChatRecorderSource { provider, config });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
     }
 
-    fn recorder_source(&self) -> Option<SideChatRecorderSource> {
+    /// Bind the definition of the mob these builds are members of: the one
+    /// an agent's own recorder reads its profile from.
+    pub(crate) fn bind_definition(&self, definition: &meerkat_mob::MobDefinition) {
+        *self
+            .definition
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(definition.clone()));
+    }
+
+    fn recorder_state(&self) -> RecorderSourceState {
         self.source
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn bound_definition(&self) -> Option<Arc<meerkat_mob::MobDefinition>> {
+        self.definition
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether the build of the member a side chat was forked from has the
+    /// recorder, by `gate`; `false` for a member that is no side chat.
+    ///
+    /// Per agent profile the answer is the source's own: the source is a
+    /// registered agent's member (asked of Core's identity entries, as
+    /// [`IdentityEntriesSlot::names_registered_agent`] does) and its
+    /// profile enables agent memory
+    /// (`definition_profile_enables_agent_memory`). While that cannot be
+    /// told (the entries' reader or the mob's definition is not bound yet)
+    /// the answer is `false`, and the next read asks again.
+    fn source_build_has_memory(
+        &self,
+        gate: &SideChatMemoryGate,
+        member: &MemberRecorderFacts,
+    ) -> bool {
+        let Some(source_member) = member.side_chat_of.as_ref() else {
+            return false;
+        };
+        match gate {
+            SideChatMemoryGate::EveryMember => true,
+            SideChatMemoryGate::AgentProfiles(explicit) => {
+                if self
+                    .identity_entries()
+                    .names_registered_agent(source_member)
+                    != Some(true)
+                {
+                    return false;
+                }
+                let profile = meerkat_mob::ProfileName::from(member.profile.as_str());
+                match self.bound_definition() {
+                    Some(definition) => {
+                        definition_profile_enables_agent_memory(&definition, &profile, explicit)
+                    }
+                    None => explicit.get(&profile).copied().unwrap_or(false),
+                }
+            }
+        }
+    }
+
+    /// The recorder of `member`, built from `source`: where the member's
+    /// records are kept is its own (see the module docs).
+    fn member_recorder(
+        &self,
+        source: SideChatRecorderSource,
+        member: &MemberRecorderFacts,
+    ) -> MemoryRecorder {
+        let recorder = MemoryRecorder::new(
+            source.provider,
+            source.config,
+            member.identity.clone(),
+            member.owner.is_none().then(|| member.mob_id.clone()),
+        );
+        match member.owner.clone() {
+            _ if member.council_participant => recorder.kept(MemberMemoryKept::Nowhere(
+                COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY,
+            )),
+            None => recorder,
+            Some(owner) => {
+                let entries = self.identity_entries();
+                let member_id = member.member_id.clone();
+                recorder.kept_as_decided_later(Arc::new(move || {
+                    entries
+                        .names_registered_agent(&member_id)
+                        .map(|registered| {
+                            if registered {
+                                MemberMemoryKept::UnderItsName
+                            } else {
+                                MemberMemoryKept::UnderItsOwner(owner.clone())
+                            }
+                        })
+                }))
+            }
+        }
     }
 
     /// `hook`, then [`Self::bind_side_chat_memory`]: the pre-build hook of
@@ -124,21 +377,27 @@ impl SideChatMemorySlot {
         })
     }
 
-    /// Bind the `memory` tool of a side chat's build to the side chat's own
-    /// identity (see the module docs), and the `memory` tool of a member
-    /// private to a person to a recorder inside no mob: its
-    /// `propose_to_mob`, which would move its memory into a scope its mob
-    /// shares, is refused. A private member that is no registered agent's
-    /// keeps its records under its owner and its name, and a temporary
-    /// council's participant keeps none (see the module docs). Nothing
-    /// changes for a request that is not a member build, a member that is
-    /// neither a side chat nor private, an overlay without a `memory` tool,
-    /// or an unfilled slot.
+    /// Wrap the tools of a side chat's build, and of the build of a member
+    /// private to a person, so that their `memory` tool is the member's own
+    /// (see the module docs): bound to the member's own identity, for a
+    /// private member inside no mob (its `propose_to_mob`, which would move
+    /// its memory into a scope its mob shares, is refused). A private
+    /// member that is no registered agent's keeps its records under its
+    /// owner and its name, and a temporary council's participant keeps
+    /// none. The recorder itself is built late, at the first read of the
+    /// member's tools that offers it.
+    ///
+    /// Nothing changes for a request that is not a member build, a member
+    /// that is neither a side chat nor private, a composition that binds no
+    /// recorder, or a private member that is no side chat and carries no
+    /// tools.
     pub(crate) fn bind_side_chat_memory(&self, req: &mut CreateSessionRequest) {
-        let is_side_chat = req
-            .labels
-            .as_ref()
-            .is_some_and(|labels| labels.contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL));
+        let side_chat_of = req.labels.as_ref().and_then(|labels| {
+            labels
+                .get(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                .map(|source| crate::member_comms_id::mob_member_id(source.as_str()))
+        });
+        let is_side_chat = side_chat_of.is_some();
         let owner = req
             .labels
             .as_ref()
@@ -147,23 +406,20 @@ impl SideChatMemorySlot {
         if !is_side_chat && owner.is_none() {
             return;
         }
-        let Some(source) = self.recorder_source() else {
+        if matches!(self.recorder_state(), RecorderSourceState::Unbound) {
             return;
-        };
+        }
         let Some(build) = req.build.as_mut() else {
             return;
         };
         let Some(binding) = build.mob_member_binding.as_ref() else {
             return;
         };
-        let Some(overlay) = build.external_tools.as_ref() else {
-            return;
-        };
-        if !overlay
-            .tools()
-            .iter()
-            .any(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME)
-        {
+        let overlay = build.external_tools.clone();
+        // A private member that is no side chat has a `memory` tool only
+        // while the tools it carries hold one: without tools nothing is
+        // rebound.
+        if !is_side_chat && overlay.is_none() {
             return;
         }
         let alias = crate::member_comms_id::logical_memory_identity(&binding.member);
@@ -190,36 +446,22 @@ impl SideChatMemorySlot {
             .fork_source
             .as_ref()
             .is_some_and(|fork| fork.source_member.mob_id != binding.mob_id);
-        let recorder = MemoryRecorder::new(
-            source.provider,
-            source.config,
+        let member = MemberRecorderFacts {
             identity,
-            owner.is_none().then(|| binding.mob_id.clone()),
-        );
-        let recorder = match owner {
-            _ if council_participant => recorder.kept(MemberMemoryKept::Nowhere(
-                COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY,
-            )),
-            None => recorder,
-            Some(owner) => {
-                let entries = self.identity_entries();
-                let member_id = meerkat_mob::ids::AgentIdentity::from(binding.member.as_str());
-                recorder.kept_as_decided_later(Arc::new(move || {
-                    entries
-                        .names_registered_agent(&member_id)
-                        .map(|registered| {
-                            if registered {
-                                MemberMemoryKept::UnderItsName
-                            } else {
-                                MemberMemoryKept::UnderItsOwner(owner.clone())
-                            }
-                        })
-                }))
-            }
+            owner,
+            council_participant,
+            member_id: meerkat_mob::ids::AgentIdentity::from(binding.member.as_str()),
+            mob_id: binding.mob_id.clone(),
+            profile: binding.role.clone(),
+            side_chat_of,
         };
         build.external_tools = Some(Arc::new(RecorderToolDispatcher::rebinding(
-            Arc::clone(overlay),
-            recorder,
+            overlay,
+            Arc::new(MemberRebinding {
+                slot: self.clone(),
+                member,
+                recorder: OnceLock::new(),
+            }),
         )));
     }
 
@@ -337,6 +579,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::identity_first::agent_memory::MEMORY_TOOL_NAME;
 
     /// `req` with the standard member labels of its own binding stamped
     /// over its labels, as Core's build of a member stamps them on every
@@ -469,6 +712,804 @@ mod tests {
                 "{member} proposes nothing to its mob: {text}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // A side chat's tools follow its source's: the tools an agent's build
+    // publishes reach its side chat whenever they are published, before or
+    // after the side chat's own build, and the side chat's `memory` tool is
+    // bound to the side chat at every moment.
+    // -----------------------------------------------------------------
+
+    /// A filled slot over a store in `dir`, with the provider and the
+    /// configuration its recorders use.
+    fn filled_slot(
+        dir: &std::path::Path,
+    ) -> (
+        SideChatMemorySlot,
+        Arc<dyn AgentMemoryProvider>,
+        AgentMemoryConfig,
+    ) {
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir).unwrap());
+        let config = AgentMemoryConfig::default();
+        let slot = SideChatMemorySlot::default();
+        slot.fill(Arc::clone(&provider), config.clone());
+        (slot, provider, config)
+    }
+
+    /// The labels of a side chat of `source`.
+    fn side_chat_of(source: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+            source.to_string(),
+        )])
+    }
+
+    /// The names of the per-spawn tools `req`'s build hands its member, in
+    /// order; none without an overlay.
+    fn overlay_tool_names(req: &CreateSessionRequest) -> Vec<String> {
+        req.build
+            .as_ref()
+            .and_then(|build| build.external_tools.as_ref())
+            .map(|overlay| {
+                overlay
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// One `remember` call of the `memory` tool of `req`'s build, titled
+    /// `title`: whether the tool answered an error, or the dispatch's refusal.
+    async fn remember_note(req: &CreateSessionRequest, title: &str) -> Result<bool, String> {
+        let overlay = req
+            .build
+            .as_ref()
+            .and_then(|build| build.external_tools.as_ref())
+            .ok_or("the build holds no per-spawn tools")?;
+        let args = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "action": "remember",
+                "kind": "fact",
+                "title": title,
+                "description": "a note made in a side chat",
+                "body": format!("The note {title} was asked for."),
+                "tags": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        overlay
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "call-remember",
+                name: MEMORY_TOOL_NAME,
+                args: &args,
+            })
+            .await
+            .map(|outcome| outcome.result.is_error)
+            .map_err(|error| error.to_string())
+    }
+
+    /// The titles of the records `identity`'s own scope holds.
+    async fn titles_of(
+        provider: &Arc<dyn AgentMemoryProvider>,
+        config: &AgentMemoryConfig,
+        identity: &str,
+    ) -> Vec<String> {
+        provider
+            .manifest(
+                &[crate::memory::records::MemoryScope::Identity {
+                    realm: config.realm.clone(),
+                    identity: identity.to_string(),
+                }],
+                crate::memory::records::ManifestTier::Full,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.title)
+            .collect()
+    }
+
+    /// A host tool an agent's build publishes beside its recorder.
+    struct LookupTool;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for LookupTool {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            vec![Arc::new(meerkat_core::ToolDef {
+                audience: Default::default(),
+                name: "lookup".into(),
+                description: "lookup".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                provenance: None,
+            })]
+            .into()
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError>
+        {
+            Ok(meerkat_core::ToolResult {
+                host_metadata: Default::default(),
+                settlement_failures: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: vec![],
+                is_error: false,
+            }
+            .into())
+        }
+    }
+
+    /// The per-identity tools of the agent `source`, with nothing published:
+    /// its registry entry before any build of the agent in this process.
+    fn unpublished_source(
+        source: &str,
+    ) -> (
+        Arc<crate::identity_first::CustomizerToolRegistry>,
+        crate::identity_first::AgentIdentity,
+        Arc<dyn meerkat_core::AgentToolDispatcher>,
+    ) {
+        let registry = crate::identity_first::CustomizerToolRegistry::new();
+        let identity = crate::identity_first::AgentIdentity::parse(source).unwrap();
+        let overlay: Arc<dyn meerkat_core::AgentToolDispatcher> = registry.ensure(&identity);
+        (registry, identity, overlay)
+    }
+
+    /// The agent's own recorder, as its build composes it over `inner`.
+    fn source_recorder(
+        inner: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+        source: &crate::identity_first::AgentIdentity,
+        provider: &Arc<dyn AgentMemoryProvider>,
+        config: &AgentMemoryConfig,
+    ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+        Arc::new(RecorderToolDispatcher::new(
+            inner,
+            MemoryRecorder::new(
+                Arc::clone(provider),
+                config.clone(),
+                source.clone(),
+                Some("team".to_string()),
+            ),
+        ))
+    }
+
+    /// A side chat built on its source's published tools: a tool the source
+    /// publishes later reaches the side chat, and the side chat still holds
+    /// one `memory` tool, whose note is kept in the side chat's own scope.
+    #[tokio::test]
+    async fn a_side_chats_tools_follow_what_its_source_publishes_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, provider, config) = filled_slot(dir.path());
+        let (registry, source, overlay) = unpublished_source("alpha");
+        registry.publish(
+            &source,
+            Some(source_recorder(None, &source, &provider, &config)),
+        );
+        let mut req = member_build("alpha-side", side_chat_of("alpha"), overlay);
+        slot.bind_side_chat_memory(&mut req);
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec![MEMORY_TOOL_NAME.to_string()],
+            "the side chat is built with a `memory` tool"
+        );
+        registry.publish(
+            &source,
+            Some(source_recorder(
+                Some(Arc::new(LookupTool)),
+                &source,
+                &provider,
+                &config,
+            )),
+        );
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string(), MEMORY_TOOL_NAME.to_string()],
+            "the tool its source published later reaches the side chat, beside one `memory` tool"
+        );
+        assert_eq!(remember_note(&req, "Side note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Side note".to_string()],
+            "the side chat's note is kept in the side chat's own scope"
+        );
+    }
+
+    /// A side chat built before its source published anything: once the
+    /// source's tools are published, they reach the side chat, and the note
+    /// the side chat's `memory` call stores is kept in the side chat's own
+    /// scope.
+    #[tokio::test]
+    async fn a_side_chat_built_before_its_source_published_keeps_its_notes_in_its_own_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, provider, config) = filled_slot(dir.path());
+        let (registry, source, overlay) = unpublished_source("alpha");
+        let mut req = member_build("alpha-side", side_chat_of("alpha"), overlay);
+        slot.bind_side_chat_memory(&mut req);
+        registry.publish(
+            &source,
+            Some(source_recorder(
+                Some(Arc::new(LookupTool)),
+                &source,
+                &provider,
+                &config,
+            )),
+        );
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string(), MEMORY_TOOL_NAME.to_string()],
+            "the tools its source published reach the side chat, with one `memory` tool"
+        );
+        assert_eq!(remember_note(&req, "Side note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Side note".to_string()],
+            "the side chat's note is kept in the side chat's own scope"
+        );
+    }
+
+    /// Control: a side chat over tools that never hold a `memory` tool gains
+    /// none, and the tools its source publishes reach it.
+    #[tokio::test]
+    async fn a_side_chat_over_tools_without_memory_gains_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, _provider, _config) = filled_slot(dir.path());
+        let (registry, source, overlay) = unpublished_source("alpha");
+        let mut req = member_build("alpha-side", side_chat_of("alpha"), overlay);
+        slot.bind_side_chat_memory(&mut req);
+        assert!(
+            overlay_tool_names(&req).is_empty(),
+            "no tool before the source published one"
+        );
+        registry.publish(&source, Some(Arc::new(LookupTool)));
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string()],
+            "the source's tool reaches the side chat, and no `memory` tool"
+        );
+    }
+
+    /// Control: a member private to a person that is no side chat, built
+    /// without per-spawn tools, gains none.
+    #[tokio::test]
+    async fn a_private_member_without_per_spawn_tools_gains_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, _provider, _config) = filled_slot(dir.path());
+        let (_registry, _source, overlay) = unpublished_source("alpha");
+        let labels = BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "console-caller:v1:aa".to_string(),
+        )]);
+        let mut req = member_build("alpha-side-helper", labels, overlay);
+        req.build.as_mut().unwrap().external_tools = None;
+        slot.bind_side_chat_memory(&mut req);
+        assert!(
+            overlay_tool_names(&req).is_empty(),
+            "a private member's tools are what its own build carries"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The gate: a side chat is offered `memory` from its first build when
+    // its source's build has the recorder, by the source's own rule.
+    // -----------------------------------------------------------------
+
+    /// A definition whose `worker` profile enables agent memory inline,
+    /// whose `plain` profile does not, and whose `referenced` profile the
+    /// definition only references.
+    fn gate_definition() -> meerkat_mob::MobDefinition {
+        let mut definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "team"
+
+[profiles.worker]
+model = "gpt-5.5"
+[profiles.worker.tools]
+memory = true
+
+[profiles.plain]
+model = "gpt-5.5"
+"#,
+        )
+        .unwrap();
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("referenced"),
+            meerkat_mob::ProfileBinding::RealmRef {
+                realm_profile: "stored-profile".to_string(),
+            },
+        );
+        definition
+    }
+
+    /// A slot filled for agent recorders gated per profile, with `explicit`
+    /// as the host's answers, and bound to [`gate_definition`].
+    fn gated_slot(
+        dir: &std::path::Path,
+        explicit: &[(&str, bool)],
+    ) -> (
+        SideChatMemorySlot,
+        Arc<dyn AgentMemoryProvider>,
+        AgentMemoryConfig,
+    ) {
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir).unwrap());
+        let config = AgentMemoryConfig::default();
+        let slot = SideChatMemorySlot::default();
+        slot.fill_gated(
+            Arc::clone(&provider),
+            config.clone(),
+            SideChatMemoryGate::AgentProfiles(
+                explicit
+                    .iter()
+                    .map(|(profile, enabled)| (meerkat_mob::ProfileName::from(*profile), *enabled))
+                    .collect(),
+            ),
+        );
+        slot.bind_definition(&gate_definition());
+        // `alpha`, the source of the rows' side chats, is a registered
+        // agent's member.
+        slot.hold_identity_entries(std::collections::BTreeSet::from([
+            crate::member_comms_id::mob_member_id("alpha"),
+        ]));
+        (slot, provider, config)
+    }
+
+    /// A side chat of `alpha` on the profile `role`, built over `overlay`.
+    fn side_chat_build(
+        role: &str,
+        overlay: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    ) -> CreateSessionRequest {
+        let (_registry, _source, placeholder) = unpublished_source("alpha");
+        let mut req = member_build("alpha-side", side_chat_of("alpha"), placeholder);
+        let build = req.build.as_mut().unwrap();
+        build.external_tools = overlay;
+        build.mob_member_binding.as_mut().unwrap().role = role.to_string();
+        req
+    }
+
+    /// A side chat of an agent whose profile enables agent memory, built
+    /// while its source's tools hold no publication, is offered its own
+    /// `memory` tool at that build, and its note is kept in its own scope.
+    #[tokio::test]
+    async fn a_side_chat_of_an_agent_with_memory_is_offered_memory_before_its_source_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, provider, config) = gated_slot(dir.path(), &[]);
+        let (_registry, _source, unpublished) = unpublished_source("alpha");
+        let mut req = side_chat_build("worker", Some(unpublished));
+        slot.bind_side_chat_memory(&mut req);
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec![MEMORY_TOOL_NAME.to_string()],
+            "the side chat is offered `memory` before its source published anything"
+        );
+        assert_eq!(remember_note(&req, "Early note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Early note".to_string()],
+            "the side chat's note is kept in the side chat's own scope"
+        );
+    }
+
+    /// A side chat of an agent whose build carries none of its source's
+    /// tools (a side chat forked from a source this process did not build)
+    /// is offered its own `memory` tool by the gate.
+    #[tokio::test]
+    async fn a_side_chat_built_without_its_sources_tools_is_offered_memory_by_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, provider, config) = gated_slot(dir.path(), &[]);
+        let mut req = side_chat_build("worker", None);
+        slot.bind_side_chat_memory(&mut req);
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec![MEMORY_TOOL_NAME.to_string()],
+            "the side chat is offered `memory` with none of its source's tools"
+        );
+        assert_eq!(remember_note(&req, "Early note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Early note".to_string()]
+        );
+    }
+
+    /// A side chat whose tools are first read before the reader of Core's
+    /// identity entries is bound is offered no `memory` at that read. The
+    /// answer is asked again at every read: once the reader is bound and
+    /// names the side chat's source a registered agent's member, the same
+    /// build's tools offer the side chat's own `memory`, and its note is
+    /// kept in its own scope.
+    #[tokio::test]
+    async fn a_side_chat_read_before_the_identity_reader_is_bound_is_offered_memory_once_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir.path()).unwrap());
+        let config = AgentMemoryConfig::default();
+        let slot = SideChatMemorySlot::default();
+        slot.fill_gated(
+            Arc::clone(&provider),
+            config.clone(),
+            SideChatMemoryGate::AgentProfiles(std::collections::BTreeMap::new()),
+        );
+        slot.bind_definition(&gate_definition());
+        slot.await_identity_entries();
+        let mut req = side_chat_build("worker", None);
+        slot.bind_side_chat_memory(&mut req);
+        assert!(
+            overlay_tool_names(&req).is_empty(),
+            "no `memory` while it cannot be told whether the side chat's source is an agent"
+        );
+
+        slot.hold_identity_entries(std::collections::BTreeSet::from([
+            crate::member_comms_id::mob_member_id("alpha"),
+        ]));
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec![MEMORY_TOOL_NAME.to_string()],
+            "the same build's tools offer the side chat's own `memory` once the reader is bound"
+        );
+        assert_eq!(remember_note(&req, "Later note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Later note".to_string()],
+            "the side chat's note is kept in the side chat's own scope"
+        );
+    }
+
+    /// A side chat of an agent whose own build has no `memory` tool is
+    /// offered none: a profile without agent memory, a profile the
+    /// definition only references (whatever that profile declares), and a
+    /// profile the host switched agent memory off for.
+    #[tokio::test]
+    async fn a_side_chat_of_an_agent_without_memory_is_offered_none() {
+        let dir = tempfile::tempdir().unwrap();
+        for (role, explicit) in [
+            ("plain", &[][..]),
+            ("referenced", &[][..]),
+            ("worker", &[("worker", false)][..]),
+        ] {
+            let (slot, _provider, _config) = gated_slot(dir.path(), explicit);
+            let (_registry, _source, unpublished) = unpublished_source("alpha");
+            let mut req = side_chat_build(role, Some(unpublished));
+            req.build.as_mut().unwrap().override_memory =
+                meerkat_core::ToolCategoryOverride::Enable;
+            slot.bind_side_chat_memory(&mut req);
+            assert!(
+                overlay_tool_names(&req).is_empty(),
+                "a side chat on `{role}` is offered no `memory` tool over its source's tools"
+            );
+            let mut req = side_chat_build(role, None);
+            slot.bind_side_chat_memory(&mut req);
+            assert!(
+                overlay_tool_names(&req).is_empty(),
+                "a side chat on `{role}` is offered no `memory` tool without its source's tools"
+            );
+        }
+    }
+
+    /// The host's explicit answer for a profile decides before the
+    /// definition does, as it does for the agent's own recorder.
+    #[tokio::test]
+    async fn the_hosts_answer_for_a_profile_decides_a_side_chats_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, _provider, _config) = gated_slot(dir.path(), &[("referenced", true)]);
+        let mut req = side_chat_build("referenced", None);
+        slot.bind_side_chat_memory(&mut req);
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec![MEMORY_TOOL_NAME.to_string()],
+            "the host switched agent memory on for the profile"
+        );
+    }
+
+    /// A slot whose mob's definition is not bound yet offers no `memory`
+    /// tool by a profile: it knows no profile.
+    #[tokio::test]
+    async fn a_slot_without_its_mobs_definition_offers_no_memory_by_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, _provider, _config) = filled_slot(dir.path());
+        let mut req = side_chat_build("worker", None);
+        slot.bind_side_chat_memory(&mut req);
+        assert!(overlay_tool_names(&req).is_empty());
+    }
+
+    /// In a composition that attaches the recorder to every member, a side
+    /// chat is offered its own `memory` tool whatever its profile.
+    #[tokio::test]
+    async fn a_side_chat_is_offered_memory_where_every_member_has_the_recorder() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir.path()).unwrap());
+        let slot = SideChatMemorySlot::default();
+        slot.fill_gated(
+            provider,
+            AgentMemoryConfig::default(),
+            SideChatMemoryGate::EveryMember,
+        );
+        let mut req = side_chat_build("plain", None);
+        slot.bind_side_chat_memory(&mut req);
+        assert_eq!(overlay_tool_names(&req), vec![MEMORY_TOOL_NAME.to_string()]);
+    }
+
+    /// A side chat of a member that is no registered agent's is offered
+    /// `memory` only while the tools it carries hold one, as its source is:
+    /// on a profile that enables agent memory it is offered none without
+    /// tools, none over tools without a `memory` tool, and its own over
+    /// tools that hold one.
+    #[tokio::test]
+    async fn a_side_chat_of_a_member_that_is_no_agent_is_offered_memory_only_with_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, provider, config) = gated_slot(dir.path(), &[]);
+        let side_chat_of_a_helper = |overlay| {
+            let mut req = side_chat_build("worker", overlay);
+            req.labels = Some(side_chat_of("helper"));
+            req
+        };
+        let mut req = side_chat_of_a_helper(None);
+        slot.bind_side_chat_memory(&mut req);
+        assert!(
+            overlay_tool_names(&req).is_empty(),
+            "no `memory` tool without its source's tools"
+        );
+        let (registry, helper, tools) = unpublished_source("helper");
+        let mut req = side_chat_of_a_helper(Some(tools));
+        slot.bind_side_chat_memory(&mut req);
+        registry.publish(&helper, Some(Arc::new(LookupTool)));
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string()],
+            "no `memory` tool over tools that hold none"
+        );
+        registry.publish(
+            &helper,
+            Some(source_recorder(
+                Some(Arc::new(LookupTool)),
+                &helper,
+                &provider,
+                &config,
+            )),
+        );
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string(), MEMORY_TOOL_NAME.to_string()],
+            "one `memory` tool over tools that hold one"
+        );
+        assert_eq!(remember_note(&req, "Side note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Side note".to_string()],
+            "the side chat's note is kept in the side chat's own scope"
+        );
+    }
+
+    /// A side chat built before its composition has bound its recorder is
+    /// wrapped all the same: it is offered no `memory` tool, also once the
+    /// tools it carries hold one, and a call of `memory` is refused; from
+    /// the read after the recorder is bound it is offered its own.
+    #[tokio::test]
+    async fn a_side_chat_built_before_the_recorder_is_bound_is_offered_its_own_once_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir.path()).unwrap());
+        let config = AgentMemoryConfig::default();
+        let slot = SideChatMemorySlot::default();
+        slot.expect_recorder();
+        let (registry, source, tools) = unpublished_source("alpha");
+        let mut req = side_chat_build("worker", Some(tools));
+        slot.bind_side_chat_memory(&mut req);
+        assert!(
+            overlay_tool_names(&req).is_empty(),
+            "no tool before the source published one"
+        );
+        registry.publish(
+            &source,
+            Some(source_recorder(
+                Some(Arc::new(LookupTool)),
+                &source,
+                &provider,
+                &config,
+            )),
+        );
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string()],
+            "the source's tool reaches the side chat, and no `memory` tool while no recorder \
+             is bound"
+        );
+        assert!(
+            remember_note(&req, "Too early").await.is_err(),
+            "a call of `memory` is refused while no recorder is bound"
+        );
+        slot.fill(Arc::clone(&provider), config.clone());
+        assert_eq!(
+            overlay_tool_names(&req),
+            vec!["lookup".to_string(), MEMORY_TOOL_NAME.to_string()],
+            "one `memory` tool once the recorder is bound"
+        );
+        assert_eq!(remember_note(&req, "Side note").await, Ok(false));
+        assert_eq!(
+            titles_of(&provider, &config, "alpha-side").await,
+            vec!["Side note".to_string()],
+            "the side chat's note is kept in the side chat's own scope"
+        );
+        assert!(
+            titles_of(&provider, &config, "alpha").await.is_empty(),
+            "the refused call stored nothing"
+        );
+    }
+
+    /// A composition that binds no recorder leaves a side chat's tools as
+    /// they are, a tool named `memory` that a host gave its source
+    /// included: when it never says it binds one, and when a side chat was
+    /// wrapped before its recorder turned out to be off.
+    #[tokio::test]
+    async fn a_composition_without_a_recorder_leaves_a_side_chats_tools_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir.path()).unwrap());
+        let config = AgentMemoryConfig::default();
+        let recorder_off = AgentMemoryConfig {
+            recorder_tool: false,
+            ..AgentMemoryConfig::default()
+        };
+        for announced in [false, true] {
+            let slot = SideChatMemorySlot::default();
+            if announced {
+                slot.expect_recorder();
+            }
+            let (registry, source, tools) = unpublished_source("alpha");
+            let mut req = side_chat_build("worker", Some(tools));
+            slot.bind_side_chat_memory(&mut req);
+            slot.fill(Arc::clone(&provider), recorder_off.clone());
+            registry.publish(
+                &source,
+                Some(source_recorder(
+                    Some(Arc::new(LookupTool)),
+                    &source,
+                    &provider,
+                    &config,
+                )),
+            );
+            assert_eq!(
+                overlay_tool_names(&req),
+                vec!["lookup".to_string(), MEMORY_TOOL_NAME.to_string()],
+                "the side chat's tools are its source's as they are (announced: {announced})"
+            );
+        }
+    }
+
+    /// One call of the `memory` tool of `req`'s build with `args`: whether
+    /// the tool answered an error, or the dispatch's refusal.
+    async fn memory_verb(
+        req: &CreateSessionRequest,
+        args: serde_json::Value,
+    ) -> Result<bool, String> {
+        let overlay = req
+            .build
+            .as_ref()
+            .and_then(|build| build.external_tools.as_ref())
+            .ok_or("the build holds no per-spawn tools")?;
+        let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        overlay
+            .dispatch(meerkat_core::types::ToolCallView {
+                id: "call-verb",
+                name: MEMORY_TOOL_NAME,
+                args: &args,
+            })
+            .await
+            .map(|outcome| outcome.result.is_error)
+            .map_err(|error| error.to_string())
+    }
+
+    /// A side chat of the agent `alpha` built before its composition has
+    /// bound its recorder, over `alpha`'s tools, which hold `alpha`'s own
+    /// recorder and one note of `alpha`'s: the verb `verb` of the side
+    /// chat's `memory` tool is refused, the agent's notes are as they were,
+    /// and the side chat holds none.
+    async fn a_verb_before_the_recorder_is_bound_is_refused(verb: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir.path()).unwrap());
+        let config = AgentMemoryConfig::default();
+        let slot = SideChatMemorySlot::default();
+        slot.expect_recorder();
+        let (registry, source, tools) = unpublished_source("alpha");
+        let mut req = side_chat_build("worker", Some(tools));
+        slot.bind_side_chat_memory(&mut req);
+        registry.publish(
+            &source,
+            Some(source_recorder(
+                Some(Arc::new(LookupTool)),
+                &source,
+                &provider,
+                &config,
+            )),
+        );
+        let agents_note = provider
+            .remember_authored(
+                &crate::memory::records::MemoryScope::Identity {
+                    realm: config.realm.clone(),
+                    identity: "alpha".to_string(),
+                },
+                crate::memory::records::NewMemoryRecord {
+                    kind: crate::memory::records::MemoryKind::Fact,
+                    title: "Agent note".to_string(),
+                    description: "a note of the agent's".to_string(),
+                    body: "The agent's own note.".to_string(),
+                    tags: vec![],
+                    evidence: vec![],
+                    verification: None,
+                },
+                crate::memory::records::MemoryAuthor::Agent {
+                    identity: "alpha".to_string(),
+                },
+            )
+            .await
+            .unwrap()
+            .memory_id;
+        let args = match verb {
+            "update" => serde_json::json!({
+                "action": verb,
+                "memory_id": agents_note,
+                "kind": "fact",
+                "title": "Rewritten",
+                "description": "a rewritten note",
+                "body": "The side chat asked to rewrite a note.",
+                "tags": [],
+            }),
+            "forget" => serde_json::json!({ "action": verb, "memory_id": agents_note }),
+            "recall" => serde_json::json!({ "action": verb }),
+            _ => serde_json::json!({
+                "action": verb,
+                "kind": "fact",
+                "title": "Side note",
+                "description": "a note made in a side chat",
+                "body": "The side chat asked to store a note.",
+                "tags": [],
+            }),
+        };
+        assert!(
+            memory_verb(&req, args).await.is_err(),
+            "`{verb}` is refused while no recorder is bound"
+        );
+        assert_eq!(
+            titles_of(&provider, &config, "alpha").await,
+            vec!["Agent note".to_string()],
+            "the source agent's notes are as they were after `{verb}`"
+        );
+        assert!(
+            titles_of(&provider, &config, "alpha-side").await.is_empty(),
+            "the side chat holds no note after `{verb}`"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remember_before_the_recorder_is_bound_is_refused() {
+        a_verb_before_the_recorder_is_bound_is_refused("remember").await;
+    }
+
+    #[tokio::test]
+    async fn an_update_before_the_recorder_is_bound_is_refused() {
+        a_verb_before_the_recorder_is_bound_is_refused("update").await;
+    }
+
+    #[tokio::test]
+    async fn a_forget_before_the_recorder_is_bound_is_refused() {
+        a_verb_before_the_recorder_is_bound_is_refused("forget").await;
+    }
+
+    #[tokio::test]
+    async fn a_recall_before_the_recorder_is_bound_is_refused() {
+        a_verb_before_the_recorder_is_bound_is_refused("recall").await;
+    }
+
+    #[tokio::test]
+    async fn a_proposal_before_the_recorder_is_bound_is_refused() {
+        a_verb_before_the_recorder_is_bound_is_refused("propose_to_mob").await;
     }
 
     // ---- where a member keeps its memory ----

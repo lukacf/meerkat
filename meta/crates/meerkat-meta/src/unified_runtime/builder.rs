@@ -2096,11 +2096,22 @@ impl UnifiedRuntimeBuilder {
         // A console side chat inherits its source's tool overlay, recorder
         // included: every member build binds a side chat's `memory` tool to
         // the side chat's own identity with this provider, on the classic
-        // and the identity-first path alike.
+        // and the identity-first path alike. The side chat's tool is gated
+        // as its source's own recorder is: per agent profile where the agent
+        // customizer attaches it, for every member where the mob's spawn
+        // customizer does (the classic path, below).
         if let Some(provider) = agent_memory_provider.as_ref() {
-            mob_spec.side_chat_memory_slot().fill(
+            let gate = if wants_identity_first {
+                crate::memory::side_chat_memory::SideChatMemoryGate::AgentProfiles(
+                    self.agent_memory_profile_policy.clone(),
+                )
+            } else {
+                crate::memory::side_chat_memory::SideChatMemoryGate::EveryMember
+            };
+            mob_spec.side_chat_memory_slot().fill_gated(
                 provider.clone(),
                 self.agent_memory_config.clone().unwrap_or_default(),
+                gate,
             );
         }
 

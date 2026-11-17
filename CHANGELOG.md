@@ -35,6 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat`: a session that is the target of a WorkGraph attention binding
+  and was built without the WorkGraph tools takes its turns. The binding's
+  turn overlay allows the WorkGraph tools of the binding's mode, and a turn
+  whose allow-list names a tool the session lacks is refused whole, so such
+  a session (a mob member whose profile has no WorkGraph tools, for one)
+  took no turn while a binding named it, and its status read healthy. The
+  session now takes the overlay as its own tools allow: with some of the
+  mode's tools the allow-list is narrowed to those it has; with none of
+  them it takes an ordinary turn with its own tools. Another overlay of
+  the same turn that narrowed the list keeps its restriction, with one
+  exception: an allow-list that holds every tool of the binding's mode
+  cannot be told from no other overlay, so a session with none of those
+  tools takes that turn with its own tools too. Present in every release
+  since 0.8.41.
+
 ## [0.9.15] - 2026-11-15
 
 ### Breaking

@@ -2673,6 +2673,12 @@ struct GatewayLaunchArgs {
     /// run `rkat` on this host for callers that no enforced access controller
     /// governs. Launch-only, and part of the resume key.
     flow_editor_host_deploy: bool,
+    /// `--resume-from-registry`: answer the launch `resumed` from the runtime
+    /// registry when it lists a runtime under this launch's resume key whose
+    /// listener answers. Without it no launch reports a registry entry: it
+    /// goes on to bind and start. A flag only (no init param, no environment
+    /// variable), and not part of the resume key.
+    resume_from_registry: bool,
 }
 
 fn main() {
@@ -2760,6 +2766,8 @@ fn main() {
     let flow_editor_host_deploy = args
         .iter()
         .any(|arg| arg == "--allow-flow-editor-host-deploy");
+    // --resume-from-registry: see `GatewayLaunchArgs::resume_from_registry`.
+    let resume_from_registry = args.iter().any(|arg| arg == "--resume-from-registry");
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "meta_gateway starting (console/HTTP gateway)"
@@ -2780,6 +2788,7 @@ fn main() {
         http_listen,
         allow_remote,
         flow_editor_host_deploy,
+        resume_from_registry,
     }))) {
         // A refusal `run()` already answered on the request id must not be
         // followed by a second, id-less reply.
@@ -2833,6 +2842,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         http_listen: http_listen_flag,
         allow_remote: allow_remote_flag,
         flow_editor_host_deploy,
+        resume_from_registry,
     } = launch;
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
@@ -3133,7 +3143,10 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     registry.entries = live_entries;
     save_registry(&registry_file, &registry)?;
 
-    if let Some(entry) = resumed_entry {
+    // Only a launch started with `--resume-from-registry` is answered from
+    // the registry. Every other launch goes on to bind and start, and nothing
+    // the registry file holds reaches its init response.
+    if resume_from_registry && let Some(entry) = resumed_entry {
         print_json_line(&init_response(
             request_id,
             &entry.runtime_id,
@@ -3146,7 +3159,8 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     }
 
     // Bind the HTTP listener before any bootstrap work and right after the
-    // resume lookup: a resumed launch reports the live runtime's listener and
+    // resume lookup: a resumed launch (one started with
+    // `--resume-from-registry`) reports the live runtime's listener and
     // must not contend for its port, while a fresh launch on a fixed
     // `http_listen` may find the port taken (EADDRINUSE). Failing here costs
     // the init reply and nothing else: no runtime build and no schedule
@@ -4099,8 +4113,14 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
                 }
             },
             || async {
+                // Only this gateway's own entry: another gateway started
+                // under the same resume key (and so with the same runtime
+                // id) keeps the entry it wrote.
+                let own_pid = std::process::id();
                 let mut registry = load_registry(&registry_file);
-                registry.entries.retain(|entry| entry.key != resume_key);
+                registry
+                    .entries
+                    .retain(|entry| entry.key != resume_key || entry.pid != own_pid);
                 save_registry(&registry_file, &registry)
             },
         )

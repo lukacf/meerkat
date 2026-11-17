@@ -1,10 +1,13 @@
-//! Rows of the keyed inject plane for a durable identity that is kept apart
-//! from other callers.
+//! Rows of the keyed inject plane, and of the control channel's member
+//! verbs, for a durable identity that is kept apart from other callers.
 //!
 //! A peer gateway's keyed delivery names a durable identity this gateway
 //! hosts. An identity that is kept apart is answered exactly as a name no
 //! identity has: its delivery is refused as for an unknown member, and its
 //! status reads as no commit. Nothing reaches its continuation owner.
+//!
+//! The member verbs answer such an identity the same way, by its name and
+//! by a generated alias of it, on a runtime that has an identity runtime.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -15,6 +18,13 @@ use async_trait::async_trait;
 
 use super::remote::KeyedInjectServer;
 use super::types::content_digest;
+use crate::auth::peer_keys::GatewayPeerKeys;
+use crate::runtime::cross_mob_control::{
+    ControlAuthorizer, ControlAuthzDenial, ControlGrant, ControlGrantTable, ControlListenAddr,
+    ControlMemberScope, ControlRequest, ControlResponse, ControlVerb, RemoteControlClient,
+    sign_control_request_as_caller,
+};
+use crate::runtime::cross_mob_remote::RemoteEndpoint;
 use crate::runtime::keyed_inject::{
     KeyedInject, KeyedInjectCallerScope, KeyedInjectReceiver, NativeStatus,
 };
@@ -156,5 +166,216 @@ async fn an_identity_kept_apart_answers_the_keyed_verbs_as_a_name_no_identity_ha
         refusal_of_no_identity.replace(NOBODY, "<identity>"),
         "an identity every caller may reach is not refused as unknown: {to_the_open_identity:?}"
     );
+    runtime.shutdown().await;
+}
+
+// The member verbs of the control channel, for the same identities: the
+// runtime has an identity runtime, and each identity is registered and has
+// no member until something reaches it.
+
+/// A gateway on the far side of the control channel: its key, where it
+/// dials the host, and the mob it signs its requests for.
+struct ControlPeer {
+    keys: GatewayPeerKeys,
+    endpoint: RemoteEndpoint,
+    audience: String,
+}
+
+impl ControlPeer {
+    async fn ask(&self, mut request: ControlRequest) -> ControlResponse {
+        sign_control_request_as_caller(&self.keys, Some(&self.audience), &mut request);
+        RemoteControlClient::send(&self.endpoint, &request, std::time::Duration::from_secs(30))
+            .await
+            .expect("the control exchange")
+    }
+}
+
+/// The identity-first runtime of [`server`], with its control listener
+/// bound for one peer gateway whose grant names every verb and reaches
+/// every member.
+async fn listening(state: &std::path::Path, mob_id: &str) -> (crate::UnifiedRuntime, ControlPeer) {
+    let (runtime, _server) = server(state, mob_id).await;
+    let keys = GatewayPeerKeys::ephemeral();
+    let mut table = ControlGrantTable::new();
+    table.insert(
+        keys.pubkey_bytes(),
+        ControlGrant::new(
+            "peer-gateway",
+            ControlVerb::all().iter().copied(),
+            ControlMemberScope::All,
+        ),
+    );
+    let audience = runtime.mob_id();
+    let advertised = runtime
+        .start_control_listener_with_authorizer(
+            &ControlListenAddr::parse("tcp://127.0.0.1:0").expect("a control address"),
+            Arc::new(ControlAuthorizer::with_grants_for_audience(
+                table,
+                audience.clone(),
+            )),
+        )
+        .await
+        .expect("the control listener binds");
+    let endpoint = RemoteEndpoint::Tcp(
+        advertised
+            .strip_prefix("tcp://")
+            .expect("a tcp listener")
+            .to_string(),
+    );
+    (
+        runtime,
+        ControlPeer {
+            keys,
+            endpoint,
+            audience,
+        },
+    )
+}
+
+/// The verbs of the member plane, by name.
+const MEMBER_VERBS: [&str; 4] = ["lookup_member", "inject", "wire", "unwire"];
+
+/// One request of the member verb `verb` for `member`, wiring a member of
+/// a far mob where the verb wires.
+fn member_request(verb: &str, member: &str, far: &GatewayPeerKeys) -> ControlRequest {
+    let wire = |wire: bool| {
+        let (remote_member, local_peer_spec_address, local_comms_name, local_peer_id) = (
+            member.to_string(),
+            "tcp://127.0.0.1:9".to_string(),
+            "far-mob/worker/far".to_string(),
+            meerkat_core::comms::PeerId::from_ed25519_pubkey(&far.pubkey_bytes()).to_string(),
+        );
+        let (local_pubkey_b64, nonce) = (Some(far.pubkey_b64()), Some("n".to_string()));
+        if wire {
+            ControlRequest::Wire {
+                remote_member,
+                local_peer_spec_address,
+                local_comms_name,
+                local_peer_id,
+                local_pubkey_b64,
+                nonce,
+                caller: None,
+            }
+        } else {
+            ControlRequest::Unwire {
+                remote_member,
+                local_peer_spec_address,
+                local_comms_name,
+                local_peer_id,
+                local_pubkey_b64,
+                nonce,
+                caller: None,
+            }
+        }
+    };
+    match verb {
+        "lookup_member" => ControlRequest::LookupMember {
+            remote_member: member.to_string(),
+            nonce: Some("n".to_string()),
+            caller: None,
+        },
+        "inject" => ControlRequest::Inject {
+            remote_member: member.to_string(),
+            content: serde_json::to_value(meerkat_core::ContentInput::Text(
+                "a word from a peer".to_string(),
+            ))
+            .expect("content"),
+            nonce: Some("n".to_string()),
+            caller: None,
+        },
+        "wire" => wire(true),
+        "unwire" => wire(false),
+        other => panic!("no member verb {other}"),
+    }
+}
+
+/// What an answer says once the identity's name is taken out of it.
+fn shape(answer: &ControlResponse, identity: &str) -> String {
+    format!("{answer:?}").replace(identity, "<identity>")
+}
+
+/// Whether the listener's grant policy refused the request.
+fn refused_by_grant(answer: &ControlResponse) -> bool {
+    matches!(answer, ControlResponse::Err { code, .. } if ControlAuthzDenial::is_denial_code(code))
+}
+
+/// The numbers a row spells a generated alias with: small ones, and one no
+/// counter holds.
+const GENERATIONS: [&str; 4] = ["0", "1", "7", "99999999999999999999999"];
+
+/// The compared pair by name, per member verb: a request for the identity
+/// kept apart is answered exactly as the same request for a name no
+/// identity has. The identity is registered and has no member: nothing
+/// makes it one, and nothing reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_kept_apart_answers_each_member_verb_as_a_name_no_identity_has() {
+    let state = tempfile::tempdir().expect("state dir");
+    let (runtime, peer) = listening(state.path(), "mob-m-apart").await;
+    let far = GatewayPeerKeys::ephemeral();
+
+    for verb in MEMBER_VERBS {
+        let for_the_identity = peer.ask(member_request(verb, APART, &far)).await;
+        let for_no_identity = peer.ask(member_request(verb, NOBODY, &far)).await;
+        assert!(
+            !refused_by_grant(&for_no_identity),
+            "{verb}: the grant reaches the name: {for_no_identity:?}"
+        );
+        assert!(
+            matches!(for_no_identity, ControlResponse::Err { .. }),
+            "{verb}: a name no identity has is refused: {for_no_identity:?}"
+        );
+        assert_eq!(
+            shape(&for_the_identity, APART),
+            shape(&for_no_identity, NOBODY),
+            "{verb}: the identity kept apart is answered as a name no identity has"
+        );
+    }
+
+    // An identity every caller may reach is not answered as a name no
+    // identity has.
+    let of_the_open_identity = peer.ask(member_request("lookup_member", OPEN, &far)).await;
+    let of_no_identity = peer
+        .ask(member_request("lookup_member", NOBODY, &far))
+        .await;
+    assert_ne!(
+        shape(&of_the_open_identity, OPEN),
+        shape(&of_no_identity, NOBODY),
+        "an identity every caller may reach is not answered as unknown: {of_the_open_identity:?}"
+    );
+    runtime.shutdown().await;
+}
+
+/// A generated alias (`rt:<identity>:<n>`), per member verb and for several
+/// numbers: the alias of the identity kept apart is answered exactly as the
+/// same alias of a name no identity has. Whether a number is the identity's
+/// current one is not told.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_alias_of_an_identity_kept_apart_answers_as_that_of_a_name_no_identity_has() {
+    let state = tempfile::tempdir().expect("state dir");
+    let (runtime, peer) = listening(state.path(), "mob-m-apart-alias").await;
+    let far = GatewayPeerKeys::ephemeral();
+
+    for verb in MEMBER_VERBS {
+        for generation in GENERATIONS {
+            let of_the_identity = format!("rt:{APART}:{generation}");
+            let of_no_identity = format!("rt:{NOBODY}:{generation}");
+            let for_the_identity = peer.ask(member_request(verb, &of_the_identity, &far)).await;
+            let for_no_identity = peer.ask(member_request(verb, &of_no_identity, &far)).await;
+            assert!(
+                !refused_by_grant(&for_no_identity),
+                "{verb}: the grant reaches the alias: {for_no_identity:?}"
+            );
+            assert!(
+                matches!(for_no_identity, ControlResponse::Err { .. }),
+                "{verb}: an alias of a name no identity has is refused: {for_no_identity:?}"
+            );
+            assert_eq!(
+                shape(&for_the_identity, APART),
+                shape(&for_no_identity, NOBODY),
+                "{verb}, alias number {generation}: the identity kept apart is answered as a \
+                 name no identity has"
+            );
+        }
+    }
     runtime.shutdown().await;
 }

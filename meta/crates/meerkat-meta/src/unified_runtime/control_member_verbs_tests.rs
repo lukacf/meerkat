@@ -347,3 +347,46 @@ async fn while_the_first_read_is_owed_every_member_is_answered_as_no_member() {
     );
     runtime.shutdown().await;
 }
+
+/// The numbers a row spells a generated alias with: small ones, and one no
+/// counter holds.
+const GENERATIONS: [&str; 3] = ["0", "7", "99999999999999999999999"];
+
+/// A generated alias (`rt:<name>:<n>`), per member verb: the alias of the
+/// member kept apart is answered exactly as the same alias of a name no
+/// member has, under a grant that reaches every member. This runtime has no
+/// identity runtime, so a generated alias names no member either way.
+#[tokio::test]
+async fn a_generated_alias_of_a_member_kept_apart_answers_as_that_of_a_name_no_member_has() {
+    let runtime = runtime_with_both_members().await;
+    let peer = listen(&runtime, ControlMemberScope::All).await;
+    let far = FarMember::new("far-mob/worker/far");
+
+    for verb in MEMBER_VERBS {
+        for generation in GENERATIONS {
+            let of_the_member = format!("rt:{APART}:{generation}");
+            let of_no_member = format!("rt:{NOBODY}:{generation}");
+            let for_the_member = peer.ask(request(verb, &of_the_member, &far)).await;
+            let for_no_member = peer.ask(request(verb, &of_no_member, &far)).await;
+            assert!(
+                !refused_by_grant(&for_no_member),
+                "{verb}: the grant reaches the alias: {for_no_member:?}"
+            );
+            assert!(
+                matches!(for_no_member, ControlResponse::Err { .. }),
+                "{verb}: an alias of a name no member has is refused: {for_no_member:?}"
+            );
+            assert_eq!(
+                shape(&for_the_member, APART),
+                shape(&for_no_member, NOBODY),
+                "{verb}, alias number {generation}: the member kept apart is answered as a name \
+                 no member has"
+            );
+        }
+    }
+    assert!(
+        !anyone_wired_to(&runtime, &far).await,
+        "nothing was wired to the member kept apart"
+    );
+    runtime.shutdown().await;
+}

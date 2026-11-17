@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-11-18
+
 ### Breaking
 
 - `rkat-rest`: a request whose `Host` is a name other than `localhost` (not an address literal) is refused with `403` and code `HOST_NOT_SERVED` until the name is listed in `[rest] served_hosts`: a reverse proxy that forwards its public host name, and a container or service name, have to be listed. A server that is not bound to loopback and lists no name says so in a warning when it starts. A browser page of another origin is refused with `403` and code `ORIGIN_NOT_ALLOWED` until its origin is listed in `[rest] allowed_origins`. An entry that is not one origin (`*`, `null`, a URL with a path, a bare host) or not one host name (a scheme, a port, a path, a wildcard) is refused when the configuration document is loaded or written. Both keys take effect at the server's next start and compose with the rest of the `[rest]` table between a realm and its parent. For a caller that sends no `Origin`, answers no longer carry `access-control-allow-origin: *`, and with nothing allowed an `OPTIONS` request without an origin is answered `405` where it was answered `200` with an empty body.
@@ -53852,7 +53854,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.16...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.17...HEAD
+[0.9.17]: https://github.com/lukacf/meerkat/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/lukacf/meerkat/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/lukacf/meerkat/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14

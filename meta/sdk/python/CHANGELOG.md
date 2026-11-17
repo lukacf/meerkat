@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.17
+
 - Added `Meta.builder().on_schedule_fire(name, handler)`: the handler for a
   host runnable, in place before `build()` first connects. A program that
   uses `build()` could register a handler only on the runtime it returns

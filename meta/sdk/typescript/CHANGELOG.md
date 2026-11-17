@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.17
+
 - A request or callback reply written to a gateway whose input is gone (it
   exited, or closed its input) no longer ends the Node program with an
   unhandled `write EPIPE` error: the waiting requests and every later

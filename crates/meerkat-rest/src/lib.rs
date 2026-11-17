@@ -21322,6 +21322,133 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(payload["details"]["retryable"], json!(true));
     }
 
+    /// A provider sign-in that needs to be renewed (`user_reauth_required`,
+    /// what a Copilot mint returns when its model listing refused the token
+    /// twice) has two answers. A build that meets it answers HTTP 500
+    /// `AGENT_ERROR` with the typed session error's message and no details.
+    /// A running session's turn that meets it answers HTTP 500: a failed
+    /// turn, `TURN_ABANDONED` with the typed turn error, not retryable. The
+    /// `Abandoned` outcome carries the same typed error and this surface
+    /// does not hand it on: it answers `INTERNAL_ERROR` without details
+    /// (JSON-RPC answers the typed error for both outcomes: the rows pin
+    /// that difference between surfaces as it is). None is the 400
+    /// `INVALID_PARAMS` of a refused
+    /// `reasoning_effort` level, and none says `retryable: true`.
+    #[tokio::test]
+    async fn a_sign_in_that_must_be_renewed_answers_500() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let build_error = SessionError::provider_auth_failure(
+            meerkat_core::service::SessionProviderAuthFailure {
+                kind: meerkat_core::AuthErrorKind::UserReauthRequired,
+                provider: meerkat_core::Provider::OpenAI,
+                realm_id: Some(meerkat_core::RealmId::parse("global").unwrap()),
+                binding_id: Some(meerkat_core::BindingId::parse("copilot_openai").unwrap()),
+            },
+        );
+        let (status, payload) =
+            api_error_status_and_payload(create_session_error_to_api(build_error)).await;
+        println!("REST, a build that needs a new sign-in: {status} {payload}");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            payload,
+            json!({
+                "error": "provider authentication failed: provider=openai \
+                          kind=user_reauth_required binding=global/copilot_openai",
+                "code": "AGENT_ERROR",
+            })
+        );
+
+        // The turn of a running session: the authentication failure its
+        // provider request's authorization fails with.
+        let agent_error = meerkat_core::AgentError::llm(
+            "openai",
+            meerkat_core::error::LlmFailureReason::AuthError,
+            "Authentication failed: user reauth required",
+        );
+        let turn_error = meerkat_core::TurnErrorMetadata::from_agent_error(&agent_error)
+            .expect("an LLM failure has turn error metadata");
+        let turn_error_json = json!({
+            "kind": "llm_failure",
+            "terminal": true,
+            "outcome": "failed",
+            "detail": "Authentication failed: user reauth required",
+            "provider": "openai",
+            "retryable": false,
+            "reason": {"reason_type": "llm_auth_error"},
+        });
+        assert_eq!(json!(turn_error), turn_error_json);
+        let reason = agent_error.to_string();
+
+        let abandoned = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: reason.clone(),
+                error: turn_error.clone(),
+            },
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("an abandoned turn is an API error");
+        let (status, payload) = api_error_status_and_payload(abandoned).await;
+        println!("REST, a turn that needs a new sign-in (abandoned): {status} {payload}");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            payload,
+            json!({
+                "error": format!("turn abandoned: {reason}"),
+                "code": "INTERNAL_ERROR",
+            })
+        );
+
+        let failed = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: reason.clone(),
+                error: turn_error.clone(),
+            },
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("a failed turn is an API error");
+        let (status, payload) = api_error_status_and_payload(failed).await;
+        println!("REST, a turn that needs a new sign-in (failed turn): {status} {payload}");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            payload,
+            json!({
+                "error": format!("turn abandoned: {reason}"),
+                "code": "TURN_ABANDONED",
+                "details": {"error": turn_error_json},
+            })
+        );
+
+        // The first turn of the request that created the session.
+        let first_turn = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason,
+                error: turn_error,
+            },
+            &session_id,
+            &realm,
+            true,
+        )
+        .expect_err("a failed first turn is an API error");
+        let (status, payload) = api_error_status_and_payload(first_turn).await;
+        println!(
+            "REST, a created session's first turn that needs a new sign-in: {status} {payload}"
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(payload["code"], json!("SESSION_CREATED_WITH_TURN_FAILURE"));
+        assert_eq!(
+            payload["details"]["turn_error_code"],
+            json!("TURN_ABANDONED")
+        );
+        assert_eq!(payload["details"]["error"], turn_error_json);
+        assert_eq!(payload["details"]["session_created"], json!(true));
+        assert_eq!(payload["details"]["resumable"], json!(true));
+    }
+
     #[test]
     fn create_session_error_to_api_surfaces_cancelled_as_request_cancelled() {
         let err = create_session_error_to_api(SessionError::Agent(

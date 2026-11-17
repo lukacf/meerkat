@@ -311,6 +311,16 @@ type TurnEffectsFuture<'a> =
 type TurnEffectsFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AgentError>> + 'a>>;
 
+/// A future of the agent loop that is built and boxed in its own frame
+/// (see [`Agent::execute_turn_effects`]): `Send` wherever the loop's own
+/// futures are.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) type BoxedAgentFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub(super) type BoxedAgentFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+
 #[cfg(not(target_arch = "wasm32"))]
 type CallingLlmStepFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<CallingLlmStep, AgentError>> + Send + 'a>,
@@ -7039,7 +7049,25 @@ where
     /// round's first commit takes the staged assistant message as the
     /// round's model response. Every exit of the run's rounds passes
     /// [`Agent::close_run_cursor_at_exit`].
-    pub(super) async fn run_loop(
+    ///
+    /// Built and boxed in its own frame, like
+    /// [`Self::execute_turn_effects`]: the loop's state lives on the heap,
+    /// so the run's poll frames above it (the run, its surface and the
+    /// session's turn) reserve a pointer for it. The future is polled to
+    /// completion where it is awaited and dropped there, as before.
+    #[inline(never)]
+    pub(super) fn run_loop(
+        &mut self,
+        run_input: Option<crate::types::RunInput>,
+        event_tx: Option<mpsc::Sender<AgentEvent>>,
+        deferred_callback: Option<crate::session::DeferredCallbackContinuation>,
+        resumed: Option<ResumedRunStart>,
+    ) -> BoxedAgentFuture<'_, Result<RunResult, AgentError>> {
+        Box::pin(self.run_loop_unboxed(run_input, event_tx, deferred_callback, resumed))
+    }
+
+    /// [`Self::run_loop`], awaited through its boxed form.
+    async fn run_loop_unboxed(
         &mut self,
         run_input: Option<crate::types::RunInput>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,

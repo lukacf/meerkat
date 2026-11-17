@@ -1093,6 +1093,22 @@ jobs:
             fi
           fi
 
+      # A registry accepts an upload before it serves the version (npm has
+      # taken from one to more than six minutes). This job ends only when
+      # PyPI and npm serve the exact packages, so the crate job's readback of
+      # every registry does not start against one that has not served yet.
+      # The verifier reads public URLs with no credential and waits up to its
+      # own deadline; a rerun of this job publishes nothing again and passes
+      # here at the first read.
+      - name: Wait until PyPI and npm serve the exact SDK packages
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        env:
+          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
+            --only-registry PyPI --only-registry npm
+
   # The crate bytes the publisher must upload. No verify build here:
   # floor_check compiled these crates' packaged sources against published
   # Core. Its own archives differ from these in Cargo.lock only (it
@@ -1208,6 +1224,10 @@ jobs:
           MEERKAT_CRATE_PUBLISH_PATCH: "false"
           MEERKAT_REGISTRY_DRY_RUN: ${{ needs.resolve_release.outputs.dry_run }}
         run: scripts/release-publish-rust-crates.sh
+      # The readback of every registry. It runs after a failed SDK job too,
+      # so it keeps the verifier's own wait: up to its deadline for each
+      # registry to serve the exact packages, then a failure that names the
+      # registries still failing.
       - name: Verify exact packages are public on every registry
         if: needs.resolve_release.outputs.dry_run == 'false'
         run: |

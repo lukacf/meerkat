@@ -20,7 +20,15 @@ NPM_NAME = "@rkat/meta-sdk"
 
 
 class RegistryVerificationError(RuntimeError):
-    """One or more public registries do not expose the requested release."""
+    """One or more public registries do not expose the requested release.
+
+    `registries` names the registries whose check failed; it is empty when
+    the failure is not a registry's answer.
+    """
+
+    def __init__(self, message: str, registries: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.registries = registries
 
 
 class PublishedArtifact(NamedTuple):
@@ -204,6 +212,34 @@ def _registry_checks(
 
 
 CRATE_REGISTRIES = {CRATE_NAME: "crates.io", EXTENSION_CRATE_NAME: "crates.io extension-state"}
+# The registries the SDK packages publish to; `--only-registry` selects among
+# them (crates are selected with `--only-crates`).
+SDK_REGISTRIES = ("PyPI", "npm")
+# A registry accepts an upload before it serves the version: npm has taken
+# from one to more than six minutes. The wait is this long on the clock.
+DEFAULT_DEADLINE_SECONDS = 1800.0
+DEFAULT_DELAY_SECONDS = 10.0
+
+
+def _selected_checks(
+    version: str,
+    crate_sha256: dict[str, str] | None,
+    only_crates: bool,
+    only_registries: frozenset[str] | None,
+):
+    """The registry checks this run makes; a run that makes none is refused."""
+    if only_crates and only_registries:
+        raise ValueError("only_crates and only_registries select different registries")
+    named_crates = {CRATE_REGISTRIES[name] for name in (crate_sha256 or {})}
+    selected = [
+        check
+        for check in _registry_checks(version, crate_sha256)
+        if not (only_crates and check[0] not in named_crates)
+        and not (only_registries and check[0] not in only_registries)
+    ]
+    if not selected:
+        raise RegistryVerificationError("no registry was checked")
+    return selected
 
 
 def verify_once(
@@ -213,13 +249,15 @@ def verify_once(
     downloader: Callable[[str], bytes] = _download_artifact,
     crate_sha256: dict[str, str] | None = None,
     only_crates: bool = False,
+    only_registries: frozenset[str] | None = None,
 ) -> list[str]:
     """Check the release on each registry; return the registries checked."""
     failures: list[str] = []
+    failed: list[str] = []
     checked: list[str] = []
-    for registry, url, validator in _registry_checks(version, crate_sha256):
-        if only_crates and registry not in {CRATE_REGISTRIES[name] for name in (crate_sha256 or {})}:
-            continue
+    for registry, url, validator in _selected_checks(
+        version, crate_sha256, only_crates, only_registries
+    ):
         checked.append(registry)
         try:
             artifacts = validator(reader(url), version)
@@ -242,19 +280,24 @@ def verify_once(
             ValueError,
         ) as error:
             failures.append(f"{registry}: {error}")
-    if not checked:
-        raise RegistryVerificationError("no registry was checked")
+            failed.append(registry)
     if failures:
-        raise RegistryVerificationError("; ".join(failures))
+        raise RegistryVerificationError("; ".join(failures), tuple(failed))
     return checked
 
 
-def success_line(version: str, checked: list[str], *, only_crates: bool = False) -> str:
+def success_line(
+    version: str,
+    checked: list[str],
+    *,
+    only_crates: bool = False,
+    only_registries: frozenset[str] | None = None,
+) -> str:
     """The success line, naming exactly the registries verify_once checked.
 
     `--only-crates` checks crates.io alone, so its line names neither PyPI nor
     npm as verified. It used to claim all three, even while npm answered 404
-    for the version.
+    for the version. `--only-registry` names what it left unchecked too.
     """
     crates = [name for name, registry in CRATE_REGISTRIES.items() if registry in checked]
     parts: list[str] = []
@@ -268,57 +311,95 @@ def success_line(version: str, checked: list[str], *, only_crates: bool = False)
     line = f"Verified exact registry metadata and checksummed artifacts for {joined}"
     if only_crates:
         line += " (--only-crates: PyPI and npm were not checked)"
+    elif only_registries:
+        unchecked = ([] if crates else ["crates.io"]) + [
+            registry for registry in SDK_REGISTRIES if registry not in checked
+        ]
+        if unchecked:
+            verb = "was" if len(unchecked) == 1 else "were"
+            line += f" (--only-registry: {' and '.join(unchecked)} {verb} not checked)"
     return line
 
 
 def verify_with_retries(
     version: str,
     *,
-    attempts: int = 30,
-    delay_seconds: float = 10.0,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+    delay_seconds: float = DEFAULT_DELAY_SECONDS,
+    attempts: int | None = None,
     reader: Callable[[str], dict[str, Any]] = _read_json,
     downloader: Callable[[str], bytes] = _download_artifact,
     sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
     crate_sha256: dict[str, str] | None = None,
     only_crates: bool = False,
+    only_registries: frozenset[str] | None = None,
 ) -> None:
-    if attempts < 1:
-        raise ValueError("attempts must be at least 1")
+    """Read the registries until all serve the release or the deadline passes.
+
+    The wait is `deadline_seconds` on `clock`, measured from the first read:
+    after a failed read the next one starts `delay_seconds` later, unless
+    that start would fall after the deadline. `attempts`, when given, also
+    caps the number of reads. Every failed check is read again, so a digest
+    that does not match fails only at the end of the wait, with its text.
+    """
+    if deadline_seconds < 0:
+        raise ValueError("deadline_seconds must not be negative")
     if delay_seconds < 0:
         raise ValueError("delay_seconds must not be negative")
+    if attempts is not None and attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    # A selection that checks nothing is not a registry's answer: no wait.
+    _selected_checks(version, crate_sha256, only_crates, only_registries)
 
-    last_error: RegistryVerificationError | None = None
-    for attempt in range(1, attempts + 1):
+    started = clock()
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             checked = verify_once(version, reader=reader, downloader=downloader,
-                                  crate_sha256=crate_sha256, only_crates=only_crates)
+                                  crate_sha256=crate_sha256, only_crates=only_crates,
+                                  only_registries=only_registries)
         except RegistryVerificationError as error:
-            last_error = error
-            if attempt == attempts:
-                break
+            elapsed = clock() - started
+            out_of_attempts = attempts is not None and attempt >= attempts
+            if out_of_attempts or elapsed + delay_seconds > deadline_seconds:
+                failing = ", ".join(error.registries) or "no registry answer"
+                raise RegistryVerificationError(
+                    f"release {version} was not fully public after {attempt} attempts "
+                    f"in {elapsed:.0f} s (deadline {deadline_seconds:.0f} s); "
+                    f"still failing: {failing}; last answer: {error}",
+                    error.registries,
+                ) from error
+            # Flushed, so a hosted log shows each attempt at its own time.
             print(
-                f"Registry verification attempt {attempt}/{attempts} incomplete: {error}"
+                f"Registry verification attempt {attempt} incomplete "
+                f"({elapsed:.0f} s of {deadline_seconds:.0f} s): {error}",
+                flush=True,
             )
             sleeper(delay_seconds)
         else:
-            print(success_line(version, checked, only_crates=only_crates))
+            print(success_line(version, checked, only_crates=only_crates,
+                               only_registries=only_registries), flush=True)
             return
-
-    assert last_error is not None
-    raise RegistryVerificationError(
-        f"release {version} was not fully public after {attempts} attempts: {last_error}"
-    ) from last_error
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--attempts", type=int, default=30)
-    parser.add_argument("--delay-seconds", type=float, default=10.0)
+    parser.add_argument("--deadline-seconds", type=float, default=DEFAULT_DEADLINE_SECONDS,
+                        help="how long to wait, from the first read, for every checked "
+                             "registry to serve the release (default: %(default)s)")
+    parser.add_argument("--delay-seconds", type=float, default=DEFAULT_DELAY_SECONDS,
+                        help="pause between reads (default: %(default)s)")
+    parser.add_argument("--attempts", type=int, default=None,
+                        help="also stop after this many reads (default: no cap but the deadline)")
     parser.add_argument("--crate-sha256", action="append", default=[], metavar="CRATE=SHA256",
                         help="require crates.io to serve exactly this verified .crate checksum")
     parser.add_argument("--only-crates", action="store_true",
                         help="check only the crates named by --crate-sha256")
+    parser.add_argument("--only-registry", action="append", default=[], choices=SDK_REGISTRIES,
+                        help="check only this SDK package registry (repeatable)")
     args = parser.parse_args()
     crate_sha256 = {}
     for item in args.crate_sha256:
@@ -328,6 +409,8 @@ def main() -> int:
         crate_sha256[name] = digest
     if args.only_crates and not crate_sha256:
         parser.error("--only-crates needs at least one --crate-sha256")
+    if args.only_crates and args.only_registry:
+        parser.error("--only-registry and --only-crates select different registries; pass one")
 
     version = args.version.strip().removeprefix("v")
     if not version:
@@ -335,10 +418,12 @@ def main() -> int:
     try:
         verify_with_retries(
             version,
-            attempts=args.attempts,
+            deadline_seconds=args.deadline_seconds,
             delay_seconds=args.delay_seconds,
+            attempts=args.attempts,
             crate_sha256=crate_sha256,
             only_crates=args.only_crates,
+            only_registries=frozenset(args.only_registry) or None,
         )
     except (RegistryVerificationError, ValueError) as error:
         parser.exit(1, f"registry verification failed: {error}\n")

@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- The SDK exposes the existing gateway host-runnable path through
+  `MetaBuilder.hostRunnables(names)` and
+  `MetaRuntime.onScheduleFire(name, handler)`: TypeScript hosts declare
+  deterministic schedule targets and handle their fires, with Python SDK
+  dispatch parity. Chainable `MetaBuilder.onScheduleFire(name, handler)`
+  installs host-local handlers before `build()` connects, so stored
+  schedules can call them during startup. Each runtime copies the handlers;
+  runtime replacements survive reconnect without reinstalling builder
+  defaults. `build()` refuses builder handlers for undeclared names, naming
+  them before any gateway transport starts. Registration may precede
+  declaration; declared names without handlers and later runtime
+  registration remain allowed. Sync and async handlers receive the raw occurrence; errors fail
+  the occurrence attempt, and returning nothing acknowledges completion.
+  Includes the exported `ScheduleFireHandler` type and a runnable source
+  collector example. With the published Meta 0.9.15 Linux x86_64 gateway,
+  the example succeeds, and a stored occurrence due while stopped completes
+  on a fresh-process restart with builder registration. A declared runnable without a handler records
+  `delivery_failed` / `runtime_rejected`, while an undeclared source-runner
+  target records `misfired` / `target_missing` under the default policy
+  without an SDK callback. These occurrences are terminal with no next
+  retry action and are not delivered later when a handler is registered;
+  later interval occurrences remain pending. Older gateways
+  have not been checked. This is opt-in access to the existing gateway
+  contract; callers, defaults, wire schemas and stored forms are unchanged.
+  On upgrade or restart, declare stored schedules' runnable names and
+  register their handlers on the builder before `build()` connects.
+
 ## 0.9.16
 
 No SDK API changes; released with Meta 0.9.16.

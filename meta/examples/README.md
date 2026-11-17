@@ -18,11 +18,13 @@ Numbered packs are intentionally browser-first and can include:
 - `004-mdm-console-pack`
 - `005-access-control-pack`
 
-Three examples are host programs and not browser packs:
+Host programs:
 
 - `006-long-term-agents` (Python and TypeScript; no console, no provider key)
 - `007-supervised-python-app` (Python; a long-lived application: work, recovery, restart, a lost gateway; a provider key is optional)
 - `008-typescript-quickstart` (a TypeScript project to copy: one agent, a question, its answer; no console; a provider key for the question)
+- [TypeScript host runnable](../sdk/typescript/examples/README.md)
+  (a durable source-runner schedule and its callback; no provider key)
 
 ## Prerequisites
 

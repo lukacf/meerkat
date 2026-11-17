@@ -135,6 +135,103 @@ file refuses the start
 an empty file is accepted. On a store with no knowledge yet, `memoryQuery`
 answers `{"assertions":[],"conflicts":[],"results":[]}`.
 
+## Host runnables
+
+Run deterministic application code when a durable schedule fires:
+`MetaBuilder.hostRunnables(names)` declares the names and
+`MetaBuilder.onScheduleFire(name, handler)` installs handlers before the
+initial connection. `MetaRuntime.onScheduleFire(name, handler)` registers
+or replaces handlers on a runtime you already have. Declaration and runtime
+dispatch match Python's `host_runnables` and `on_schedule_fire`; builder
+registration also covers schedules that fire during startup. These use the
+existing `runtime_options.host_runnables` and `callback/schedule_fire`
+gateway contract. Handler functions stay in the host process.
+
+A host that registers runnables: every member that holds the schedule tools,
+and is not private to a person, can create a schedule that fires any of them,
+with parameters of its choosing; the fire does not tell the handler who
+wrote the schedule. Register only runnables that any such member may fire,
+and check their parameters in the handler.
+
+Install handlers before `build()` connects, on every boot:
+
+```typescript
+import { Meta, type ScheduleFireHandler } from "@rkat/meta-sdk";
+
+const collect: ScheduleFireHandler = async (occurrence) => {
+  console.log(occurrence.schedule_id, occurrence.occurrence_id);
+  console.log(occurrence.due_at, occurrence.payload);
+};
+
+const runtime = await Meta.builder()
+  .mob("config/mob.toml")
+  .gateway("/path/to/rpc_gateway")
+  .persistentState(".meta/collector")
+  .hostRunnables(["local.collect"])
+  .onScheduleFire("local.collect", collect)
+  .build();
+```
+
+The handler receives the raw occurrence with `schedule_id`, `occurrence_id`,
+`due_at` and optional `payload`. It may return synchronously or asynchronously;
+throwing or rejecting fails the occurrence attempt. A handler returning
+nothing acknowledges completion with JSON `null`. Return values cross the
+callback bridge but are not stored as schedule results. Use `occurrence_id`
+to deduplicate external side effects.
+
+Declaring a name creates no schedule. A schedule targeting
+`{target_kind: "host_runnable", runnable: "local.collect"}` must exist on
+the persistent gateway's schedule service. An
+[announcement source runner](/reference/configuration#mob-announcement-source-runners)
+creates such a schedule through `announcementSourcePut` with
+`runner: {host_runnable: "local.collect", every_seconds: 60}`. The
+[runnable example](https://github.com/lukacf/meerkat/tree/main/meta/sdk/typescript/examples)
+declares a source, receives its scheduled callback and ends the source,
+without a provider key or an LLM turn.
+
+`build()` returns a connected runtime: a stored schedule may fire before
+that promise resolves. Each runtime copies the builder's handlers before
+connecting. Later builder changes do not affect it. Calling
+`runtime.onScheduleFire` replaces that runtime's handler, and the replacement
+survives `shutdown()` followed by `connect()` on the same object; reconnect
+does not reinstall builder defaults. A fresh process must register on its
+builder again. Declaration and handler registration are separate requirements:
+
+Builder registration and declaration can appear in either order, but
+`build()` refuses a builder handler whose exact name is absent from
+`hostRunnables`, naming it before any gateway transport starts. Declaring
+a name without a handler is allowed. Runtime registration remains
+independent of declarations and can add or replace a handler after connection;
+it does not add a gateway target.
+
+| State when the source runner fires | SDK behavior | Durable gateway outcome |
+| --- | --- | --- |
+| Name declared, no handler registered | Returns `no schedule-fire handler registered for runnable: <name>` through the callback bridge | `delivery_failed`, with failure class `runtime_rejected` |
+| Name undeclared, even if registered through `runtime.onScheduleFire` | Receives no callback | `misfired`, with failure class `target_missing`, under the source runner's default `mark_misfired` policy |
+
+These outcomes were verified against the published Meta 0.9.15 Linux x86_64
+gateway, including the stored occurrence and receipt after shutdown. Each
+occurrence was terminal after one attempt, with no next retry action; it
+is not delivered later when a handler is registered. The interval schedule
+remained active with later occurrences pending.
+
+### Upgrading a host
+
+Use an SDK version that provides these methods. The runnable example also
+passed against the published Meta 0.9.15 Linux x86_64 gateway; older gateways
+have not been checked. A fresh-process restart on that gateway was also
+verified: an existing occurrence became due while the gateway was stopped,
+and builder registration handled the same stored occurrence on restart,
+with one callback and one completed attempt. This exposes an existing gateway
+contract: existing callers, stored schedules and wire schemas do not need
+migration. Omitting `hostRunnables`, or passing an empty list, sends no
+declaration and changes no default. The gateway continues to validate
+duplicate and reserved names. On every restart, declare the names used by
+stored schedules and call the builder's `onScheduleFire` before `build()`;
+upgrading alone supplies neither declaration nor handler. Waiting until
+`build()` returns to register on the runtime leaves a startup gap for stored
+schedules.
+
 ## Operator instructions
 
 Standing instructions for the members of the gateway's mob: the host writes

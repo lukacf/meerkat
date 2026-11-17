@@ -62,10 +62,18 @@ Schedules can target:
 Python applications register deterministic host runnables with
 `MetaBuilder.host_runnables(...)` and handle
 `callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
+TypeScript applications use `MetaBuilder.hostRunnables(...)` and
+`MetaRuntime.onScheduleFire(...)`; see [Host runnables](/sdks/typescript#host-runnables).
 The callback is delivery for a durable occurrence, not a substitute scheduler.
-In releases 0.7.32 to 0.9.16 a callback can arrive while the application is
+In Python SDK releases 0.7.32 to 0.9.16 a callback can arrive while the application is
 still starting, before its handler is registered: see
 [Schedule callbacks that arrive during startup](/sdks/python#schedule-callbacks-that-arrive-during-startup).
+
+A host that registers runnables: every member that holds the schedule tools,
+and is not private to a person, can create a schedule that fires any of them,
+with parameters of its choosing; the fire does not tell the handler who
+wrote the schedule. Register only runnables that any such member may fire,
+and check their parameters in the handler.
 
 ## Console schedules
 

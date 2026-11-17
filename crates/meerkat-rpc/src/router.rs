@@ -12854,7 +12854,10 @@ mod tests {
                     call(
                         &router,
                         "session/create",
-                        keep_alive_create(&format!("keep-alive-fails-at-once-{round}")),
+                        // The flavor is part of the name: both flavors' tests
+                        // can run at once in one process, and a comms name
+                        // is held for the whole process.
+                        keep_alive_create(&format!("keep-alive-fails-at-once-{flavor}-{round}")),
                     ),
                 )
                 .await

@@ -25069,18 +25069,21 @@ mod tests {
         error.structured_data().unwrap_or(serde_json::Value::Null)
     }
 
-    /// A restart over `root` with the two mobs `restore-unavailable`
-    /// (Running) and `restore-stopped` (Stopped): only the running mob's
-    /// resume reads the session catalog.
+    /// A restart over `root` with the two mobs `<label>-running` (Running)
+    /// and `<label>-stopped` (Stopped): only the running mob's resume reads
+    /// the session catalog. A mob's participant names are held for the whole
+    /// process, so each test passes a label of its own: two tests of this
+    /// binary that run at once must not share a mob id.
     async fn a_running_and_a_stopped_mob_before_a_restart(
         svc: &Arc<MockSessionSvc>,
         root: &std::path::Path,
+        label: &str,
     ) -> (MobId, MobId) {
         a_running_and_a_stopped_mob_before_a_restart_as(
             svc,
             root,
-            "restore-unavailable",
-            "restore-stopped",
+            &format!("{label}-running"),
+            &format!("{label}-stopped"),
         )
         .await
     }
@@ -25203,7 +25206,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "quarantine-heals")
+                .await;
 
         let restored = restored_state(&svc, root.path());
         // The first session listing (the running mob's resume) answers that
@@ -25281,7 +25285,7 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, _stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "failed-resume").await;
         let restored = restored_state(&svc, root.path());
         let bound = bind_activated_mobs_refusing_live_rebinds(&restored);
         svc.fail_next_lists(1);
@@ -25360,7 +25364,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "single-flight-retry")
+                .await;
         let restored = restored_state(&svc, root.path());
         // The pass and the first on-demand re-attempt meet the outage.
         svc.fail_next_lists(2);
@@ -25564,7 +25569,8 @@ mod tests {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let (running, _stopped) =
-            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path(), "concurrent-verb")
+                .await;
         let restored = restored_state(&svc, root.path());
         // The pass meets the outage: the running mob is quarantined.
         svc.fail_next_lists(1);

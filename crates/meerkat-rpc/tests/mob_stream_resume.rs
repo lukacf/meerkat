@@ -39,7 +39,15 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 const LIMIT: Duration = Duration::from_secs(10);
-const MOB: &str = "stream_resume_mob";
+/// A mob id for one harness. A mob's participant names are held for the whole
+/// process, so two tests of this binary that run at once must not share one.
+fn next_mob() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!(
+        "stream_resume_mob_{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
 const MEMBER: &str = "w1";
 
 /// Answers every request with two text deltas and an end of turn, so each
@@ -92,6 +100,8 @@ impl LlmClient for TwoDeltaProvider {
 
 /// One JSON-RPC client over a real TCP connection.
 struct Connection {
+    /// The mob of the harness this connection belongs to.
+    mob: String,
     writer: OwnedWriteHalf,
     frames: mpsc::UnboundedReceiver<Value>,
     reader_task: JoinHandle<()>,
@@ -170,6 +180,7 @@ impl Connection {
 }
 
 struct Harness {
+    mob: String,
     _temp: tempfile::TempDir,
     runtime: Arc<SessionRuntime>,
     config: Arc<dyn ConfigStore>,
@@ -203,6 +214,7 @@ impl Harness {
             temp.path().join("config_state.json"),
         )));
         Self {
+            mob: next_mob(),
             _temp: temp,
             runtime: Arc::new(runtime),
             config,
@@ -234,6 +246,7 @@ impl Harness {
             }
         });
         let mut connection = Connection {
+            mob: self.mob.clone(),
             writer,
             frames,
             reader_task,
@@ -263,14 +276,14 @@ async fn create_mob_with_member(connection: &mut Connection) {
     connection
         .request(
             "mob/create",
-            json!({"definition":{"id":MOB,"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            json!({"definition":{"id":connection.mob.as_str(),"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
             &mut ignored,
         )
         .await;
     connection
         .request(
             "mob/spawn",
-            json!({"mob_id":MOB,"profile":"worker","agent_identity":MEMBER,"runtime_mode":"turn_driven"}),
+            json!({"mob_id":connection.mob.as_str(),"profile":"worker","agent_identity":MEMBER,"runtime_mode":"turn_driven"}),
             &mut ignored,
         )
         .await;
@@ -283,7 +296,7 @@ async fn member_turn(connection: &mut Connection, prompt: &str) -> Vec<Value> {
     connection
         .request(
             "mob/turn_start",
-            json!({"mob_id":MOB,"agent_identity":MEMBER,"prompt":prompt}),
+            json!({"mob_id":connection.mob.as_str(),"agent_identity":MEMBER,"prompt":prompt}),
             &mut notifications,
         )
         .await;
@@ -333,7 +346,7 @@ async fn mob_stream_open_resumes_after_a_cursor_across_connections() {
     let stream_a = a
         .request(
             "mob/stream_open",
-            json!({"mob_id":MOB,"agent_identity":MEMBER}),
+            json!({"mob_id":h.mob.as_str(),"agent_identity":MEMBER}),
             &mut opened,
         )
         .await["stream_id"]
@@ -368,7 +381,7 @@ async fn mob_stream_open_resumes_after_a_cursor_across_connections() {
     let stream_b = b
         .request(
             "mob/stream_open",
-            json!({"mob_id":MOB,"agent_identity":MEMBER,"cursor":{"epoch":epoch,"seq":last_seq}}),
+            json!({"mob_id":h.mob.as_str(),"agent_identity":MEMBER,"cursor":{"epoch":epoch,"seq":last_seq}}),
             &mut replayed,
         )
         .await["stream_id"]
@@ -414,7 +427,7 @@ async fn mob_stream_open_replays_the_current_space_for_a_cursor_it_cannot_resume
     let mob_state = h.runtime.mob_state().expect("the RPC mob state");
     let earliest = mob_state
         .subscribe_agent_events_from(
-            &meerkat_mob::MobId::from(MOB),
+            &meerkat_mob::MobId::from(h.mob.as_str()),
             &meerkat_mob::AgentIdentity::from(MEMBER),
             SessionEventCursor::Earliest,
         )
@@ -454,7 +467,7 @@ async fn mob_stream_open_replays_the_current_space_for_a_cursor_it_cannot_resume
         let stream = a
             .request(
                 "mob/stream_open",
-                json!({"mob_id":MOB,"agent_identity":MEMBER,"cursor":cursor}),
+                json!({"mob_id":h.mob.as_str(),"agent_identity":MEMBER,"cursor":cursor}),
                 &mut opened,
             )
             .await["stream_id"]
@@ -496,12 +509,12 @@ async fn mob_stream_open_refuses_a_cursor_it_cannot_place() {
     for (id, params, what) in [
         (
             100,
-            json!({"mob_id":MOB,"cursor":{"epoch":SessionEventEpoch::new().to_string(),"seq":1}}),
+            json!({"mob_id":h.mob.as_str(),"cursor":{"epoch":SessionEventEpoch::new().to_string(),"seq":1}}),
             "a cursor on a mob-wide stream",
         ),
         (
             101,
-            json!({"mob_id":MOB,"agent_identity":MEMBER,"cursor":{"epoch":"not-a-uuid","seq":1}}),
+            json!({"mob_id":h.mob.as_str(),"agent_identity":MEMBER,"cursor":{"epoch":"not-a-uuid","seq":1}}),
             "a cursor epoch that is not a UUID",
         ),
     ] {
@@ -522,7 +535,11 @@ async fn mob_stream_open_refuses_a_cursor_it_cannot_place() {
 
     let mut ignored = Vec::new();
     let mob_wide = a
-        .request("mob/stream_open", json!({"mob_id":MOB}), &mut ignored)
+        .request(
+            "mob/stream_open",
+            json!({"mob_id":h.mob.as_str()}),
+            &mut ignored,
+        )
         .await["stream_id"]
         .as_str()
         .unwrap()
@@ -555,7 +572,7 @@ async fn rust_subscribe_agent_events_from_replays_the_tail_after_a_cursor() {
     let mut a = h.connect().await;
     create_mob_with_member(&mut a).await;
     let mob_state = h.runtime.mob_state().expect("the RPC mob state");
-    let mob_id = meerkat_mob::MobId::from(MOB);
+    let mob_id = meerkat_mob::MobId::from(h.mob.as_str());
     let member = meerkat_mob::AgentIdentity::from(MEMBER);
 
     let first = mob_state

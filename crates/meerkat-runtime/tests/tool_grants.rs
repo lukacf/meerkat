@@ -1,3 +1,7 @@
+// Every test here runs on SQLite too and several use the crate's test
+// faults: the target needs both features, as the crate's test command
+// passes them.
+#![cfg(all(feature = "sqlite-store", feature = "test-support"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Scoped tool grants through the runtime: the grant service over a store,
 //! a served session's grant gate on its runtime bindings, the visibility

@@ -117,6 +117,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   someone else closed, and the Console said for both "This question was
   already answered or closed ... Nothing more is needed from you." It now
   words the line by the set's own deadline; the refusal is unchanged.
+- A mob runtime whose storage provider has no WorkGraph binds no resume
+  check for durable workers. Its resume check was bound over a store that
+  refuses every operation, so each of its reads failed, and after Meerkat's
+  bounded retries every interrupted run of a durable worker was settled as
+  superseded when the worker resumed. Such a runtime now binds no resume
+  check, as a runtime without a WorkGraph service does, and the run
+  continues. Present in every release since the resume check was added in
+  0.9.5.
 
 ### Known limitations
 

@@ -11,6 +11,12 @@
 //! record is unchanged, so the neighbour session B is owed its next turn on
 //! the sign-in, and a new session of the sign-in is owed its start.
 //!
+//! The same holds for an API-key credential: a session that runs on it as
+//! its fallback, or has it as its fallback, keeps it when another session
+//! leaves it. A sign-out or a removal still withdraws a credential from
+//! every session, and a session leaves a credential without waiting for its
+//! lifecycle.
+//!
 //! Each row records what the host returned under an `LN-RECORD` prefix.
 
 use std::path::{Path, PathBuf};
@@ -48,6 +54,9 @@ const LOGIN_MODEL: &str = "gpt-5.4";
 const BACKUP_MODEL: &str = "claude-sonnet-4-5";
 const LOGIN_BINDING: &str = "chatgpt_login";
 const BACKUP_BINDING: &str = "default_anthropic";
+/// A second API-key binding of the backup's provider: another credential
+/// than [`BACKUP_BINDING`], for a session that leaves that one.
+const SECOND_BINDING: &str = "anthropic_second";
 const PROVIDER_ACCOUNT: &str = "chatgpt-provider-account";
 const FIRST_SIGN_IN: &str = "sign-in-access-one";
 const SECOND_SIGN_IN: &str = "sign-in-access-two";
@@ -263,7 +272,7 @@ fn binding(realm: &str, binding: &str) -> AuthBindingRef {
 }
 
 /// The host's config: the sign-in's ChatGPT-backend binding (a credential
-/// account in the managed store) and an Anthropic API-key binding, each on
+/// account in the managed store) and two Anthropic API-key bindings, each on
 /// its loopback server. The host configures no model fallback; a session
 /// states its own.
 fn host_config(realm: &str, account: &str, login_base: &str, backup_base: &str) -> Config {
@@ -273,6 +282,19 @@ fn host_config(realm: &str, account: &str, login_base: &str, backup_base: &str) 
         .get_mut(BACKUP_BINDING)
         .expect("the API-key backend is configured")
         .base_url = Some(backup_base.to_string());
+    let second_backend = section.backend[BACKUP_BINDING].clone();
+    let second_auth = section.auth[BACKUP_BINDING].clone();
+    let mut second_binding = section.binding[BACKUP_BINDING].clone();
+    second_binding.backend_profile = SECOND_BINDING.to_string();
+    second_binding.auth_profile = SECOND_BINDING.to_string();
+    second_binding.provider_default = false;
+    section
+        .backend
+        .insert(SECOND_BINDING.to_string(), second_backend);
+    section.auth.insert(SECOND_BINDING.to_string(), second_auth);
+    section
+        .binding
+        .insert(SECOND_BINDING.to_string(), second_binding);
     section.backend.insert(
         LOGIN_BINDING.to_string(),
         meerkat_core::BackendProfileConfig {
@@ -351,6 +373,38 @@ fn answered(text: &str) -> Turn {
     Turn::Answered(text.to_string())
 }
 
+/// The model and binding a session is created on.
+#[derive(Debug, Clone, Copy)]
+enum Route {
+    /// [`LOGIN_MODEL`] on the sign-in.
+    SignIn,
+    /// [`BACKUP_MODEL`] on the first API-key binding.
+    Backup,
+}
+
+impl Route {
+    fn model(self) -> &'static str {
+        match self {
+            Self::SignIn => LOGIN_MODEL,
+            Self::Backup => BACKUP_MODEL,
+        }
+    }
+
+    fn provider(self) -> Provider {
+        match self {
+            Self::SignIn => Provider::OpenAI,
+            Self::Backup => Provider::Anthropic,
+        }
+    }
+
+    fn binding(self) -> &'static str {
+        match self {
+            Self::SignIn => LOGIN_BINDING,
+            Self::Backup => BACKUP_BINDING,
+        }
+    }
+}
+
 /// One host: the runtime-backed service and its machine over one store
 /// directory, and the credential store it resolves the sign-in from.
 struct Host {
@@ -358,9 +412,13 @@ struct Host {
     adapter: Arc<MeerkatMachine>,
     owner: GeneratedAuthLeaseHandle,
     store: Arc<dyn TokenStore>,
+    persistence: ProviderAuthPersistence,
     /// The root of a credential store on disk; `None` for one in memory.
     credential_root: Option<PathBuf>,
+    /// The sign-in's credential.
     credential: AuthCredentialIdentity,
+    /// The first API-key binding's credential.
+    backup_credential: AuthCredentialIdentity,
     realm: String,
 }
 
@@ -381,15 +439,17 @@ impl Host {
         let config = host_config(&realm, &account, login_base, backup_base);
         let credential = config.realm[&realm].binding[LOGIN_BINDING]
             .credential_identity(&binding(&realm, LOGIN_BINDING));
+        let backup_credential = config.realm[&realm].binding[BACKUP_BINDING]
+            .credential_identity(&binding(&realm, BACKUP_BINDING));
         let persistence =
             ProviderAuthPersistence::new(Arc::clone(&store), Arc::new(InMemoryCoordinator::new()));
         let factory = AgentFactory::new(directory.join("factory-sessions"))
-            .with_provider_auth_persistence(persistence)
+            .with_provider_auth_persistence(persistence.clone())
             .builtins(false);
         let builder = FactoryAgentBuilder::new(factory, config);
         let session_store: Arc<dyn SessionStore> =
             Arc::new(meerkat_store::JsonlStore::new(directory.join("jsonl")));
-        let persistence = PersistenceBundle::new(
+        let runtime_persistence = PersistenceBundle::new(
             session_store,
             Arc::new(
                 meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(
@@ -404,7 +464,7 @@ impl Host {
             crate::surface::build_runtime_backed_service_with_default_reconfigure_host(
                 builder,
                 8,
-                persistence,
+                runtime_persistence,
                 directory.join("config_state.json"),
             )
             .expect("compose the runtime-backed service");
@@ -414,8 +474,10 @@ impl Host {
             adapter,
             owner,
             store,
+            persistence,
             credential_root,
             credential,
+            backup_credential,
             realm,
         }
     }
@@ -479,11 +541,12 @@ impl Host {
         &self,
         session: Session,
         fresh: bool,
+        route: Route,
         fallback: bool,
     ) -> Result<(), String> {
         let request = CreateSessionRequest {
             injected_context: Vec::new(),
-            model: LOGIN_MODEL.to_string(),
+            model: route.model().to_string(),
             prompt: meerkat_core::ContentInput::Text(String::new()),
             // A resumed session keeps its persisted prompt, provider and
             // binding.
@@ -498,9 +561,9 @@ impl Host {
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 model_fallback: fallback.then(|| fallback_to_the_backup(&self.realm)),
-                provider: fresh.then_some(Provider::OpenAI),
+                provider: fresh.then_some(route.provider()),
                 realm_id: Some(RealmId::parse(&self.realm).expect("valid test realm")),
-                auth_binding: fresh.then(|| binding(&self.realm, LOGIN_BINDING)),
+                auth_binding: fresh.then(|| binding(&self.realm, route.binding())),
                 override_image_generation: meerkat_core::ToolCategoryOverride::Disable,
                 ..Default::default()
             }),
@@ -527,9 +590,15 @@ impl Host {
     /// Create a session on the sign-in, with the fallback to the backup when
     /// `fallback`. A refusal is returned as the host would show it.
     async fn create_session(&self, fallback: bool) -> Result<SessionId, String> {
+        self.create_session_on(Route::SignIn, fallback).await
+    }
+
+    /// Create a session on `route`, with the fallback to the backup when
+    /// `fallback`.
+    async fn create_session_on(&self, route: Route, fallback: bool) -> Result<SessionId, String> {
         let session = Session::new();
         let session_id = session.id().clone();
-        self.materialize(session, true, fallback)
+        self.materialize(session, true, route, fallback)
             .await
             .map(|()| session_id)
     }
@@ -543,7 +612,48 @@ impl Host {
             .await
             .expect("load the persisted session")
             .expect("the session stays durable");
-        self.materialize(session, false, false).await
+        self.materialize(session, false, Route::SignIn, false).await
+    }
+
+    /// Switch `session` live to `model` of `provider` on the binding
+    /// `binding_name`.
+    async fn switch(
+        &self,
+        session: &SessionId,
+        model: &str,
+        provider: Provider,
+        binding_name: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .reconfigure_session_llm_identity(
+                session,
+                SessionLlmReconfigureRequest {
+                    model: Some(model.to_string()),
+                    provider: Some(provider.as_str().to_string()),
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: Some(TurnMetadataOverride::Set(binding(
+                        &self.realm,
+                        binding_name,
+                    ))),
+                    reasoning_effort: None,
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{error} [{error:?}]"))
+    }
+
+    /// Withdraw `credential` as a sign-out and an auth profile removal do:
+    /// the one coordinated clear of its stored record and its lifecycle.
+    async fn withdraw(&self, credential: &AuthCredentialIdentity) -> Result<(), String> {
+        meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+            self.persistence.clone(),
+            self.owner.clone(),
+            credential.clone(),
+        )
+        .await
+        .map_err(|error| format!("{error} [{error:?}]"))
     }
 
     /// One turn of `session`, and what the host got back.
@@ -611,6 +721,32 @@ impl Host {
             snapshot.phase, snapshot.credential_present, snapshot.generation
         );
     }
+
+    fn record_backup_lease(&self, moment: &str) {
+        let snapshot = self
+            .owner
+            .snapshot(&LeaseKey::from_credential_identity(&self.backup_credential));
+        eprintln!(
+            "LN-RECORD: the API-key binding's lease {moment}: phase={:?} credential_present={} generation={}",
+            snapshot.phase, snapshot.credential_present, snapshot.generation
+        );
+    }
+
+    /// A rate-limited turn of `session` (named `who` in the record), and the
+    /// model fallback events it emitted.
+    async fn rate_limited_turn(&self, session: &SessionId, who: &str) -> (Turn, Vec<String>) {
+        let watched = self.watch_model_fallback(session).await;
+        let turn = self.turn(session, RATE_LIMITED_PROMPT).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let events = watched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for event in &events {
+            eprintln!("LN-RECORD: {who}'s model fallback event: {event}");
+        }
+        (turn, events)
+    }
 }
 
 /// How session A leaves the sign-in's credential.
@@ -651,16 +787,7 @@ async fn a_leaves_the_sign_in(host: &Host, departure: Departure) -> SessionId {
 
     match departure {
         Departure::Fallback => {
-            let watched = host.watch_model_fallback(&a).await;
-            let turn = host.turn(&a, RATE_LIMITED_PROMPT).await;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let events = watched
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            for event in &events {
-                eprintln!("LN-RECORD: A's model fallback event: {event}");
-            }
+            let (turn, events) = host.rate_limited_turn(&a, "A").await;
             assert_eq!(
                 turn,
                 answered(BACKUP_ANSWER),
@@ -669,21 +796,7 @@ async fn a_leaves_the_sign_in(host: &Host, departure: Departure) -> SessionId {
             );
         }
         Departure::LiveSwitch => {
-            host.adapter
-                .reconfigure_session_llm_identity(
-                    &a,
-                    SessionLlmReconfigureRequest {
-                        model: Some(BACKUP_MODEL.to_string()),
-                        provider: Some(Provider::Anthropic.as_str().to_string()),
-                        self_hosted_server_id: None,
-                        provider_params: None,
-                        auth_binding: Some(TurnMetadataOverride::Set(binding(
-                            &host.realm,
-                            BACKUP_BINDING,
-                        ))),
-                        reasoning_effort: None,
-                    },
-                )
+            host.switch(&a, BACKUP_MODEL, Provider::Anthropic, BACKUP_BINDING)
                 .await
                 .expect("control: A switches to the backup model and binding");
             assert_eq!(
@@ -891,6 +1004,253 @@ async fn a_neighbour_sessions_turn_succeeds_after_the_runtime_is_rebuilt_in_the_
     eprintln!("LN-RECORD: B's turn in the rebuilt runtime returned: {turn:?}");
     rebuilt.record_lease("in the rebuilt runtime, after B's turn");
     assert_eq!(turn, answered(LOGIN_ANSWER));
+}
+
+/// A host with a sign-in, a session on the sign-in whose fallback is the
+/// API-key binding, and session Y on that API-key binding. Both controls
+/// are asserted. Returns the session with the fallback and Y.
+async fn a_fallback_user_and_a_session_on_the_api_key(host: &Host) -> (SessionId, SessionId) {
+    host.sign_in(FIRST_SIGN_IN).await;
+    let with_fallback = host
+        .create_session(true)
+        .await
+        .expect("the session with the fallback starts on the sign-in");
+    let y = host
+        .create_session_on(Route::Backup, false)
+        .await
+        .expect("session Y starts on the API-key binding");
+    assert_eq!(
+        host.turn(&y, "Y's first turn").await,
+        answered(BACKUP_ANSWER),
+        "control: Y answers on the API-key binding"
+    );
+    (with_fallback, y)
+}
+
+/// Session Y leaves the API-key binding for the second API-key binding, by a
+/// live switch, and answers there.
+async fn y_leaves_the_api_key(host: &Host, y: &SessionId) {
+    host.record_backup_lease("before Y leaves");
+    host.switch(y, BACKUP_MODEL, Provider::Anthropic, SECOND_BINDING)
+        .await
+        .expect("control: Y switches to the second API-key binding");
+    assert_eq!(
+        host.turn(y, "Y's turn after the switch").await,
+        answered(BACKUP_ANSWER),
+        "control: Y answers on the second API-key binding"
+    );
+    assert_eq!(
+        host.live_route(y).await,
+        (
+            BACKUP_MODEL.to_string(),
+            Some(binding(&host.realm, SECOND_BINDING))
+        ),
+        "control: Y is on the second API-key binding"
+    );
+    host.record_backup_lease("after Y left");
+}
+
+/// Session X runs on its fallback, the API-key binding. Session Y, on that
+/// binding in the same host, leaves it for another credential. X takes its
+/// next turns.
+#[tokio::test]
+async fn a_session_on_its_fallback_keeps_its_turns_after_another_session_leaves_that_credential() {
+    let stage = Stage::new("running_on_fallback").await;
+    let host = stage.host();
+    let (x, y) = a_fallback_user_and_a_session_on_the_api_key(&host).await;
+    let (fell_back, events) = host.rate_limited_turn(&x, "X").await;
+    assert_eq!(
+        fell_back,
+        answered(BACKUP_ANSWER),
+        "control: X's rate-limited turn is answered by its fallback; \
+         its model fallback events: {events:?}"
+    );
+    assert_eq!(
+        host.live_route(&x).await,
+        (
+            BACKUP_MODEL.to_string(),
+            Some(binding(&host.realm, BACKUP_BINDING))
+        ),
+        "control: X runs on the API-key binding"
+    );
+    y_leaves_the_api_key(&host, &y).await;
+
+    let mut turns = Vec::new();
+    for prompt in ["X's next turn", "X's turn after that"] {
+        let turn = host.turn(&x, prompt).await;
+        eprintln!("LN-RECORD: {prompt}, after Y left X's credential, returned: {turn:?}");
+        turns.push(turn);
+    }
+    host.record_backup_lease("after X's turns");
+    assert_eq!(
+        turns,
+        vec![answered(BACKUP_ANSWER); 2],
+        "nobody removed the API-key credential X runs on"
+    );
+}
+
+/// Session Z is on the sign-in and has the API-key binding as its fallback.
+/// Session Y, on that binding in the same host, leaves it for another
+/// credential. Z's own model then answers a rate limit with nothing
+/// streamed.
+#[tokio::test]
+async fn a_sessions_fallback_happens_after_another_session_left_the_fallbacks_credential() {
+    let stage = Stage::new("owed_fallback").await;
+    let host = stage.host();
+    let (z, y) = a_fallback_user_and_a_session_on_the_api_key(&host).await;
+    assert_eq!(
+        host.turn(&z, "Z's first turn").await,
+        answered(LOGIN_ANSWER),
+        "control: Z answers on the sign-in"
+    );
+    y_leaves_the_api_key(&host, &y).await;
+
+    let (turn, events) = host.rate_limited_turn(&z, "Z").await;
+    eprintln!(
+        "LN-RECORD: Z's rate-limited turn, after Y left its fallback's credential, returned: {turn:?}"
+    );
+    assert_eq!(
+        turn,
+        answered(BACKUP_ANSWER),
+        "nobody removed the API-key credential Z falls back to; \
+         its model fallback events: {events:?}"
+    );
+}
+
+/// A sign-out withdraws the sign-in from every session of the host: two
+/// running sessions lose their next turn and a new one is refused.
+#[tokio::test]
+async fn a_sign_out_withdraws_the_sign_in_from_every_session() {
+    let stage = Stage::new("sign_out").await;
+    let host = stage.host();
+    host.sign_in(FIRST_SIGN_IN).await;
+    let b = host.create_session(false).await.expect("session B starts");
+    let c = host.create_session(false).await.expect("session C starts");
+    for (session, name) in [(&b, "B"), (&c, "C")] {
+        assert_eq!(
+            host.turn(session, "a first turn").await,
+            answered(LOGIN_ANSWER),
+            "control: {name} answers on the sign-in"
+        );
+    }
+
+    host.withdraw(&host.credential)
+        .await
+        .expect("the sign-out succeeds");
+    host.record_lease("after the sign-out");
+    assert_eq!(host.stored_access_token().await, None);
+    for (session, name) in [(&b, "B"), (&c, "C")] {
+        let turn = host.turn(session, "a turn after the sign-out").await;
+        eprintln!("LN-RECORD: {name}'s turn after the sign-out returned: {turn:?}");
+        assert!(
+            matches!(&turn, Turn::Failed(text) if text.contains("auth lease absent")),
+            "{name} must not be served by a signed-out credential: {turn:?}"
+        );
+    }
+    let created = host.create_session(false).await;
+    eprintln!("LN-RECORD: a new session after the sign-out: {created:?}");
+    assert!(
+        created.is_err(),
+        "a signed-out credential serves no new session"
+    );
+}
+
+/// After session A left the sign-in by its fallback, a sign-out still
+/// withdraws the sign-in from every session: B loses its next turn and a new
+/// session is refused.
+#[tokio::test]
+async fn a_sign_out_after_another_sessions_fallback_withdraws_the_sign_in_from_every_session() {
+    let (_stage, host, b) = neighbours_after_a_left("sign_out_later", Departure::Fallback).await;
+
+    let signed_out = host.withdraw(&host.credential).await;
+    eprintln!("LN-RECORD: the sign-out after A's fallback: {signed_out:?}");
+    signed_out.expect("the sign-out succeeds");
+    host.record_lease("after the sign-out");
+    assert_eq!(host.stored_access_token().await, None);
+    let turn = host.turn(&b, "B's turn after the sign-out").await;
+    eprintln!("LN-RECORD: B's turn after the sign-out returned: {turn:?}");
+    assert!(
+        matches!(&turn, Turn::Failed(text) if text.contains("auth lease absent")),
+        "B must not be served by a signed-out credential: {turn:?}"
+    );
+    let created = host.create_session(false).await;
+    eprintln!("LN-RECORD: a new session after the sign-out: {created:?}");
+    assert!(
+        created.is_err(),
+        "a signed-out credential serves no new session"
+    );
+}
+
+/// A removed credential is withdrawn from every session: the session that
+/// runs on it as its fallback loses its next turn, and the session that has
+/// it as its fallback does not fall back to it.
+#[tokio::test]
+async fn a_removed_credential_is_withdrawn_from_every_session_that_falls_back_to_it() {
+    let stage = Stage::new("removed_credential").await;
+    let host = stage.host();
+    host.sign_in(FIRST_SIGN_IN).await;
+    let x = host.create_session(true).await.expect("session X starts");
+    let z = host.create_session(true).await.expect("session Z starts");
+    let (fell_back, events) = host.rate_limited_turn(&x, "X").await;
+    assert_eq!(
+        fell_back,
+        answered(BACKUP_ANSWER),
+        "control: X's rate-limited turn is answered by its fallback; \
+         its model fallback events: {events:?}"
+    );
+
+    host.withdraw(&host.backup_credential)
+        .await
+        .expect("the removal succeeds");
+    host.record_backup_lease("after the removal");
+    let turn = host.turn(&x, "X's turn after the removal").await;
+    eprintln!("LN-RECORD: X's turn after its fallback's credential was removed returned: {turn:?}");
+    assert!(
+        matches!(turn, Turn::Failed(_)),
+        "X must not be served by a removed credential: {turn:?}"
+    );
+    let (turn, events) = host.rate_limited_turn(&z, "Z").await;
+    eprintln!(
+        "LN-RECORD: Z's rate-limited turn after its fallback's credential was removed returned: {turn:?}"
+    );
+    assert!(
+        matches!(turn, Turn::Failed(_)),
+        "Z must not fall back to a removed credential: {turn:?}; \
+         its model fallback events: {events:?}"
+    );
+}
+
+/// A session is switched live away from the sign-in while another task of
+/// the host holds the sign-in's credential lifecycle (as a status read, a
+/// sign-in or another session's authorization does for a moment).
+#[tokio::test]
+async fn a_live_switch_succeeds_while_another_task_holds_the_sign_ins_lifecycle() {
+    let stage = Stage::new("busy_lifecycle").await;
+    let host = stage.host();
+    host.sign_in(FIRST_SIGN_IN).await;
+    let a = host.create_session(false).await.expect("session A starts");
+    assert_eq!(
+        host.turn(&a, "A's first turn").await,
+        answered(LOGIN_ANSWER),
+        "control: A answers on the sign-in"
+    );
+
+    let held = meerkat_core::acquire_auth_login_lifecycle_guard(&host.lease_key()).await;
+    let switched = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        host.switch(&a, BACKUP_MODEL, Provider::Anthropic, BACKUP_BINDING),
+    )
+    .await;
+    drop(held);
+    eprintln!("LN-RECORD: A's live switch while the sign-in's lifecycle was held: {switched:?}");
+    switched
+        .expect("the switch does not wait for the sign-in's lifecycle")
+        .expect("the switch leaves the sign-in without asking for its lifecycle");
+    assert_eq!(
+        host.turn(&a, "A's first turn after the switch").await,
+        answered(BACKUP_ANSWER)
+    );
+    host.record_lease("after A's switch");
 }
 
 const RESTART_PHASE_ENV: &str = "MEERKAT_TEST_NEIGHBOUR_RESTART_PHASE";

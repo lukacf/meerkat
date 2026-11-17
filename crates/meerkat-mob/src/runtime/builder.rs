@@ -10127,14 +10127,24 @@ impl MobBuilder {
             // entry, as it did from that update's commit on: the rows are
             // read already, and nothing is built, woken or written. Every
             // other seat is left as the journal projected it, with every
-            // label it carries: a difference no update made is not the
-            // start's to settle. A seat whose session no build created
-            // also takes its descriptive inputs from the row: an update
-            // after the seat applies at the first build.
+            // label it carries: a difference no update and no adoption
+            // made is not the start's to settle. An adoption from a roster
+            // spec is such an act: its row holds the labels the host
+            // declared, and the member it found was seated before the
+            // identity had a row. So while that member's last seat row is
+            // still the one the adoption found, its roster entry reads the
+            // row's labels too, as it did from the adoption's commit on,
+            // and nothing is written for it. A seat whose session no build
+            // created also takes its descriptive inputs from the row: an
+            // update after the seat applies at the first build.
             for (identity, spec) in &recovered_created_rows.specs {
                 if recovered_created_rows
                     .label_restamps_owed
                     .contains(identity)
+                    || (recovered_created_rows
+                        .adopted_from_roster
+                        .contains(identity)
+                        && roster.seat_is_as_adopted(identity))
                 {
                     roster.set_store_owned_seat_labels(identity, &spec.labels);
                 }
@@ -12891,6 +12901,11 @@ pub(super) struct ResumeRestoreCandidate {
     /// successor's declared role migration): its build declares it, unless
     /// the host's customizer declared one itself.
     pub(super) resume_from_role: Option<ProfileName>,
+    /// Whether the member's last seat row is still the one its adoption
+    /// into store custody found ([`Roster::seat_is_as_adopted`]): a build
+    /// of such a member reads its seat's labels from the row an adoption
+    /// from a roster spec wrote.
+    pub(super) seat_as_adopted: bool,
 }
 
 /// The members a cold resume restores, in `entries`' order (every in-mob
@@ -12938,6 +12953,7 @@ fn resume_restore_set(
                 in_turn: shares_session || member_restore_follows_in_mob_source(entry, mob_id),
                 seat_build: roster.next_build(&entry.agent_identity),
                 resume_from_role: roster.resume_from_role(&entry.agent_identity).cloned(),
+                seat_as_adopted: roster.seat_is_as_adopted(&entry.agent_identity),
             })
         })
         .collect()
@@ -14043,7 +14059,10 @@ pub(super) async fn restore_resumed_member(
     // labels since) makes the row's labels the seat's: the host is asked
     // with them, and the comparison below is made with them, so a host
     // that answers the row is not refused and a label the row lacks is
-    // refused as ever. The record stays as it is: a build writes no seat
+    // refused as ever. A row an adoption wrote from a roster spec, whose
+    // member's last seat row is still the one the adoption found, is read
+    // the same way: the adoption made the row the identity's record and
+    // seated nothing. The record stays as it is: a build writes no seat
     // row, so it settles nothing, and the next build after a restart reads
     // the same. Any other row leaves the seat's labels the member's own,
     // as its last seat row seated them: a label only the seat carries is
@@ -14065,8 +14084,11 @@ pub(super) async fn restore_resumed_member(
         {
             Ok(StoreOwnedSeatRow::Row {
                 labels,
-                label_restamp_owed: true,
-            }) => owed_row_labels = Some(labels),
+                label_restamp_owed,
+                adopted_from_roster,
+            }) if label_restamp_owed || (adopted_from_roster && candidate.seat_as_adopted) => {
+                owed_row_labels = Some(labels);
+            }
             Ok(StoreOwnedSeatRow::Row { .. } | StoreOwnedSeatRow::Absent) => {}
             Ok(StoreOwnedSeatRow::Unreadable) => {
                 row_unavailable = Some(format!(

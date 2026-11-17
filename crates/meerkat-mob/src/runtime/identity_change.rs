@@ -3806,6 +3806,8 @@ pub(super) enum StoreOwnedSeatRow {
     Row {
         labels: BTreeMap<String, String>,
         label_restamp_owed: bool,
+        /// Whether an adoption from a roster spec wrote the row.
+        adopted_from_roster: bool,
     },
     /// The store holds no row of the identity, or one with no spec.
     Absent,
@@ -3825,10 +3827,12 @@ pub(super) async fn store_owned_seat_row(
         match store.observe_created_identity(mob_id, identity).await? {
             Some(crate::identity::CreatedIdentityObservation::Created(row)) => {
                 let label_restamp_owed = row.label_restamp_owed;
+                let adopted_from_roster = row.adopted_from_roster();
                 match row.spec {
                     Some(spec) => StoreOwnedSeatRow::Row {
                         labels: spec.labels,
                         label_restamp_owed,
+                        adopted_from_roster,
                     },
                     None => StoreOwnedSeatRow::Absent,
                 }

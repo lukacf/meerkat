@@ -797,22 +797,39 @@ impl HostConfinement {
         sources
     }
 
-    /// The documents a realm keeps at its root that decide what a host
-    /// built on it runs and authorizes: its config document
-    /// (`config.toml`), that document's generation sidecar
-    /// (`config_state.json`), the realm manifest (`realm_manifest.json`)
-    /// and the directory of the grant owner store (`authorization`). A host
-    /// passes them to [`crate::AgentFactory::with_protected_host_inputs`]
-    /// with its inputs and convention sources, so its in-process file tools
-    /// never write them, also where the tools' project root is the realm
-    /// directory itself and the state root as a whole does not apply. The
-    /// realm's stores (sessions, runtime, jobs and the rest) are not
-    /// documents and are not listed.
+    /// What a realm keeps at its root that its host's in-process file tools
+    /// never write or read: the documents that decide what a host built on
+    /// it runs and authorizes (its config document `config.toml`, that
+    /// document's generation sidecar `config_state.json`, the realm
+    /// manifest `realm_manifest.json` and the directory of the grant owner
+    /// store, `authorization`), and the realm's stores (sessions, runtime,
+    /// jobs, work graph, memory, tasks, blobs, artifacts, mobs, approvals
+    /// and decisions, the shell tools' process custody records, and the
+    /// lease, hosting lock and delivery
+    /// directories), and the two lock files a realm keeps at its root, each
+    /// by its owner's name: the admission fence
+    /// ([`meerkat_core::realm_admission::ADMISSION_LOCK_FILE`]) and the
+    /// write-admission lock (the fence path of
+    /// [`meerkat_store::migrate::realm_write_admission_target`]). A host
+    /// passes them to
+    /// [`crate::AgentFactory::with_protected_host_inputs`] with its inputs
+    /// and convention sources, so they are kept also where the tools'
+    /// project root is the realm directory itself and the state root as a
+    /// whole does not apply. A listed file is kept with its side files (a
+    /// database's write-ahead log, a lock, a backup beside it).
     #[must_use]
     pub fn realm_documents(realm_root: &Path) -> Vec<PathBuf> {
         REALM_DOCUMENTS
             .iter()
+            .copied()
+            .chain(REALM_STORES.iter().map(|(name, _)| *name))
             .map(|name| realm_root.join(name))
+            .chain([
+                realm_root.join(meerkat_core::realm_admission::ADMISSION_LOCK_FILE),
+                meerkat_sqlite::fence_lock_path(
+                    &meerkat_store::migrate::realm_write_admission_target(realm_root),
+                ),
+            ])
             .collect()
     }
 
@@ -836,7 +853,8 @@ fn backend_name(backend: ConfinementBackend) -> &'static str {
     }
 }
 
-/// The names, under a realm root, of [`HostConfinement::realm_documents`].
+/// The names, under a realm root, of the realm's documents: the first part
+/// of [`HostConfinement::realm_documents`].
 const REALM_DOCUMENTS: &[&str] = &[
     "config.toml",
     "config_state.json",
@@ -844,31 +862,38 @@ const REALM_DOCUMENTS: &[&str] = &[
     "authorization",
 ];
 
-/// The names, under a realm root, of the realm's stores that the path
-/// authority (`meerkat_store::RealmPaths`) exposes, each with why it is not a
-/// realm document. The in-process file tools refuse them as part of the
-/// state root's subtree where that root lies inside the tools' project
-/// root; where the project root is the realm directory itself they are not
-/// refused. A path the authority gains belongs here or in
-/// [`REALM_DOCUMENTS`].
-#[cfg(test)]
+/// The names, under a realm root, of the realm's stores, each with what it
+/// holds: the second part of [`HostConfinement::realm_documents`]. The
+/// host's own stores are not an agent's files: its in-process file tools
+/// never write or read them, also where the tools' project root is the
+/// realm directory itself. A file is listed by its own name and covers its
+/// side files; a directory covers everything under it. A path the path
+/// authority (`meerkat_store::RealmPaths`) or the storage doctor's database
+/// list gains belongs here or in [`REALM_DOCUMENTS`].
 const REALM_STORES: &[(&str, &str)] = &[
     (
         "sessions.sqlite3",
-        "session rows: conversation content the host rewrites on every turn, read as data",
+        "session rows, and the schedule rows kept in the same file",
     ),
+    ("sessions_jsonl", "the JSONL session store and its index"),
+    ("runtime.sqlite3", "the runtime store"),
+    ("jobs.sqlite3", "the detached job store"),
+    ("workgraph.sqlite3", "the work graph store"),
+    ("memory", "the memory store"),
+    ("tasks.db", "the task store of the built-in task tools"),
+    ("blobs", "the blob store"),
+    ("artifacts", "the artifact store"),
+    ("mobs", "the mob stores"),
+    ("approvals.json", "the approval records"),
+    ("approval_decisions.sqlite3", "the durable decisions"),
+    ("leases", "the realm's lease files"),
+    ("hosting", "the per-session hosting lock files"),
+    ("delivery", "the delivery coordination files"),
     (
-        "sessions_jsonl",
-        "the JSONL session store: the same content in files",
+        "tool_process_custody",
+        "the shell tools' process custody records",
     ),
-    (
-        "runtime.sqlite3",
-        "the runtime store: a binary database the host holds open and rewrites continuously",
-    ),
-    (
-        "jobs.sqlite3",
-        "the detached job store: a binary database the host holds open",
-    ),
+    (".realm_manifest.lock", "the realm manifest's lock file"),
 ];
 
 impl std::fmt::Display for HostConfinement {
@@ -1610,11 +1635,12 @@ mod tests {
         assert!(!host.untrusted_source(&home.join(".rkat").join("mcp.toml")));
     }
 
-    /// The realm document list stays level with the path authority: every
-    /// path `RealmPaths` exposes under a realm root is a listed document or
-    /// a named store, never both and never neither, and the grant owner
-    /// store lies in a listed directory. The destructuring names every
-    /// field, so a path the authority gains must be classified here.
+    /// The list a host declares to its file tools stays level with what a
+    /// realm keeps at its root: every path `RealmPaths` exposes there, every
+    /// database file the storage doctor probes there, and the lease,
+    /// hosting lock and delivery directories lie in a listed entry, and the
+    /// grant owner store lies in a listed directory. The destructuring
+    /// names every field, so a path the authority gains must be listed.
     #[test]
     fn realm_documents_cover_what_the_path_authority_names() {
         let meerkat_store::RealmPaths {
@@ -1626,14 +1652,8 @@ mod tests {
             runtime_sqlite_path,
             jobs_sqlite_path,
         } = meerkat_store::realm_paths_in(Path::new("/realms"), "realm-1");
-        let documents = HostConfinement::realm_documents(&root);
-        let stores: Vec<PathBuf> = REALM_STORES
-            .iter()
-            .map(|(name, reason)| {
-                assert!(!reason.is_empty(), "{name} states why it is a store");
-                root.join(name)
-            })
-            .collect();
+        let listed = HostConfinement::realm_documents(&root);
+        let covered = |path: &Path| listed.iter().any(|entry| path.starts_with(entry));
         for path in [
             &manifest_path,
             &config_path,
@@ -1642,25 +1662,58 @@ mod tests {
             &runtime_sqlite_path,
             &jobs_sqlite_path,
         ] {
+            assert!(covered(path), "{} lies in a listed entry", path.display());
+        }
+        for (file, _) in meerkat_store::doctor::REALM_DATABASE_FILES {
             assert!(
-                documents.contains(path) != stores.contains(path),
-                "{} is a realm document or a named store, exactly one of them",
-                path.display()
+                covered(&root.join(file)),
+                "the database file {file} lies in a listed entry"
             );
         }
-        for document in [&config_path, &manifest_path] {
-            assert!(documents.contains(document), "{}", document.display());
+        let paths = meerkat_store::realm_paths_in(Path::new("/realms"), "realm-1");
+        for path in [
+            paths.session_hosting_lock_dir(),
+            paths.delivery_coordination_dir(),
+            meerkat_store::realm_lease_dir(&paths),
+        ] {
+            assert!(covered(&path), "{} lies in a listed entry", path.display());
+        }
+        // The realm's two lock files that belong to no single store: the
+        // admission fence of its documents and the write-admission lock of
+        // its file stores, each by the name its owner gives it.
+        for lock in [
+            root.join(meerkat_core::realm_admission::ADMISSION_LOCK_FILE),
+            meerkat_sqlite::fence_lock_path(&meerkat_store::migrate::realm_write_admission_target(
+                &root,
+            )),
+        ] {
+            assert!(
+                listed.contains(&lock),
+                "the lock file {} is listed",
+                lock.display()
+            );
+        }
+        for (name, reason) in REALM_STORES {
+            assert!(!reason.is_empty(), "{name} states what it holds");
+            assert!(listed.contains(&root.join(name)), "{name} is listed");
+        }
+        for document in REALM_DOCUMENTS {
+            assert!(
+                listed.contains(&root.join(document)),
+                "{document} is listed"
+            );
         }
         let grant_owner = meerkat_store::grant_owner_store_path(&root);
         assert!(
-            documents
+            listed
                 .iter()
-                .any(|document| grant_owner.starts_with(document) && grant_owner != *document),
+                .any(|entry| grant_owner.starts_with(entry) && grant_owner != *entry),
             "the grant owner store {} lies in a listed directory",
             grant_owner.display()
         );
-        assert_eq!(documents.len(), REALM_DOCUMENTS.len());
-        assert!(documents.iter().all(|document| document.starts_with(&root)));
+        let distinct: std::collections::BTreeSet<&PathBuf> = listed.iter().collect();
+        assert_eq!(distinct.len(), listed.len(), "no entry is listed twice");
+        assert!(listed.iter().all(|entry| entry.starts_with(&root)));
     }
 
     /// The generation sidecar the config runtime writes beside a realm's

@@ -1299,12 +1299,11 @@ mod tests {
 
     /// The paths a host declared as its own are refused like the engine
     /// directory. A host whose tools are rooted inside its own state root
-    /// (a server started without a context root) keeps its realm documents
-    /// and still lets ordinary files, a store file included, be written
-    /// there: the state root contains the project root, so it is not applied
-    /// as a whole. That the stores stay writable in that layout is a known
-    /// limit of this rule, stated in the tools reference; a host that wants
-    /// them out of reach gives its tools a context root.
+    /// (a server started without a context root) keeps what it declares
+    /// there, and a file it did not declare is still written: the state
+    /// root contains the project root, so it is not applied as a whole. The
+    /// stock hosts declare their realm's documents and stores; this host
+    /// declares two documents.
     #[tokio::test]
     async fn save_file_refuses_host_declared_paths() {
         let temp = tempfile::tempdir().unwrap();

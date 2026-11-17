@@ -1314,8 +1314,8 @@ move:
   project root, with everything under it: the realm state root (also one
   given with `--state-root`), the realm's documents (`config.toml`,
   `config_state.json`, `realm_manifest.json`, the `authorization`
-  directory), the user config document, the MCP, hook and skill sources and
-  a file credential store. `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp`
+  directory) and stores, the user config document, the MCP, hook and skill
+  sources and a file credential store. `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp`
   declare theirs. A Rust host declares its own with
   `AgentFactory::with_protected_host_inputs` (or
   `CompositeDispatcher::protect_host_paths` on a dispatcher it builds
@@ -1341,10 +1341,18 @@ A declared path that contains the project root, or is the project root, is
 not applied as a whole. That is the layout of `rkat-rpc` and `rkat-mcp`
 started without `--context-root`: they root these tools in the realm
 directory itself. The realm's documents are refused there like everywhere
-else, with the hooks and skills read from that directory's `.rkat`, and
-other files are written and read as before. The realm's stores (sessions, runtime,
-jobs, tasks, blobs and the rest) lie in the same directory and are not
-refused in that layout. Start the server with `--context-root <dir>` (SDK
+else, with the hooks and skills read from that directory's `.rkat`, and so
+are the realm's stores: the session, runtime, job, work graph, memory and
+task stores, the blob, artifact and mob stores, the approval records and
+decisions, the shell tools' process custody records, the lease, hosting
+lock and delivery directories, and the realm's two lock files
+(`admission.lock`, `realm.mfence`). A listed
+file is refused with its side files: an entry beside it whose name is the
+file's name followed by `-` or `.` (a database's write-ahead log, a lock, a
+backup), or the file's name without its extension followed by `.` and ending
+in `.lock` (a lock file made from its name). Other files in that directory
+are written and read as before.
+Start the server with `--context-root <dir>` (SDK
 option `context_root` / `contextRoot`) to give agents a project directory of
 their own and keep the whole realm out of these tools' reach. `rkat-rest`
 without a context root roots the tools in its own instance directory, which

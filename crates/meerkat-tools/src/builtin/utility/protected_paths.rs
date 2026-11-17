@@ -15,11 +15,15 @@
 //! - every path the host declares as its own state or input
 //!   ([`ProtectedPaths::with_host_paths`]) that lies strictly inside the
 //!   project root: a realm state root, a config document, a convention file
-//!   or a credential store. It is protected with everything under it. A
-//!   declared path that contains or equals the project root is not applied:
-//!   a host that roots its tools inside its own state (a server started
-//!   without a context root) declares the documents it must keep, and every
-//!   other file there stays writable and readable.
+//!   or a credential store. It is protected with everything under it, and
+//!   a declared file with its side files: the entries beside it whose names
+//!   are its name followed by `-` or `.` (a database's write-ahead log, a
+//!   lock, a backup), or its name without the extension followed by `.` and
+//!   ending in `.lock`. A declared path that contains or equals the project
+//!   root is not applied: a host that roots its tools inside its own state
+//!   (a server started without a context root) declares the documents and
+//!   stores it keeps there, and every other file there stays writable and
+//!   readable.
 //!
 //! A write, a delete and both ends of a move are refused when the target
 //! lies in such a location, judged twice: on the path's own components (a
@@ -161,7 +165,7 @@ impl ProtectedPaths {
 
     /// Whether one of `paths` lies in a declared location that applies to
     /// `project_root`: a declared path strictly inside the root, with
-    /// everything under it.
+    /// everything under it and, for a declared file, its side files.
     fn in_declared_path(&self, project_root: &Path, real_root: &Path, paths: &[&Path]) -> bool {
         self.host.iter().any(|declared| {
             // The declared path as the host named it and where it really
@@ -171,9 +175,9 @@ impl ProtectedPaths {
             forms().any(|declared| {
                 strictly_inside(declared, project_root) || strictly_inside(declared, real_root)
             }) && forms().any(|declared| {
-                paths
-                    .iter()
-                    .any(|path| strip_prefix(path, declared).is_some())
+                paths.iter().any(|path| {
+                    strip_prefix(path, declared).is_some() || in_side_file(path, declared)
+                })
             })
         })
     }
@@ -237,6 +241,51 @@ fn in_engine_directory(root: &Path, target: &Path) -> bool {
             )
         })
     })
+}
+
+/// Whether `path` is a side file of the declared file `declared`, or lies
+/// under one: an entry beside the declared file whose name is that file's
+/// name followed by `-` or `.` (a database's write-ahead log and shared
+/// memory, a lock, a marker, a backup), or that file's name without its
+/// extension followed by `.` and ending in `.lock` (a lock file made from
+/// its name). Only a declared name with an extension names a file: a
+/// declared directory has no side files.
+fn in_side_file(path: &Path, declared: &Path) -> bool {
+    let (Some(parent), Some(declared_name)) = (
+        declared.parent(),
+        declared.file_name().and_then(OsStr::to_str),
+    ) else {
+        return false;
+    };
+    // The name without its extension. A name with none, or whose only dot
+    // leads it, names no file here.
+    let Some(stem) = declared_name
+        .rfind('.')
+        .filter(|index| *index > 0)
+        .map(|index| &declared_name[..index])
+    else {
+        return false;
+    };
+    let Some(below) = strip_prefix(path, parent) else {
+        return false;
+    };
+    let Some(Component::Normal(name)) = below.components().next() else {
+        return false;
+    };
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let (name, declared_name, stem) = if CASE_INSENSITIVE_NAMES {
+        (fold_name(name), fold_name(declared_name), fold_name(stem))
+    } else {
+        (name.to_owned(), declared_name.to_owned(), stem.to_owned())
+    };
+    name.strip_prefix(&declared_name)
+        .is_some_and(|rest| rest.starts_with(['-', '.']))
+        || (name.ends_with(".lock")
+            && name
+                .strip_prefix(&stem)
+                .is_some_and(|rest| rest.starts_with('.')))
 }
 
 /// Whether `path` lies under `base` and is not `base` itself.
@@ -545,7 +594,8 @@ mod tests {
     /// started without a context root: the project root is the realm
     /// directory) declares the state root and the realm's own documents.
     /// The state root contains the project root, so it is not applied; the
-    /// documents are refused, and every other file there stays writable.
+    /// declared documents are refused, each with its side files, and every
+    /// other file there stays writable.
     #[test]
     fn a_declared_path_that_contains_the_project_root_is_not_applied() {
         let (_dir, base) = project();
@@ -560,6 +610,7 @@ mod tests {
         ]);
         for refused in [
             "config.toml",
+            "config.toml.bak",
             "authorization",
             "authorization/grant-owner.jsonl",
             ".rkat/config.toml",
@@ -570,17 +621,117 @@ mod tests {
                 "{refused}"
             );
         }
-        for admitted in [
-            "out.png",
-            "notes/config.toml",
-            "sessions.sqlite3",
-            "config.toml.bak",
-        ] {
+        for admitted in ["out.png", "notes/config.toml", "sessions.sqlite3"] {
             assert_eq!(
                 rule.admit_write(&root, &root.join(admitted)),
                 Ok(()),
                 "{admitted}"
             );
+        }
+    }
+
+    /// A declared file covers its side files: the entries beside it whose
+    /// names are its name followed by `-` or `.` (a database's write-ahead
+    /// log, a lock, a backup), for writes and for reads. A declared
+    /// directory has none, and a name that only begins alike is the
+    /// project's own.
+    #[test]
+    fn a_declared_file_covers_its_side_files() {
+        let (_dir, base) = project();
+        let state_root = base.join("realms");
+        let root = state_root.join("realm-1");
+        std::fs::create_dir_all(&root).unwrap();
+        let rule = ProtectedPaths::with_host_paths([
+            state_root,
+            root.join("store.sqlite3"),
+            root.join("records.json"),
+            root.join("blobs"),
+        ]);
+        for refused in [
+            "store.sqlite3",
+            "store.sqlite3-wal",
+            "store.sqlite3-shm",
+            "store.sqlite3.mfence",
+            "store.sqlite3.pre-1-1700000000",
+            "store.sqlite3.pre-1-1700000000/inner",
+            "records.json.lock",
+            "records.json.unsynced",
+            "blobs",
+            "blobs/sha256/payload",
+        ] {
+            let target = root.join(refused);
+            assert_eq!(
+                rule.admit_write(&root, &target),
+                Err(WriteRefusal::Protected),
+                "write {refused}"
+            );
+            assert_eq!(
+                rule.admit_read(&root, &target),
+                Err(ReadRefusal::Protected),
+                "read {refused}"
+            );
+        }
+        for admitted in [
+            "store.sqlite3x",
+            "store.sqlite",
+            "store.md",
+            "my-store.sqlite3",
+            "notes/store.sqlite3-wal",
+            "records.jsonl",
+            "blobs.md",
+            "blobs-notes.txt",
+        ] {
+            let target = root.join(admitted);
+            assert_eq!(rule.admit_write(&root, &target), Ok(()), "write {admitted}");
+            assert_eq!(rule.admit_read(&root, &target), Ok(()), "read {admitted}");
+        }
+    }
+
+    /// A declared file covers the lock files made from its name: an entry
+    /// beside it whose name is the file's name without its extension,
+    /// followed by `.` and ending in `.lock`. Another file of that stem is
+    /// the project's own.
+    #[test]
+    fn a_declared_file_covers_the_lock_files_made_from_its_name() {
+        let (_dir, base) = project();
+        let state_root = base.join("realms");
+        let root = state_root.join("realm-1");
+        std::fs::create_dir_all(&root).unwrap();
+        let rule = ProtectedPaths::with_host_paths([
+            state_root,
+            root.join("decisions.sqlite3"),
+            root.join("state.json"),
+        ]);
+        for refused in [
+            "state.lock",
+            "decisions.lock",
+            "decisions.executor.lock",
+            "decisions.executor.kind.issue.lock",
+        ] {
+            let target = root.join(refused);
+            assert_eq!(
+                rule.admit_write(&root, &target),
+                Err(WriteRefusal::Protected),
+                "write {refused}"
+            );
+            assert_eq!(
+                rule.admit_read(&root, &target),
+                Err(ReadRefusal::Protected),
+                "read {refused}"
+            );
+        }
+        for admitted in [
+            "state.yaml",
+            "state.md",
+            "statement.lock",
+            "state-lock",
+            "decisions.executor.txt",
+            "notes/state.lock",
+            "package.lock",
+        ] {
+            let target = root.join(admitted);
+            assert_eq!(rule.admit_write(&root, &target), Ok(()), "write {admitted}");
+            assert_eq!(rule.admit_read(&root, &target), Ok(()), "read {admitted}");
         }
     }
 

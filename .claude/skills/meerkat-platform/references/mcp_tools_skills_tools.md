@@ -105,8 +105,9 @@ store), nor through a symbolic link whose target does not exist: the call is
 applies none of its operations. A Rust host declares its paths with
 `AgentFactory::with_protected_host_inputs`. `rkat-rpc` and `rkat-mcp` without
 `--context-root` root these tools in the realm directory: the realm's
-documents are refused there, its stores are not, so give such a server a
-context root. `web_search {query, provider?,
+documents and its stores are refused there, each listed file with its side
+files, so give such a server a context root to keep the whole realm out of
+these tools' reach. `web_search {query, provider?,
 context?}` is the fallback: offered only on an explicit enable when native
 search is not active (the model lacks it, or provider-native tools are off).
 

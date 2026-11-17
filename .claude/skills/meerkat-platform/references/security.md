@@ -186,8 +186,9 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
   `AgentFactory::with_protected_host_inputs`), or a path through a symbolic
   link whose target does not exist. The refusal is `invalid_arguments`.
   `rkat-rpc` and `rkat-mcp` started without `--context-root` root those tools
-  in the realm directory, where the realm's documents are refused and its
-  stores are not: give them a context root. An existing hard link to a
+  in the realm directory, where the realm's documents and its stores are
+  refused, each listed file with its side files: give them a context root to
+  keep the whole realm out of these tools' reach. An existing hard link to a
   protected file is written through, and a symbolic link deeper inside a
   protected directory is not followed.
 - At startup each host reports each launch kind's requested and effective

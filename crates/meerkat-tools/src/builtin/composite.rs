@@ -630,7 +630,9 @@ impl CompositeDispatcher {
     /// `view_image`): a realm state root, config
     /// documents, MCP, hook and skill sources, a credential store. A
     /// declared path that lies strictly inside the project root is refused
-    /// with everything under it; one that contains or equals the project
+    /// with everything under it, and a declared file with its side files
+    /// (its write-ahead log, locks and backups beside it);
+    /// one that contains or equals the project
     /// root is not applied, and a path that is not absolute is ignored.
     /// The engine's own directory, `.rkat` at the project root or in any
     /// directory under it, is refused without any declaration. Each call
@@ -3826,6 +3828,96 @@ mod tests {
         read_through(rebound.as_ref(), "view_image", "src/logo.png")
             .await
             .expect("an ordinary project image is viewed");
+    }
+
+    /// The composite's file tools refuse the side files of a declared file
+    /// (an entry beside it whose name is its name followed by `-` or `.`)
+    /// as they refuse the file, for writes and for reads, and a refused
+    /// target is left as it was. A name that only begins alike is the
+    /// project's own.
+    #[tokio::test]
+    async fn file_tools_refuse_the_side_files_of_a_declared_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let state_root = base.join("realms");
+        let realm = state_root.join("realm-1");
+        write_project_file(&realm, "store.sqlite3-wal", b"kept\n");
+        write_project_file(&realm, "charts.db.png", PNG_HEAD);
+        write_project_file(&realm, "store.md", b"note");
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(realm.clone()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob = store.put_image("image/png", "aGVsbG8=").await.unwrap();
+        dispatcher.register_blob_file_tools(Arc::clone(&store));
+        dispatcher.protect_host_paths([
+            state_root,
+            realm.join("store.sqlite3"),
+            realm.join("charts.db"),
+        ]);
+
+        // Writes: a new side file, an existing one, and a save onto one.
+        let result = add_file_through(&dispatcher, "store.sqlite3.pre-1-1700000000").await;
+        assert_protected_path_refusal(&result, "a new side file");
+        let update = serde_json::json!({
+            "patch": "*** Begin Patch\n*** Update File: store.sqlite3-wal\n@@\n-kept\n+changed\n*** End Patch"
+        });
+        let call_json = serde_json::value::RawValue::from_string(update.to_string()).unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-update",
+                name: "apply_patch",
+                args: &call_json,
+            })
+            .await;
+        assert_protected_path_refusal(&result, "an existing side file");
+        let save = serde_json::json!({
+            "blob_id": blob.blob_id.as_str(),
+            "path": "store.sqlite3-shm",
+        });
+        let call_json = serde_json::value::RawValue::from_string(save.to_string()).unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-save",
+                name: "blob_save_file",
+                args: &call_json,
+            })
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(ToolError::InvalidArguments { name, reason })
+                    if name == "blob_save_file" && reason.contains("engine's own directory")
+            ),
+            "a save onto a side file: {result:?}"
+        );
+
+        // Reads.
+        let result = read_through(&dispatcher, "blob_load_file", "store.sqlite3-wal").await;
+        assert_protected_read_refusal(&result, "blob_load_file", "store.sqlite3-wal");
+        let result = read_through(&dispatcher, "view_image", "charts.db.png").await;
+        assert_protected_read_refusal(&result, "view_image", "charts.db.png");
+
+        // Nothing was written and the existing side file is as it was.
+        assert!(!realm.join("store.sqlite3.pre-1-1700000000").exists());
+        assert!(!realm.join("store.sqlite3-shm").exists());
+        assert_eq!(
+            std::fs::read(realm.join("store.sqlite3-wal")).unwrap(),
+            b"kept\n"
+        );
+
+        add_file_through(&dispatcher, "store.sqlite3x")
+            .await
+            .expect("a name that only begins alike is written");
+        read_through(&dispatcher, "blob_load_file", "store.md")
+            .await
+            .expect("a name that only begins alike is loaded");
     }
 
     #[tokio::test]

@@ -35,6 +35,40 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-session`: on a realm created with `--realm-backend jsonl`, and on
+  in-memory stores, the first turn after a run was cancelled at its boundary
+  is no longer lost. After `mob/cancel_all_work` ended a member's running
+  run, the first turn then started on that member's session (`turn/start`,
+  `mob/turn_start`) made its model call, and its result was not kept: the
+  request was answered an internal error (`-32603`, `turn abandoned: ...
+  WholeBlob committed authority differs from the live actor base ...`). A
+  `mob/member_send` to that member was accepted, made its model call and
+  ended without its result, with no error to its sender. The turn after
+  that ran. A session with no mob showed the same after a run of its own
+  was cancelled at the run's boundary. The first turn and the member send
+  now complete. The cause: the runtime alone made the cancelled run's last
+  save the session's committed document, and the live session's own record
+  of the committed document it saves from stayed at the earlier one,
+  because the conversation itself had not changed; the next run's first
+  save was then refused. A turn's entry now compares that record with the
+  store and brings the live session up to the committed document when they
+  differ. A realm on the default `sqlite` backend was not affected: it
+  reads the committed document's identity from the store at each save. This
+  ends the 0.9.15 Known limitation about the first turn after
+  `mob/cancel_all_work`. Affected: 0.9.5 through 0.9.16 by the presence of
+  the code that settles a cancelled run without telling the session layer
+  (first in 0.9.5); shown by runs on the published 0.9.14 with a `jsonl`
+  realm and by tests on the 0.9.15 and 0.9.16 trees; 0.9.5 through 0.9.13
+  were not run. Measured by tests of this change for `mob/cancel_all_work`
+  (the cancelled run started by a member send and by a client's own
+  `turn/start`) on a `jsonl` realm and on in-memory stores, with a `sqlite`
+  realm as the control, and for a session with no mob through the session
+  runtime's own boundary cancel, which no public JSON-RPC method sends;
+  `mob/force_cancel` and a member stop that cancels at the run's boundary
+  reach the same state by reading and were not run.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

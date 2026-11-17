@@ -88,9 +88,11 @@ export class InitOutcomeUnknownError extends MetaError {
  * The transport's reader stopped, so no response can arrive any more.
  *
  * Rejects every request still waiting when the gateway closes its stdout,
- * and every later request on the same gateway process. `reason` names what
- * ended the reader. A request written before the reader stopped may still
- * have been executed by the gateway.
+ * and every later request on the same gateway process. A failed write to the
+ * gateway's stdin (the gateway closed its input or is gone) and a failed
+ * read of its stdout reject the same way: nothing can be asked of that
+ * process any more. `reason` names what ended the reader. A request written
+ * before the reader stopped may still have been executed by the gateway.
  */
 export class TransportReaderFailedError extends TransportError {
   constructor(readonly reason: string) {

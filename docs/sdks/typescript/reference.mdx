@@ -989,7 +989,7 @@ class BinaryIntegrityError extends MeerkatError {
 | `BINARY_DOWNLOAD_TOO_LARGE` | The release archive is over 256 MiB, far above any `rkat-rpc` release archive |
 | `UNKNOWN_EVENT_TYPE` | Streamed event `type` not in the generated known-event inventory |
 | `PROCESS_EXITED` | The `rkat-rpc` child exited before replying (a crash, for example). Since 0.9.4 pending requests fail with it at most about a second after the exit, even while a process the child started still holds its pipes |
-| `PROTOCOL_ERROR` | A reply line was not JSON, so the stream can no longer be trusted. Since 0.9.4 the client then stops the child the way `close()` does |
+| `PROTOCOL_ERROR` | A reply line was not JSON, so the stream can no longer be trusted. Since 0.9.4 the client then stops the child the way `close()` does. A write to the child's input or a read of its output that failed while the child kept running is reported the same way, about a second later |
 
 ### Typed comms/send errors
 

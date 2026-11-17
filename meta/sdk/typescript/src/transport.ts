@@ -630,12 +630,28 @@ export class PersistentTransport {
 
     const child = this._process;
 
+    // A write that meets a gateway whose input is gone fails on the stream,
+    // after the call that made it has returned, and a failed read ends the
+    // reader without closing it. Node raises a stream 'error' that nobody
+    // listens to as an uncaught exception in the host program. These go
+    // where a closed reader goes instead: the waiting requests and every
+    // later one on this child reject.
+    child.stdin?.on("error", (error: Error) => {
+      this._onStreamFailed(`a write to the gateway's stdin failed (${error.message})`, child);
+    });
+    const onStdoutError = (error: Error): void => {
+      this._onStreamFailed(`reading the gateway's stdout failed (${error.message})`, child);
+    };
+    child.stdout?.on("error", onStdoutError);
+
     // Background reader on stdout
     let readerClosed = child.stdout == null;
     let exitFailed = false;
     let exitGrace: ReturnType<typeof setTimeout> | undefined;
     if (child.stdout) {
       const rl = createInterface({ input: child.stdout });
+      // The interface raises its input's error again as its own.
+      rl.on("error", onStdoutError);
       rl.on("line", (line: string) => this._handleLine(line, child));
       rl.on("close", () => {
         readerClosed = true;
@@ -728,6 +744,18 @@ export class PersistentTransport {
       pending.reject(failure);
     }
     this._initWatch?.fail(failure);
+  }
+
+  /**
+   * The child's stdin or stdout failed: nothing can be asked of this child,
+   * or read from it, any more. A failure this child already has is never
+   * replaced by a stream's; a later close of the reader or the exit grace
+   * still records its own. A child this transport has let go of or replaced
+   * is never touched.
+   */
+  private _onStreamFailed(reason: string, child: ChildProcess): void {
+    if (this._process !== child || this._readerFailure !== null) return;
+    this._onReaderClosed(reason, child);
   }
 
   /**

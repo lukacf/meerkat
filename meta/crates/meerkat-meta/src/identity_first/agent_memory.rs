@@ -524,6 +524,14 @@ pub trait AgentMemoryProvider: Send + Sync {
     fn as_tombstone_source(&self) -> Option<Arc<dyn crate::memory::distiller::TombstoneSource>> {
         None
     }
+
+    /// Meta's bundled SQLite store, when this provider is that store. A
+    /// build asks a storage provider's agent memory for it, to run the
+    /// store's first start's step over it as it does over the store it
+    /// opens itself.
+    fn as_bundled_store(&self) -> Option<crate::memory::sqlite_store::SqliteAgentMemoryStore> {
+        None
+    }
 }
 
 /// Build-time memory assembly (§9.1). Thin caller into the

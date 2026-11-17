@@ -883,6 +883,66 @@ async fn a_child_store_that_does_not_restore_is_quarantined_and_the_boot_goes_on
     stand_down_released(runtime, 0).await;
 }
 
+/// What agent memory's first start's step is handed for the mobs the agent
+/// mob tools host (`crate::memory::set_aside::HostedMobLogs`): a durable
+/// child mob that runs is handed with its event log, a durable child mob
+/// store that did not restore is named as not restored and has no event
+/// log there, and the root mob is not among them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_store_that_does_not_restore_is_handed_to_the_memory_step_as_not_restored() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let root = crate::child_mob_storage::child_mob_root(dir.path());
+    std::fs::create_dir_all(&root).expect("child root");
+    std::fs::write(root.join("mob--broken-child.db"), b"not a sqlite database")
+        .expect("plant an undecodable child store");
+    let host = Host::new();
+    let mob_id = unique("memory-step-children");
+    let runtime = lifetime(dir.path(), &mob_id, &host, |spec| {
+        spec.with_child_mob_storage(durable(dir.path()))
+    })
+    .await
+    .expect("a quarantined child mob does not fail the boot");
+    let state = runtime.agent_mob_mcp_state().expect("agent mob state");
+    let running = MobId::from(unique("running-child").as_str());
+    state
+        .mob_create_definition(child_definition(&running))
+        .await
+        .expect("create a child mob that runs");
+
+    let hosted = crate::memory::set_aside::HostedMobLogs::of(Some(&*state), &mob_id)
+        .await
+        .expect("the hosted mobs read");
+    let mobs = hosted.mobs();
+
+    assert_eq!(
+        mobs.journals
+            .iter()
+            .map(|hosted| hosted.journal.mob())
+            .collect::<Vec<_>>(),
+        [running.to_string()],
+        "the child that runs is handed with its event log; the root mob is not"
+    );
+    assert!(
+        mobs.journals.iter().all(|hosted| hosted.creator.is_none()),
+        "a mob the host created names no creating member"
+    );
+    assert_eq!(
+        mobs.not_restored,
+        ["broken-child"],
+        "the child store that did not restore is named, and has no event log here"
+    );
+
+    drop(mobs);
+    drop(hosted);
+    drop(state);
+    runtime
+        .handle()
+        .shutdown()
+        .await
+        .expect("root mob shutdown");
+    let _ = runtime.stand_down_child_mobs(release_deadline()).await;
+}
+
 /// The boot answer of a root mob whose stored state could not be restored:
 /// a store fault or records that disagree become the typed quarantine (its
 /// class from the typed failure, the failure as its cause); any other

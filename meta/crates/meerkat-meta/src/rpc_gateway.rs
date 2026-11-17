@@ -20273,39 +20273,67 @@ external_addressable = true
         > = Arc::new(std::sync::OnceLock::new());
         let mut agent_memory_distiller: Option<Arc<crate::memory::distiller::DistillerEngine>> =
             None;
-        let agent_memory_provider: Option<Arc<dyn crate::AgentMemoryProvider>> =
-            if let Some(agent_memory) = gateway_options.agent_memory.as_ref() {
-                // Concrete store construction is the only per-kind decision
-                // left (M4 de-weld); everything downstream assembles on the
-                // provider's advertised capabilities.
-                // Agent memory is a durable storage slot: an open failure is
-                // a storage-resolution refusal (-32014), same as the other
-                // fail-closed store opens above.
-                let provider: Arc<dyn crate::AgentMemoryProvider> = match agent_memory.store {
-                    // The live markdown execution path is retired: refuse
-                    // with the typed migration verdict instead of booting
-                    // a store that silently has no firewall, no ledger
-                    // and no judgment plane. The markdown READER is
-                    // untouched and still runs, as the one-shot import
-                    // inside SqliteAgentMemoryStore::open.
-                    GatewayAgentMemoryStoreKind::Markdown => {
-                        let migration = AgentMemoryStoreMigration::MarkdownIsImportOnly;
-                        return Err(fail_init(
-                            &request_id,
-                            migration.code(),
-                            migration.message(),
-                        ));
-                    }
-                    GatewayAgentMemoryStoreKind::Sqlite => Arc::new(
+        // The agent memory store is opened and its first start's step is run
+        // (`crate::memory::set_aside`) before anything takes the store: the
+        // engines, the panel, the side chat recorder, the injector and the
+        // customizer below are all given it only from `agent_memory_store`.
+        // A step that cannot run refuses the launch.
+        let agent_memory_store: Option<(
+            &GatewayAgentMemoryOptions,
+            Arc<dyn crate::AgentMemoryProvider>,
+        )> = match gateway_options.agent_memory.as_ref() {
+            None => None,
+            // Concrete store construction is the only per-kind decision
+            // left (M4 de-weld); everything downstream assembles on the
+            // provider's advertised capabilities.
+            // Agent memory is a durable storage slot: an open failure is
+            // a storage-resolution refusal (-32014), same as the other
+            // fail-closed store opens above.
+            Some(agent_memory) => match agent_memory.store {
+                // The live markdown execution path is retired: refuse
+                // with the typed migration verdict instead of booting
+                // a store that silently has no firewall, no ledger
+                // and no judgment plane. The markdown READER is
+                // untouched and still runs, as the one-shot import
+                // inside SqliteAgentMemoryStore::open.
+                GatewayAgentMemoryStoreKind::Markdown => {
+                    let migration = AgentMemoryStoreMigration::MarkdownIsImportOnly;
+                    return Err(fail_init(
+                        &request_id,
+                        migration.code(),
+                        migration.message(),
+                    ));
+                }
+                GatewayAgentMemoryStoreKind::Sqlite => {
+                    let store =
                         crate::SqliteAgentMemoryStore::open(&agent_memory.path).map_err(|e| {
                             fail_init(
                                 &request_id,
                                 STORAGE_RESOLUTION_CODE,
                                 format!("failed to open agent memory store: {e}"),
                             )
-                        })?,
-                    ),
-                };
+                        })?;
+                    let start = Box::pin(crate::memory::set_aside::memory_start_for(
+                        &store,
+                        &agent_memory.config.realm,
+                        runtime.mob_runtime(),
+                        crate::memory::set_aside::bound_at_a_gateway_start(),
+                    ))
+                    .await;
+                    match start {
+                        crate::memory::set_aside::MemoryStart::Attach => Some((
+                            agent_memory,
+                            Arc::new(store) as Arc<dyn crate::AgentMemoryProvider>,
+                        )),
+                        crate::memory::set_aside::MemoryStart::Refuse { message } => {
+                            return Err(fail_init(&request_id, STORAGE_RESOLUTION_CODE, message));
+                        }
+                    }
+                }
+            },
+        };
+        let agent_memory_provider: Option<Arc<dyn crate::AgentMemoryProvider>> =
+            if let Some((agent_memory, provider)) = agent_memory_store {
                 if provider.as_taintable().is_some() {
                     // Shared read handle on the persistent session store
                     // for the Distiller's evidence windows and the

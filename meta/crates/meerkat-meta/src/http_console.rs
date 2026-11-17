@@ -4217,6 +4217,10 @@ mod console_private_audience_tests;
 mod console_absent_answer_tests;
 
 #[cfg(test)]
+#[path = "console_set_aside_memory_tests.rs"]
+mod console_set_aside_memory_tests;
+
+#[cfg(test)]
 #[path = "console_malformed_params_tests.rs"]
 mod console_malformed_params_tests;
 

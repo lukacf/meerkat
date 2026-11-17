@@ -1563,6 +1563,22 @@ that stays would then name another server or none (a binding can name its
 server through the entry of its default model). Set up providers in the
 realm document, with `rkat auth`, or through JSON-RPC `config/patch`.
 
+A `set` or `patch` that would change a host's own listener settings is
+refused the same way, with `data.type` `confinement_administration_required`,
+and nothing is written. These are all keys of `[rest]` (the address the REST
+server binds and the origins and hosts it answers), of `[mob_host]` (the host
+acceptor's listener) and of `[comms]` (`mode`, `address`,
+`advertise_address`, `event_address`, `auth`, `require_peer_auth`), a key
+this server's version does not know included. A
+write that carries them unchanged commits. A write that changes realm
+sections so that the realm would compose another of these tables is refused
+too, and so is any write while the realm's parent chain does not compose (as
+an internal error; mend the chain in the configuration file). Set these keys
+in the configuration file or through the operator's commands. A `set` or
+`patch` commits only on the document the tool judged: with an
+`expected_generation` other than that document's, or when another write was
+committed after the tool read it, the write is a generation conflict.
+
 ### meerkat_capabilities
 
 Returns the runtime capability set with status resolved against config.

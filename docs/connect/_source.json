@@ -5,7 +5,7 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "1d8caeb5943ce9b0a6d84fefc3221d9c204e3604",
+  "source_docs_tree": "d59e7c1a4cd87ffb9506b9fa50548d0f6c4a326d",
   "connect_source_state": "monorepo_sync",
   "connect_source_version": "0.9.16",
   "existing_products_unchanged": true,
@@ -34,8 +34,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "4cf33049ff1063bc7dda09cf993c051703824ba34cf99dd63d285420f3e11b75",
-      "rendered_sha256": "475a8d045418f6f02d6bbbc3bed570a0cc4d725e0ec3d0b1272f7eae834cba54"
+      "source_sha256": "00e56d534ccbb71063a993b46496fd311ced998569e53a9f4b99f8168f5ede40",
+      "rendered_sha256": "b3be5d2a1320c0ffb914bff2e2e09f63a3a6d18a8f0af0283334c0898df6dcbb"
     },
     {
       "path": "concepts/acquisition.mdx",

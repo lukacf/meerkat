@@ -7,8 +7,8 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 ## Install and use
 
 Connect 0.9.16 is released for Linux x86_64 with glibc 2.39: its two programs
-need glibc 2.39 symbols (read from the released binaries, not run on other
-hosts), and it was built and checked on a glibc 2.39 host. No macOS arm64
+need glibc 2.39 symbols (read from the released binaries). Both answered
+`--version` on a glibc 2.39 host; no other host was run. No macOS arm64
 products are part of this release.
 Install [Meerkat Core 0.9.16](https://github.com/lukacf/meerkat/releases/tag/v0.9.16),
 the Core release Connect 0.9.16 was built and released with,

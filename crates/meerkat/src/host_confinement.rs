@@ -1036,12 +1036,12 @@ fn unread_section_text(
     );
     match section {
         meerkat_core::AdministeredSection::Confinement => {
-            // The Linux workspace preset cannot keep a project's own realm
-            // state from its confined processes, so such a start is refused
-            // without a state root elsewhere; the clause uses that
-            // refusal's remedy.
+            // On Linux a start that confines every launch kind is refused
+            // while its realm state lies inside a write grant (the workspace
+            // preset protects nothing there); the clause states that rule
+            // with the refusal's own remedy.
             let state_root = if cfg!(target_os = "linux") {
-                " (on Linux a workspace confinement also needs --state-root <dir> outside every confinement write grant; see OS process confinement in the CLI configuration docs)"
+                " (on Linux, when every launch kind is confined and the realm state lies inside a confinement write grant, the start is refused: start the host with --state-root <dir> outside every confinement write grant; see OS process confinement in the CLI configuration docs)"
             } else {
                 ""
             };

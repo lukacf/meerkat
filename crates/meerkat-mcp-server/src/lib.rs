@@ -3723,6 +3723,9 @@ fn added_or_changed_launching_entry(
         mob_enabled: _,
         schedule_enabled: _,
         workgraph_enabled: _,
+        // A host's allowance: it names no program, argument, environment or
+        // working directory of a launch, and adds no entry.
+        agent_schedules_may_create_sessions: _,
     } = tools;
     let HooksConfig {
         entries,

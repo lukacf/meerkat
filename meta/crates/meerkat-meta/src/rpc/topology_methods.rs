@@ -516,6 +516,22 @@ fn access_denied(response_id: Value, violation: AccessViolation) -> JsonRpcRespo
 }
 
 fn failure(response_id: Value, error: TopologyControlError) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        id: response_id,
+        result: None,
+        error: Some(failure_error(error)),
+    }
+}
+
+/// The refusal of an edge's end no member holds, as the topology answers
+/// it. The console answers an end that names a member hidden from its
+/// caller with it.
+pub(crate) fn member_not_found_rpc_error(identity: &str) -> JsonRpcError {
+    failure_error(TopologyControlError::MemberNotFound(identity.to_string()))
+}
+
+fn failure_error(error: TopologyControlError) -> JsonRpcError {
     let code = match error {
         TopologyControlError::InvalidRequest(_)
         | TopologyControlError::InvalidPolicy(_)
@@ -561,15 +577,10 @@ fn failure(response_id: Value, error: TopologyControlError) -> JsonRpcResponse {
     if let Some(receipt) = error.receipt() {
         data["receipt"] = serde_json::to_value(receipt).unwrap_or(Value::Null);
     }
-    JsonRpcResponse {
-        jsonrpc: JSONRPC_VERSION.to_string(),
-        id: response_id,
-        result: None,
-        error: Some(JsonRpcError {
-            code,
-            message: error.to_string(),
-            data: Some(data),
-        }),
+    JsonRpcError {
+        code,
+        message: error.to_string(),
+        data: Some(data),
     }
 }
 

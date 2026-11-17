@@ -19,16 +19,45 @@ PYPI_NAME = "meerkat-meta"
 NPM_NAME = "@rkat/meta-sdk"
 
 
+class WrongDigest(NamedTuple):
+    """A registry that serves the version with other bytes than expected."""
+
+    registry: str
+    subject: str
+    algorithm: str
+    expected: str
+    served: str
+
+
 class RegistryVerificationError(RuntimeError):
     """One or more public registries do not expose the requested release.
 
     `registries` names the registries whose check failed; it is empty when
-    the failure is not a registry's answer.
+    the failure is not a registry's answer. `wrong_digests` lists the checks
+    that failed because the registry serves the version with other bytes.
     """
 
-    def __init__(self, message: str, registries: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        message: str,
+        registries: tuple[str, ...] = (),
+        wrong_digests: tuple[WrongDigest, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.registries = registries
+        self.wrong_digests = wrong_digests
+
+
+class DigestMismatchError(RegistryVerificationError):
+    """A served version whose digest is not the expected one."""
+
+    def __init__(self, message: str, *, subject: str, algorithm: str,
+                 expected: str, served: str) -> None:
+        super().__init__(message)
+        self.subject = subject
+        self.algorithm = algorithm
+        self.expected = expected.lower()
+        self.served = served.lower()
 
 
 class PublishedArtifact(NamedTuple):
@@ -91,9 +120,11 @@ def _verify_crates_payload(
     # The release verified one exact .crate per crate; crates.io must serve
     # those bytes, whichever attempt uploaded them.
     if verified_sha256 is not None and checksum.lower() != verified_sha256.lower():
-        raise RegistryVerificationError(
+        raise DigestMismatchError(
             f"crates.io serves {crate_name} {version} with checksum {checksum}, "
-            f"not the verified {verified_sha256}"
+            f"not the verified {verified_sha256}",
+            subject=f"{crate_name} {version}", algorithm="sha256",
+            expected=verified_sha256, served=checksum,
         )
     return [
         PublishedArtifact(
@@ -254,6 +285,7 @@ def verify_once(
     """Check the release on each registry; return the registries checked."""
     failures: list[str] = []
     failed: list[str] = []
+    wrong: list[WrongDigest] = []
     checked: list[str] = []
     for registry, url, validator in _selected_checks(
         version, crate_sha256, only_crates, only_registries
@@ -267,9 +299,11 @@ def verify_once(
                     artifact.digest_algorithm, payload
                 ).hexdigest()
                 if actual_digest.lower() != artifact.expected_digest.lower():
-                    raise RegistryVerificationError(
+                    raise DigestMismatchError(
                         f"{artifact.label} checksum mismatch: "
-                        f"expected {artifact.expected_digest}, got {actual_digest}"
+                        f"expected {artifact.expected_digest}, got {actual_digest}",
+                        subject=artifact.label, algorithm=artifact.digest_algorithm,
+                        expected=artifact.expected_digest, served=actual_digest,
                     )
         except (
             RegistryVerificationError,
@@ -281,8 +315,11 @@ def verify_once(
         ) as error:
             failures.append(f"{registry}: {error}")
             failed.append(registry)
+            if isinstance(error, DigestMismatchError):
+                wrong.append(WrongDigest(registry, error.subject, error.algorithm,
+                                         error.expected, error.served))
     if failures:
-        raise RegistryVerificationError("; ".join(failures), tuple(failed))
+        raise RegistryVerificationError("; ".join(failures), tuple(failed), tuple(wrong))
     return checked
 
 
@@ -337,11 +374,18 @@ def verify_with_retries(
 ) -> None:
     """Read the registries until all serve the release or the deadline passes.
 
-    The wait is `deadline_seconds` on `clock`, measured from the first read:
-    after a failed read the next one starts `delay_seconds` later, unless
-    that start would fall after the deadline. `attempts`, when given, also
-    caps the number of reads. Every failed check is read again, so a digest
-    that does not match fails only at the end of the wait, with its text.
+    Only a version that is not served yet waits. The wait is
+    `deadline_seconds` on `clock`, measured from the first read: after a
+    failed read the next one starts `delay_seconds` later, unless that start
+    would fall after the deadline. `attempts`, when given, also caps the
+    number of reads.
+
+    A registry that serves the version with other bytes is refused, not
+    waited for: when two reads in a row give the same wrong digest for the
+    same artifact, the run fails at the second, naming the registry, the
+    expected and the served digest. A wrong digest that changes between
+    reads (a mirror catching up) keeps waiting, and so does every other
+    answer: an absent version, a transport error, a missing artifact kind.
     """
     if deadline_seconds < 0:
         raise ValueError("deadline_seconds must not be negative")
@@ -354,6 +398,7 @@ def verify_with_retries(
 
     started = clock()
     attempt = 0
+    wrong_at_last_read: tuple[WrongDigest, ...] = ()
     while True:
         attempt += 1
         try:
@@ -361,6 +406,20 @@ def verify_with_retries(
                                   crate_sha256=crate_sha256, only_crates=only_crates,
                                   only_registries=only_registries)
         except RegistryVerificationError as error:
+            repeated = [wrong for wrong in error.wrong_digests if wrong in wrong_at_last_read]
+            if repeated:
+                refusals = "; ".join(
+                    f"{wrong.registry} serves {wrong.subject} with {wrong.algorithm} "
+                    f"{wrong.served}, not the expected {wrong.expected}"
+                    for wrong in repeated
+                )
+                raise RegistryVerificationError(
+                    f"release {version} refused: {refusals} "
+                    "(the same answer at two reads in a row)",
+                    tuple(wrong.registry for wrong in repeated),
+                    tuple(repeated),
+                ) from error
+            wrong_at_last_read = error.wrong_digests
             elapsed = clock() - started
             out_of_attempts = attempts is not None and attempt >= attempts
             if out_of_attempts or elapsed + delay_seconds > deadline_seconds:

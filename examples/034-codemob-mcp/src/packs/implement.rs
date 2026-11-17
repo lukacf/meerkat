@@ -40,7 +40,7 @@ impl Pack for ImplementPack {
         profiles.insert(
             ProfileName::from("implementer"),
             turn_driven_profile(
-                resolve_model(overrides, "implementer", "claude-sonnet-4-6"),
+                resolve_model(overrides, "implementer", "claude-sonnet-5-5"),
                 "implementer-skill",
                 "Implementation agent — produces the solution",
                 pp,
@@ -49,7 +49,7 @@ impl Pack for ImplementPack {
         profiles.insert(
             ProfileName::from("reviewer"),
             turn_driven_profile(
-                resolve_model(overrides, "reviewer", "gpt-5.5"),
+                resolve_model(overrides, "reviewer", "gpt-6-astra"),
                 "gate-reviewer-skill",
                 "Quality gate reviewer — approves or requests revision",
                 pp,

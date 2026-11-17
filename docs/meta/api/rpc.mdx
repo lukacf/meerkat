@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [622bcd0a2d9f](https://github.com/lukacf/meerkat/commit/622bcd0a2d9fd9b8336a4b6df4873e94986c4378) on 2026-11-16; Meta version 0.9.15 at that commit.*
+*Mirrored from Meerkat Meta main at [a41ffd904d5b](https://github.com/lukacf/meerkat/commit/a41ffd904d5bb769d1594c17665f9eaeeaa2985e) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -1411,7 +1411,11 @@ error type for all of them.
 | `agents` | `array` | yes | 1 to 256 agents, each `{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?, addressability?, runtime_mode_override?}` |
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
-`name` is unique in the mob. On the Console, a create under the name of an
+`name` is unique in the mob. A create under a taken name is refused
+`name_taken`: when it is asked for, or, where a person decides the create
+and the caller is not shown what holds the name, when the approved create
+is carried out.
+On the Console, a create under the name of an
 agent private to another person answers `-32001` (unknown identity), not
 `name_taken`, to a caller who is neither that person nor an access
 administrator. A name that begins `approval-branch-` and holds only ASCII
@@ -1819,8 +1823,12 @@ for it: such an operation was never asked or was refused, and asking it
 commits it at most once. An operation whose decision ended without its
 change (rejected, expired, withdrawn, or refused when it was carried out)
 answers a result too: `{"outcome": "refused", "kind", "retryable",
-"detail"}` with the kind's members and no `operation_id`. Such an operation
-is closed for good: ask the change again under a new `request_id`.
+"detail"}` with the kind's members and no `operation_id`.
+Such an operation is closed for good. Where it was rejected, expired or
+was withdrawn, the change may be asked again under a new `request_id`;
+where it was refused when it was carried out, asking again is refused in
+the same way while the cause holds (for `name_taken`: choose another
+name).
 
 The entry of an agent whose create answered `pending_preparation` says what
 became of the agent since: `pending_preparation` while it waits for its
@@ -1913,8 +1921,12 @@ schedules?}`. `outcome` is `allow` or
 `rendering` the whole text a decider would be shown. The rendering names a
 person who asked, and a person a host names as the proposer, by the id
 their principal key carries, never by the key. A change the rules
-deny is refused as the change itself would be. Nothing is held and nothing
-is written.
+deny is refused as the change itself would be. The plan of a create the
+rules would hold for a person is refused `name_taken` where the create
+itself would be refused before the hold; under any other taken name, and
+for a create the rules allow at once, it answers as for a name no agent
+holds (the create is then refused when it is asked for or carried out).
+Nothing is held and nothing is written.
 
 ### On the Console
 
@@ -3149,7 +3161,10 @@ A decision nobody decided by its deadline ends `expired`, a rejected one
 decision refused when it was carried out answers the kind it was refused
 with where that kind carries nothing but its name (`subject_widened`,
 `grant_revoked`), and `decision_closed` with the state `execution_refused`
-otherwise. An agent that asked is told the outcome by a message to its own
+otherwise. Its `detail` then names the refusal (for example `name_taken`);
+the refusal stands, so the same change asked again under a new
+`request_id` is refused the same way while its cause holds.
+An agent that asked is told the outcome by a message to its own
 name once the decision ended.
 
 Limits of this release:

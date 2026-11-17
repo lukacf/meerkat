@@ -25,6 +25,12 @@ use meerkat_tools::EmptyToolDispatcher;
 
 type DemoError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Output limit of one turn. Current Claude models think before they answer,
+/// and the limit covers the thinking and the answer together: with a small
+/// limit a turn can end as `MaxTokensReached` while the model is still
+/// thinking. Leave room for both.
+const MAX_TOKENS_PER_TURN: u32 = 4096;
+
 fn main() -> Result<(), DemoError> {
     meerkat_runtime::host_stack::run_host("015-session-persistence", async_main)?
 }
@@ -51,7 +57,7 @@ async fn async_main() -> Result<(), DemoError> {
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-5-5")
         .system_prompt("You are an assistant whose session is written to a store.")
-        .max_tokens_per_turn(512)
+        .max_tokens_per_turn(MAX_TOKENS_PER_TURN)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), adapted_store)
         .await?;
 

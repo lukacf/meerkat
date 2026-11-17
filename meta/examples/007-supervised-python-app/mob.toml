@@ -1,0 +1,14 @@
+# The one profile the agents of this example run on. A profile gives an agent
+# its model and tools; the agents themselves are named by the roster in
+# main.py. `turn_driven` agents run only when they are given work, which is
+# what lets the program track each turn.
+[mob]
+id = "front-desk"
+
+[profiles.desk]
+model = "gpt-6-luna"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.desk.tools]
+comms = true

@@ -239,8 +239,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   0.9.5.
 - TypeScript SDK: when a gateway that the SDK started refuses the start
   after it has accepted the init request, and exits, `builder.build()` now
-  always rejects with the refusal (today inside `GatewayStartupCleanupError`,
-  as its `startupError`). Before, the Node program could be ended by an
+  always rejects with the refusal (in this release the refusal itself: see
+  Breaking). Before, the Node program could be ended by an
   unhandled `write EPIPE` error (`Unhandled 'error' event`, exit code 1)
   although `build()` was inside a try/catch: the SDK asked the exiting
   gateway to shut down, and the failed write was raised outside the call.
@@ -252,6 +252,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to the init request, and a gateway that exits without a refusal
   (`InitOutcomeUnknownError`), were not affected. Affected: every release
   of the TypeScript SDK up to 0.9.16.
+  This closes the Known limitation on the TypeScript SDK's unhandled
+  `write EPIPE` error that was added under 0.9.16 and 0.9.15 on
+  2026-11-17, after those releases.
 - A deny, a closed grant gate or `read_only = true` that a member's profile
   gained after the member started a script monitor now holds for the
   monitor's re-run after a gateway restart: at the member's next shell job

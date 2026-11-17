@@ -363,8 +363,7 @@ them.
   `/.well-known/oauth-authorization-server` at its origin names its
   endpoints. From 0.6.34 through 0.9.16 the login failed with `MCP OAuth
   discovery failed for '<server>': no oauth-protected-resource metadata
-  found`, and such a server could be used only through a bridge outside
-  Meerkat. The server is now taken to be its own authorization server: the
+  found`. The server is now taken to be its own authorization server: the
   metadata is read from the origin of the configured server URL (RFC 8414,
   then OpenID Connect discovery) and the configured URL is the resource.
   A server has no protected resource metadata when every location the
@@ -490,7 +489,7 @@ them.
   reach the same state by reading and were not run.
 
 - An environment variable that is not set fails only the `mcp.toml` server
-  that names it (affected: 0.8.42 to 0.9.16, where it failed every server).
+  that names it (affected: 0.3.0 to 0.9.16, where it failed every server).
   Each server resolves alone, and that server is reported by name with the
   field and the variable, never a value. `rkat mcp list` and `rkat mcp get`
   show it with nothing expanded, marked unresolved (`--json`: the entry as

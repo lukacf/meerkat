@@ -9,8 +9,8 @@
   for the waiting requests its `reason` names the failed write. A failed
   read of the gateway's output rejects the same way. So when a gateway
   refuses the start after it has accepted the init request, and exits,
-  `MetaBuilder.build()` always rejects with the refusal (today inside
-  `GatewayStartupCleanupError`, as its `startupError`). No new error type.
+  `MetaBuilder.build()` always rejects with the refusal (its own typed
+  error: see the next entry). No new error type.
 - A gateway start refused after the init request was accepted raises the
   refusal's own typed error (`CompositionProvenanceError`,
   `StorageResolutionError` or the typed RPC error) instead of

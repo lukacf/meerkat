@@ -480,6 +480,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Copying or backing up a state directory: copy each database together with its side files. After a clean shutdown the content of a store can lie in the `-wal` file beside its database file and not in the database file itself. In a run, a gateway started on a copy that left the `-wal` and `-shm` files out started without a warning and had lost every agent memory record; its agents, their sessions and the Console's timeline were still there. Stop the gateway and copy the whole state directory, every database with its `-wal` and `-shm` files: a gateway started on such a copy had everything. The state directory is not the whole of a backup: the 0.9.6 upgrade note lists what lies beside it (the credentials store, the session comms identity directory, a host store realm). Upgrade notes gave the instruction for their own step (0.8.8, 0.9.6); no page said what a copy without the side files loses. It is not new in this release. (By runs on the released 0.9.15 `rpc_gateway`, stopped by the SDK's shutdown: one copy of the database files alone and one of the directory without its side files, each started; one copy of the whole directory, started. After that shutdown `continuity.sqlite3` likewise held no table without its `-wal`; no loss was run for it. Not tested: a copy taken while a gateway writes, `meta_gateway`, a gateway stopped by a signal or by its input closing.)
 
+- Python SDK, host runnables (0.7.32 to 0.9.16; added 2026-11-17): a schedule
+  callback can arrive before the application has registered its handler. The
+  gateway begins firing stored schedules while `build()` is still running, and
+  a handler can be registered only after `build()` has returned. A callback
+  that arrives in between is answered
+  `no schedule-fire handler registered for runnable: <name>` and its
+  occurrence is recorded `delivery_failed` (`runtime_rejected`). A recurring
+  schedule fires again at its next time; the fire of a schedule that fires
+  once is lost. It takes persistent state, a declared runnable and a stored
+  schedule that falls due while the application starts. Shown by a run of the
+  0.9.16 source against the released 0.9.15 gateway with the SDK's start held
+  open; one unforced start on the published 0.9.15 did not meet it. A fix (a
+  way to register the handler on the builder) is planned.
+
 ## [0.9.15] - 2026-11-15
 
 A console that can identify a person shows a timeline frame stored without

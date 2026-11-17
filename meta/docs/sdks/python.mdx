@@ -1326,6 +1326,31 @@ runtime. Ordinary dispatch starts only after init settles, and the
 gateway refuses an earlier request at once with `InitInProgressError`
 (`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
 
+### Schedule callbacks that arrive during startup
+
+A host runnable is application code that a durable schedule fires. The builder
+declares its name with `.host_runnables([...])`, and
+`on_schedule_fire(name, handler)` on the runtime registers the handler that
+takes each fire (see [Scheduling](/concepts/scheduling#targets)).
+
+<Warning>
+From 0.7.32 to 0.9.16 a schedule callback can arrive before the application
+has registered its handler. The gateway begins firing stored schedules while
+`build()` is still running, and a handler can be registered only after
+`build()` has returned. A callback that arrives in between is answered
+`no schedule-fire handler registered for runnable: <name>`, and its occurrence
+is recorded `delivery_failed` (`runtime_rejected`). A recurring schedule fires
+again at its next time; the fire of a schedule that fires once is lost. It
+takes persistent state, a declared runnable and a stored schedule that falls
+due while the application starts.
+
+This was shown by a run of the 0.9.16 source against the released 0.9.15
+gateway with the SDK's start held open; one unforced start on the published
+0.9.15 did not meet it. A fix, a way to register the handler on the builder,
+is planned. See Known limitations under 0.9.16 in the
+[Meta changelog](https://github.com/lukacf/meerkat/blob/main/meta/CHANGELOG.md).
+</Warning>
+
 ## Adopting a gateway child the host started
 
 By default `connect()` spawns `rpc_gateway --persistent` and owns that

@@ -42,6 +42,7 @@ import {
   MOB_CHAIN_INVALIDATED,
   PARTITIONED_UNIT_PACKAGES,
   ROW_DURATIONS,
+  UNIT_ROWS_APART,
   UNIT_SOLO_PACKAGES,
   WAVE_FIRST_SECONDS,
   WAVE_LANES,
@@ -827,6 +828,12 @@ function assertArchivedLanes(plan, label) {
   for (const name of UNIT_SOLO_PACKAGES) {
     const lanes = unitOf(plan).shards.filter((shard) => shard.packages.includes(name));
     assert.deepEqual(lanes.map((shard) => shard.packages), [[name]], `${name} runs its unit tests in a lane of its own`);
+  }
+  // A UNIT_ROWS_APART pair builds its unit tests in two rows, each once.
+  for (const { keep, apart } of UNIT_ROWS_APART) {
+    const pair = (shard) => shard.packages.filter((name) => name === keep || name === apart);
+    const rows = unitOf(plan).shards.map(pair).filter((names) => names.length > 0);
+    assert.deepEqual(rows.sort(), [[apart], [keep]], `${keep} and ${apart} run in different unit rows`);
   }
   // The nested-Cargo canaries' binary (the downstream-cargo-canary test
   // group) runs as count partitions of its own, one per canary, and in no

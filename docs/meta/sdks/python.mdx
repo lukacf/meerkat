@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [ac4e7319b46a](https://github.com/lukacf/meerkat/commit/ac4e7319b46abc8e94f04e4c7180f9d5d70851c4) on 2026-11-17; Meta version 0.9.16 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -447,9 +447,25 @@ class MyRoster:
 
 ```python
 DispatchInput.system("text")
-DispatchInput.connector("event from slack", correlation_id="msg-1")
+DispatchInput.connector("event from slack")
 DispatchInput.scheduler("nightly sync")
+
+# A dispatch that is safe to repeat carries both keys.
+DispatchInput(
+    content="event from slack", origin="connector",
+    idempotency_key="evt-1",
+    correlation_id="7c2d9a4b-3e18-4b7a-8f55-1a9e0c6b2d10",
+)
 ```
+
+`idempotency_key` and `correlation_id` go together: a repeat of the same
+pair to the same identity starts no second turn in its session, and a
+dispatch that carries one of the two without the other is refused with
+nothing delivered (`invalid delivery identity (... (half-pair))`).
+`DispatchInput.connector(text, correlation_id=...)` sets a correlation id
+and no key, so an input built that way is refused: build a keyed input with
+the full constructor, or pass both to `dispatch_text`. Give the correlation
+id as a canonical UUID.
 
 ### Scope-bound dispatch
 

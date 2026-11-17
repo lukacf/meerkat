@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `meerkat-mob`: the error of a member left Broken by a resume that could not
+  certify the cleanup of its own attempt, and the log line of its parked
+  custody, now say what to do by cause. When the cause is a Recovery
+  corruption: leave the member as it is (a retire, respawn or rotation is
+  refused in that state and can leave the mob unable to start), send it
+  nothing, keep a copy of the state directory, and see Known limitations in
+  the release notes. For any other cause the repair stays retire or respawn.
+  Before, the message named retire or respawn as the repair of every cause.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

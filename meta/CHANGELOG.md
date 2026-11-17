@@ -19,11 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The same holds for any request or callback reply written to a gateway
   whose input is gone, and for a failed read of its output: the waiting
   requests and every later request on that gateway process reject with
-  `TransportReaderFailedError`, whose `reason` names the failed write or
-  read. A refusal that the gateway gives as its answer to the init request,
-  and a gateway that exits without a refusal (`InitOutcomeUnknownError`),
-  were not affected. Affected: every release of the TypeScript SDK up to
-  0.9.16.
+  `TransportReaderFailedError`; for the waiting requests its `reason` names
+  the failed write or read. A refusal that the gateway gives as its answer
+  to the init request, and a gateway that exits without a refusal
+  (`InitOutcomeUnknownError`), were not affected. Affected: every release
+  of the TypeScript SDK up to 0.9.16.
 
 ## [0.9.16] - 2026-11-16
 

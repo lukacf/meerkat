@@ -37,6 +37,14 @@ process uses the store. Keep the store on a local
 filesystem, as SQLite needs anyway: on NFS the locks are emulated with POSIX
 record locks, which do not exclude a second claim from the same process.
 
+The comms keys of sessions are not in a state root or a realm either, and
+these commands do not read or move them: each session with comms has its key
+pair in a `session_comms_identity` directory under the user's home (see [where
+a session's keys are
+kept](/guides/comms#where-a-session%E2%80%99s-keys-are-kept)). A backup or a
+move of a state root takes that directory with it; without it a resumed
+session gets a new key pair, and a restored mob member is marked broken.
+
 ## Select Roots And Realms
 
 Without explicit roots, storage commands inspect two sweep candidates:

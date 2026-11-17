@@ -359,6 +359,9 @@ struct TestState {
     /// The server publishes no protected resource metadata: the well-known
     /// document is absent.
     protected_resource_absent: AtomicBool,
+    /// The protected resource metadata URL answers with this status and no
+    /// document (a redirection status answers a redirect).
+    protected_resource_answer: Mutex<Option<StatusCode>>,
     /// The server publishes no authorization-server metadata: the RFC 8414
     /// and the OpenID Connect discovery documents are both absent.
     authorization_metadata_absent: AtomicBool,
@@ -667,6 +670,12 @@ async fn protected_resource(
 ) -> axum::response::Response {
     if state.protected_resource_absent.load(Ordering::SeqCst) {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Some(status) = *state.protected_resource_answer.lock() {
+        if status.is_redirection() {
+            return Redirect::temporary("/redirected").into_response();
+        }
+        return status.into_response();
     }
     let host = headers
         .get("host")
@@ -11463,4 +11472,192 @@ async fn a_published_issuer_is_still_matched_exactly() {
         )
     );
     assert!(state.registration_requests.lock().is_empty());
+}
+
+/// A protected resource metadata URL that answers `status` is not an absent
+/// document: the server may publish one, so the login is refused as before
+/// and the server's own origin metadata is not read in its place.
+async fn assert_unreadable_resource_metadata_is_refused(status: StatusCode) {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.protected_resource_answer.lock() = Some(status);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "unreadable-resource");
+
+    let refused = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await;
+
+    let Err(McpOAuthError::DiscoveryFailed { reason, .. }) = &refused else {
+        panic!("expected the resource metadata refusal for {status}, got {refused:?}");
+    };
+    assert_eq!(
+        reason, "no oauth-protected-resource metadata found",
+        "{status}"
+    );
+    assert!(asked_for(
+        &state,
+        "/.well-known/oauth-protected-resource/mcp"
+    ));
+    assert!(
+        !asked_for(&state, "/.well-known/oauth-authorization-server"),
+        "{status}: the server's own origin metadata is not read"
+    );
+    assert!(!asked_for(&state, "/.well-known/openid-configuration"));
+    assert!(!asked_for(&state, "/redirected"));
+    assert!(authority.pending_attempt(&target).unwrap().is_none());
+    assert!(state.registration_requests.lock().is_empty());
+    assert!(!asked_for(&state, "/authorize"));
+}
+
+/// A server error of the protected resource metadata URL is not an absent
+/// document.
+#[tokio::test]
+async fn a_resource_metadata_url_that_answers_a_server_error_is_not_absent() {
+    for status in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        assert_unreadable_resource_metadata_is_refused(status).await;
+    }
+}
+
+/// A protected resource metadata URL that demands authorization is not an
+/// absent document.
+#[tokio::test]
+async fn a_resource_metadata_url_that_demands_authorization_is_not_absent() {
+    for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+        assert_unreadable_resource_metadata_is_refused(status).await;
+    }
+}
+
+/// A protected resource metadata URL that redirects is not an absent
+/// document, and the redirect is not followed.
+#[tokio::test]
+async fn a_resource_metadata_url_that_redirects_is_not_absent() {
+    assert_unreadable_resource_metadata_is_refused(StatusCode::TEMPORARY_REDIRECT).await;
+}
+
+/// `410 Gone` says, like `404`, that the document is absent: the server's
+/// own origin metadata is then read.
+#[tokio::test]
+async fn a_gone_resource_metadata_url_is_an_absent_document() {
+    let (base, state) = spawn_oauth_fixture().await;
+    *state.protected_resource_answer.lock() = Some(StatusCode::GONE);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "gone-resource");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the origin's authorization-server metadata admits the login");
+
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    assert!(asked_for(&state, "/.well-known/oauth-authorization-server"));
+}
+
+/// The origin's authorization-server metadata may come from OpenID Connect
+/// discovery when its RFC 8414 document is absent, as for any issuer.
+#[tokio::test]
+async fn origin_authorization_server_metadata_may_come_from_openid_connect_discovery() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    state
+        .authorization_metadata_via_openid_configuration
+        .store(true, Ordering::SeqCst);
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-openid-discovery");
+
+    let start = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("OpenID Connect discovery at the origin supplies the metadata");
+    assert!(
+        start
+            .authorize_url
+            .starts_with(&format!("{base}/authorize?"))
+    );
+    let paths = state.request_paths.lock().clone();
+    let rfc8414 = paths
+        .iter()
+        .position(|path| path == "/.well-known/oauth-authorization-server")
+        .expect("RFC 8414 is tried first");
+    let oidc = paths
+        .iter()
+        .position(|path| path == "/.well-known/openid-configuration")
+        .expect("OpenID Connect discovery is tried next");
+    assert!(rfc8414 < oidc, "{paths:?}");
+    authority
+        .login_complete(&target, split_callback(&start, &start.state))
+        .await
+        .expect("the completion reads the same document again");
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("access-token")
+    );
+}
+
+/// A second start joins the pending attempt of an origin whose issuer is
+/// written with a trailing slash: the join reads the metadata again for the
+/// issuer as the metadata states it.
+#[tokio::test]
+async fn a_second_start_joins_the_pending_attempt_of_a_trailing_slash_issuer() {
+    let (base, state) = spawn_oauth_fixture().await;
+    state
+        .protected_resource_absent
+        .store(true, Ordering::SeqCst);
+    *state.issuer_override.lock() = Some(format!("{base}/"));
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "origin-slash-join");
+
+    let first = authority
+        .login_start(
+            &target,
+            SPLIT_REDIRECT,
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, McpOAuthLoginDisposition::Started);
+    let joined = authority
+        .login_start(
+            &target,
+            "http://127.0.0.1:10/mcp/oauth/callback",
+            Some(CHALLENGE_WITHOUT_RESOURCE_METADATA),
+        )
+        .await
+        .expect("the join finds the issuer as the metadata states it");
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(joined.state, first.state);
+    assert_eq!(joined.authorize_url, first.authorize_url);
+    assert_eq!(
+        state.registration_requests.lock().len(),
+        1,
+        "a join registers no second client"
+    );
+    authority
+        .login_complete(&target, split_callback(&joined, &joined.state))
+        .await
+        .expect("the joined projection completes the single attempt");
 }

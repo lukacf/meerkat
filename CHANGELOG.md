@@ -110,6 +110,43 @@ them.
   tools takes that turn with its own tools too. Present in every release
   since 0.8.41.
 
+- `meerkat-auth-core` (`rkat mcp login`, and every host's MCP OAuth login): a
+  remote MCP server that publishes only OAuth authorization-server metadata
+  at its own origin can be logged in to. Such a server follows the 2025-03-26
+  MCP authorization revision: its `401` challenge names no
+  `resource_metadata`, it has no protected resource metadata (RFC 9728), and
+  `/.well-known/oauth-authorization-server` at its origin names its
+  endpoints. From 0.6.34 through 0.9.16 the login failed with `MCP OAuth
+  discovery failed for '<server>': no oauth-protected-resource metadata
+  found`, and such a server could be used only through a bridge outside
+  Meerkat. The server is now taken to be its own authorization server: the
+  metadata is read from the origin of the configured server URL (RFC 8414,
+  then OpenID Connect discovery) and the configured URL is the resource.
+  A server has no protected resource metadata when every location the
+  document is looked for says so: the two well-known URLs at the origin
+  root (with and without the server's path) by `404` or `410`, and the one
+  under the server's own endpoint path by `404`, `410`, `403`, `405` or a
+  `401` whose challenge names no resource metadata (the endpoint's own
+  guard answers there). Any other answer without
+  a document (a server error, a redirect, `401` at the origin root) still
+  fails the login, unless another of the candidate locations serves the
+  document.
+  Every existing check applies unchanged: the `issuer` must be that origin
+  (as written, or with one trailing slash), PKCE `S256`, a registration
+  endpoint, `https` or loopback endpoints, no redirects. A metadata document
+  is required (no default endpoint paths are assumed), a document served at
+  one of these locations (the earliest that serves one), or named by the
+  challenge the host passes on, is always the one followed (a defect of it
+  still fails the login), and a host-registered client is never discovered
+  this way. A document served only behind the endpoint's own guard is not
+  seen. `rkat mcp login` passes the endpoint's own challenge on; the RPC
+  and REST login starts pass none, so a document named only in that
+  challenge is not seen by them. A server with neither document is refused
+  with both named. A
+  server of this kind without an OpenID Connect UserInfo endpoint needs
+  `--oauth-account-selection unverified`, as before for any such
+  authorization server.
+
 ### Security
 
 - `rkat-rest`: a web page open in a browser on the same machine as a running server could read the server's answers and make requests that write. The server answered every request with a cross-origin allowance for any origin, on reads, on preflights and on writes, with its default loopback bind and with no setting or credential: a page of any origin could read the realm's configuration document and its sessions, and could send a configuration patch or create a session. Now the server compares a request's `Origin` with the realm's `[rest] allowed_origins` (an array of origins, empty by default, read when the server starts) before any route runs. An origin that is not listed, `null` included, is answered `403` with code `ORIGIN_NOT_ALLOWED` and no cross-origin header, on a preflight too; so is a request that a browser marks `Sec-Fetch-Site: cross-site` and that carries no `Origin`. A listed origin is served, and its answer allows that origin only. A caller that sends no `Origin` is served as before. Limits: the server still asks for no credential, so any local program that can open a socket to it is served; a request marked `same-site` without an origin is served (every GET route is a read, and the page cannot read the answer); a listed origin written with its default port never matches, and one written with a trailing dot matches only a page loaded under the name with that dot; the preflight answer carries no private-network allowance for a listed public origin. Affected: every release from 0.3.0 through 0.9.16 (by the source at the release tags). (Shown by rows and through the built binary on a loopback port; that the check covers every route and that no GET route writes: read from the source.) (Shown by a run on the published 0.9.15: a page of another local origin, in a headless Chromium, read `/config`, an inline auth source set in it included, and changed it with a `PATCH`, with no credential; the answers carried `access-control-allow-origin: *`. A page of a public site and another browser were not run; of the other routes, only a session create was run (it reached the handler and was refused only for the realm's missing provider credential, the refusal readable to the page).)

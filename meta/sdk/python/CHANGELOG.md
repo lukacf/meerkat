@@ -15,7 +15,8 @@ All notable changes to the Python SDK are documented here.
   object. A later call for one name replaces the earlier; a handler for a
   name `host_runnables()` does not declare raises `ValueError` at `build()`.
   `runtime.on_schedule_fire` is unchanged and still replaces or adds a
-  handler afterwards.
+  handler afterwards. (The lost fire was shown by a run with the SDK's
+  start held open; it was not seen in an unforced start.)
 
 ## 0.9.16
 

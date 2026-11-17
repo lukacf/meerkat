@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   had no such window. A later call for one name replaces the earlier, a
   handler for a name `host_runnables()` does not declare raises `ValueError`
   at `build()`, and `runtime.on_schedule_fire` is unchanged. No option is
-  sent to the gateway and the `meta/init` request is unchanged.
+  sent to the gateway and the `meta/init` request is unchanged. (The lost
+  fire was shown by a run with the SDK's start held open; it was not seen
+  in an unforced start.)
 
 ## [0.9.16] - 2026-11-16
 

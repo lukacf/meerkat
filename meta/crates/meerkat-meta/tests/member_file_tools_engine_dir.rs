@@ -7,8 +7,10 @@
 //! (`meerkat_config_path` defaults to `<workspace>/.rkat/config.toml`) and
 //! the comms identity keys. Meerkat's file tools refuse that directory with
 //! no declaration from the host, so a member's `apply_patch` cannot rewrite
-//! the config its gateway starts every agent from. Every other workspace
-//! file stays writable, the gateway's undeclared `state` directory included.
+//! the config its gateway starts every agent from. The gateway declares its
+//! state directory and the workspace's configuration directories
+//! (`meerkat_meta::gateway_composition::declare_host_paths`), which the
+//! tools refuse the same way. Every other workspace file stays writable.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::path::Path;
@@ -20,23 +22,28 @@ use meerkat_core::{AgentToolDispatcher, ToolDispatchOutcome, ToolError};
 
 /// The builtin dispatcher of a member built the way the gateway builds it.
 async fn member_dispatcher(workspace: &Path) -> Arc<dyn AgentToolDispatcher> {
-    AgentFactory::new(workspace.join("state"))
+    let factory = AgentFactory::new(workspace.join("state"))
         .runtime_root(workspace)
         .project_root(workspace)
         .context_root(workspace)
         .builtins(true)
-        .shell(true)
-        .build_builtin_dispatcher(
-            Arc::new(MemoryTaskStore::new()),
-            BuiltinToolConfig::default(),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("a member's builtin dispatcher builds")
+        .shell(true);
+    meerkat_meta::gateway_composition::declare_host_paths(
+        factory,
+        [workspace.join("state")],
+        [workspace.join("config"), workspace.join("deployment")],
+    )
+    .build_builtin_dispatcher(
+        Arc::new(MemoryTaskStore::new()),
+        BuiltinToolConfig::default(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("a member's builtin dispatcher builds")
 }
 
 /// One `apply_patch` add of `path` through the member's dispatcher.
@@ -101,9 +108,26 @@ async fn a_members_file_tool_cannot_write_the_workspace_engine_directory() {
         "kept = true\n"
     );
 
-    // Ordinary workspace files, and the gateway's undeclared state
-    // directory, are written as before.
-    for path in ["notes/plan.md", "src/lib.rs", "state/scratch.txt"] {
+    // The paths the gateway declares are refused with the same words.
+    for path in [
+        "state/scratch.txt",
+        "config/access.toml",
+        "deployment/routing.toml",
+    ] {
+        let result = add_file(dispatcher.as_ref(), path).await;
+        assert!(
+            matches!(
+                &result,
+                Err(ToolError::InvalidArguments { name, reason })
+                    if name == "apply_patch" && reason.contains("the file tools do not write there")
+            ),
+            "{path}: expected the typed refusal, got {result:?}"
+        );
+        assert!(!workspace.join(path).exists(), "{path} was written");
+    }
+
+    // Ordinary workspace files are written as before.
+    for path in ["notes/plan.md", "src/lib.rs"] {
         add_file(dispatcher.as_ref(), path)
             .await
             .unwrap_or_else(|error| panic!("{path} is an ordinary workspace file: {error}"));

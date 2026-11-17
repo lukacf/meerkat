@@ -228,6 +228,11 @@ struct GatewayRuntimeOptions {
     /// refuses init; `None` keeps `Config::default()`. A native realm's
     /// effective configuration takes this slot when the launch names one.
     host_config: Option<Config>,
+    /// The files `runtime_options.meerkat_config_path`,
+    /// `routing_config_path`, `gating_config_path` and `console_config_path`
+    /// name, kept beside what was read from them: the launch declares each
+    /// to the members' file tools.
+    named_config_files: Vec<PathBuf>,
     /// `runtime_options.native_realm`: the native realm whose effective
     /// configuration every gateway-built agent starts from, read once at
     /// init into `host_config` with Core's native reader, in place of
@@ -504,6 +509,7 @@ impl Default for GatewayRuntimeOptions {
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             compaction: None,
             host_config: None,
+            named_config_files: Vec::new(),
             native_realm: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
@@ -799,6 +805,40 @@ fn launch_provider_auth_persistence(
             }),
         (None, None) => Ok(None),
     }
+}
+
+/// The configuration files and roots a launch names, for
+/// [`crate::gateway_composition::declare_host_paths`]: the host
+/// configuration file, the routing, gating and console files, each by its
+/// own path (their directories are the launch's to choose and are not
+/// declared), the access file administrator edits persist to with the
+/// sibling a save of it is written through, the
+/// provider credentials root, the realms root of a native realm, and the
+/// directory of a durable work graph store; and the skill files
+/// `definition` names by path. A `.rkat` directory under a root the launch
+/// names (the session identity root, a native realm's user configuration
+/// root) needs no declaration.
+fn launch_named_paths(options: &GatewayRuntimeOptions, definition: &MobDefinition) -> Vec<PathBuf> {
+    let mut named = crate::gateway_composition::definition_skill_files(definition);
+    named.extend(options.named_config_files.iter().cloned());
+    named.extend(
+        options
+            .access
+            .as_ref()
+            .map(crate::AccessController::persist_paths)
+            .unwrap_or_default(),
+    );
+    named.extend(options.provider_credentials_root.clone());
+    named.extend(
+        options
+            .native_realm
+            .as_ref()
+            .map(|realm| realm.state_root.clone()),
+    );
+    if let GatewayWorkgraphOption::DurableDir(directory) = &options.workgraph {
+        named.push(directory.clone());
+    }
+    named
 }
 
 /// The identity policy a launch uses: the native host's Rust form
@@ -9890,6 +9930,7 @@ fn parse_gateway_runtime_options(
             crate::gateway_composition::load_gateway_host_config(std::path::Path::new(path))
                 .map_err(|error| format!("runtime_options.meerkat_config_path: {error}"))?,
         );
+        parsed.named_config_files.push(PathBuf::from(path));
     }
     if let Some(value) = runtime_options.get("http_listen") {
         let listen = value
@@ -9952,6 +9993,7 @@ fn parse_gateway_runtime_options(
         .and_then(Value::as_str)
     {
         parsed.routing_routes = parse_gateway_routing_config_path(path)?;
+        parsed.named_config_files.push(PathBuf::from(path));
     }
     // An explicit gating path must be a path string; absent or null keeps
     // gating off.
@@ -9960,6 +10002,7 @@ fn parse_gateway_runtime_options(
         Some(Value::String(path)) => {
             OptInConfigPath::Gating.refuse_empty(path)?;
             parsed.gating = parse_gateway_gating_config_path(path)?;
+            parsed.named_config_files.push(PathBuf::from(path));
         }
         Some(_) => {
             return Err("runtime_options.gating_config_path must be a string".to_string());
@@ -9974,6 +10017,7 @@ fn parse_gateway_runtime_options(
     {
         parsed.console_ui = load_console_ui_config_from_path_for_realm(path, None)
             .map_err(|err| format!("runtime_options.console_config_path is invalid: {err}"))?;
+        parsed.named_config_files.push(PathBuf::from(path));
     }
     // The decision ingresses a declared host channel attests people
     // through; absent or null declares none.
@@ -18209,6 +18253,57 @@ external_addressable = true
             PROVIDER_CREDENTIALS_ROOT_UNDER_HOST.to_string(),
         ));
     }
+    // The members' file tools are rooted in the directory that holds the
+    // state directory. The gateway starts only where that root is apart
+    // from every directory the launch names for its state. A launch
+    // without a state directory roots them in a workspace of its own,
+    // which holds none of these, and is not asked.
+    if let Some(tools_root) = persistent_state
+        .as_deref()
+        .and_then(std::path::Path::parent)
+    {
+        let kept = [
+            (
+                "the realms root of runtime_options.native_realm",
+                gateway_options
+                    .native_realm
+                    .as_ref()
+                    .map(|realm| realm.state_root.clone()),
+            ),
+            (
+                "the provider credentials root (runtime_options.provider_credentials_root)",
+                gateway_options.provider_credentials_root.clone(),
+            ),
+            (
+                "the durable work graph directory (runtime_options.workgraph)",
+                match &gateway_options.workgraph {
+                    GatewayWorkgraphOption::DurableDir(directory) => Some(directory.clone()),
+                    GatewayWorkgraphOption::Enabled | GatewayWorkgraphOption::Disabled => None,
+                },
+            ),
+        ];
+        for (what, directory) in kept {
+            if let Some(directory) = directory
+                && let Some((root, directory)) =
+                    crate::gateway_composition::tools_root_in_state(tools_root, &directory)
+            {
+                return Err(fail_init(
+                    &request_id,
+                    -32602,
+                    format!(
+                        "runtime_options: the members' file tools are rooted at {}, the \
+                         directory that holds persistent_state, and that directory is {what} {} \
+                         or lies inside it. The gateway keeps that directory out of the file \
+                         tools' reach, so the two must be apart: place persistent_state in a \
+                         directory outside it, or name a directory for it that does not hold \
+                         the directory persistent_state lies in",
+                        root.display(),
+                        directory.display()
+                    ),
+                ));
+            }
+        }
+    }
     // The identity policy, settled before the durable phase: the native
     // host's Rust form or the init option, never both, checked against the
     // definition's profiles, and refused on a launch without persistence.
@@ -18864,6 +18959,14 @@ external_addressable = true
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             factory = factory.user_config_root(root.clone());
         }
+        // The gateway declares its state directory (the scratch root of a
+        // launch without one) and the configuration files and roots its
+        // launch names to the members' file tools.
+        factory = crate::gateway_composition::declare_host_paths(
+            factory,
+            [storage_layout.state_dir().to_path_buf()],
+            launch_named_paths(&gateway_options, &definition),
+        );
         // The host composes this factory's MCP constructions, and installs its
         // operation refusal observer and operation review (with the review's
         // consent settlement on this runtime), before it is cloned for live or
@@ -19281,10 +19384,31 @@ external_addressable = true
         // The supported persistent service/machine pair does not require
         // durable session files on read-only container filesystems.
         let temp_dir = Some(tempfile::tempdir().expect("create temp dir for agent working space"));
-        let agent_workspace = temp_dir
+        // The members' file tools and shell are rooted in a workspace inside
+        // this launch's own temporary directory: the agent factory roots
+        // them in the directory that holds its store, so its store is a
+        // directory of that workspace (declared to the file tools below).
+        // Both go with the temporary directory when the gateway exits.
+        let member_workspace = temp_dir
             .as_ref()
-            .map(|dir| dir.path())
+            .map(|dir| dir.path().join("workspace"))
             .expect("temp dir for agent working space");
+        let agent_store = member_workspace.join(".gateway-store");
+        std::fs::create_dir_all(&agent_store).map_err(|error| {
+            fail_init(
+                &request_id,
+                STORAGE_RESOLUTION_CODE,
+                format!(
+                    "failed to create the members' workspace {}: {error}",
+                    member_workspace.display()
+                ),
+            )
+        })?;
+        tracing::info!(
+            path = %member_workspace.display(),
+            "members' file tools and shell are rooted in this launch's own workspace"
+        );
+        let agent_workspace = agent_store.as_path();
         let binary_blob_store: Arc<dyn BinaryBlobStore> = Arc::new(ObjectStoreBlobStore::memory());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(Base64BlobStoreAdapter::new(binary_blob_store.clone()));
@@ -19335,6 +19459,17 @@ external_addressable = true
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             factory = factory.user_config_root(root.clone());
         }
+        // The gateway declares its state directory (the scratch root of a
+        // launch without one) and the configuration files and roots its
+        // launch names to the members' file tools.
+        factory = crate::gateway_composition::declare_host_paths(
+            factory,
+            [
+                storage_layout.state_dir().to_path_buf(),
+                agent_store.clone(),
+            ],
+            launch_named_paths(&gateway_options, &definition),
+        );
         // The host composes this factory's MCP constructions, and installs its
         // operation refusal observer and operation review (with the review's
         // consent settlement on this runtime), before it is cloned for live or

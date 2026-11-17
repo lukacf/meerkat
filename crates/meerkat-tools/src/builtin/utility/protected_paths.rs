@@ -1,8 +1,9 @@
-//! The one rule for where the in-process file tools never write.
+//! The one rule for where the in-process file tools never write or read.
 //!
-//! `apply_patch` and `blob_save_file` run in the host process, so no OS
-//! process confinement stands between a model's call and the file. Two kinds
-//! of location inside the project root are the host's, not the project's:
+//! `apply_patch`, `blob_save_file`, `blob_load_file` and `view_image` run
+//! in the host process, so no OS process confinement stands between a
+//! model's call and the file. Two kinds of location inside the project root
+//! are the host's, not the project's:
 //!
 //! - the engine's own directory, `.rkat`, at the project root and in any
 //!   directory under it, with everything it holds: the project's MCP
@@ -14,11 +15,15 @@
 //! - every path the host declares as its own state or input
 //!   ([`ProtectedPaths::with_host_paths`]) that lies strictly inside the
 //!   project root: a realm state root, a config document, a convention file
-//!   or a credential store. It is protected with everything under it. A
-//!   declared path that contains or equals the project root is not applied:
-//!   a host that roots its tools inside its own state (a server started
-//!   without a context root) declares the documents it must keep, and every
-//!   other file there stays writable.
+//!   or a credential store. It is protected with everything under it, and
+//!   a declared file with its side files: the entries beside it whose names
+//!   are its name followed by `-` or `.` (a database's write-ahead log, a
+//!   lock, a backup), or its name without the extension followed by `.` and
+//!   ending in `.lock`. A declared path that contains or equals the project
+//!   root is not applied: a host that roots its tools inside its own state
+//!   (a server started without a context root) declares the documents and
+//!   stores it keeps there, and every other file there stays writable and
+//!   readable.
 //!
 //! A write, a delete and both ends of a move are refused when the target
 //! lies in such a location, judged twice: on the path's own components (a
@@ -28,9 +33,14 @@
 //! a symbolic link, the directory it leads to is the same location and is
 //! refused under its own name; a link deeper inside such a location is not
 //! followed. A path with a symbolic link that leads nowhere is refused too:
-//! the write would create the link's target, wherever it points. Reads are
-//! not judged here.
+//! the write would create the link's target, wherever it points.
+//!
+//! A read (`blob_load_file`, `view_image`) is judged the same way
+//! ([`ProtectedPaths::admit_read`]): a file in such a location is not read,
+//! under any spelling of its path or through a symbolic link, whether it
+//! exists or not, and the refusal is the same whatever stands at the path.
 
+use crate::builtin::BuiltinToolError;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -69,7 +79,35 @@ impl WriteRefusal {
     }
 }
 
-/// The locations a file tool rooted at one project root never writes.
+/// Why a file tool refused to read its target path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadRefusal {
+    /// The target lies in the engine's own directory or in a location the
+    /// host declared as its own.
+    Protected,
+    /// A component of the path is a symbolic link that leads nowhere.
+    DanglingLink,
+}
+
+impl ReadRefusal {
+    /// The reason a model reads. It names the path as the model gave it and
+    /// nothing of the host's layout.
+    pub(crate) fn reason(self, given: &Path) -> String {
+        match self {
+            Self::Protected => format!(
+                "path '{}' is in the engine's own directory (a {ENGINE_DIRECTORY} directory anywhere under the project root) or in another location the host keeps its state and configuration in; the file tools do not read there",
+                given.display()
+            ),
+            Self::DanglingLink => format!(
+                "path '{}' goes through a symbolic link whose target does not exist; the file tools do not read through it",
+                given.display()
+            ),
+        }
+    }
+}
+
+/// The locations a file tool rooted at one project root never writes or
+/// reads.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProtectedPaths {
     /// Absolute paths the host declared. One that lies strictly inside the
@@ -119,24 +157,74 @@ impl ProtectedPaths {
         {
             return Err(WriteRefusal::Protected);
         }
-        for declared in self.host.iter() {
+        if self.in_declared_path(project_root, &real_root, &[target, &real_target]) {
+            return Err(WriteRefusal::Protected);
+        }
+        Ok(())
+    }
+
+    /// Whether one of `paths` lies in a declared location that applies to
+    /// `project_root`: a declared path strictly inside the root, with
+    /// everything under it and, for a declared file, its side files.
+    fn in_declared_path(&self, project_root: &Path, real_root: &Path, paths: &[&Path]) -> bool {
+        self.host.iter().any(|declared| {
             // The declared path as the host named it and where it really
             // lies: the host may name its state through a symbolic link.
             let real_declared = real_path(declared).ok();
             let forms = || std::iter::once(declared.as_path()).chain(real_declared.as_deref());
-            let inside_root = forms().any(|declared| {
-                strictly_inside(declared, project_root) || strictly_inside(declared, &real_root)
-            });
-            if inside_root
-                && forms().any(|declared| {
-                    strip_prefix(target, declared).is_some()
-                        || strip_prefix(&real_target, declared).is_some()
+            forms().any(|declared| {
+                strictly_inside(declared, project_root) || strictly_inside(declared, real_root)
+            }) && forms().any(|declared| {
+                paths.iter().any(|path| {
+                    strip_prefix(path, declared).is_some() || in_side_file(path, declared)
                 })
-            {
-                return Err(WriteRefusal::Protected);
+            })
+        })
+    }
+
+    /// Admit `target` as a path a file tool may read. The judgement is
+    /// [`Self::admit_write`]'s: the same locations, by the path's components
+    /// and by where it really lies, so a file in an engine directory or
+    /// under a declared path is not read under any spelling or through a
+    /// symbolic link, whether it exists or not. A refused path answers the
+    /// same whatever stands there: under a declared path by its components
+    /// the answer is the location's, also through a link that leads
+    /// nowhere.
+    pub(crate) fn admit_read(&self, project_root: &Path, target: &Path) -> Result<(), ReadRefusal> {
+        match self.admit_write(project_root, target) {
+            Ok(()) => Ok(()),
+            Err(WriteRefusal::Protected) => Err(ReadRefusal::Protected),
+            Err(WriteRefusal::DanglingLink) => {
+                let real_root =
+                    real_path(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+                if self.in_declared_path(project_root, &real_root, &[target]) {
+                    Err(ReadRefusal::Protected)
+                } else {
+                    Err(ReadRefusal::DanglingLink)
+                }
             }
         }
-        Ok(())
+    }
+
+    /// [`Self::admit_read`] for a tool's call, judged off the async executor
+    /// (the judgement resolves paths on disk). A refusal is the tool's
+    /// invalid-arguments error and names `given`, the path as the model
+    /// gave it.
+    pub(crate) async fn admit_tool_read(
+        &self,
+        project_root: &Path,
+        target: &Path,
+        given: &Path,
+    ) -> Result<(), BuiltinToolError> {
+        let protected = self.clone();
+        let project_root = project_root.to_path_buf();
+        let target = target.to_path_buf();
+        tokio::task::spawn_blocking(move || protected.admit_read(&project_root, &target))
+            .await
+            .map_err(|err| {
+                BuiltinToolError::execution_failed(format!("read path check failed: {err}"))
+            })?
+            .map_err(|refusal| BuiltinToolError::invalid_args(refusal.reason(given)))
     }
 }
 
@@ -153,6 +241,51 @@ fn in_engine_directory(root: &Path, target: &Path) -> bool {
             )
         })
     })
+}
+
+/// Whether `path` is a side file of the declared file `declared`, or lies
+/// under one: an entry beside the declared file whose name is that file's
+/// name followed by `-` or `.` (a database's write-ahead log and shared
+/// memory, a lock, a marker, a backup), or that file's name without its
+/// extension followed by `.` and ending in `.lock` (a lock file made from
+/// its name). Only a declared name with an extension names a file: a
+/// declared directory has no side files.
+fn in_side_file(path: &Path, declared: &Path) -> bool {
+    let (Some(parent), Some(declared_name)) = (
+        declared.parent(),
+        declared.file_name().and_then(OsStr::to_str),
+    ) else {
+        return false;
+    };
+    // The name without its extension. A name with none, or whose only dot
+    // leads it, names no file here.
+    let Some(stem) = declared_name
+        .rfind('.')
+        .filter(|index| *index > 0)
+        .map(|index| &declared_name[..index])
+    else {
+        return false;
+    };
+    let Some(below) = strip_prefix(path, parent) else {
+        return false;
+    };
+    let Some(Component::Normal(name)) = below.components().next() else {
+        return false;
+    };
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let (name, declared_name, stem) = if CASE_INSENSITIVE_NAMES {
+        (fold_name(name), fold_name(declared_name), fold_name(stem))
+    } else {
+        (name.to_owned(), declared_name.to_owned(), stem.to_owned())
+    };
+    name.strip_prefix(&declared_name)
+        .is_some_and(|rest| rest.starts_with(['-', '.']))
+        || (name.ends_with(".lock")
+            && name
+                .strip_prefix(&stem)
+                .is_some_and(|rest| rest.starts_with('.')))
 }
 
 /// Whether `path` lies under `base` and is not `base` itself.
@@ -461,7 +594,8 @@ mod tests {
     /// started without a context root: the project root is the realm
     /// directory) declares the state root and the realm's own documents.
     /// The state root contains the project root, so it is not applied; the
-    /// documents are refused, and every other file there stays writable.
+    /// declared documents are refused, each with its side files, and every
+    /// other file there stays writable.
     #[test]
     fn a_declared_path_that_contains_the_project_root_is_not_applied() {
         let (_dir, base) = project();
@@ -476,6 +610,7 @@ mod tests {
         ]);
         for refused in [
             "config.toml",
+            "config.toml.bak",
             "authorization",
             "authorization/grant-owner.jsonl",
             ".rkat/config.toml",
@@ -486,17 +621,117 @@ mod tests {
                 "{refused}"
             );
         }
-        for admitted in [
-            "out.png",
-            "notes/config.toml",
-            "sessions.sqlite3",
-            "config.toml.bak",
-        ] {
+        for admitted in ["out.png", "notes/config.toml", "sessions.sqlite3"] {
             assert_eq!(
                 rule.admit_write(&root, &root.join(admitted)),
                 Ok(()),
                 "{admitted}"
             );
+        }
+    }
+
+    /// A declared file covers its side files: the entries beside it whose
+    /// names are its name followed by `-` or `.` (a database's write-ahead
+    /// log, a lock, a backup), for writes and for reads. A declared
+    /// directory has none, and a name that only begins alike is the
+    /// project's own.
+    #[test]
+    fn a_declared_file_covers_its_side_files() {
+        let (_dir, base) = project();
+        let state_root = base.join("realms");
+        let root = state_root.join("realm-1");
+        std::fs::create_dir_all(&root).unwrap();
+        let rule = ProtectedPaths::with_host_paths([
+            state_root,
+            root.join("store.sqlite3"),
+            root.join("records.json"),
+            root.join("blobs"),
+        ]);
+        for refused in [
+            "store.sqlite3",
+            "store.sqlite3-wal",
+            "store.sqlite3-shm",
+            "store.sqlite3.mfence",
+            "store.sqlite3.pre-1-1700000000",
+            "store.sqlite3.pre-1-1700000000/inner",
+            "records.json.lock",
+            "records.json.unsynced",
+            "blobs",
+            "blobs/sha256/payload",
+        ] {
+            let target = root.join(refused);
+            assert_eq!(
+                rule.admit_write(&root, &target),
+                Err(WriteRefusal::Protected),
+                "write {refused}"
+            );
+            assert_eq!(
+                rule.admit_read(&root, &target),
+                Err(ReadRefusal::Protected),
+                "read {refused}"
+            );
+        }
+        for admitted in [
+            "store.sqlite3x",
+            "store.sqlite",
+            "store.md",
+            "my-store.sqlite3",
+            "notes/store.sqlite3-wal",
+            "records.jsonl",
+            "blobs.md",
+            "blobs-notes.txt",
+        ] {
+            let target = root.join(admitted);
+            assert_eq!(rule.admit_write(&root, &target), Ok(()), "write {admitted}");
+            assert_eq!(rule.admit_read(&root, &target), Ok(()), "read {admitted}");
+        }
+    }
+
+    /// A declared file covers the lock files made from its name: an entry
+    /// beside it whose name is the file's name without its extension,
+    /// followed by `.` and ending in `.lock`. Another file of that stem is
+    /// the project's own.
+    #[test]
+    fn a_declared_file_covers_the_lock_files_made_from_its_name() {
+        let (_dir, base) = project();
+        let state_root = base.join("realms");
+        let root = state_root.join("realm-1");
+        std::fs::create_dir_all(&root).unwrap();
+        let rule = ProtectedPaths::with_host_paths([
+            state_root,
+            root.join("decisions.sqlite3"),
+            root.join("state.json"),
+        ]);
+        for refused in [
+            "state.lock",
+            "decisions.lock",
+            "decisions.executor.lock",
+            "decisions.executor.kind.issue.lock",
+        ] {
+            let target = root.join(refused);
+            assert_eq!(
+                rule.admit_write(&root, &target),
+                Err(WriteRefusal::Protected),
+                "write {refused}"
+            );
+            assert_eq!(
+                rule.admit_read(&root, &target),
+                Err(ReadRefusal::Protected),
+                "read {refused}"
+            );
+        }
+        for admitted in [
+            "state.yaml",
+            "state.md",
+            "statement.lock",
+            "state-lock",
+            "decisions.executor.txt",
+            "notes/state.lock",
+            "package.lock",
+        ] {
+            let target = root.join(admitted);
+            assert_eq!(rule.admit_write(&root, &target), Ok(()), "write {admitted}");
+            assert_eq!(rule.admit_read(&root, &target), Ok(()), "read {admitted}");
         }
     }
 
@@ -719,5 +954,100 @@ mod tests {
         assert!(reason.contains("rkat CLI"));
         let reason = WriteRefusal::DanglingLink.reason(Path::new("link"));
         assert!(reason.contains("'link'") && reason.contains("symbolic link"));
+    }
+
+    /// A read is judged as a write is: the same locations and links, in the
+    /// read's own words.
+    #[cfg(unix)]
+    #[test]
+    fn reads_are_judged_as_writes_are() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join(".rkat")).unwrap();
+        std::fs::create_dir_all(root.join("state/realm")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        symlink(root.join("state"), root.join("alias")).unwrap();
+        symlink(root.join("missing-target"), root.join("file-link")).unwrap();
+        let rule = ProtectedPaths::with_host_paths([root.join("state")]);
+
+        for path in [
+            ".rkat/mcp.toml",
+            "packages/app/.rkat/config.toml",
+            "state/realm/config.toml",
+            "alias/realm/config.toml",
+            "file-link",
+            "src/lib.rs",
+            "new/dir/file.txt",
+        ] {
+            let target = root.join(path);
+            let as_a_read = |refusal| match refusal {
+                WriteRefusal::Protected => ReadRefusal::Protected,
+                WriteRefusal::DanglingLink => ReadRefusal::DanglingLink,
+            };
+            assert_eq!(
+                rule.admit_read(&root, &target),
+                rule.admit_write(&root, &target).map_err(as_a_read),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            rule.admit_read(&root, &root.join("state/realm/config.toml")),
+            Err(ReadRefusal::Protected)
+        );
+        assert_eq!(
+            rule.admit_read(&root, &root.join("file-link")),
+            Err(ReadRefusal::DanglingLink)
+        );
+        assert_eq!(rule.admit_read(&root, &root.join("src/lib.rs")), Ok(()));
+
+        // A declared path that contains the project root is not applied.
+        let outer = ProtectedPaths::with_host_paths([root.clone()]);
+        assert_eq!(outer.admit_read(&root, &root.join("src/lib.rs")), Ok(()));
+    }
+
+    /// A read under a declared path answers as the location does, also
+    /// through a symbolic link there that leads nowhere; such a link in an
+    /// ordinary directory keeps its own answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_under_a_declared_path_answers_as_the_location_does() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("state/realm")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        symlink(root.join("missing-target"), root.join("state/realm/link")).unwrap();
+        symlink(root.join("missing-target"), root.join("src/link")).unwrap();
+        let rule = ProtectedPaths::with_host_paths([root.join("state")]);
+
+        for path in [
+            "state/realm/config.toml",
+            "state/realm/link",
+            "state/realm/link/below.txt",
+        ] {
+            assert_eq!(
+                rule.admit_read(&root, &root.join(path)),
+                Err(ReadRefusal::Protected),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            rule.admit_read(&root, &root.join("src/link")),
+            Err(ReadRefusal::DanglingLink)
+        );
+    }
+
+    /// The read refusal names the path as given and nothing of the host's
+    /// layout.
+    #[test]
+    fn read_refusal_reasons_name_only_the_given_path() {
+        let reason = ReadRefusal::Protected.reason(Path::new(".rkat/mcp.toml"));
+        assert!(reason.contains("'.rkat/mcp.toml'"));
+        assert!(reason.contains("engine's own directory"));
+        assert!(reason.ends_with("the file tools do not read there"));
+        let reason = ReadRefusal::DanglingLink.reason(Path::new("link"));
+        assert!(reason.contains("'link'") && reason.contains("symbolic link"));
+        assert!(reason.ends_with("the file tools do not read through it"));
     }
 }

@@ -132,9 +132,9 @@ pub struct CompositeDispatcher {
     web_search_runtime: Option<WebSearchToolBinding>,
     #[cfg(not(target_arch = "wasm32"))]
     blob_tools: Option<BlobToolBinding>,
-    /// The paths this composite's file tools never write: the engine's own
-    /// directory under the project root, always, and what the host declared
-    /// with [`Self::protect_host_paths`].
+    /// The paths this composite's file tools never write or read: the
+    /// engine's own directory under the project root, always, and what the
+    /// host declared with [`Self::protect_host_paths`].
     #[cfg(not(target_arch = "wasm32"))]
     protected_paths: ProtectedPaths,
     allowed_tools: HashSet<String>,
@@ -625,11 +625,14 @@ impl CompositeDispatcher {
     }
 
     /// Declare the paths the host keeps its own state and inputs in, so
-    /// this composite's in-process file tools (`apply_patch`,
-    /// `blob_save_file`) never write them: a realm state root, config
+    /// this composite's in-process file tools never write them
+    /// (`apply_patch`, `blob_save_file`) or read them (`blob_load_file`,
+    /// `view_image`): a realm state root, config
     /// documents, MCP, hook and skill sources, a credential store. A
     /// declared path that lies strictly inside the project root is refused
-    /// with everything under it; one that contains or equals the project
+    /// with everything under it, and a declared file with its side files
+    /// (its write-ahead log, locks and backups beside it);
+    /// one that contains or equals the project
     /// root is not applied, and a path that is not absolute is ignored.
     /// The engine's own directory, `.rkat` at the project root or in any
     /// directory under it, is refused without any declaration. Each call
@@ -642,13 +645,18 @@ impl CompositeDispatcher {
     /// Rebuild this composite's file tools with `protected`.
     #[cfg(not(target_arch = "wasm32"))]
     fn set_protected_paths(&mut self, protected: ProtectedPaths) {
-        use crate::builtin::utility::ApplyPatchTool;
+        use crate::builtin::utility::{ApplyPatchTool, ViewImageTool};
         self.protected_paths = protected;
         if let Some(project_root) = self.project_root.clone() {
             for tool in &mut self.builtin_tools {
                 if tool.name() == "apply_patch" {
                     *tool = Arc::new(
                         ApplyPatchTool::new(project_root.clone())
+                            .protecting(self.protected_paths.clone()),
+                    );
+                } else if tool.name() == "view_image" {
+                    *tool = Arc::new(
+                        ViewImageTool::new(project_root.clone())
                             .protecting(self.protected_paths.clone()),
                     );
                 }
@@ -681,7 +689,10 @@ impl CompositeDispatcher {
                 BlobSaveFileTool::new(project_root.clone(), Arc::clone(&blob_store))
                     .protecting(self.protected_paths.clone()),
             ),
-            Arc::new(BlobLoadFileTool::new(project_root, Arc::clone(&blob_store))),
+            Arc::new(
+                BlobLoadFileTool::new(project_root, Arc::clone(&blob_store))
+                    .protecting(self.protected_paths.clone()),
+            ),
             Arc::new(BlobInspectTool::new(Arc::clone(&blob_store))),
         ];
         let resolved_policy = self.builtin_config.resolve();
@@ -3582,6 +3593,331 @@ mod tests {
         add_file_through(rebound.as_ref(), "src/lib.rs")
             .await
             .expect("an ordinary project file is written");
+    }
+
+    /// The leading bytes of a PNG file, enough for the image view.
+    const PNG_HEAD: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+
+    /// Write `bytes` at `relative` under `root`, creating its directories.
+    fn write_project_file(root: &std::path::Path, relative: &str, bytes: &[u8]) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// One call of a reading tool (`view_image`, `blob_load_file`) on `path`
+    /// through the dispatcher.
+    async fn read_through(
+        dispatcher: &dyn AgentToolDispatcher,
+        tool: &'static str,
+        path: &str,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        // `blob_load_file` is given its media type, so a call does not stop
+        // at the file's extension: the path alone decides.
+        let args = if tool == "blob_load_file" {
+            serde_json::json!({ "path": path, "media_type": "text/plain" })
+        } else {
+            serde_json::json!({ "path": path })
+        };
+        let call_json = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-read",
+                name: tool,
+                args: &call_json,
+            })
+            .await
+    }
+
+    fn assert_protected_read_refusal(
+        result: &Result<meerkat_core::ToolDispatchOutcome, ToolError>,
+        tool: &str,
+        case: &str,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err(ToolError::InvalidArguments { name, reason })
+                    if name == tool
+                        && reason.contains("engine's own directory")
+                        && reason.contains("do not read there")
+            ),
+            "{tool} on {case}: expected the typed refusal, got {result:?}"
+        );
+    }
+
+    /// The composite's reading tools refuse the engine's own directory with
+    /// no declaration, and the paths a host declares, also through a
+    /// symbolic link in the project, whether the blob tools were registered
+    /// before or after the declaration. A file beside them is read. The
+    /// refusal is the typed invalid-arguments tool error.
+    #[tokio::test]
+    async fn reading_tools_refuse_the_engine_directory_and_declared_host_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        write_project_file(&root, ".rkat/logo.png", PNG_HEAD);
+        write_project_file(&root, "state/realm/chart.png", PNG_HEAD);
+        write_project_file(&root, "state/realm/config.toml", b"kept");
+        write_project_file(&root, "src/logo.png", PNG_HEAD);
+        write_project_file(&root, "notes.txt", b"note");
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.clone()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        dispatcher.register_blob_file_tools(Arc::clone(&store));
+
+        for tool in ["view_image", "blob_load_file"] {
+            let result = read_through(&dispatcher, tool, ".rkat/logo.png").await;
+            assert_protected_read_refusal(&result, tool, "no declaration: .rkat");
+        }
+        read_through(&dispatcher, "view_image", "state/realm/chart.png")
+            .await
+            .expect("an undeclared directory is the project's own");
+        read_through(&dispatcher, "blob_load_file", "state/realm/chart.png")
+            .await
+            .expect("an undeclared directory is the project's own");
+
+        dispatcher.protect_host_paths([root.join("state")]);
+
+        let result = read_through(&dispatcher, "view_image", "state/realm/chart.png").await;
+        assert_protected_read_refusal(&result, "view_image", "declared state root");
+        for path in ["state/realm/config.toml", "state/realm/chart.png"] {
+            let result = read_through(&dispatcher, "blob_load_file", path).await;
+            assert_protected_read_refusal(&result, "blob_load_file", path);
+        }
+        for tool in ["view_image", "blob_load_file"] {
+            let result = read_through(&dispatcher, tool, ".rkat/logo.png").await;
+            assert_protected_read_refusal(&result, tool, "declared paths keep the .rkat rule");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(root.join("state"), root.join("alias")).unwrap();
+            symlink("state/realm/chart.png", root.join("linked.png")).unwrap();
+            for tool in ["view_image", "blob_load_file"] {
+                for path in ["alias/realm/chart.png", "linked.png"] {
+                    let result = read_through(&dispatcher, tool, path).await;
+                    assert_protected_read_refusal(&result, tool, path);
+                }
+            }
+        }
+
+        // Registered after the declaration.
+        dispatcher.register_blob_file_tools(store);
+        let result = read_through(&dispatcher, "blob_load_file", "state/realm/config.toml").await;
+        assert_protected_read_refusal(
+            &result,
+            "blob_load_file",
+            "blob tools registered after the declaration",
+        );
+
+        read_through(&dispatcher, "view_image", "src/logo.png")
+            .await
+            .expect("an ordinary project image is viewed");
+        read_through(&dispatcher, "blob_load_file", "notes.txt")
+            .await
+            .expect("an ordinary project file is loaded");
+    }
+
+    /// A host whose tools are rooted inside its own state root keeps its
+    /// realm documents from the reading tools as from the writing ones: the
+    /// state root contains the project root, so it is not applied as a
+    /// whole, and the documents declared one by one are refused while the
+    /// other files there are read.
+    #[tokio::test]
+    async fn reading_tools_keep_the_realm_documents_when_the_declaration_contains_the_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let state_root = base.join("realms");
+        let realm = state_root.join("realm-1");
+        write_project_file(&realm, "config.toml", b"kept");
+        write_project_file(&realm, "authorization/grant-owner.jsonl", b"kept");
+        write_project_file(&realm, "authorization/seal.png", PNG_HEAD);
+        write_project_file(&realm, "notes.txt", b"note");
+        write_project_file(&realm, "chart.png", PNG_HEAD);
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(realm.clone()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        dispatcher.register_blob_file_tools(store);
+        dispatcher.protect_host_paths([
+            state_root,
+            realm.join("config.toml"),
+            realm.join("authorization"),
+        ]);
+
+        for path in ["config.toml", "authorization/grant-owner.jsonl"] {
+            let result = read_through(&dispatcher, "blob_load_file", path).await;
+            assert_protected_read_refusal(&result, "blob_load_file", path);
+        }
+        let result = read_through(&dispatcher, "view_image", "authorization/seal.png").await;
+        assert_protected_read_refusal(&result, "view_image", "authorization/seal.png");
+
+        read_through(&dispatcher, "blob_load_file", "notes.txt")
+            .await
+            .expect("the state root as a whole is not applied");
+        read_through(&dispatcher, "view_image", "chart.png")
+            .await
+            .expect("the state root as a whole is not applied");
+    }
+
+    /// A composite rebuilt for its session's ops lifecycle keeps the paths
+    /// the host declared for its reading tools too.
+    #[tokio::test]
+    async fn reading_tools_keep_declared_host_paths_after_ops_lifecycle_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        write_project_file(&root, ".rkat/logo.png", PNG_HEAD);
+        write_project_file(&root, "state/realm/chart.png", PNG_HEAD);
+        write_project_file(&root, "state/realm/config.toml", b"kept");
+        write_project_file(&root, "src/logo.png", PNG_HEAD);
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.clone()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .expect("composite dispatcher should build");
+        dispatcher.register_blob_file_tools(store);
+        dispatcher.protect_host_paths([root.join("state")]);
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .expect("ops lifecycle binding should rebuild the composite")
+            .into_dispatcher();
+
+        let result = read_through(rebound.as_ref(), "view_image", "state/realm/chart.png").await;
+        assert_protected_read_refusal(
+            &result,
+            "view_image",
+            "declared state root after the rebind",
+        );
+        let result = read_through(
+            rebound.as_ref(),
+            "blob_load_file",
+            "state/realm/config.toml",
+        )
+        .await;
+        assert_protected_read_refusal(
+            &result,
+            "blob_load_file",
+            "declared state root after the rebind",
+        );
+        for tool in ["view_image", "blob_load_file"] {
+            let result = read_through(rebound.as_ref(), tool, ".rkat/logo.png").await;
+            assert_protected_read_refusal(&result, tool, ".rkat after the rebind");
+        }
+        read_through(rebound.as_ref(), "view_image", "src/logo.png")
+            .await
+            .expect("an ordinary project image is viewed");
+    }
+
+    /// The composite's file tools refuse the side files of a declared file
+    /// (an entry beside it whose name is its name followed by `-` or `.`)
+    /// as they refuse the file, for writes and for reads, and a refused
+    /// target is left as it was. A name that only begins alike is the
+    /// project's own.
+    #[tokio::test]
+    async fn file_tools_refuse_the_side_files_of_a_declared_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let state_root = base.join("realms");
+        let realm = state_root.join("realm-1");
+        write_project_file(&realm, "store.sqlite3-wal", b"kept\n");
+        write_project_file(&realm, "charts.db.png", PNG_HEAD);
+        write_project_file(&realm, "store.md", b"note");
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(realm.clone()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob = store.put_image("image/png", "aGVsbG8=").await.unwrap();
+        dispatcher.register_blob_file_tools(Arc::clone(&store));
+        dispatcher.protect_host_paths([
+            state_root,
+            realm.join("store.sqlite3"),
+            realm.join("charts.db"),
+        ]);
+
+        // Writes: a new side file, an existing one, and a save onto one.
+        let result = add_file_through(&dispatcher, "store.sqlite3.pre-1-1700000000").await;
+        assert_protected_path_refusal(&result, "a new side file");
+        let update = serde_json::json!({
+            "patch": "*** Begin Patch\n*** Update File: store.sqlite3-wal\n@@\n-kept\n+changed\n*** End Patch"
+        });
+        let call_json = serde_json::value::RawValue::from_string(update.to_string()).unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-update",
+                name: "apply_patch",
+                args: &call_json,
+            })
+            .await;
+        assert_protected_path_refusal(&result, "an existing side file");
+        let save = serde_json::json!({
+            "blob_id": blob.blob_id.as_str(),
+            "path": "store.sqlite3-shm",
+        });
+        let call_json = serde_json::value::RawValue::from_string(save.to_string()).unwrap();
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-save",
+                name: "blob_save_file",
+                args: &call_json,
+            })
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(ToolError::InvalidArguments { name, reason })
+                    if name == "blob_save_file" && reason.contains("engine's own directory")
+            ),
+            "a save onto a side file: {result:?}"
+        );
+
+        // Reads.
+        let result = read_through(&dispatcher, "blob_load_file", "store.sqlite3-wal").await;
+        assert_protected_read_refusal(&result, "blob_load_file", "store.sqlite3-wal");
+        let result = read_through(&dispatcher, "view_image", "charts.db.png").await;
+        assert_protected_read_refusal(&result, "view_image", "charts.db.png");
+
+        // Nothing was written and the existing side file is as it was.
+        assert!(!realm.join("store.sqlite3.pre-1-1700000000").exists());
+        assert!(!realm.join("store.sqlite3-shm").exists());
+        assert_eq!(
+            std::fs::read(realm.join("store.sqlite3-wal")).unwrap(),
+            b"kept\n"
+        );
+
+        add_file_through(&dispatcher, "store.sqlite3x")
+            .await
+            .expect("a name that only begins alike is written");
+        read_through(&dispatcher, "blob_load_file", "store.md")
+            .await
+            .expect("a name that only begins alike is loaded");
     }
 
     #[tokio::test]

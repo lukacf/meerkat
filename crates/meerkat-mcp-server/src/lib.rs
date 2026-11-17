@@ -6702,18 +6702,28 @@ mod tests {
         assert!(ingress.logical_router(&session).await.is_some());
     }
 
-    /// Records the tool names each model request offers. An armed tool call
+    /// Records the tool names each model request offers and the text of the
+    /// tool result a request carries as its last message. An armed tool call
     /// is asked for by the next request only; every other request answers
     /// `ok`.
     #[derive(Default)]
     struct ToolCallScriptLlmClient {
         tool_names: std::sync::Mutex<Vec<Vec<String>>>,
+        tool_results: std::sync::Mutex<Vec<String>>,
         armed_call: std::sync::Mutex<Option<(String, Value)>>,
     }
 
     impl ToolCallScriptLlmClient {
         fn arm_call(&self, name: &str, args: Value) {
             *self.armed_call.lock().expect("armed call lock") = Some((name.to_string(), args));
+        }
+
+        /// The text of each tool result the model was sent, in order.
+        fn returned_tool_results(&self) -> Vec<String> {
+            self.tool_results
+                .lock()
+                .expect("recorded tool results lock")
+                .clone()
         }
 
         fn requests(&self) -> Vec<std::collections::BTreeSet<String>> {
@@ -6749,6 +6759,14 @@ mod tests {
                         .map(|tool| tool.name.to_string())
                         .collect(),
                 );
+            if let Some(meerkat_core::Message::ToolResults { results, .. }) =
+                request.messages.last()
+            {
+                self.tool_results
+                    .lock()
+                    .expect("recorded tool results lock")
+                    .extend(results.iter().map(meerkat_core::ToolResult::text_content));
+            }
             let usage = LlmEvent::UsageUpdate {
                 usage: meerkat_core::TurnUsage::host_declared(
                     provider_for_successful_mcp_test_model(&request.model),
@@ -14365,5 +14383,216 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 assert!(!target.exists(), "{case}: {path} was written");
             }
         }
+    }
+
+    /// Whether `name`, an entry at a realm's root, is one the server
+    /// declares to its agents' file tools: a listed entry, or a side file
+    /// of a listed file (the file's name followed by `-` or `.`, or the
+    /// file's name without its extension followed by `.` and ending in
+    /// `.lock`).
+    fn declared_realm_entry(
+        listed: &[std::path::PathBuf],
+        realm: &std::path::Path,
+        name: &str,
+    ) -> bool {
+        listed
+            .iter()
+            .filter(|entry| entry.parent() == Some(realm))
+            .filter_map(|entry| entry.file_name()?.to_str())
+            .any(|declared| {
+                if name == declared {
+                    return true;
+                }
+                let Some(stem) = declared
+                    .rfind('.')
+                    .filter(|index| *index > 0)
+                    .map(|index| &declared[..index])
+                else {
+                    return false;
+                };
+                name.strip_prefix(declared)
+                    .is_some_and(|rest| rest.starts_with(['-', '.']))
+                    || (name.ends_with(".lock")
+                        && name
+                            .strip_prefix(stem)
+                            .is_some_and(|rest| rest.starts_with('.')))
+            })
+    }
+
+    /// Started without a context root, the server roots its agents' file
+    /// tools in the realm directory. A session uses the realm (it loads an
+    /// ordinary file into the blob store and writes one), the host takes a
+    /// config write, and the file tools are asked to write and to read
+    /// every entry the server declares for the realm, a file under each
+    /// declared directory and side files of declared files. Every such call
+    /// is refused, nothing is planted, and every entry the realm then holds
+    /// at its root is declared.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_tools_refuse_every_declared_entry_of_the_served_realm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical tempdir");
+        let realms = base.join("realms");
+        let realm_paths = meerkat_store::realm_paths_in(&realms, "file-tools-census");
+        let realm_dir = realm_paths.root.clone();
+        std::fs::create_dir_all(&realm_dir).expect("realm dir");
+        std::fs::write(&realm_paths.config_path, "[realm.file-tools-census]\n")
+            .expect("realm document");
+        std::fs::write(realm_dir.join("seed.txt"), "seed\n").expect("an ordinary file");
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "file-tools-census".into(),
+        };
+        bootstrap.realm.state_root = Some(realms.clone());
+        bootstrap.context.user_config_root = Some(base.join("user"));
+        let llm = Arc::new(ToolCallScriptLlmClient::default());
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::clone(&llm) as Arc<dyn meerkat::LlmClient>),
+            None,
+        )
+        .await
+        .expect("the server starts");
+
+        // One run in which the model makes one tool call; the text of the
+        // result it was sent.
+        let call = |name: &'static str, args: Value| {
+            let llm = Arc::clone(&llm);
+            let state = &state;
+            async move {
+                let before = llm.returned_tool_results().len();
+                llm.arm_call(name, args);
+                let run_input: MeerkatRunInput = serde_json::from_value(json!({
+                    "prompt": "Use the file tools.",
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic",
+                    "enable_workgraph": false,
+                }))
+                .expect("run input");
+                Box::pin(handle_meerkat_run(state, run_input, None, None))
+                    .await
+                    .expect("meerkat_run succeeds");
+                let results = llm.returned_tool_results();
+                assert_eq!(results.len(), before + 1, "{name}: one tool result");
+                results[before].clone()
+            }
+        };
+        let add = |path: &str| {
+            json!({
+                "patch": format!(
+                    "*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch"
+                )
+            })
+        };
+
+        // The realm is used before anything is asked of it.
+        let loaded = call("blob_load_file", json!({ "path": "seed.txt" })).await;
+        assert!(
+            !loaded.contains("engine's own directory"),
+            "the ordinary file was loaded: {loaded}"
+        );
+        call("apply_patch", add("out.txt")).await;
+        assert_eq!(
+            std::fs::read_to_string(realm_dir.join("out.txt")).expect("the ordinary file"),
+            "written by the model\n"
+        );
+        let config_write: MeerkatConfigInput = serde_json::from_value(json!({
+            "action": "patch",
+            "patch": { "max_tokens": 2048 },
+        }))
+        .expect("config input");
+        handle_meerkat_config(&state, config_write)
+            .await
+            .expect("the host takes a config write");
+
+        // Each declared entry by its own name when it is a file, and a file
+        // under it when it is a directory; then side files of declared
+        // files.
+        let mut targets: Vec<String> = meerkat::HostConfinement::realm_documents(&realm_dir)
+            .iter()
+            .map(|entry| {
+                let name = entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("a declared entry's name");
+                if name.rfind('.').is_some_and(|index| index > 0) {
+                    name.to_owned()
+                } else {
+                    format!("{name}/planted.txt")
+                }
+            })
+            .collect();
+        targets.extend(
+            [
+                "sessions.sqlite3-wal",
+                "sessions.sqlite3.planted",
+                "approvals.json.planted",
+                "config_state.planted.lock",
+                "admission.lock",
+                "realm.mfence",
+            ]
+            .map(str::to_owned),
+        );
+        for target in &targets {
+            let written = call("apply_patch", add(target)).await;
+            assert!(
+                written.contains("engine's own directory")
+                    && written.contains("do not write there"),
+                "a write of {target} was refused: {written}"
+            );
+            let read = call(
+                "blob_load_file",
+                json!({ "path": target, "media_type": "text/plain" }),
+            )
+            .await;
+            assert!(
+                read.contains("engine's own directory") && read.contains("do not read there"),
+                "a read of {target} was refused: {read}"
+            );
+        }
+        for planted in [
+            "sessions.sqlite3.planted",
+            "approvals.json.planted",
+            "config_state.planted.lock",
+        ] {
+            assert!(!realm_dir.join(planted).exists(), "{planted} was written");
+        }
+        for target in targets
+            .iter()
+            .filter(|target| target.ends_with("/planted.txt"))
+        {
+            assert!(!realm_dir.join(target).exists(), "{target} was written");
+        }
+
+        let listed = meerkat::HostConfinement::realm_documents(&realm_dir);
+        let mut entries: Vec<String> = std::fs::read_dir(&realm_dir)
+            .expect("the realm directory")
+            .map(|entry| {
+                entry
+                    .expect("a realm entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        entries.sort();
+        for used in ["blobs", "config_state.json"] {
+            assert!(
+                entries.iter().any(|name| name == used),
+                "the realm was used before it was listed ({used}): {entries:?}"
+            );
+        }
+        // The two ordinary files are the agent's own, and the engine
+        // directory is refused without any declaration.
+        let undeclared: Vec<&String> = entries
+            .iter()
+            .filter(|name| !matches!(name.as_str(), "seed.txt" | "out.txt" | ".rkat"))
+            .filter(|name| !declared_realm_entry(&listed, &realm_dir, name))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "entries of the served realm the server does not declare: {undeclared:?} (all: {entries:?})"
+        );
     }
 }

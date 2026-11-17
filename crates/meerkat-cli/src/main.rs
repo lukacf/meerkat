@@ -2490,8 +2490,11 @@ enum StorageCommands {
     /// transcript-history footprint, dangling session→blob references, and
     /// orphaned lock/lease/backup artifacts.
     ///
-    /// By default the sweep covers the invocation-context-local
-    /// root (`<context-root>/.rkat/realms`) and the user-global data root. When
+    /// By default the sweep covers the roots ordinary runtime resolution
+    /// probes for an existing realm: the `.rkat/realms` of the context
+    /// root and of every ancestor that has a `.rkat` directory, and the
+    /// user-global data root. A realm present under more than one of them
+    /// is reported with both directories. When
     /// any explicit root is given (the global `--state-root` or one or more
     /// `--root`), ONLY those roots are read. `--realm` restricts the sweep
     /// to one realm id (split-brain twins for it are still detected across
@@ -2516,7 +2519,10 @@ enum StorageCommands {
 
     /// Offline migration framework (dry-run by default)
     ///
-    /// Sweeps the same candidate roots as `storage doctor` and, per realm:
+    /// Sweeps the invocation-context-local root
+    /// (`<context-root>/.rkat/realms`) and the user-global data root, or
+    /// only the roots `--state-root`/`--root` name (an ancestor's root is
+    /// never touched unless named), and, per realm:
     /// (1) ledger baseline — under the realm's exclusive maintenance fence,
     /// every store is opened through its normal constructor so the guarded
     /// schema-ledger migrations admit fresh domains or exact released
@@ -6053,14 +6059,15 @@ fn resolve_runtime_scope_with_realm(
             .map(|b: RealmBackend| b.as_str().to_string()),
         state_root: cli.state_root.clone(),
     };
-    // Bootstrap path authority: realm-id-first dual-root resolution through
+    // Bootstrap path authority: realm-id-first resolution through
     // `StorageLayout::resolve`. An explicit --state-root wins; else the
-    // realm is used where it already exists (project-local
-    // <project-root>/.rkat/realms — walked up from the context root — or
-    // the user-global data dir; both is a typed split-brain refusal); else
-    // the CLI's documented project-local default applies. The resolved
-    // layout rides on the scope so persistence opens reserve across every
-    // probed candidate root.
+    // realm is used where it already exists (the `.rkat/realms` of the
+    // project root walked up from the context root or of a farther
+    // ancestor, or the user-global data dir; more than one is a typed
+    // split-brain refusal); else the CLI's documented project-local
+    // default, the nearest of them, applies. The resolved layout rides on
+    // the scope so persistence opens reserve across the root that holds
+    // the realm and the user-global root.
     let resolved = meerkat_core::StorageLayout::resolve(
         meerkat_core::StorageLayoutInputs {
             invocation_context: context_root.clone(),
@@ -6072,6 +6079,12 @@ fn resolve_runtime_scope_with_realm(
         &realm_cfg,
     )?;
     let locator = resolved.locator;
+    for root in resolved.layout.unreadable_realm_roots() {
+        eprintln!(
+            "Warning: the realm state root '{}' of an ancestor directory cannot be read and was skipped; a realm kept there is not used.",
+            root.display()
+        );
+    }
     if resolved.root_choice == meerkat_core::RealmRootChoice::ExistingGlobal {
         tracing::info!(
             realm = %locator.realm,
@@ -10715,14 +10728,14 @@ impl StorageHostsFencesLine {
     }
 }
 
-/// Candidate state roots for the storage verbs, resolved WITHOUT opening
-/// persistence, taking leases, or building a service: an explicit
-/// `--state-root`/`--root` set is used verbatim (and nothing else is read);
-/// otherwise the sweep covers the invocation-context-local candidate and the
-/// user-global data root. Unlike ordinary runtime scope, this deliberately
-/// does not walk up to the nearest ancestor containing `.rkat`; callers that
-/// want the runtime's project-local candidate must invoke the verb there or
-/// pass it explicitly.
+/// Candidate state roots for the storage verbs that change or remove
+/// something (`migrate`, `prune`), resolved WITHOUT opening persistence,
+/// taking leases, or building a service: an explicit `--state-root`/`--root`
+/// set is used verbatim (and nothing else is read); otherwise the sweep
+/// covers the invocation-context-local candidate and the user-global data
+/// root. Unlike ordinary runtime scope, this deliberately does not walk up
+/// to an ancestor containing `.rkat`: these verbs act on an ancestor's root
+/// only when `--root` names it.
 fn storage_sweep_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut state_roots: Vec<PathBuf> = Vec::new();
     if let Some(explicit) = &cli.state_root {
@@ -10737,6 +10750,31 @@ fn storage_sweep_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
         state_roots.push(meerkat_core::local_realms_candidate(&context_root));
         state_roots.push(meerkat_core::default_state_root());
     }
+    state_roots
+}
+
+/// The roots `storage doctor` reads: an explicit `--state-root`/`--root`
+/// set verbatim; otherwise the roots ordinary runtime resolution probes for
+/// an existing realm (the `.rkat/realms` of the context root's project and
+/// of every farther ancestor that has a `.rkat` directory) and the
+/// user-global data root, so a realm present under more than one of them is
+/// reported. The doctor only reads.
+fn storage_doctor_roots(cli: &Cli, extra_roots: &[PathBuf]) -> Vec<PathBuf> {
+    if cli.state_root.is_some() || !extra_roots.is_empty() {
+        return storage_sweep_roots(cli, extra_roots);
+    }
+    let context_root = cli
+        .context_root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut state_roots = meerkat_core::local_realms_candidates(&context_root);
+    // The context's own candidate stays in the sweep as before, also where
+    // the context has no `.rkat` of its own.
+    let own = meerkat_core::local_realms_candidate(&context_root);
+    if !state_roots.contains(&own) {
+        state_roots.insert(0, own);
+    }
+    state_roots.push(meerkat_core::default_state_root());
     state_roots
 }
 
@@ -10777,7 +10815,7 @@ async fn handle_storage_doctor(
     json: bool,
     extra_roots: &[PathBuf],
 ) -> anyhow::Result<()> {
-    let state_roots = storage_sweep_roots(cli, extra_roots);
+    let state_roots = storage_doctor_roots(cli, extra_roots);
     let mut scope = meerkat_core::DiagnoseScope::new(state_roots);
     if let Some(realm) = storage_realm_filter(cli)? {
         scope = scope.with_realm(realm);
@@ -40760,6 +40798,110 @@ auth_profile = "openai_key"
                 .contains(&scope.locator.state_root),
             "the chosen root must be among the reservation candidates"
         );
+    }
+
+    #[test]
+    fn test_resolve_runtime_scope_keeps_a_realm_under_a_farther_ancestor_root() {
+        // A realm that exists under the project's state root is used there
+        // also once a directory between the context root and the project
+        // root holds a `.rkat` entry of its own.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("proj");
+        let nested = project.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::create_dir_all(project.join(".rkat")).expect("mkdir .rkat");
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "--context-root",
+            nested.to_str().expect("utf-8 path"),
+            "run",
+            "hello",
+        ])
+        .expect("cli should parse");
+        let project_realms = project.join(".rkat").join("realms");
+        let first =
+            resolve_runtime_scope_with_realm(&cli, cli.realm.clone()).expect("scope resolves");
+        assert_eq!(first.locator.state_root, project_realms);
+
+        let realm_dir = project_realms.join(meerkat_core::runtime_bootstrap::sanitize_realm_id(
+            first.locator.realm.as_str(),
+        ));
+        std::fs::create_dir_all(&realm_dir).expect("realm dir");
+        std::fs::write(
+            realm_dir.join(meerkat_core::runtime_bootstrap::REALM_MANIFEST_FILE_NAME),
+            serde_json::json!({
+                "realm_id": first.locator.realm.as_str(),
+                "backend": "sqlite",
+                "created_at": "0",
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+
+        std::fs::create_dir_all(project.join("a").join(".rkat")).expect("nearer .rkat");
+        let second =
+            resolve_runtime_scope_with_realm(&cli, cli.realm.clone()).expect("scope resolves");
+        assert_eq!(second.locator.realm, first.locator.realm);
+        assert_eq!(
+            second.locator.state_root, project_realms,
+            "the realm stays under the root where it exists"
+        );
+        assert_eq!(
+            second.root_choice,
+            meerkat_core::RealmRootChoice::ExistingLocal
+        );
+    }
+
+    #[test]
+    fn test_resolve_runtime_scope_refuses_a_realm_under_two_ancestor_roots() {
+        // The refusal comes from scope resolution itself, before any realm
+        // storage is opened.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("proj");
+        let nested = project.join("sub");
+        let roots = [
+            nested.join(".rkat").join("realms"),
+            project.join(".rkat").join("realms"),
+        ];
+        for root in &roots {
+            let realm_dir = root.join("dev");
+            std::fs::create_dir_all(&realm_dir).expect("realm dir");
+            std::fs::write(
+                realm_dir.join(meerkat_core::runtime_bootstrap::REALM_MANIFEST_FILE_NAME),
+                serde_json::json!({
+                    "realm_id": "dev",
+                    "backend": "sqlite",
+                    "created_at": "0",
+                })
+                .to_string(),
+            )
+            .expect("manifest");
+        }
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "--realm",
+            "dev",
+            "--context-root",
+            nested.to_str().expect("utf-8 path"),
+            "run",
+            "hello",
+        ])
+        .expect("cli should parse");
+        let Err(error) = resolve_runtime_scope(&cli) else {
+            panic!("a realm under two candidate roots must refuse scope resolution");
+        };
+        match error.downcast_ref::<meerkat_core::runtime_bootstrap::RuntimeBootstrapError>() {
+            Some(meerkat_core::runtime_bootstrap::RuntimeBootstrapError::RealmSplitBrain {
+                realm_id,
+                local,
+                global,
+            }) => {
+                assert_eq!(realm_id, "dev");
+                assert_eq!(local, &roots[0]);
+                assert_eq!(global, &roots[1]);
+            }
+            other => panic!("wrong error: {other:?} ({error})"),
+        }
     }
 
     #[test]

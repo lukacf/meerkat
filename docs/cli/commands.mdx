@@ -63,6 +63,9 @@ and derive a stable workspace realm id from that path. For project-local state,
 `StorageLayout` walks upward to the nearest ancestor containing a `.rkat`
 entry and stores realms under `<project-root>/.rkat/realms/<realm>/`. When no
 ancestor contains `.rkat`, the context root is the project root fallback.
+A realm that already exists under a farther ancestor's `.rkat/realms` is used
+where it lies; a realm found under more than one root is refused, and the
+refusal names both realm directories and the two ways out.
 `--context-root` changes the derived workspace identity and the starting point
 for that ancestor search; it does not necessarily change the project root when
 both contexts are inside the same project. `--state-root` bypasses discovery
@@ -632,11 +635,13 @@ rkat storage doctor [--json] [--root PATH]...
 Read-only and safe against a live realm: takes no leases, never changes
 logical database content, and never creates a database or directory. SQLite
 may create or update the `-wal`/`-shm` sidecars needed for a coherent WAL read.
-Sweeps the invocation-context-local
-(`<context-root>/.rkat/realms`) and user-global roots by default. Ordinary
-runtime resolution first walks to the nearest ancestor containing `.rkat`, so
-run the storage verb from that project root (or pass `--root`) to inspect the
-same local candidate;
+With no root given, `storage doctor` reads the roots ordinary runtime
+resolution probes: the `.rkat/realms` of the context root and of every
+ancestor that has a `.rkat` directory, and the user-global root. A realm
+present under more than one of them is reported with both directories.
+`storage migrate` and `storage prune` act on the invocation-context-local
+(`<context-root>/.rkat/realms`) and user-global roots by default, and on an
+ancestor's root only when `--root` names it;
 any explicit root (`--state-root` or repeatable `--root`) restricts the
 sweep to exactly those roots. `--realm` focuses the sweep on one realm.
 Reports per-root realm inventory, schema-ledger state per database,

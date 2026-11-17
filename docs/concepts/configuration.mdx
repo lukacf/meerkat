@@ -27,7 +27,9 @@ For CLI commands, the normal non-global location is project-local:
 ```
 
 Here `project-root` is the nearest ancestor containing `.rkat`. Outside an
-existing project, it falls back to the exact invocation context. The invocation
+existing project, it falls back to the exact invocation context. A realm that
+already exists (has its manifest) under a farther ancestor's `.rkat/realms` is
+used where it lies; only a new realm goes to the nearest root. The invocation
 context itself is never walked up for workspace realm identity or MCP trust
 discovery, so identity and the local storage candidate are intentionally
 separate facts. An explicit `--state-root` bypasses candidate probing.

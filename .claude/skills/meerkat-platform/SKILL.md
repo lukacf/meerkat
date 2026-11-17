@@ -64,7 +64,7 @@ CLI filesystem defaults:
 
 - `context_root` controls workspace identity and project files (`.rkat/mcp.toml`, `.rkat/skills`, AGENTS/CLAUDE discovery, etc.).
 - `state_root` is the parent directory containing realm directories.
-- Without overrides, CLI uses `context_root = CWD` and walks upward to the nearest ancestor containing `.rkat`. A realm that already exists is used where it lies (`<project-root>/.rkat/realms` or the user-global data root; both is a split-brain refusal); a new realm goes to `<project-root>/.rkat/realms`, falling back to `<context_root>/.rkat/realms` outside a project.
+- Without overrides, CLI uses `context_root = CWD` and walks upward to the nearest ancestor containing `.rkat`. A realm that already exists is used where it lies (`<project-root>/.rkat/realms`, a farther ancestor's `.rkat/realms`, or the user-global data root; more than one is a split-brain refusal naming both realm directories and the two ways out); a new realm goes to `<project-root>/.rkat/realms`, falling back to `<context_root>/.rkat/realms` outside a project.
 - `--context-root` changes the derived `ws-...` realm id and the starting point for project-root discovery; contexts inside the same project can therefore share a state root unless `--state-root` is supplied.
 - `--state-root` changes storage location only; it does not change the realm id.
 

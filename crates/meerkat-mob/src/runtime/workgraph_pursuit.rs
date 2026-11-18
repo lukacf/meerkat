@@ -322,10 +322,13 @@ fn written_by(
 /// Whether the binding's work may be pursued now, with the projection a
 /// turn for it runs under. The rule is the projection's own: the binding
 /// is eligible and its item is not terminal. A binding that is not
-/// eligible, or whose item is terminal, has no projection, and that is
-/// how the store says so. A projection that could not be read for any
-/// other reason is logged: no turn is started for it either, and the next
-/// write is weighed anew.
+/// eligible, or whose item is terminal, has no projection, and the store
+/// says so with its invalid-transition error, which is taken quietly. The
+/// same error is also what the store answers when a machine refuses to
+/// recover or to classify a stored state: that case is taken quietly too
+/// and is not logged yet. A projection that could not be read for any
+/// other error is logged. No turn is started in any of these cases, and
+/// the next write is weighed anew.
 async fn pursuable_projection(
     mob: &MobHandle,
     service: &meerkat::WorkGraphService,

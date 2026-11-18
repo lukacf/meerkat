@@ -3287,6 +3287,15 @@ enum SubmitWorkDispatchCompletion {
         input: Box<super::state::GovernedInputDelivery>,
         completion_tx: super::handle::ExactTurnCompletionSender,
     },
+    /// A WorkGraph attention continuation for a local session-backed
+    /// member, admitted by that member's lane after readiness.
+    AwaitAttentionContinuationAdmission {
+        agent_identity: AgentIdentity,
+        readiness: Option<LocalTurnAdmissionReadiness>,
+        member_ref: MemberRef,
+        delivery: Box<super::state::AttentionContinuationDelivery>,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    },
     /// Local AutonomousHost delivery: readiness, the steer admission-barrier
     /// probe, and the runtime-admit-or-inbox-inject decision all run in the
     /// member's admission lane (#1102). Only the DSL admission stays inline.
@@ -3339,6 +3348,9 @@ impl SubmitWorkDispatchCompletion {
             Self::Completed => "Completed",
             Self::AwaitTurnAdmission { .. } => "AwaitTurnAdmission",
             Self::AwaitGovernedAdmission { .. } => "AwaitGovernedAdmission",
+            Self::AwaitAttentionContinuationAdmission { .. } => {
+                "AwaitAttentionContinuationAdmission"
+            }
             Self::AwaitAutonomousDispatch { .. } => "AwaitAutonomousDispatch",
             Self::AwaitPolicySpawn { .. } => "AwaitPolicySpawn",
             Self::AwaitTurnCompletion { .. } => "AwaitTurnCompletion",
@@ -3460,6 +3472,13 @@ enum PendingTurnDispatch {
         input: Box<super::state::GovernedInputDelivery>,
         completion_tx: super::handle::ExactTurnCompletionSender,
     },
+    /// A WorkGraph attention continuation, admitted to the member's session
+    /// as a continuation. No turn request is built from it.
+    AttentionContinuation {
+        member_ref: MemberRef,
+        delivery: Box<super::state::AttentionContinuationDelivery>,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    },
     /// TurnCompleted-ack delivery (local tracked completion or placed
     /// completion with its actor-registered waiter). Routed through the same
     /// lane as IngressAccepted deliveries so a completion-bearing send cannot
@@ -3483,6 +3502,7 @@ impl PendingTurnDispatch {
         match self {
             Self::Admission { member_ref, .. }
             | Self::Governed { member_ref, .. }
+            | Self::AttentionContinuation { member_ref, .. }
             | Self::Completion { member_ref, .. } => {
                 *member_ref = MobActor::member_ref_on_session(member_ref, session);
             }
@@ -4526,6 +4546,9 @@ struct SubmitWorkDispatchRequest {
     /// A caller-bound governed input realized in place of a turn built from
     /// `content` (see `SubmitWorkPayload::governed_input`).
     governed_input: Option<Box<super::state::GovernedInputDelivery>>,
+    /// A WorkGraph attention continuation realized in place of a turn built
+    /// from `content` (see `SubmitWorkPayload::attention_continuation`).
+    attention_continuation: Option<Box<super::state::AttentionContinuationDelivery>>,
     content: ContentInput,
     /// Optional ordinary System message authored for this exact work turn.
     system_prompt: Option<String>,
@@ -20485,6 +20508,7 @@ impl MobActor {
             let member_ref = match &dispatch {
                 PendingTurnDispatch::Admission { member_ref, .. }
                 | PendingTurnDispatch::Governed { member_ref, .. }
+                | PendingTurnDispatch::AttentionContinuation { member_ref, .. }
                 | PendingTurnDispatch::Completion { member_ref, .. } => member_ref,
                 PendingTurnDispatch::Autonomous(material) => &material.member_ref,
             };
@@ -20577,6 +20601,39 @@ impl MobActor {
                     Err(MobError::UnsupportedForMode {
                         mode: crate::MobRuntimeMode::TurnDriven,
                         reason: "governed input requires the runtime adapter".to_string(),
+                    })
+                };
+                let _ = reply_tx.send(result);
+            }
+            PendingTurnDispatch::AttentionContinuation {
+                member_ref,
+                delivery,
+                completion_tx,
+            } => {
+                // The canonical admission reaches the one who handed the
+                // continuation over before the lane answers. A refusal is
+                // the lane's answer and nothing was handed over.
+                #[cfg(feature = "runtime-adapter")]
+                let result = {
+                    let super::state::AttentionContinuationDelivery {
+                        input,
+                        admission_tx,
+                    } = *delivery;
+                    context
+                        .provisioner
+                        .admit_attention_continuation(&member_ref, input, completion_tx)
+                        .await
+                        .map(|admission| {
+                            let _ = admission_tx.send(admission);
+                        })
+                };
+                #[cfg(not(feature = "runtime-adapter"))]
+                let result = {
+                    let _ = (member_ref, delivery, completion_tx);
+                    Err(MobError::UnsupportedForMode {
+                        mode: crate::MobRuntimeMode::TurnDriven,
+                        reason: "a WorkGraph attention continuation requires the runtime adapter"
+                            .to_string(),
                     })
                 };
                 let _ = reply_tx.send(result);
@@ -31333,6 +31390,28 @@ impl MobActor {
                                         dispatch: PendingTurnDispatch::Governed {
                                             member_ref,
                                             input,
+                                            completion_tx,
+                                        },
+                                    }),
+                                    reply_tx,
+                                );
+                            }
+                        }
+                        Ok(SubmitWorkDispatchCompletion::AwaitAttentionContinuationAdmission {
+                            agent_identity,
+                            readiness,
+                            member_ref,
+                            delivery,
+                            completion_tx,
+                        }) => {
+                            if !self.respawn_topology_reply_withheld {
+                                self.enqueue_member_turn_admission(
+                                    Box::new(PendingMemberTurnAdmission {
+                                        agent_identity,
+                                        readiness,
+                                        dispatch: PendingTurnDispatch::AttentionContinuation {
+                                            member_ref,
+                                            delivery,
                                             completion_tx,
                                         },
                                     }),
@@ -63393,6 +63472,7 @@ impl MobActor {
             requester,
             sender_label,
             governed_input,
+            attention_continuation,
         } = *payload;
         let dsl_expected_session_id = expected_session_id
             .as_ref()
@@ -63488,6 +63568,7 @@ impl MobActor {
                 if matches!(origin, WorkOrigin::Internal)
                     || content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
                     || governed_input.is_some()
+                    || attention_continuation.is_some()
                     || expected_session_id.is_some()
                 {
                     let current_state = self.state();
@@ -63539,6 +63620,7 @@ impl MobActor {
                             requester,
                             sender_label,
                             governed_input,
+                            attention_continuation,
                         }),
                     });
                 }
@@ -63679,6 +63761,31 @@ impl MobActor {
             {
                 return Err(MobError::Internal(
                     "governed input requires a tracked ingress admission".to_string(),
+                ));
+            }
+        }
+        // A WorkGraph attention continuation is realized only by a local
+        // session-backed member's native admission, as internal work whose
+        // admission is answered. Refuse anything else before MobMachine
+        // emits an ingress effect: an effect that is emitted and then not
+        // realized is an obligation nobody closes.
+        if attention_continuation.is_some() {
+            if remotely_hosted || entry.member_ref.bridge_session_id().is_none() {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: super::state::ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION.to_string(),
+                });
+            }
+            if governed_input.is_some()
+                || origin != WorkOrigin::Internal
+                || completion_tx.is_none()
+                || ack_mode != crate::mob_machine::SubmitWorkAckMode::IngressAccepted
+                || content_attribution != crate::mob_machine::WorkContentAttribution::Conversational
+            {
+                return Err(MobError::Internal(
+                    "a WorkGraph attention continuation requires a tracked internal ingress \
+                     admission"
+                        .to_string(),
                 ));
             }
         }
@@ -64025,6 +64132,7 @@ impl MobActor {
                     placed_completion_obligation: placed_completion_obligation.clone(),
                     placed_completion_context,
                     governed_input,
+                    attention_continuation,
                 },
             )
             .await
@@ -64626,6 +64734,7 @@ impl MobActor {
             placed_completion_obligation,
             placed_completion_context,
             governed_input,
+            attention_continuation,
         } = request;
         if ingress_authority.content_attribution() != content_attribution {
             return Err(MobError::Internal(
@@ -64794,6 +64903,34 @@ impl MobActor {
                 input,
                 completion_tx,
             });
+        }
+
+        // A WorkGraph attention continuation leaves the request here, before
+        // the placed branch and the turn branches below: none of them ever
+        // builds a turn request, and so a prompt, from one. Its target was
+        // proved local and session-backed before the machine's admission; a
+        // member that is not is an error here, never a delivery.
+        if let Some(delivery) = attention_continuation {
+            let completion_tx = completion_tx.ok_or_else(|| {
+                MobError::Internal(
+                    "admitted WorkGraph attention continuation lost its completion".to_string(),
+                )
+            })?;
+            if placed_identity.is_some() || ingress_authority.is_peer_runtime() {
+                return Err(MobError::Internal(
+                    "admitted WorkGraph attention continuation resolved to a non-local member"
+                        .to_string(),
+                ));
+            }
+            return Ok(
+                SubmitWorkDispatchCompletion::AwaitAttentionContinuationAdmission {
+                    agent_identity: entry.agent_identity.clone(),
+                    readiness,
+                    member_ref: machine_member_ref,
+                    delivery,
+                    completion_tx,
+                },
+            );
         }
 
         // Placement selects the physical owner before runtime mode. Both
@@ -70736,6 +70873,7 @@ mod routed_effect_containment_tests {
                 requester: None,
                 sender_label: None,
                 governed_input: None,
+                attention_continuation: None,
                 expected_session_id: None,
             })
         };

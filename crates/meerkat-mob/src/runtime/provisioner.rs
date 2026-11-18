@@ -2070,7 +2070,13 @@ pub trait MobProvisioner: Send + Sync {
         })
     }
     /// Admit one WorkGraph attention continuation to the member's session
-    /// through native admission, as a continuation.
+    /// through native admission, as a continuation: no turn request and no
+    /// prompt is built from it. A second handover of the same continuation
+    /// (the same idempotency key) is answered with the admission of the
+    /// first. Returns the session's canonical admission unchanged; a
+    /// refusal stays the runtime's typed verdict. An implementation that
+    /// admits no continuation refuses, and nothing is handed over: that is
+    /// this default.
     #[cfg(feature = "runtime-adapter")]
     async fn admit_attention_continuation(
         &self,
@@ -2079,9 +2085,11 @@ pub trait MobProvisioner: Send + Sync {
         completion_tx: super::handle::ExactTurnCompletionSender,
     ) -> Result<super::handle::MemberInputAdmission, MobError> {
         let _ = (member_ref, input, completion_tx);
-        Err(MobError::Internal(
-            "a WorkGraph attention continuation is not delivered yet".to_string(),
-        ))
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "a WorkGraph attention continuation is not supported by this provisioner"
+                .to_string(),
+        })
     }
     async fn admit_turn_for_operation(
         &self,
@@ -16597,6 +16605,46 @@ impl MobProvisioner for SessionBackend {
         })
     }
 
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_attention_continuation(
+        &self,
+        member_ref: &MemberRef,
+        input: meerkat_runtime::ContinuationInput,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    ) -> Result<super::handle::MemberInputAdmission, MobError> {
+        let session_id = Self::require_session(member_ref, "admit attention continuation")?;
+        if self.runtime_adapter.is_none() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a WorkGraph attention continuation requires a runtime-backed member"
+                    .to_string(),
+            });
+        }
+        if input.continuation_kind != meerkat_runtime::ContinuationKind::WorkgraphAttention {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "only a WorkGraph attention continuation is admitted here".to_string(),
+            });
+        }
+        // A second handover is matched by the continuation's own key: it
+        // names the projection the continuation was made from.
+        self.admit_runtime_input_with_replay_policy(
+            &session_id,
+            Input::Continuation(input),
+            None,
+            Some(completion_tx),
+            None,
+            meerkat_runtime::accept::InputReplayPolicy::KeyOnly,
+            None,
+        )
+        .await?
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "attention continuation admission returned no canonical input: {session_id}"
+            ))
+        })
+    }
+
     async fn admit_turn_for_operation(
         &self,
         member_ref: &MemberRef,
@@ -21158,6 +21206,26 @@ impl MobProvisioner for MultiBackendProvisioner {
             MemberRef::BackendPeer { .. } => Err(MobError::UnsupportedForMode {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "governed input requires a local session-backed member".to_string(),
+            }),
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_attention_continuation(
+        &self,
+        member_ref: &MemberRef,
+        input: meerkat_runtime::ContinuationInput,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    ) -> Result<super::handle::MemberInputAdmission, MobError> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                self.session
+                    .admit_attention_continuation(member_ref, input, completion_tx)
+                    .await
+            }
+            MemberRef::BackendPeer { .. } => Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: super::state::ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION.to_string(),
             }),
         }
     }

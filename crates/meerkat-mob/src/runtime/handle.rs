@@ -4141,6 +4141,7 @@ fn submit_work_payload(
         requester: spec.requester,
         sender_label: spec.sender_label,
         governed_input: None,
+        attention_continuation: None,
     }))
 }
 
@@ -14326,6 +14327,7 @@ impl MobHandle {
                 admission_tx,
                 custody,
             })),
+            attention_continuation: None,
         });
         self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
             .await??;
@@ -14353,6 +14355,21 @@ impl MobHandle {
 
     /// Hand one WorkGraph attention continuation to a member's current
     /// session through its native admission, as internal work of the mob.
+    ///
+    /// It is ordinary internal work to the mob: the same MobMachine
+    /// SubmitWork admission and ingress effect, the same per-member
+    /// admission lane, ordering and wake (a member that is seated and not
+    /// materialized is woken for it, as for any delivery of content); only
+    /// the realization admits the continuation instead of building a turn
+    /// from content. No prompt is ever built from it. The answer comes once
+    /// the member's session admitted the continuation: the handle carries
+    /// the session's canonical admission, which says whether an earlier
+    /// handover of the same continuation was matched. Everything else is a
+    /// refusal and nothing was handed over: a member hosted elsewhere or
+    /// without a session binding ([`MobError::UnsupportedForMode`]), a wake
+    /// that was refused or failed, a provisioner that admits no
+    /// continuation, and the session's own refusal
+    /// ([`MobError::MemberInputRefused`]).
     #[cfg(feature = "runtime-adapter")]
     #[cfg_attr(
         not(test),
@@ -14366,10 +14383,96 @@ impl MobHandle {
         identity: &AgentIdentity,
         input: meerkat_runtime::ContinuationInput,
     ) -> Result<MemberTurnHandle, MobError> {
-        let _ = (identity, input);
-        Err(MobError::Internal(
-            "a WorkGraph attention continuation is not delivered yet".to_string(),
-        ))
+        if input.continuation_kind != meerkat_runtime::ContinuationKind::WorkgraphAttention {
+            return Err(MobError::Internal(
+                "only a WorkGraph attention continuation is handed over through this door"
+                    .to_string(),
+            ));
+        }
+        let handling_mode = input.handling_mode;
+        let domain_identity = AgentIdentity::from(identity.as_str());
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let Some((runtime_id, fence_token)) = machine_state
+            .member_runtime_material_for_identity(&mob_dsl::AgentIdentity::from_domain(
+                &domain_identity,
+            ))
+            .map(|material| material.to_domain_for_identity(&domain_identity))
+        else {
+            return Err(self
+                .resolve_submit_work_missing_runtime_rejection(
+                    identity,
+                    WorkOrigin::Internal,
+                    "start_attention_continuation",
+                )
+                .await);
+        };
+        let session_id =
+            Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state)
+                .ok_or_else(|| MobError::UnsupportedForMode {
+                    mode: crate::MobRuntimeMode::TurnDriven,
+                    reason: super::state::ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION.to_string(),
+                })?;
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
+        // The same SubmitWork admission, member lane and settlement as any
+        // internal work; only the realization carries the continuation.
+        let payload = Box::new(super::state::SubmitWorkPayload {
+            runtime_id: runtime_id.clone(),
+            fence_token,
+            work_ref: WorkRef::new(),
+            content: meerkat_core::types::ContentInput::Text(String::new()),
+            origin: WorkOrigin::Internal,
+            system_prompt: None,
+            injected_context: Vec::new(),
+            interaction_id: None,
+            objective_id: None,
+            handling_mode,
+            external_delivery_identity: None,
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: Some(completion_tx),
+            bounded_result_spec: None,
+            llm_identity_applied_tx: None,
+            // The continuation's delivery forwards its admission itself.
+            admission_tx: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            // Not read for a continuation: no turn request is built from it,
+            // so nothing is lowered from this value.
+            content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            requester: None,
+            sender_label: None,
+            // Bound to the session read above: the admission refuses it if
+            // the member's binding moved since.
+            expected_session_id: Some(session_id.clone()),
+            governed_input: None,
+            attention_continuation: Some(Box::new(super::state::AttentionContinuationDelivery {
+                input,
+                admission_tx,
+            })),
+        });
+        self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
+            .await??;
+        // The member lane forwards the native admission before it answers.
+        let admission = admission_rx.await.map_err(|_| {
+            MobError::Internal(
+                "a WorkGraph attention continuation was admitted without its canonical admission"
+                    .to_string(),
+            )
+        })?;
+        Ok(MemberTurnHandle {
+            receipt: MemberDeliveryReceipt {
+                identity: identity.clone(),
+                agent_runtime_id: runtime_id,
+                fence_token,
+                handling_mode,
+                // The handle answers it (`MemberTurnHandle::admission`).
+                admission: None,
+            },
+            session_id: Some(session_id),
+            completion_rx,
+            llm_identity_applied_rx: None,
+            admission: Some(admission),
+        })
     }
 
     /// Acquire a capability-bearing handle for a specific member.

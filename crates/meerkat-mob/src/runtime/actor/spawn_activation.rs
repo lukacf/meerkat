@@ -376,6 +376,11 @@ impl SpawnActivationWorkerContext {
                     "turn-driven spawn kickoff for '{agent_identity}' resolved to a governed input"
                 )))
             }
+            SubmitWorkDispatchCompletion::AwaitAttentionContinuationAdmission { .. } => {
+                Err(MobError::Internal(format!(
+                    "turn-driven spawn kickoff for '{agent_identity}' resolved to a WorkGraph attention continuation"
+                )))
+            }
         }
     }
 
@@ -3061,6 +3066,7 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     governed_input: None,
+                    attention_continuation: None,
                     content,
                     system_prompt: None,
                     // Spawn kickoff is mob-internal coordination content; the

@@ -279,6 +279,25 @@ init says so. A resumed launch (same fingerprint) reports the `http_base_url`
 and `http_public_base_url` the live runtime was started with, which are by
 construction the ones you declared.
 
+## Back up or move a gateway state directory
+
+Stop the gateway before copying its state. Copy the **whole state directory**,
+including every SQLite database and its adjacent `-wal` and `-shm` files if
+present. Restore them together from the same copy. A clean shutdown does not
+guarantee that all committed data has moved from the write-ahead log into the
+main database file.
+
+A successful restart is not proof that the backup is complete. After a clean
+SDK shutdown of `rpc_gateway` 0.9.15, a copy without the SQLite side files
+started without warning: the agents, their sessions and the Console timeline
+were present, but **all agent memory records were missing**. A copy of the
+whole directory retained those records. When checking a restored copy, verify
+an agent memory record you expect to find, not just that the gateway starts.
+
+The state directory is only part of a deployment backup. Account separately
+for the credentials store, the session comms identity directory and any host
+store realm kept outside it.
+
 ## Lifecycle side effects across a restart
 
 The side effects of an identity's lifecycle steps (the customizer's

@@ -998,6 +998,26 @@ impl ContinuationInput {
             turn_append: None,
         }
     }
+
+    /// The continuation that gives a session a turn of its own under a
+    /// WorkGraph attention projection.
+    ///
+    /// Not filled in yet: it answers an ordinary continuation that carries
+    /// none of its arguments.
+    pub fn workgraph_attention(
+        idempotency_key: IdempotencyKey,
+        supersession_key: SupersessionKey,
+        turn_tool_overlay: TurnToolOverlay,
+        turn_append: ConversationAppend,
+    ) -> Self {
+        let _ = (
+            idempotency_key,
+            supersession_key,
+            turn_tool_overlay,
+            turn_append,
+        );
+        Self::detached_background_op_completed()
+    }
 }
 
 /// Explicit operation/lifecycle input admitted through runtime instead of

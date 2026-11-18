@@ -325,6 +325,132 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
     );
 }
 
+/// An attention continuation as its constructor builds it, for the
+/// projection `key` names and the binding `binding` names.
+fn built_attention_continuation(key: &str, binding: &str) -> ContinuationInput {
+    ContinuationInput::workgraph_attention(
+        meerkat_runtime::identifiers::IdempotencyKey::new(key),
+        meerkat_runtime::identifiers::SupersessionKey::new(binding),
+        TurnToolOverlay {
+            dispatch_context: [(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!({ "projection": key }),
+            )]
+            .into_iter()
+            .collect(),
+            ..TurnToolOverlay::default()
+        },
+        ConversationAppend {
+            runtime_source: None,
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::Text {
+                text: format!("attention turn for {key}"),
+            },
+            identity: None,
+        },
+    )
+}
+
+/// The attention continuation's constructor builds a continuation of the
+/// system, of the attention kind, that carries the key that names its
+/// projection, the key of its binding, the turn's overlay and the notice
+/// the turn starts from.
+#[test]
+fn attention_continuation_constructor_carries_its_keys_overlay_and_notice() {
+    let continuation = built_attention_continuation("projection-1", "binding-1");
+
+    assert_eq!(
+        continuation.continuation_kind,
+        meerkat_runtime::ContinuationKind::WorkgraphAttention
+    );
+    assert_eq!(continuation.header.source, InputOrigin::System);
+    assert_eq!(
+        continuation.handling_mode,
+        meerkat_core::types::HandlingMode::Queue
+    );
+    assert_eq!(
+        continuation.header.idempotency_key,
+        Some(meerkat_runtime::identifiers::IdempotencyKey::new(
+            "projection-1"
+        ))
+    );
+    assert_eq!(
+        continuation.header.supersession_key,
+        Some(meerkat_runtime::identifiers::SupersessionKey::new(
+            "binding-1"
+        ))
+    );
+    assert!(continuation.header.correlation_id.is_none());
+    assert!(continuation.header.requester.is_none());
+    assert_eq!(
+        continuation
+            .turn_tool_overlay
+            .as_ref()
+            .and_then(|overlay| overlay
+                .dispatch_context
+                .get("workgraph.attention_projection")),
+        Some(&serde_json::json!({ "projection": "projection-1" })),
+        "the turn's overlay is the one the constructor was given"
+    );
+    assert!(
+        matches!(
+            continuation
+                .turn_append
+                .as_ref()
+                .map(|append| &append.content),
+            Some(CoreRenderable::Text { text }) if text == "attention turn for projection-1"
+        ),
+        "the notice the turn starts from is the one the constructor was given"
+    );
+}
+
+/// A built attention continuation is admitted as a content turn of its own
+/// at a run's start, in the queue for the next turn: an idle runtime wakes
+/// for it, and a runtime that is not idle does not.
+#[test]
+fn attention_continuation_constructor_is_admitted_as_a_queued_turn_of_its_own() {
+    let input = Input::Continuation(built_attention_continuation("projection-1", "binding-1"));
+
+    for runtime_idle in [true, false] {
+        let policy = meerkat_runtime::DefaultPolicyTable::resolve(&input, runtime_idle);
+        assert_eq!(
+            policy.apply_mode,
+            ApplyMode::StageRunStart,
+            "idle {runtime_idle}"
+        );
+        assert_eq!(
+            policy.drain_policy,
+            DrainPolicy::QueueNextTurn,
+            "idle {runtime_idle}"
+        );
+        assert_eq!(
+            policy.routing_disposition,
+            RoutingDisposition::Queue,
+            "idle {runtime_idle}"
+        );
+        assert_eq!(
+            policy.wake_mode,
+            if runtime_idle {
+                WakeMode::WakeIfIdle
+            } else {
+                WakeMode::None
+            },
+            "idle {runtime_idle}"
+        );
+        let semantics =
+            meerkat_runtime::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &input,
+                runtime_idle,
+            )
+            .expect("generated admission projects the continuation's semantics");
+        assert_eq!(semantics.boundary(), RunApplyBoundary::RunStart);
+        assert_eq!(
+            semantics.execution_kind(),
+            RuntimeExecutionKind::ContentTurn
+        );
+    }
+}
+
 #[tokio::test]
 async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_order() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

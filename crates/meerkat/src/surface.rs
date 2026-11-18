@@ -258,6 +258,18 @@ pub async fn validate_workgraph_attention_turn_overlay(
         .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))
 }
 
+/// The continuation that gives the session a binding targets a turn of its
+/// own under `projection`.
+///
+/// Not filled in yet: it answers an ordinary continuation that carries
+/// nothing of the projection.
+pub fn workgraph_attention_continuation(
+    projection: &crate::AttentionContextProjection,
+) -> Result<meerkat_runtime::ContinuationInput, crate::WorkGraphError> {
+    let _ = projection;
+    Ok(meerkat_runtime::ContinuationInput::detached_background_op_completed())
+}
+
 pub async fn inject_workgraph_attention_turn_overlay(
     session_service: &dyn meerkat_core::SessionService,
     workgraph_service: Option<&crate::WorkGraphService>,
@@ -2679,6 +2691,85 @@ mod tests {
                 .dispatch_context
                 .contains_key("workgraph.attention_projection"),
             "attention overlay must carry the projection dispatch context"
+        );
+    }
+
+    /// The continuation built for a binding's projection is an attention
+    /// continuation of the system. It carries the projection in its turn's
+    /// overlay, the notice the turn starts from, the key that names this
+    /// projection and no other, and the key of its binding.
+    #[tokio::test]
+    async fn attention_continuation_carries_the_projection_its_keys_and_the_notice() {
+        let workgraph_service = owner_scoped_workgraph_service().await;
+        let binding = workgraph_service
+            .list_attention(crate::AttentionListRequest::default())
+            .await
+            .expect("list attention")
+            .attention
+            .into_iter()
+            .next()
+            .expect("the fixture's binding");
+        let projection = workgraph_service
+            .attention_projection(crate::AttentionProjectionRequest {
+                binding_id: binding.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("the binding's projection")
+            .projection;
+
+        let continuation =
+            workgraph_attention_continuation(&projection).expect("build the continuation");
+
+        assert_eq!(
+            continuation.continuation_kind,
+            meerkat_runtime::ContinuationKind::WorkgraphAttention
+        );
+        assert_eq!(
+            continuation.header.source,
+            meerkat_runtime::InputOrigin::System
+        );
+        assert_eq!(
+            continuation.header.idempotency_key,
+            Some(meerkat_runtime::IdempotencyKey::new(
+                crate::workgraph_attention_continuation_key(&projection)
+                    .expect("the projection's continuation key")
+            )),
+            "the key that names this projection"
+        );
+        assert_eq!(
+            continuation.header.supersession_key,
+            Some(meerkat_runtime::SupersessionKey::new(
+                crate::workgraph_attention_supersession_key(&projection)
+            )),
+            "the key of the projection's binding"
+        );
+        let carried = crate::workgraph_attention_projection_from_overlay(
+            continuation.turn_tool_overlay.as_ref(),
+        )
+        .expect("decode the overlay's projection");
+        assert_eq!(
+            carried.as_ref(),
+            Some(&projection),
+            "the turn's overlay carries the projection"
+        );
+        let expected_overlay =
+            crate::WorkGraphToolSurface::turn_overlay_for_attention_projection(&projection)
+                .expect("the projection's turn overlay");
+        assert_eq!(
+            continuation
+                .turn_tool_overlay
+                .as_ref()
+                .and_then(|overlay| overlay.allowed_tools.clone()),
+            expected_overlay.allowed_tools,
+            "the turn's tools are the projection's"
+        );
+        assert_eq!(
+            serde_json::to_value(&continuation.turn_append).expect("encode the notice"),
+            serde_json::to_value(Some(crate::workgraph_attention_turn_append(&projection)))
+                .expect("encode the expected notice"),
+            "the notice the turn starts from is the projection's"
         );
     }
 

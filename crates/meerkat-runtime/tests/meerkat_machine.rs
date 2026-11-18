@@ -6719,6 +6719,194 @@ async fn a_coalescing_admission_tells_the_host_once() {
     );
 }
 
+/// An attention continuation as its constructor builds it, for the
+/// projection `key` names and the binding `binding` names.
+fn built_attention_continuation(key: &str, binding: &str) -> Input {
+    use meerkat_core::lifecycle::run_primitive::{
+        ConversationAppend, ConversationAppendRole, CoreRenderable,
+    };
+
+    Input::Continuation(meerkat_runtime::ContinuationInput::workgraph_attention(
+        meerkat_runtime::identifiers::IdempotencyKey::new(key),
+        meerkat_runtime::identifiers::SupersessionKey::new(binding),
+        meerkat_core::service::TurnToolOverlay {
+            dispatch_context: [(
+                "workgraph.attention_projection".to_string(),
+                serde_json::json!({ "projection": key }),
+            )]
+            .into_iter()
+            .collect(),
+            ..meerkat_core::service::TurnToolOverlay::default()
+        },
+        ConversationAppend {
+            runtime_source: None,
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::Text {
+                text: format!("attention turn for {key}"),
+            },
+            identity: None,
+        },
+    ))
+}
+
+/// The same attention continuation handed over twice is one input: the
+/// second admission under the projection's key is answered as a duplicate
+/// of the first, which stays queued.
+#[tokio::test]
+async fn an_attention_continuation_handed_over_twice_is_one_input() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+
+    // No executor serves the session, so the input stays queued.
+    let first = built_attention_continuation("projection-1", "binding-1");
+    let first_id = first.id().clone();
+    assert!(
+        adapter
+            .accept_input(&sid, first)
+            .await
+            .expect("the first hand-over is admitted")
+            .is_accepted()
+    );
+
+    let again = built_attention_continuation("projection-1", "binding-1");
+    let outcome = adapter
+        .accept_input(&sid, again)
+        .await
+        .expect("the second hand-over is answered");
+    assert!(
+        outcome.is_deduplicated(),
+        "the second hand-over of one projection is a duplicate: {outcome:?}"
+    );
+    assert_eq!(
+        adapter
+            .list_active_inputs(&sid)
+            .await
+            .expect("list the active inputs"),
+        vec![first_id],
+        "one input waits"
+    );
+}
+
+/// Two attention continuations of one binding, for two projections of it,
+/// carry the binding's key and both wait: the later one does not replace
+/// the earlier one at admission. The earlier one is refused when it is
+/// applied, because the store no longer holds its projection as current.
+#[tokio::test]
+async fn two_attention_continuations_of_one_binding_both_wait() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    assert_eq!(
+        earlier.header().supersession_key,
+        Some(meerkat_runtime::identifiers::SupersessionKey::new(
+            "binding-1"
+        )),
+        "a continuation carries its binding's key"
+    );
+    assert_eq!(
+        earlier.header().supersession_key,
+        later.header().supersession_key,
+        "both are continuations of one binding"
+    );
+    let earlier_id = earlier.id().clone();
+    let later_id = later.id().clone();
+
+    // No executor serves the session, so both stay queued.
+    for input in [earlier, later] {
+        assert!(
+            adapter
+                .accept_input(&sid, input)
+                .await
+                .expect("the hand-over is answered")
+                .is_accepted()
+        );
+    }
+    let active = adapter
+        .list_active_inputs(&sid)
+        .await
+        .expect("list the active inputs");
+    assert!(
+        active.len() == 2 && active.contains(&earlier_id) && active.contains(&later_id),
+        "both continuations wait: {active:?}"
+    );
+    let earlier_state = adapter
+        .input_state(&sid, &earlier_id)
+        .await
+        .expect("read the earlier continuation")
+        .expect("the earlier continuation is recorded");
+    assert_eq!(
+        earlier_state.seed.terminal_outcome, None,
+        "the earlier continuation has no terminal: the later one did not replace it"
+    );
+}
+
+/// An attention continuation handed to a session whose runtime does not
+/// serve input is refused, not kept: a runtime that was retired answers
+/// that it is not ready and names its state, and a session the machine
+/// does not know is an error.
+#[tokio::test]
+async fn an_attention_continuation_for_a_runtime_that_serves_no_input_is_refused() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
+    meerkat_runtime::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
+        .await
+        .expect("retire the runtime");
+    assert_eq!(
+        adapter.runtime_state(&sid).await.expect("runtime state"),
+        RuntimeState::Retired
+    );
+
+    let retired = adapter
+        .accept_input(
+            &sid,
+            built_attention_continuation("projection-1", "binding-1"),
+        )
+        .await;
+    assert!(
+        matches!(
+            &retired,
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Retired
+            })
+        ),
+        "a retired runtime answers that it is not ready and names its state: {retired:?}"
+    );
+    assert!(
+        adapter
+            .list_active_inputs(&sid)
+            .await
+            .expect("list the active inputs")
+            .is_empty(),
+        "the refused continuation is not kept"
+    );
+
+    let unknown = adapter
+        .accept_input(
+            &SessionId::new(),
+            built_attention_continuation("projection-2", "binding-2"),
+        )
+        .await;
+    assert!(
+        unknown.is_err(),
+        "a session the machine does not know is an error: {unknown:?}"
+    );
+}
+
 /// A response to an outbound peer request is accepted only from the peer the
 /// request was sent to: the verified signer of the response's envelope must be
 /// the request's addressee.

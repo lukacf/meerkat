@@ -5714,6 +5714,9 @@ mod tests {
 
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::expect_used)]
+mod attention_continuation_tests;
+#[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used)]
 mod tool_application_tests;
 
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]

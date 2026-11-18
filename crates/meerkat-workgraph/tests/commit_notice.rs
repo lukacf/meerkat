@@ -14,10 +14,10 @@ use meerkat_workgraph::{
     AttentionProjectionRequest, AttentionPruneRequest, AttentionReassignRequest,
     AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     FailedChildJoinPolicy, GoalAttentionTarget, GoalBindExistingRequest, GoalCreateRequest,
-    GoalCreateResult, LinkWorkItemsRequest, MemoryWorkGraphStore, ObserveReadinessRequest,
-    ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey, WorkEdgeKind,
-    WorkGraphCommitNotice, WorkGraphCommitObserver, WorkGraphCommitOrigin, WorkGraphService,
-    WorkItem, WorkOwner, WorkOwnerKey, WorkStatus,
+    GoalCreateResult, LinkWorkItemsRequest, MemoryWorkGraphStore, ObserveLeaseExpiryRequest,
+    ObserveReadinessRequest, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey,
+    WorkEdgeKind, WorkGraphCommitNotice, WorkGraphCommitObserver, WorkGraphCommitOrigin,
+    WorkGraphService, WorkItem, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use serde_json::json;
 
@@ -555,4 +555,46 @@ async fn pruning_ended_bindings_tells_nothing() {
         .pruned;
     assert_eq!(pruned, 1, "the stopped binding's row is gone");
     assert_eq!(recorder.taken(), Vec::new());
+}
+
+/// A lease that ran out is observed for the host, with no call of the
+/// item's owner. The release that observation records is told once, for
+/// the item.
+#[tokio::test]
+async fn a_lease_expiry_observation_is_told_once_for_the_item() {
+    let (service, recorder) = observed_service();
+    let item = created(&service, "a leased item").await;
+    let claimed = service
+        .claim(ClaimWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+            owner: WorkOwner::new(WorkOwnerKey::agent("worker-1").expect("owner key")),
+            lease_seconds: Some(60),
+            lease_expires_at: None,
+        })
+        .await
+        .expect("claim the item under a lease");
+    recorder.taken();
+
+    let released = service
+        .observe_lease_expiry(ObserveLeaseExpiryRequest {
+            id: claimed.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: claimed.revision,
+            observed_at: Utc::now() + Duration::hours(1),
+        })
+        .await
+        .expect("observe the lease that ran out");
+    assert!(
+        released.claim.is_none(),
+        "the observation ended the claim: {:?}",
+        released.claim
+    );
+    assert_eq!(
+        recorder.taken(),
+        vec![of_item(&released, WorkGraphCommitOrigin::Unattributed)]
+    );
 }

@@ -42,7 +42,8 @@ SETUP_RUST = "./.github/actions/setup-rust-ci"
 # The jobs that run on pull requests only: the root CI runs their tests on
 # the push (main unit, feature suite and closure-tests rows for Meta's
 # packages).
-PULL_REQUEST_ONLY_JOBS = {"rust-unit": "rust", "rust-conformance": "rust", "rust-integration": "integration",
+PULL_REQUEST_ONLY_JOBS = {"rust-unit-build": "rust", "rust-unit": "rust", "rust-conformance": "rust",
+                          "rust-integration": "integration",
                           "rust-extension-state-lib": "extension_state", "rust-voice-lib": "voice"}
 PULL_REQUEST_ONLY = " && github.event_name == 'pull_request'"
 # Meta's workspace packages: the only ones a Meta job names to Cargo.
@@ -368,7 +369,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual([use for use in reference_uses if use in setup_order], setup_order)
         jobs = rust_jobs(meta)
         self.assertEqual(sorted(jobs), sorted(["test-python", "console-backends", "console-fixtures",
-                                               "console-acceptance", "flow-editor", "rust-unit",
+                                               "console-acceptance", "flow-editor", "rust-unit-build",
                                                "rust-examples", "rust-conformance", "rust-integration",
                                                "rust-features-check", "rust-extension-state",
                                                "rust-extension-state-lib", "rust-voice", "rust-voice-lib",
@@ -1019,19 +1020,109 @@ class CiWorkflowTests(unittest.TestCase):
         # expand them against the checkout.
         self.assertIn('read -r -a patterns <<< "${TESTS}"\n', job_block("rust-integration"))
 
-    def test_the_unit_partitions_run_every_lib_test_once(self):
-        """rust-unit's legs each compile meerkat-meta's lib test harness and
-        run one nextest count partition of its tests: the matrix is 1..N and
-        the job's name and its --partition both say N, so every test runs in
-        exactly one leg."""
-        job = load(CI_WORKFLOW)["jobs"]["rust-unit"]
+    def test_the_unit_lane_builds_once_and_its_partitions_run_every_lib_test_once(self):
+        """rust-unit-build compiles meerkat-meta's lib test harness once into
+        a nextest archive, checks that the count partitions cover its tests
+        exactly once and hands it to the run's legs; each rust-unit leg runs
+        one count partition from that archive and compiles nothing. The
+        matrix is 1..N and the job's name, the build's check and the leg's
+        --partition all say N, so every test runs in exactly one leg. The
+        selection (the package's lib, default features), the nextest profile
+        (the default one) and Meta's 16 MiB stack are the ones the legs had
+        when each compiled the harness itself."""
+        workflow = load(CI_WORKFLOW)
+        build, job = workflow["jobs"]["rust-unit-build"], workflow["jobs"]["rust-unit"]
         legs = job["strategy"]["matrix"]["partition"]
         self.assertEqual(legs, list(range(1, len(legs) + 1)))
         self.assertEqual(job["name"], f"rust-unit (${{{{ matrix.partition }}}}/{len(legs)})")
-        step = next(step for step in steps_of(job) if step.get("name") == "Lib tests")
-        self.assertEqual(step["env"]["PARTITION"], "${{ matrix.partition }}")
-        self.assertEqual(step["run"].strip(), "./scripts/repo-cargo nextest run -p meerkat-meta --lib "
+        self.assertIs(job["strategy"]["fail-fast"], False)
+        self.assertEqual(build["name"], "rust-unit-build")
+        self.assertNotIn("strategy", build)
+        self.assertEqual(build["needs"], "changes")
+        self.assertEqual(job["needs"], ["changes", "rust-unit-build"])
+        self.assertEqual(build["if"], job["if"])
+        archive = "nextest-meta-unit.tar.zst"
+        built_at = "nextest-meta-unit.workspace"
+        artifact = "nextest-meta-unit-${{ github.run_id }}"
+        stack = "16777216"
+
+        def named(owner: dict, name: str) -> tuple[int, dict]:
+            found = [(index, step) for index, step in enumerate(steps_of(owner)) if step.get("name") == name]
+            self.assertEqual(len(found), 1, name)
+            return found[0]
+
+        # The build: one archive of the package's lib tests, through the root
+        # wrapper, on Meta's stack (the step's environment reaches rustc too,
+        # as the legs' step did).
+        compile_at, compile_step = named(build, "Build the lib test archive")
+        self.assertEqual(compile_step["working-directory"], ".")
+        self.assertEqual(compile_step["env"], {"RUST_MIN_STACK": stack})
+        self.assertEqual(compile_step["run"].strip(), "./scripts/repo-cargo nextest archive -p meerkat-meta --lib "
+                         f'--archive-file "${{RUNNER_TEMP}}/{archive}"')
+        archives = [line for _, _, line in run_lines(workflow) if re.search(r"\bnextest archive\b", line)]
+        self.assertEqual(len(archives), 1, archives)
+        record_at, record = named(build, "Record the workspace path the archive was built at")
+        self.assertEqual(record["run"].strip(),
+                         f"printf '%s\\n' \"${{GITHUB_WORKSPACE}}\" > \"${{RUNNER_TEMP}}/{built_at}\"")
+        check_at, check = named(build, "Verify the partitions cover every test exactly once")
+        self.assertEqual(check["working-directory"], ".")
+        self.assertEqual(check["env"], {"PARTITIONS": str(len(legs))})
+        self.assertIn(f'archive="${{RUNNER_TEMP}}/{archive}"\n', check["run"])
+        self.assertIn('cargo-nextest nextest list --archive-file "${archive}" '
+                      '--workspace-remap "${GITHUB_WORKSPACE}" \\\n', check["run"])
+        self.assertIn('list --partition "count:${index}/${PARTITIONS}" >> "${RUNNER_TEMP}/union.txt"\n', check["run"])
+        self.assertIn('[[ -s "${RUNNER_TEMP}/all.txt" ]]', check["run"])
+        self.assertIn('cmp -s "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt"', check["run"])
+        self.assertNotIn("--profile", check["run"])
+        uploads = [(index, step) for index, step in enumerate(steps_of(build))
+                   if uses_of(step) == "actions/upload-artifact"]
+        self.assertEqual(len(uploads), 1)
+        upload_at, upload = uploads[0]
+        # Keyed by the run, not the attempt: a rerun of one failed leg finds
+        # the archive the first attempt built, and a rerun of the build
+        # replaces it.
+        self.assertEqual(upload["with"]["name"], artifact)
+        self.assertEqual(upload["with"]["path"].split(),
+                         [f"${{{{ runner.temp }}}}/{archive}", f"${{{{ runner.temp }}}}/{built_at}"])
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertIs(upload["with"]["overwrite"], True)
+        self.assertEqual(upload["with"]["retention-days"], 1)
+        self.assertEqual([compile_at, record_at, check_at, upload_at],
+                         sorted([compile_at, record_at, check_at, upload_at]))
+        self.assertEqual(build["timeout-minutes"], job["timeout-minutes"])
+
+        # The legs: the checkout, Rust, nextest and the run's own archive,
+        # fetched by name alone (no token, run or repository: the action then
+        # reads the current run's artifacts only).
+        self.assertEqual([uses_of(step) for step in steps_of(job) if uses_of(step)],
+                         ["actions/checkout", SETUP_RUST, "./.github/actions/setup-cargo-tool-ci",
+                          "actions/download-artifact"])
+        fetch_at, fetch = next((index, step) for index, step in enumerate(steps_of(job))
+                               if uses_of(step) == "actions/download-artifact")
+        self.assertEqual(fetch["with"], {"name": artifact, "path": "${{ runner.temp }}/nextest-archive"})
+        # The lib's tests read fixtures by the build's absolute path
+        # (env!("CARGO_MANIFEST_DIR")), and some return early when a file
+        # is absent: a leg at another path fails before it runs any.
+        guard_at, guard = named(job, "Check the workspace path the archive was built at")
+        self.assertIn(f'built="$(cat "${{RUNNER_TEMP}}/nextest-archive/{built_at}")"\n', guard["run"])
+        self.assertIn('if [[ "${built}" != "${GITHUB_WORKSPACE}" ]]; then\n', guard["run"])
+        self.assertIn("exit 1\n", guard["run"])
+        run_at, step = named(job, "Lib tests")
+        self.assertEqual([fetch_at, guard_at, run_at], sorted([fetch_at, guard_at, run_at]))
+        self.assertEqual(run_at, len(steps_of(job)) - 1)
+        self.assertEqual(step["working-directory"], ".")
+        self.assertEqual(step["env"], {"RUST_MIN_STACK": stack, "PARTITION": "${{ matrix.partition }}"})
+        self.assertEqual(step["run"].strip(),
+                         f'cargo-nextest nextest run --archive-file "${{RUNNER_TEMP}}/nextest-archive/{archive}" '
+                         '--workspace-remap "${GITHUB_WORKSPACE}" '
                          f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
+        # A leg compiles nothing and holds no identity: no wrapper, compiler
+        # cache, linker or registry step, no permissions of its own.
+        self.assertNotIn("permissions", job)
+        self.assertNotIn("env", job)
+        code = "\n".join(line for line in job_block("rust-unit").splitlines() if not line.strip().startswith("#"))
+        for absent in ("repo-cargo", SETUP_SCCACHE, SETUP_MOLD, "Swatinem/rust-cache", "id-token", "RUSTC_WRAPPER"):
+            self.assertNotIn(absent, code)
 
     def test_gate_requires_every_job_it_lists(self):
         """A job absent from `gate` can fail without failing the check suite.
@@ -1056,7 +1147,8 @@ class CiWorkflowTests(unittest.TestCase):
         listed = set(gate["needs"])
         must_gate = {"changes", "meta-checks", "test-typescript", "test-python", "console-backends", "console",
                      "console-browser", "console-fixtures", "console-acceptance", "console-perf",
-                     "flow-editor-contracts", "flow-editor", "rust-unit", "rust-examples", "rust-conformance",
+                     "flow-editor-contracts", "flow-editor", "rust-unit-build", "rust-unit", "rust-examples",
+                     "rust-conformance",
                      "rust-integration", "rust-features-check", "rust-extension-state",
                      "rust-extension-state-lib", "rust-voice", "rust-voice-lib"}
         missing = must_gate - listed
@@ -1129,6 +1221,9 @@ class CiWorkflowTests(unittest.TestCase):
             ("a docs-only change of Meta's", lanes_skipped, docs_only, 0),
             ("the python lane skipped when classified false", {"test-python": "skipped"}, console_only, 0),
             ("meta-checks skipped while Meta is reached", {"meta-checks": "skipped"}, docs_only, 1),
+            ("the unit legs skipped behind a failed build",
+             {"rust-unit-build": "failure", "rust-unit": "skipped"}, every, 1),
+            ("the unit legs skipped behind a build that passed", {"rust-unit": "skipped"}, every, 1),
             ("the browser legs skipped behind failed backends",
              {"console-backends": "failure", "console-browser": "skipped", "console": "skipped"}, every, 1),
             ("a skipped job of a running lane", {"flow-editor-contracts": "skipped"}, console_only, 1),

@@ -407,7 +407,10 @@ class CiWorkflowTests(unittest.TestCase):
             default = ((workflow.get("defaults") or {}).get("run") or {}).get("working-directory")
             self.assertEqual(default, "meta", path.name)
             for _, step, line in run_lines(workflow):
-                self.assertNotIn("--workspace", line, path.name)
+                # Cargo's `--workspace`, as a whole flag: nextest's
+                # `--workspace-remap`, which only tells an archived test
+                # binary where this checkout is, selects no package.
+                self.assertIsNone(re.search(r"(^|\s)--workspace(\s|=|$)", line), f"{path.name}: {line}")
                 self.assertIsNone(re.search(r"(^|[\s;&|(])cargo\s", line), f"{path.name}: raw cargo in {line}")
                 if "repo-cargo" not in line:
                     continue
@@ -1082,7 +1085,7 @@ class CiWorkflowTests(unittest.TestCase):
         # the archive the first attempt built, and a rerun of the build
         # replaces it.
         self.assertEqual(upload["with"]["name"], artifact)
-        self.assertEqual(upload["with"]["path"].split(),
+        self.assertEqual([line.strip() for line in upload["with"]["path"].splitlines()],
                          [f"${{{{ runner.temp }}}}/{archive}", f"${{{{ runner.temp }}}}/{built_at}"])
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         self.assertIs(upload["with"]["overwrite"], True)

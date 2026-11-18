@@ -194,6 +194,51 @@ describe("decision notices and later turns", () => {
     assert.equal(answer, null);
   });
 
+  // The gateway writes a notice when a decision opens, which can be before
+  // the host registered its handler (`build()` resolves to a connected
+  // runtime). The SDK keeps one notice per decision, drops none, and hands
+  // them to the handler when it registers, once.
+  it("notices before a handler reach the handler when it registers", async () => {
+    const rt = new MetaRuntime(runtimeConfig());
+    const dispatcher = (rt as any)._dispatcher as CallbackDispatcher;
+    const ids = Array.from(
+      { length: 3000 },
+      (_, index) => `decision:${index.toString(16).padStart(64, "0")}`,
+    );
+    for (const decisionId of ids) {
+      const early = { ...NOTICE, decision_id: decisionId, notice_id: `early-${decisionId}` };
+      assert.equal(await dispatcher.handleCallback("meta/decisions/notice", early), null);
+    }
+    // A later notice of a decision replaces the one kept for it.
+    const later = { ...NOTICE, decision_id: ids[0], notice_id: "later", event: "presented" };
+    assert.equal(await dispatcher.handleCallback("meta/decisions/notice", later), null);
+
+    const received: Array<Record<string, unknown>> = [];
+    rt.onDecisionNotice(async (notice) => {
+      received.push(notice);
+    });
+    for (let turn = 0; turn < 500 && received.length < ids.length; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(received.length, ids.length, "one notice per decision, none dropped");
+    assert.deepEqual(received.map((notice) => notice.decision_id).sort(), [...ids].sort());
+    assert.deepEqual(
+      received.filter((notice) => notice.decision_id === ids[0]),
+      [later],
+    );
+
+    // They are handed over once: the next notice arrives alone.
+    await dispatcher.handleCallback("meta/decisions/notice", NOTICE);
+    assert.equal(received.length, ids.length + 1);
+    assert.deepEqual(received[received.length - 1], NOTICE);
+    const other: unknown[] = [];
+    rt.onDecisionNotice((notice) => {
+      other.push(notice);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(other, [], "a second handler is handed nothing that was delivered");
+  });
+
   it("decide is refused in a later promise turn the tool handler starts", async () => {
     const { handle, calls } = mockHandle();
     let later: Promise<unknown> | undefined;

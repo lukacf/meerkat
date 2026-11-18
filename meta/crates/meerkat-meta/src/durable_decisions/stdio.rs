@@ -155,6 +155,13 @@ impl StdioDecisionConnection {
         self.open.store(false, Ordering::SeqCst);
     }
 
+    /// Tell the host of the open decisions of `owner` without waiting for
+    /// its list. Declared here for the rows that pin it; it does nothing
+    /// yet.
+    pub async fn notice_openings(self: Arc<Self>, owner: DurableDecisionService) {
+        drop(owner);
+    }
+
     /// The answer to `request_line` when it calls a `meta/decisions/*`
     /// method, and `None` for any other line.
     pub async fn handle_line(

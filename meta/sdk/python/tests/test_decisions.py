@@ -203,6 +203,46 @@ async def test_a_notice_with_no_handler_answers_nothing():
 
 
 @pytest.mark.asyncio
+async def test_notices_before_a_handler_reach_the_handler_when_it_registers():
+    """The gateway writes a notice when a decision opens, which can be before
+    the host registered its handler (``build()`` returns a connected
+    runtime). The SDK keeps one notice per decision, drops none, and hands
+    them to the handler when it registers, once."""
+    runtime = _runtime()
+    dispatch = runtime._dispatcher.handle_callback
+    ids = [f"decision:{index:064x}" for index in range(3000)]
+    for decision_id in ids:
+        early = {**NOTICE, "decision_id": decision_id, "notice_id": f"early-{decision_id}"}
+        assert await dispatch("meta/decisions/notice", early) is None
+    # A later notice of a decision replaces the one kept for it.
+    later = {**NOTICE, "decision_id": ids[0], "notice_id": "later", "event": "presented"}
+    assert await dispatch("meta/decisions/notice", later) is None
+
+    received = []
+
+    async def handler(notice):
+        received.append(notice)
+
+    runtime.on_decision_notice(handler)
+    for _ in range(500):
+        if len(received) >= len(ids):
+            break
+        await asyncio.sleep(0.01)
+    assert len(received) == len(ids), "one notice per decision, none dropped"
+    assert sorted(notice["decision_id"] for notice in received) == sorted(ids)
+    assert [notice for notice in received if notice["decision_id"] == ids[0]] == [later]
+
+    # They are handed over once: the next notice arrives alone.
+    await dispatch("meta/decisions/notice", NOTICE)
+    assert len(received) == len(ids) + 1
+    assert received[-1] == NOTICE
+    other = []
+    runtime.on_decision_notice(other.append)
+    await asyncio.sleep(0.05)
+    assert other == [], "a second handler is handed nothing that was delivered"
+
+
+@pytest.mark.asyncio
 async def test_decide_is_refused_inside_a_task_the_tool_handler_starts():
     from meerkat_meta.errors import DecideInsideToolCallbackError
 

@@ -3993,6 +3993,92 @@ mod tests {
         }
     }
 
+    /// An operator-instruction entry of a session of such a model, on this
+    /// wire. The session appends the entry at its transcript tail and its
+    /// model request places it at the end of the leading System prefix: that
+    /// request lowers, with the entry as a block of `system` after the
+    /// prompt. The rows as the transcript holds them, which is what a
+    /// release that does not place entries sends, are refused before the
+    /// provider is called.
+    #[test]
+    fn a_placed_operator_instruction_entry_lowers_and_the_unplaced_rows_are_refused() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let mut session = meerkat_core::Session::new();
+        session.append_system_message("You are a careful assistant.");
+        session.push(Message::User(UserMessage::text("hello")));
+        session.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: "hi".to_string(),
+                    meta: None,
+                }],
+                meerkat_core::StopReason::EndTurn,
+            ),
+        ));
+        session
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::types::InstructionNamespace::new("app.example")
+                        .unwrap(),
+                    key: meerkat_core::types::InstructionKey::new("tone").unwrap(),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .unwrap();
+        let applied = session
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::LeadingPrefixOnly,
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                applied,
+                meerkat_core::RunStartInstructionOutcome::Applied { .. }
+            ),
+            "{applied:?}"
+        );
+        session.push(Message::User(UserMessage::text("next")));
+
+        for model in ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"] {
+            let placed = session
+                .messages_for_model_request(meerkat_core::InstructionLowering::LeadingPrefixOnly)
+                .unwrap();
+            let body = client
+                .build_request_body(&LlmRequest::new(model, placed))
+                .expect("the placed request lowers");
+            let system = body["system"].as_array().expect("system blocks");
+            assert_eq!(system.len(), 2, "{model}: the prompt, then the entry");
+            assert_eq!(system[0]["text"], "You are a careful assistant.");
+            assert!(
+                system[1]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Answer formally.")),
+                "{model}: {system:?}"
+            );
+            let conversation = body["messages"].as_array().expect("messages array");
+            assert_eq!(conversation.len(), 3, "{model}: {conversation:?}");
+            assert_eq!(conversation[2]["content"], "next");
+
+            let unplaced = session.messages_for_model_boundary().unwrap();
+            let error = client
+                .build_request_body(&LlmRequest::new(model, unplaced))
+                .expect_err("the rows as the transcript holds them are refused");
+            let LlmError::InvalidInputShape { message } = &error else {
+                panic!("expected an input-shape refusal, got {error:?}");
+            };
+            assert!(
+                message.contains("this model requires System rows to form a leading prefix"),
+                "{model}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn modern_model_lowers_turn_scoped_system_after_the_governing_user() {
         let client = AnthropicClient::new("test-key".to_string()).unwrap();

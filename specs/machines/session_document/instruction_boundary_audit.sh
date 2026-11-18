@@ -6,8 +6,10 @@
 # them), an application reaches the target and coalesces every earlier write
 # into one entry, an applied revoke holds until a later write, a mid-run
 # fold, a write, a record, a rebind and a release leave the slots in effect
-# alone, a session write never lowers a revision, a leading-prefix-only
-# model applies only on a leading System prefix, a mob-owned target changes
+# alone, a session write never lowers a revision, nothing applies on a wire
+# that carries no entry, a fresh run start on a lowering that carries one
+# leaves nothing pending (a leading-prefix-only model included, whatever its
+# transcript holds), a mob-owned target changes
 # owner only when its own mob releases it, a release empties the target and
 # the next fresh run start revokes what the released mob had in effect, a
 # rebind starts from the right target, the target stays within the
@@ -24,7 +26,7 @@
 # arm or field fails the run instead of a vacuous pass. It then checks the
 # invariants (safety), and reruns once per reachability witness, with that
 # witness's negation as an extra invariant, requiring TLC to report exactly
-# that violation. With --mutants it seeds twelve defects into a copy of the
+# that violation. With --mutants it seeds thirteen defects into a copy of the
 # generated model and requires TLC to refuse each with the invariant it
 # targets, checked as the run's only invariant:
 #   - apply on ResumeRun (the FreshRun guard widened to any run);
@@ -32,7 +34,9 @@
 #     take the target's whole effect map);
 #   - apply a mid-run fold from the target (the run-start guard dropped);
 #   - accept a stale session write (the higher-revision guard dropped);
-#   - skip the leading-prefix check (any lowering but Unavailable applies);
+#   - apply on a wire that carries no entry (the lowering guard dropped);
+#   - defer a leading-prefix-only model again (the deferral arm taken on
+#     every lowering but mid-conversation);
 #   - accept another mob's record (the owning-mob guard dropped);
 #   - let a rebind take a mob-owned target (the attach's ownership guard
 #     dropped, alone);
@@ -85,7 +89,7 @@ record = "session_id, mob_id, generation, revision, effect, digest, bytes, membe
 write = "session_id, slot, revision, effect, digest, body_bytes, member_bound"
 rebind = "session_id, owner, mob_id, member_bound"
 release = "session_id, mob_id"
-resolve = "session_id, run_start, lowering, transcript_is_system_prefix"
+resolve = "session_id, run_start, lowering"
 fold = "session_id, at_run_start, lowering"
 arms = {
     "RecoverSessionInstructionState": recover,
@@ -119,7 +123,6 @@ arms = {
     "ReleaseInstructionTargetOwnedBySession": release,
     "ResolveRunStartInstructionsApply": resolve,
     "ResolveRunStartInstructionsNoChange": resolve,
-    "ResolveRunStartInstructionsDeferredLeadingPrefix": resolve,
     "ResolveRunStartInstructionsDeferredUnavailable": resolve,
     "AuthorizeInstructionFoldAtRunStart": fold,
     "AuthorizeInstructionFoldEffective": fold,
@@ -158,7 +161,8 @@ audit_invariants="  AuditEffectiveChangesOnlyAtRunStart
   AuditAppliedRevokeStaysAbsent
   AuditMidRunFoldKeepsEffective
   AuditSessionWriteNeverLowersRevision
-  AuditPrefixOnlyAppliesInLeadingPrefix
+  AuditNothingAppliesWithoutALowering
+  AuditFreshRunStartLeavesNothingPending
   AuditMobTargetBoundUntilReleased
   AuditReleaseEmptiesTheTarget
   AuditUnownedRunStartRevokesWhatIsInEffect
@@ -283,6 +287,37 @@ for anchor, line in zip(edits[0::2], edits[1::2]):
 text = text[:start] + "\n".join(lines) + text[end:]
 open(path, "w").write(text)
 PY
+    judge_mutant "${name}" "${target}" "${dir}"
+  }
+
+  # usage: mutate_part <name> <target invariant> <arm> <old text> <new text>
+  # As mutate, for a defect inside a line: replaces the one occurrence of
+  # <old text> in <arm> with <new text>.
+  mutate_part() {
+    local name="$1" target="$2" arm="$3" old="$4" new="$5"
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}/model.tla" "${spec_dir}/instruction_boundary_audit.tla" "${dir}/"
+    MODEL="${dir}/model.tla" ARM="${arm}" OLD="${old}" NEW="${new}" python3 - <<'PY'
+import os
+path, arm = os.environ["MODEL"], os.environ["ARM"]
+old, new = os.environ["OLD"], os.environ["NEW"]
+text = open(path).read()
+start = text.index("\n" + arm + "(") + 1
+end = text.index("\n\n", start)
+body = text[start:end]
+assert body.count(old) == 1, f"expected one {old!r} in {arm}, found {body.count(old)}"
+text = text[:start] + body.replace(old, new) + text[end:]
+open(path, "w").write(text)
+PY
+    judge_mutant "${name}" "${target}" "${dir}"
+  }
+
+  # usage: judge_mutant <name> <target invariant> <dir>; runs the target as
+  # the only invariant on the mutated specs in <dir> and requires TLC to
+  # report it violated.
+  judge_mutant() {
+    local name="$1" target="$2" dir="$3"
     local cfg="${work_dir}/mutant-${name}.cfg"
     write_target_cfg "${cfg}" "${target}"
     run_tlc "mutant-${name}" "${cfg}" "${dir}"
@@ -309,9 +344,17 @@ PY
   mutate stale_session_write_accepted AuditSessionWriteNeverLowersRevision \
     SetSessionInstructionAdvance '(revision > ' \
     '    /\ TRUE'
-  mutate leading_prefix_check_skipped AuditPrefixOnlyAppliesInLeadingPrefix \
+  # Apply on a wire that carries no entry: the lowering guard dropped.
+  mutate unavailable_lowering_applies AuditNothingAppliesWithoutALowering \
     ResolveRunStartInstructionsApply 'instruction_entry_lowers(' \
-    '    /\ (lowering # "Unavailable")'
+    '    /\ TRUE'
+  # Defer a leading-prefix-only model again: the deferral arm taken on every
+  # lowering but mid-conversation, so a fresh run start may leave such a
+  # model's change pending.
+  mutate_part leading_prefix_only_deferred_again AuditFreshRunStartLeavesNothingPending \
+    ResolveRunStartInstructionsDeferredUnavailable \
+    '(lowering = "Unavailable")' \
+    '(lowering # "MidConversation")'
   mutate foreign_mob_record_accepted AuditMobTargetBoundUntilReleased \
     RecordInstructionTargetAdvance '= mob_id)' \
     '    /\ TRUE'

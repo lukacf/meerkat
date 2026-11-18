@@ -525,12 +525,15 @@ class InstructionOutcome:
     what the outcome says.
 
     ``kind`` is one of :data:`INSTRUCTION_OUTCOME_KINDS`:
-    ``applies_at_next_run`` (a run that starts within moments of the change
-    may still use the earlier instructions); ``applies_after_compaction``
-    (the agent's model takes new instructions only at the head of what it
-    reads: the change waits for a compaction at the start of a run, which a
-    short conversation may never reach; a reset of the agent brings it into
-    effect and gives the agent's conversation up);
+    ``applies_at_next_run`` (the answer on every model that takes a system
+    instruction; a run that starts within moments of the change may still
+    use the earlier instructions); ``applies_after_compaction`` (answered by
+    an earlier gateway only, for an agent whose model takes new
+    instructions only at the head of what it reads: there the change waits
+    for a compaction at the start of a run, which a short conversation may
+    never reach, and a reset of the agent brings it into effect and gives
+    the agent's conversation up; the gateway now answers
+    ``applies_at_next_run`` for such an agent);
     ``applies_at_next_session`` (the change does not reach the agent as it
     runs now and applies when it next starts afresh, for ``reason``, one of
     :data:`INSTRUCTION_NEXT_SESSION_REASONS`); ``unchanged``.

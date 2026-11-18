@@ -2530,10 +2530,12 @@ class MetaRuntime:
         destroy a mob it created before the call if it must not be
         left running unmanaged. Call it against a 0.9.15 gateway: on 0.9.9
         through 0.9.14 a call that fails leaves the agent with the call's
-        low compaction threshold. A changed instruction that waits for a
-        compaction takes effect with it: an update answered
-        ``applies_after_compaction`` because the member's model takes a
-        system instruction only ahead of the conversation.
+        low compaction threshold. Against an earlier gateway a
+        changed instruction that waits for a compaction takes effect with
+        it: an update answered ``applies_after_compaction`` because the
+        member's model takes a system instruction only ahead of the
+        conversation. The gateway now applies such a change at the member's
+        next run and needs no compaction for it.
 
         ``floor_tokens`` is the member's compaction threshold for that one
         turn, in tokens (gateway default 1024, a positive integer). A

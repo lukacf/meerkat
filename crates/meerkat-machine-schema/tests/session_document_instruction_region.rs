@@ -30,7 +30,7 @@ type State = SessionDocumentMachineState;
 type Transition = SessionDocumentMachineTransition;
 type TransitionError = SessionDocumentMachineTransitionError;
 
-const ARMS: [&str; 35] = [
+const ARMS: [&str; 34] = [
     "RecoverSessionInstructionState",
     "RecoverSessionInstructionTarget",
     "RecoverSessionInstructionEffective",
@@ -62,7 +62,6 @@ const ARMS: [&str; 35] = [
     "ReleaseInstructionTargetOwnedBySession",
     "ResolveRunStartInstructionsApply",
     "ResolveRunStartInstructionsNoChange",
-    "ResolveRunStartInstructionsDeferredLeadingPrefix",
     "ResolveRunStartInstructionsDeferredUnavailable",
     "AuthorizeInstructionFoldAtRunStart",
     "AuthorizeInstructionFoldEffective",
@@ -313,25 +312,16 @@ fn release(mob: &str) -> Input {
     }
 }
 
-fn resolve(
-    run_start: InstructionRunStart,
-    lowering: InstructionLowering,
-    transcript_is_system_prefix: bool,
-) -> Input {
+fn resolve(run_start: InstructionRunStart, lowering: InstructionLowering) -> Input {
     Input::ResolveRunStartInstructions {
         session_id: session(),
         run_start,
         lowering,
-        transcript_is_system_prefix,
     }
 }
 
-fn fresh_run(lowering: InstructionLowering, transcript_is_system_prefix: bool) -> Input {
-    resolve(
-        InstructionRunStart::FreshRun,
-        lowering,
-        transcript_is_system_prefix,
-    )
+fn fresh_run(lowering: InstructionLowering) -> Input {
+    resolve(InstructionRunStart::FreshRun, lowering)
 }
 
 fn fold(at_run_start: bool, lowering: InstructionLowering) -> Input {
@@ -617,11 +607,10 @@ fn an_unrecovered_session_is_refused_by_every_instruction_input() {
         revoke("a", 2),
         rebind(InstructionTargetOwner::Session, ""),
         release("mob-a"),
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
         resolve(
             InstructionRunStart::ResumeRun,
             InstructionLowering::MidConversation,
-            false,
         ),
         fold(true, InstructionLowering::MidConversation),
         fold(false, InstructionLowering::Unavailable),
@@ -733,7 +722,7 @@ fn a_record_takes_over_a_member_sessions_own_target_in_one_step() {
     );
     let transition = apply(
         &mut authority,
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
     );
     assert!(
         matches!(
@@ -876,9 +865,9 @@ fn release_empties_the_target_and_the_next_fresh_run_start_revokes_what_was_in_e
     let in_effect = Slots::empty()
         .active("tone", 1, DIGEST_X, 9)
         .active("style", 2, DIGEST_Y, 4);
-    for (lowering, transcript_is_system_prefix) in [
-        (InstructionLowering::MidConversation, false),
-        (InstructionLowering::LeadingPrefixOnly, true),
+    for lowering in [
+        InstructionLowering::MidConversation,
+        InstructionLowering::LeadingPrefixOnly,
     ] {
         let mut authority =
             seeded(&Seed::mob_owned("mob-a", 3, in_effect.clone()).in_effect(1, in_effect.clone()));
@@ -888,10 +877,7 @@ fn release_empties_the_target_and_the_next_fresh_run_start_revokes_what_was_in_e
             Slots::empty(),
             "a release empties the target"
         );
-        let transition = apply(
-            &mut authority,
-            fresh_run(lowering, transcript_is_system_prefix),
-        );
+        let transition = apply(&mut authority, fresh_run(lowering));
         assert_eq!(
             transition.effects(),
             [Effect::InstructionEntryAuthorized {
@@ -908,21 +894,22 @@ fn release_empties_the_target_and_the_next_fresh_run_start_revokes_what_was_in_e
         );
         assert_verdict_only(
             &mut authority,
-            fresh_run(lowering, transcript_is_system_prefix),
+            fresh_run(lowering),
             &[Effect::InstructionEntryNotNeeded],
         );
     }
 
-    // A prefix-only model after conversation rows defers the revoke, and a
-    // compaction at the next run's first request folds the empty target.
+    // A wire that carries no entry defers the revoke. A compaction at a
+    // run's first request on a lowering that carries one folds the empty
+    // target.
     let mut authority =
         seeded(&Seed::mob_owned("mob-a", 3, in_effect.clone()).in_effect(1, in_effect));
     apply(&mut authority, release("mob-a"));
     assert_verdict_only(
         &mut authority,
-        fresh_run(InstructionLowering::LeadingPrefixOnly, false),
+        fresh_run(InstructionLowering::Unavailable),
         &[Effect::InstructionApplicationDeferred {
-            reason: InstructionDeferReason::LeadingPrefixOnly,
+            reason: InstructionDeferReason::LoweringUnavailable,
         }],
     );
     let transition = apply(
@@ -1271,7 +1258,7 @@ fn rebind_starts_the_new_owner_from_the_slots_in_effect() {
     );
     assert_verdict_only(
         &mut authority,
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
         &[Effect::InstructionEntryNotNeeded],
     );
 }
@@ -1304,7 +1291,7 @@ fn rebind_takes_an_unowned_target_and_a_session_target_only_for_a_mob() {
         assert_eq!(effective(&authority), in_effect, "a rebind applies nothing");
         let transition = apply(
             &mut authority,
-            fresh_run(InstructionLowering::MidConversation, false),
+            fresh_run(InstructionLowering::MidConversation),
         );
         assert_eq!(
             transition.effects(),
@@ -1463,17 +1450,15 @@ fn pending_seed() -> Seed {
 
 #[test]
 fn fresh_run_start_applies_the_pending_changes_in_one_entry() {
-    for (lowering, transcript_is_system_prefix) in [
-        (InstructionLowering::MidConversation, false),
-        (InstructionLowering::MidConversation, true),
-        (InstructionLowering::LeadingPrefixOnly, true),
+    // Every lowering that carries an entry applies, whatever the transcript
+    // holds: a leading-prefix-only model's request places the entry.
+    for lowering in [
+        InstructionLowering::MidConversation,
+        InstructionLowering::LeadingPrefixOnly,
     ] {
         let seed = pending_seed();
         let mut authority = seeded(&seed);
-        let transition = apply(
-            &mut authority,
-            fresh_run(lowering, transcript_is_system_prefix),
-        );
+        let transition = apply(&mut authority, fresh_run(lowering));
         assert_eq!(
             transition.effects(),
             [Effect::InstructionEntryAuthorized {
@@ -1481,7 +1466,7 @@ fn fresh_run_start_applies_the_pending_changes_in_one_entry() {
                 generation: 2
             }]
             .as_slice(),
-            "{lowering:?} {transcript_is_system_prefix}"
+            "{lowering:?}"
         );
         assert_eq!(entry_sequence(&authority), Some(2));
         assert_eq!(
@@ -1495,7 +1480,7 @@ fn fresh_run_start_applies_the_pending_changes_in_one_entry() {
         // Nothing is pending after the application.
         assert_verdict_only(
             &mut authority,
-            fresh_run(lowering, transcript_is_system_prefix),
+            fresh_run(lowering),
             &[Effect::InstructionEntryNotNeeded],
         );
     }
@@ -1546,7 +1531,7 @@ fn the_machine_decides_what_is_pending_from_its_own_slots() {
         let mut authority = seeded(&Seed::session_owned(1, target).in_effect(1, in_effect));
         let transition = apply(
             &mut authority,
-            fresh_run(InstructionLowering::MidConversation, false),
+            fresh_run(InstructionLowering::MidConversation),
         );
         let expected = if pending {
             vec![Effect::InstructionEntryAuthorized {
@@ -1570,7 +1555,7 @@ fn resume_and_no_run_starts_never_apply() {
         ] {
             assert_verdict_only(
                 &mut authority,
-                resolve(run_start, lowering, true),
+                resolve(run_start, lowering),
                 &[Effect::InstructionEntryNotNeeded],
             );
         }
@@ -1585,7 +1570,7 @@ fn an_unowned_target_revokes_what_is_in_effect_at_the_next_fresh_run_start() {
         seeded(&Seed::empty().in_effect(3, Slots::empty().active("tone", 1, DIGEST_X, 5)));
     let transition = apply(
         &mut authority,
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
     );
     assert_eq!(
         transition.effects(),
@@ -1601,38 +1586,55 @@ fn an_unowned_target_revokes_what_is_in_effect_at_the_next_fresh_run_start() {
     let mut authority = seeded(&Seed::empty());
     assert_verdict_only(
         &mut authority,
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
         &[Effect::InstructionEntryNotNeeded],
-    );
-}
-
-#[test]
-fn leading_prefix_only_lowering_defers_after_conversation_rows() {
-    let mut authority = seeded(&pending_seed());
-    assert_verdict_only(
-        &mut authority,
-        fresh_run(InstructionLowering::LeadingPrefixOnly, false),
-        &[Effect::InstructionApplicationDeferred {
-            reason: InstructionDeferReason::LeadingPrefixOnly,
-        }],
     );
 }
 
 #[test]
 fn unavailable_lowering_defers() {
     let mut authority = seeded(&pending_seed());
-    for transcript_is_system_prefix in [true, false] {
-        assert_verdict_only(
-            &mut authority,
-            fresh_run(
-                InstructionLowering::Unavailable,
-                transcript_is_system_prefix,
-            ),
-            &[Effect::InstructionApplicationDeferred {
-                reason: InstructionDeferReason::LoweringUnavailable,
-            }],
-        );
-    }
+    assert_verdict_only(
+        &mut authority,
+        fresh_run(InstructionLowering::Unavailable),
+        &[Effect::InstructionApplicationDeferred {
+            reason: InstructionDeferReason::LoweringUnavailable,
+        }],
+    );
+}
+
+/// A model that carries System rows only inside the leading System prefix
+/// takes the pending changes at a fresh run start after conversation rows
+/// too: the entry is appended like any other, and the model request places
+/// it inside the leading prefix. Only a wire that carries no entry defers.
+#[test]
+fn leading_prefix_only_lowering_applies_after_conversation_rows() {
+    let seed = pending_seed();
+    let mut authority = seeded(&seed);
+    let transition = apply(
+        &mut authority,
+        fresh_run(InstructionLowering::LeadingPrefixOnly),
+    );
+    assert_eq!(
+        transition.effects(),
+        [Effect::InstructionEntryAuthorized {
+            entry_sequence: 2,
+            generation: 2
+        }]
+        .as_slice()
+    );
+    assert_eq!(
+        effective(&authority),
+        Slots::empty().active("tone", 2, DIGEST_Y, 6),
+        "the target's Active slots are in effect"
+    );
+    assert_eq!(effective_generation(&authority), Some(2));
+    assert_eq!(target(&authority), seed.target, "applying records nothing");
+    assert_verdict_only(
+        &mut authority,
+        fresh_run(InstructionLowering::LeadingPrefixOnly),
+        &[Effect::InstructionEntryNotNeeded],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1806,14 +1808,14 @@ fn the_machine_equals_its_reseed_after_an_applied_revoke_through_rebinds_and_a_l
     let mut machine = seeded(&Seed::empty());
     for input in [
         activate("tone", 5, DIGEST_X, 5),
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
         revoke("tone", 6),
     ] {
         apply(&mut machine, input);
     }
     let transition = apply(
         &mut machine,
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
     );
     assert_eq!(
         transition.effects(),
@@ -1884,7 +1886,7 @@ fn every_reached_instruction_state_recovers() {
     let snapshot = Slots::empty().active("style", 1, DIGEST_Z, 2);
     for input in [
         activate("tone", 1, DIGEST_X, 5),
-        fresh_run(InstructionLowering::MidConversation, false),
+        fresh_run(InstructionLowering::MidConversation),
         revoke("tone", 2),
         fold(false, InstructionLowering::MidConversation),
         rebind(InstructionTargetOwner::Mob, "mob-a"),

@@ -185,6 +185,26 @@ pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
 /// `runtime.sqlite3`). A host-store realm keeps its documents in the host's
 /// store, not on disk, so the disk sweep cannot list them.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-envelope";
+/// Sessions whose stored transcript holds the session's own
+/// operator-instruction entry row after a conversation row. This release
+/// writes such a row also in a session of a model that takes System rows
+/// only ahead of the conversation, where its model request places the row
+/// ahead of the conversation. An earlier release does not place it and
+/// refuses to resume such a session of such a model ("cannot represent the
+/// operator-instruction entries already applied in session"); it serves the
+/// session on a model that takes System rows anywhere. An operator counts
+/// them before a rollback. Informational, with the count, the count per
+/// model over all of them and, for the first fifty sessions by id, the
+/// model its document or its head row records. The store records no
+/// model capability, so the finding cannot tell which of the listed
+/// sessions an earlier release refuses: that is decided by the model's
+/// `supports_mid_conversation_system_messages`. The census covers the realms
+/// whose documents are on disk, as
+/// [`FINDING_OPERATOR_INSTRUCTION_ENVELOPE`] does: a SQLite realm's
+/// head-canonical sessions by the live rows of their head strand and its
+/// head-less documents, and a JSONL realm's WholeBlob documents.
+pub const FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION: &str =
+    "operator-instruction-entry-after-conversation";
 /// Mob journals that hold operator-instruction events (the records a mob
 /// committed and the member targets its members' sessions recorded),
 /// written at mob event schema
@@ -935,6 +955,12 @@ fn diagnose_realm_dir(
                             sweep_dangling_blobs(&tx, realm_dir, &sessions_db, realm, diagnosis);
                             census_storage_footprint(&tx, &sessions_db, realm, diagnosis);
                             census_operator_instruction_envelopes(
+                                &tx,
+                                &sessions_db,
+                                realm,
+                                diagnosis,
+                            );
+                            census_operator_instruction_late_entries(
                                 &tx,
                                 &sessions_db,
                                 realm,
@@ -2260,7 +2286,10 @@ fn census_runtime_store_instruction_envelopes(
         return;
     };
     match conn.unchecked_transaction() {
-        Ok(tx) => census_operator_instruction_envelopes(&tx, db_path, realm, diagnosis),
+        Ok(tx) => {
+            census_operator_instruction_envelopes(&tx, db_path, realm, diagnosis);
+            census_operator_instruction_late_entries(&tx, db_path, realm, diagnosis);
+        }
         Err(err) => {
             diagnosis.findings.push(
                 StorageFinding::new(
@@ -2336,6 +2365,278 @@ fn census_operator_instruction_envelopes(
                  census reads the realms whose documents are on disk (SQLite realms, and JSONL \
                  realms through runtime.sqlite3); host-store realms keep their documents in \
                  the host's store and are not listed",
+                sessions.len()
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
+}
+
+/// The most sessions the finding for an own operator-instruction entry
+/// after a conversation row names.
+const OPERATOR_INSTRUCTION_LATE_ENTRY_REPORT_CAP: usize = 50;
+
+/// Metadata lens of a session document or a head row: the model its session
+/// metadata names.
+#[derive(Deserialize, Default)]
+struct SessionModelMetadataLens {
+    #[serde(default)]
+    session_metadata: Option<SessionModelLens>,
+}
+
+#[derive(Deserialize)]
+struct SessionModelLens {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+impl SessionModelMetadataLens {
+    /// `provider/model`, or the model alone, where the metadata names one.
+    fn label(self) -> Option<String> {
+        let named = self.session_metadata?;
+        let model = named.model?;
+        Some(match named.provider {
+            Some(provider) => format!("{provider}/{model}"),
+            None => model,
+        })
+    }
+}
+
+/// Document lens: its messages and its metadata's model.
+#[derive(Deserialize)]
+struct LateEntryDocumentLens<'a> {
+    #[serde(borrow, default)]
+    messages: Vec<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    metadata: SessionModelMetadataLens,
+}
+
+/// Walks one session's rows in order and says whether the session's own
+/// operator-instruction entry row stands after a conversation row: the
+/// rule `meerkat_core` judges a session's own entry rows by. A conversation
+/// row is any row that is not a System row; an entry another session wrote
+/// (a fork's copy) is not the session's own. A row that does not decode is
+/// passed over; the blob sweep reports it.
+#[derive(Default)]
+struct LateEntryWalk {
+    conversation_seen: bool,
+    late: bool,
+}
+
+impl LateEntryWalk {
+    fn row(&mut self, session_id: &str, message_json: &[u8]) {
+        let Ok(message) = serde_json::from_slice::<Message>(message_json) else {
+            return;
+        };
+        let Message::System(system) = message else {
+            self.conversation_seen = true;
+            return;
+        };
+        if self.conversation_seen
+            && system
+                .instruction_entry
+                .as_ref()
+                .is_some_and(|entry| entry.origin_session_id().to_string() == session_id)
+        {
+            self.late = true;
+        }
+    }
+}
+
+/// The sessions of one database whose stored transcript holds the session's
+/// own operator-instruction entry row after a conversation row, each with
+/// the model its head row or document records (`provider/model`) where it
+/// records one: the census behind
+/// [`FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION`], over a
+/// connection the caller opened read-only (inside one read transaction, so
+/// the sources below are read from one snapshot). It reads a session
+/// store's head-canonical sessions at the operator-instruction envelope or
+/// later by the live rows of their head strand, its head-less documents,
+/// and a runtime store's WholeBlob documents (each session's committed
+/// body, and the candidate body of a run's provisional tail); a source
+/// whose table the database does not hold is skipped. It only reads.
+pub fn operator_instruction_entry_after_conversation_sessions(
+    conn: &Connection,
+) -> Result<BTreeMap<String, Option<String>>, rusqlite::Error> {
+    let envelope =
+        meerkat_core::generated::session_persistence_version_authority::session_envelope_version_for_document(
+            true,
+        );
+    let mut sessions = BTreeMap::new();
+    let heads = table_exists(conn, "session_heads")?;
+    if heads && table_exists(conn, "session_strand_messages")? {
+        let mut head_rows = conn.prepare(
+            "SELECT session_id, strand, message_count, metadata_json FROM session_heads \
+             WHERE version >= ?1 ORDER BY session_id",
+        )?;
+        let mut live_rows = conn.prepare(
+            "SELECT message_json FROM session_strand_messages \
+             WHERE session_id = ?1 AND strand = ?2 AND seq < ?3 ORDER BY seq",
+        )?;
+        let mut rows = head_rows.query(rusqlite::params![i64::from(envelope)])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let strand: String = row.get(1)?;
+            let message_count: i64 = row.get(2)?;
+            let metadata: JsonColumnBytes = row.get(3)?;
+            let mut walk = LateEntryWalk::default();
+            let mut messages =
+                live_rows.query(rusqlite::params![session_id, strand, message_count])?;
+            while let Some(message) = messages.next()? {
+                let message_json: JsonColumnBytes = message.get(0)?;
+                walk.row(&session_id, &message_json.into_bytes());
+            }
+            if walk.late {
+                let model =
+                    serde_json::from_slice::<SessionModelMetadataLens>(&metadata.into_bytes())
+                        .ok()
+                        .and_then(SessionModelMetadataLens::label);
+                sessions.insert(session_id, model);
+            }
+        }
+    }
+    // The whole documents the envelope census reads, without a runtime
+    // store's boundary heads: a head holds no row.
+    let mut documents = Vec::new();
+    if table_exists(conn, "sessions")? {
+        documents.push(if heads {
+            "SELECT session_id, session_json FROM sessions \
+             WHERE session_id NOT IN (SELECT session_id FROM session_heads) ORDER BY session_id"
+        } else {
+            "SELECT session_id, session_json FROM sessions ORDER BY session_id"
+        });
+    }
+    if table_exists(conn, "runtime_whole_blob_bodies")? {
+        if table_exists(conn, "runtime_whole_blob_authority")? {
+            documents.push(
+                "SELECT authority.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_authority AS authority \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = authority.blob_sha256",
+            );
+        }
+        if table_exists(conn, "runtime_whole_blob_provisional_tails")? {
+            documents.push(
+                "SELECT tail.session_id, body.session_snapshot \
+                 FROM runtime_whole_blob_provisional_tails AS tail \
+                 JOIN runtime_whole_blob_bodies AS body \
+                 ON body.blob_sha256 = tail.candidate_blob_sha256",
+            );
+        }
+    }
+    for sql in documents {
+        let mut statement = conn.prepare(sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let document: JsonColumnBytes = row.get(1)?;
+            let document = document.into_bytes();
+            let Ok(lens) = serde_json::from_slice::<LateEntryDocumentLens<'_>>(&document) else {
+                continue;
+            };
+            let mut walk = LateEntryWalk::default();
+            for message in &lens.messages {
+                walk.row(&session_id, message.get().as_bytes());
+            }
+            if walk.late {
+                let model = lens.metadata.label();
+                sessions
+                    .entry(session_id)
+                    .and_modify(|known: &mut Option<String>| {
+                        if known.is_none() {
+                            known.clone_from(&model);
+                        }
+                    })
+                    .or_insert(model);
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// One Info finding counting the sessions of this database that hold their
+/// own operator-instruction entry after a conversation row.
+fn census_operator_instruction_late_entries(
+    conn: &Connection,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let sessions = match operator_instruction_entry_after_conversation_sessions(conn) {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Warning,
+                    FINDING_STORAGE_CENSUS_UNMEASURED,
+                    format!(
+                        "could not count the sessions that hold their own operator-instruction \
+                         entry after a conversation row: {error}"
+                    ),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            return;
+        }
+    };
+    if sessions.is_empty() {
+        return;
+    }
+    let listed = sessions
+        .iter()
+        .take(OPERATOR_INSTRUCTION_LATE_ENTRY_REPORT_CAP)
+        .map(|(session_id, model)| match model {
+            Some(model) => format!("{session_id} (model {model})"),
+            None => format!("{session_id} (model not recorded)"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let overflow = sessions
+        .len()
+        .saturating_sub(OPERATOR_INSTRUCTION_LATE_ENTRY_REPORT_CAP);
+    let overflow_note = if overflow > 0 {
+        format!(" and {overflow} more")
+    } else {
+        String::new()
+    };
+    // The count per model over every session, not only the listed ones: the
+    // list is capped and ordered by session id, so its models alone could
+    // leave out a model that only later sessions run on.
+    let mut by_model = BTreeMap::<&str, usize>::new();
+    for model in sessions.values() {
+        *by_model
+            .entry(model.as_deref().unwrap_or("model not recorded"))
+            .or_insert(0) += 1;
+    }
+    let by_model = by_model
+        .iter()
+        .map(|(model, count)| format!("{model}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+            format!(
+                "{} session(s) hold their own operator-instruction entry after a conversation \
+                 row ({by_model}): {listed}{overflow_note}. An earlier release, one that does \
+                 not place such \
+                 an entry ahead of the conversation in the model request, refuses to resume \
+                 such a session when its model takes System rows only ahead of the conversation \
+                 (the model's capability `supports_mid_conversation_system_messages` is false, \
+                 or the catalog does not know the model), with \"cannot represent the \
+                 operator-instruction entries already applied in session\"; it serves the \
+                 session on a model that takes System rows anywhere. The store records no model \
+                 capability, so this census cannot tell which of the sessions such a \
+                 release refuses: the counts per model cover every session it counts, listed \
+                 or not, so look at each model before a rollback. The census reads \
+                 the realms whose documents are on disk (SQLite realms, and JSONL realms \
+                 through runtime.sqlite3); host-store realms keep their documents in the \
+                 host's store and are not counted",
                 sessions.len()
             ),
         )
@@ -5259,6 +5560,409 @@ mod tests {
         assert!(
             !listed.message.contains("carry operator instructions"),
             "a session at the envelope need not carry operator instructions: {}",
+            listed.message
+        );
+    }
+
+    /// A stored operator-instruction entry row written in session `origin`.
+    fn instruction_entry_row(origin: &SessionId) -> serde_json::Value {
+        serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-operator-instructions-v1]",
+            "instruction_entry": {
+                "render_version": 1,
+                "origin_session_id": origin.to_string(),
+                "entry_sequence": 1,
+                "kind": "delta",
+                "target_generation": 1,
+            },
+        })
+    }
+
+    fn prompt_row() -> serde_json::Value {
+        serde_json::json!({"role": "system", "content": "You are a careful assistant."})
+    }
+
+    fn question_row() -> serde_json::Value {
+        serde_json::json!({"role": "user", "content": "hello"})
+    }
+
+    /// The metadata a document or a head row records for a session of `model`.
+    fn metadata_naming(provider: &str, model: &str) -> serde_json::Value {
+        serde_json::json!({"session_metadata": {"provider": provider, "model": model}})
+    }
+
+    /// Before a rollback an operator needs the sessions an earlier release
+    /// may refuse to resume: the doctor counts the sessions whose stored
+    /// transcript holds the session's OWN operator-instruction entry row
+    /// after a conversation row, a head-canonical session by the live rows
+    /// of its head strand and a head-less document by its messages. It names
+    /// each with the model its head row or document records, and says that
+    /// the store cannot tell which of them such a release refuses. Not
+    /// counted: an entry that stands ahead of the conversation, an entry
+    /// another session wrote (a fork's copy), and a late entry on a strand
+    /// row past the head's live rows.
+    #[tokio::test]
+    async fn sessions_with_their_own_instruction_entry_after_a_conversation_row_are_counted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "late-entries", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let late_id = Session::new().id().clone();
+        let unnamed_late_id = Session::new().id().clone();
+        let leading_id = Session::new().id().clone();
+        let copied_id = Session::new().id().clone();
+        let retained_id = Session::new().id().clone();
+        let headless_id = Session::new().id().clone();
+        let other_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            conn.execute_batch(SESSION_HEADS_DDL).unwrap();
+            conn.execute_batch(SESSION_STRAND_MESSAGES_DDL).unwrap();
+            let head = |id: &SessionId, live_rows: usize, metadata: serde_json::Value| {
+                conn.execute(
+                    "INSERT INTO session_heads (session_id, version, strand, head_revision, \
+                     message_count, rewrite_count, total_tokens, created_at_ms, updated_at_ms, \
+                     metadata_json, head_json, cas_token) \
+                     VALUES (?1, 5, 'root', 'digest', ?2, 0, 0, 0, 0, ?3, '{}', 'cas')",
+                    rusqlite::params![id.to_string(), live_rows as i64, metadata.to_string()],
+                )
+                .unwrap();
+            };
+            let strand = |id: &SessionId, rows: Vec<serde_json::Value>| {
+                for (seq, row) in rows.into_iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO session_strand_messages (session_id, strand, seq, \
+                         message_json, created_at_ms) VALUES (?1, 'root', ?2, ?3, 0)",
+                        rusqlite::params![id.to_string(), seq as i64, row.to_string().into_bytes()],
+                    )
+                    .unwrap();
+                }
+            };
+            // Its own entry after a conversation row; the head names a model.
+            head(&late_id, 3, metadata_naming("gemini", "gemini-3.5-flash"));
+            strand(
+                &late_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&late_id),
+                ],
+            );
+            // The same, and the head records no model.
+            head(&unnamed_late_id, 3, serde_json::json!({}));
+            strand(
+                &unnamed_late_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&unnamed_late_id),
+                ],
+            );
+            // Its own entry ahead of the conversation.
+            head(
+                &leading_id,
+                3,
+                metadata_naming("gemini", "gemini-3.5-flash"),
+            );
+            strand(
+                &leading_id,
+                vec![
+                    prompt_row(),
+                    instruction_entry_row(&leading_id),
+                    question_row(),
+                ],
+            );
+            // An entry another session wrote, after a conversation row.
+            head(&copied_id, 3, metadata_naming("gemini", "gemini-3.5-flash"));
+            strand(
+                &copied_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&other_id),
+                ],
+            );
+            // Its own late entry on a strand row past the head's live rows.
+            head(
+                &retained_id,
+                2,
+                metadata_naming("gemini", "gemini-3.5-flash"),
+            );
+            strand(
+                &retained_id,
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&retained_id),
+                ],
+            );
+            // A head-less document with its own late entry.
+            let document = serde_json::json!({
+                "version": 5,
+                "messages": [prompt_row(), question_row(), instruction_entry_row(&headless_id)],
+                "metadata": metadata_naming("anthropic", "claude-haiku-4-5"),
+            });
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 3, 0, '{}', ?2)",
+                rusqlite::params![headless_id.to_string(), document.to_string().into_bytes()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert_eq!(listed.severity, FindingSeverity::Info);
+        assert_eq!(listed.realm.as_deref(), Some("late-entries"));
+        assert_eq!(listed.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            listed.message.contains("3 session(s)"),
+            "{}",
+            listed.message
+        );
+        for named in [
+            format!("{late_id} (model gemini/gemini-3.5-flash)"),
+            format!("{unnamed_late_id} (model not recorded)"),
+            format!("{headless_id} (model anthropic/claude-haiku-4-5)"),
+        ] {
+            assert!(
+                listed.message.contains(&named),
+                "the finding names {named:?}: {}",
+                listed.message
+            );
+        }
+        for (id, why) in [
+            (&leading_id, "an entry ahead of the conversation"),
+            (&copied_id, "an entry another session wrote"),
+            (&retained_id, "a row past the head's live rows"),
+        ] {
+            assert!(
+                !listed.message.contains(&id.to_string()),
+                "{why} is not counted: {}",
+                listed.message
+            );
+        }
+        for said in [
+            "cannot represent the operator-instruction entries already applied in session",
+            "supports_mid_conversation_system_messages",
+            "cannot tell",
+        ] {
+            assert!(
+                listed.message.contains(said),
+                "the finding says {said:?}: {}",
+                listed.message
+            );
+        }
+    }
+
+    /// The finding lists at most fifty sessions, the first by id, which are
+    /// the oldest. An operator who reads only the listed models could miss
+    /// every model an earlier release refuses, so the finding carries the
+    /// count per model over ALL the sessions it counts: here fifty-five
+    /// sessions, the fifty oldest on one model and the five newest on
+    /// another, none of which is listed.
+    #[tokio::test]
+    async fn the_late_entry_finding_counts_every_model_past_the_sessions_it_lists() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "many-late-entries", "sqlite");
+        let db_path = realm_dir.join("sessions.sqlite3");
+        let mut ids: Vec<SessionId> = (0..55).map(|_| Session::new().id().clone()).collect();
+        ids.sort_by_key(ToString::to_string);
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                let metadata = if index < 50 {
+                    metadata_naming("openai", "gpt-5.5")
+                } else {
+                    metadata_naming("gemini", "gemini-3.5-flash")
+                };
+                let document = serde_json::json!({
+                    "version": 5,
+                    "messages": [prompt_row(), question_row(), instruction_entry_row(id)],
+                    "metadata": metadata,
+                });
+                conn.execute(
+                    "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, \
+                     message_count, total_tokens, metadata_json, session_json) \
+                     VALUES (?1, 0, 0, 3, 0, '{}', ?2)",
+                    rusqlite::params![id.to_string(), document.to_string().into_bytes()],
+                )
+                .unwrap();
+            }
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let listed = finding(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        )
+        .expect("the finding for an own entry after a conversation row");
+        assert!(
+            listed.message.contains("55 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(
+            listed
+                .message
+                .contains("(gemini/gemini-3.5-flash: 5, openai/gpt-5.5: 50)"),
+            "the finding counts every model over all the sessions: {}",
+            listed.message
+        );
+        assert!(listed.message.contains("and 5 more"), "{}", listed.message);
+        assert!(listed.message.contains(&ids[0].to_string()));
+        for unlisted in &ids[50..] {
+            assert!(
+                !listed.message.contains(&unlisted.to_string()),
+                "a session past the fifty listed is counted, not listed: {}",
+                listed.message
+            );
+        }
+    }
+
+    /// A JSONL realm keeps its session documents in its WholeBlob runtime
+    /// store: the doctor counts there the documents with their own late
+    /// entry, a committed body and a run's provisional candidate body, and a
+    /// realm without one has no such finding.
+    #[tokio::test]
+    async fn runtime_store_documents_with_their_own_late_instruction_entry_are_counted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "jsonl-late-entries", "jsonl");
+        let db_path = realm_dir.join("runtime.sqlite3");
+        let plain_id = Session::new().id().clone();
+        let late_id = Session::new().id().clone();
+        let candidate_id = Session::new().id().clone();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE runtime_whole_blob_authority (
+                    runtime_id TEXT PRIMARY KEY, authority_version INTEGER, session_id TEXT,
+                    store_revision INTEGER, blob_sha256 TEXT);
+                 CREATE TABLE runtime_whole_blob_bodies (
+                    blob_sha256 TEXT PRIMARY KEY, session_snapshot BLOB);
+                 CREATE TABLE runtime_whole_blob_provisional_tails (
+                    runtime_id TEXT PRIMARY KEY, session_id TEXT, candidate_blob_sha256 TEXT);",
+            )
+            .unwrap();
+            let body = |blob: &str, rows: Vec<serde_json::Value>| {
+                let document = serde_json::json!({
+                    "version": 5,
+                    "messages": rows,
+                    "metadata": metadata_naming("gemini", "gemini-3.5-flash"),
+                });
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, document.to_string().into_bytes()],
+                )
+                .unwrap();
+            };
+            let committed = |id: &SessionId, blob: &str| {
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, authority_version, \
+                     session_id, store_revision, blob_sha256) VALUES (?1, 1, ?2, 1, ?3)",
+                    rusqlite::params![format!("rt:session:{id}"), id.to_string(), blob],
+                )
+                .unwrap();
+            };
+            // A committed body with the entry ahead of the conversation.
+            body(
+                "row-sha256:plain",
+                vec![
+                    prompt_row(),
+                    instruction_entry_row(&plain_id),
+                    question_row(),
+                ],
+            );
+            committed(&plain_id, "row-sha256:plain");
+            // A committed body with its own late entry.
+            body(
+                "row-sha256:late",
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&late_id),
+                ],
+            );
+            committed(&late_id, "row-sha256:late");
+            // A committed body without an entry whose run left a candidate
+            // body with its own late entry.
+            body(
+                "row-sha256:candidate-base",
+                vec![prompt_row(), question_row()],
+            );
+            committed(&candidate_id, "row-sha256:candidate-base");
+            body(
+                "row-sha256:candidate",
+                vec![
+                    prompt_row(),
+                    question_row(),
+                    instruction_entry_row(&candidate_id),
+                ],
+            );
+            conn.execute(
+                "INSERT INTO runtime_whole_blob_provisional_tails (runtime_id, session_id, \
+                 candidate_blob_sha256) VALUES (?1, ?2, 'row-sha256:candidate')",
+                rusqlite::params![
+                    format!("rt:session:{candidate_id}"),
+                    candidate_id.to_string()
+                ],
+            )
+            .unwrap();
+        }
+        // A realm whose only session holds no late entry.
+        let quiet_dir = write_manifest(&root, "no-late-entries", "sqlite");
+        {
+            let conn = Connection::open(quiet_dir.join("sessions.sqlite3")).unwrap();
+            conn.execute_batch(SESSIONS_DDL).unwrap();
+            let document = serde_json::json!({
+                "version": 5,
+                "messages": [prompt_row(), instruction_entry_row(&plain_id), question_row()],
+            });
+            conn.execute(
+                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+                 total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 3, 0, '{}', ?2)",
+                rusqlite::params![plain_id.to_string(), document.to_string().into_bytes()],
+            )
+            .unwrap();
+        }
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let found: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.code == FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION)
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "one finding, for the realm that holds late entries"
+        );
+        let listed = found[0];
+        assert_eq!(listed.realm.as_deref(), Some("jsonl-late-entries"));
+        assert_eq!(listed.path.as_deref(), Some(db_path.as_path()));
+        assert!(
+            listed.message.contains("2 session(s)"),
+            "{}",
+            listed.message
+        );
+        assert!(listed.message.contains(&late_id.to_string()));
+        assert!(listed.message.contains(&candidate_id.to_string()));
+        assert!(
+            !listed.message.contains(&plain_id.to_string()),
+            "an entry ahead of the conversation is not counted: {}",
             listed.message
         );
     }

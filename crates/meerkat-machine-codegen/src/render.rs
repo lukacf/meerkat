@@ -739,6 +739,29 @@ const MEERKAT_TRANSITION_ENUM_RETIRED: &[RetiredTransitionVariant] = &[
     },
 ];
 
+// Published SessionDocumentMachine `TransitionId` variants whose transition
+// no longer exists, under the rules of the list above. A run start on a
+// model that carries System rows only inside the leading System prefix no
+// longer defers after conversation rows: the entry is appended and the
+// model request places it.
+#[cfg(not(test))]
+const SESSION_DOCUMENT_TRANSITION_ENUM_RETIRED: &[RetiredTransitionVariant] =
+    &[RetiredTransitionVariant {
+        name: "ResolveRunStartInstructionsDeferredLeadingPrefix",
+        follows: "ResolveRunStartInstructionsNoChange",
+    }];
+
+/// The published `TransitionId` variants of `machine` whose transition no
+/// longer exists.
+#[cfg(not(test))]
+fn retired_transition_variants(machine: &str) -> &'static [RetiredTransitionVariant] {
+    match machine {
+        "MeerkatMachine" => MEERKAT_TRANSITION_ENUM_RETIRED,
+        "SessionDocumentMachine" => SESSION_DOCUMENT_TRANSITION_ENUM_RETIRED,
+        _ => &[],
+    }
+}
+
 // Append-only emission tails for the other machines, whose public
 // TransitionId otherwise follows catalog declaration order. A new arm sits
 // beside its siblings in the catalog, where its first-match chain needs it;
@@ -785,7 +808,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ReleaseInstructionTargetOwnedBySession",
             "ResolveRunStartInstructionsApply",
             "ResolveRunStartInstructionsNoChange",
-            "ResolveRunStartInstructionsDeferredLeadingPrefix",
             "ResolveRunStartInstructionsDeferredUnavailable",
             "AuthorizeInstructionFoldAtRunStart",
             "AuthorizeInstructionFoldEffective",
@@ -1521,7 +1543,7 @@ enum PublicTransitionVariant<'a> {
     /// A transition of the schema.
     Live(&'a TransitionSchema),
     /// A published variant whose transition no longer exists
-    /// ([`MEERKAT_TRANSITION_ENUM_RETIRED`]).
+    /// ([`retired_transition_variants`]).
     Retired(&'static str),
 }
 
@@ -1538,10 +1560,7 @@ fn public_transition_enum_variants(
         .into_iter()
         .map(PublicTransitionVariant::Live)
         .collect();
-    if schema.machine.as_ref() != "MeerkatMachine" {
-        return Ok(variants);
-    }
-    for retired in MEERKAT_TRANSITION_ENUM_RETIRED {
+    for retired in retired_transition_variants(schema.machine.as_ref()) {
         if schema
             .transitions
             .iter()

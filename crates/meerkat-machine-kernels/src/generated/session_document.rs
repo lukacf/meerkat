@@ -315,15 +315,12 @@ impl std::fmt::Display for DurableTailStopReason {
 )]
 pub enum InstructionDeferReason {
     #[default]
-    #[serde(rename = "LeadingPrefixOnly")]
-    LeadingPrefixOnly,
     #[serde(rename = "LoweringUnavailable")]
     LoweringUnavailable,
 }
 impl InstructionDeferReason {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::LeadingPrefixOnly => "LeadingPrefixOnly",
             Self::LoweringUnavailable => "LoweringUnavailable",
         }
     }
@@ -332,7 +329,6 @@ impl std::convert::TryFrom<&str> for InstructionDeferReason {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "LeadingPrefixOnly" => Ok(Self::LeadingPrefixOnly),
             "LoweringUnavailable" => Ok(Self::LoweringUnavailable),
             other => Err(format!("invalid InstructionDeferReason value `{other}`")),
         }
@@ -3034,7 +3030,6 @@ pub mod inputs {
         pub session_id: SessionId,
         pub run_start: InstructionRunStart,
         pub lowering: InstructionLowering,
-        pub transcript_is_system_prefix: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeInstructionFold {
@@ -3868,6 +3863,8 @@ pub enum TransitionId {
     ReleaseInstructionTargetOwnedBySession,
     ResolveRunStartInstructionsApply,
     ResolveRunStartInstructionsNoChange,
+    /// Retired: never fired. No transition has this id any more; the
+    /// variant keeps its place so that no published discriminant moves.
     ResolveRunStartInstructionsDeferredLeadingPrefix,
     ResolveRunStartInstructionsDeferredUnavailable,
     AuthorizeInstructionFoldAtRunStart,

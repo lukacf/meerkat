@@ -108,11 +108,16 @@ tolerant_vocabulary! {
     WireInstructionPendingReason in pending_reason_schema {
         /// Recorded; the session's next fresh run start applies it.
         AwaitingRunStart => "awaiting_run_start",
-        /// Recorded; the model takes System rows only inside the leading
-        /// System prefix, so a run start whose transcript is still that prefix,
-        /// or a compaction fold at a run start, applies it.
+        /// Recorded on a model that takes System rows only inside the leading
+        /// System prefix, by a host that applied such a change only while
+        /// the transcript was still that prefix or at a compaction fold at a
+        /// run start. This release applies it at the next fresh run start
+        /// and reports `awaiting_run_start`; the value stays in the
+        /// vocabulary for a member whose host runs an earlier release.
         LeadingPrefixOnlyLowering => "leading_prefix_only_lowering",
-        /// Recorded; the model's wire carries no System row an entry can take.
+        /// Recorded; the model's wire carries no System row an entry can
+        /// take, or the read of the session did not tell how its model
+        /// lowers one.
         LoweringUnavailable => "lowering_unavailable",
         /// The member's seat has no session yet: its first wake creates the
         /// session with the snapshot.
@@ -175,18 +180,19 @@ impl From<meerkat_core::InstructionLowering> for WireInstructionLowering {
 
 impl WireInstructionPendingReason {
     /// Why a recorded change waits, from how the session's model lowers
-    /// entries: the next fresh run start, unless the model takes System rows
-    /// only in the leading prefix or cannot carry them at all.
+    /// entries: the next fresh run start, unless the model's wire carries no
+    /// entry at all. A model that takes System rows only inside the leading
+    /// System prefix waits for its next fresh run start like any other: its
+    /// request places the entry there.
     #[must_use]
     pub fn for_lowering(lowering: Option<meerkat_core::InstructionLowering>) -> Self {
         match lowering {
-            Some(meerkat_core::InstructionLowering::LeadingPrefixOnly) => {
-                Self::LeadingPrefixOnlyLowering
-            }
             Some(meerkat_core::InstructionLowering::Unavailable) => Self::LoweringUnavailable,
-            Some(meerkat_core::InstructionLowering::MidConversation) | None => {
-                Self::AwaitingRunStart
-            }
+            Some(
+                meerkat_core::InstructionLowering::MidConversation
+                | meerkat_core::InstructionLowering::LeadingPrefixOnly,
+            )
+            | None => Self::AwaitingRunStart,
         }
     }
 }

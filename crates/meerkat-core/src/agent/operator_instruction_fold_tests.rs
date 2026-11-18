@@ -812,7 +812,8 @@ async fn a_compaction_folds_entries_and_retires_bodies_in_one_pass() {
 }
 
 /// A compaction inside a run, after its first response, folds what is in
-/// effect: a change the run start left pending stays pending.
+/// effect: a change no run start applied stays pending. Here the run is a
+/// resumed one, whose start applies nothing.
 #[tokio::test]
 async fn mid_run_fold_does_not_apply_a_pending_target() {
     let client = Arc::new(FoldClient::default());
@@ -837,11 +838,12 @@ async fn mid_run_fold_does_not_apply_a_pending_target() {
         .set_session_instruction(activate("tone", 2, "Answer warmly."))
         .unwrap();
     let outcome = agent
-        .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+        .apply_run_start_operator_instructions(InstructionRunStart::ResumeRun, None)
         .unwrap();
     assert_eq!(
         outcome,
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
+        RunStartInstructionOutcome::NotNeeded,
+        "a resumed run applies nothing"
     );
     client.call_tool_once();
     // The run's first request answers with a tool call; the compaction runs
@@ -895,7 +897,8 @@ async fn mid_run_fold_does_not_apply_a_pending_target() {
 }
 
 /// A compaction at a fresh run's first request folds the recorded target:
-/// a leading-prefix-only model takes the pending change in the snapshot, in
+/// a change no run start applied (here the run is started without resolving
+/// its run start) reaches a leading-prefix-only model in the snapshot, in
 /// the leading System prefix of that very request.
 #[tokio::test]
 async fn run_start_fold_applies_a_pending_target_on_a_leading_prefix_only_model() {
@@ -913,10 +916,8 @@ async fn run_start_fold_applies_a_pending_target_on_a_leading_prefix_only_model(
         .set_session_instruction(activate("tone", 1, "Answer formally."))
         .unwrap();
     compactor.arm(1);
-    assert_eq!(
-        apply_and_run(&mut agent, "next").await,
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
-    );
+    // No run start resolved the target: the run is started directly.
+    agent.run("next".into()).await.unwrap();
     assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
 
     let requests = client.requests();
@@ -1291,11 +1292,12 @@ async fn no_curator_window_carries_an_instruction_body() {
 }
 
 /// The fold's snapshot is neutral in the shrink rule, which counts the rows
-/// other than operator-instruction entries. On a leading-prefix-only model
-/// the first run-start fold inserts a snapshot and takes no entry row out,
-/// so a compactor that takes out exactly two rows (its summary takes one
-/// back) leaves as many rows as there were. Its own rebuild still shrank
-/// the transcript, so the rewrite commits and the reloaded graph validates.
+/// other than operator-instruction entries. A run-start fold that applies a
+/// target no run start applied (here the run is started without resolving
+/// its run start) inserts a snapshot and takes no entry row out, so a
+/// compactor that takes out exactly two rows (its summary takes one back)
+/// leaves as many rows as there were. Its own rebuild still shrank the
+/// transcript, so the rewrite commits and the reloaded graph validates.
 #[tokio::test]
 async fn the_first_run_start_fold_commits_when_its_compaction_removes_two_rows() {
     let client = Arc::new(FoldClient::default());
@@ -1314,10 +1316,8 @@ async fn the_first_run_start_fold_commits_when_its_compaction_removes_two_rows()
         .set_session_instruction(activate("tone", 1, "Answer formally."))
         .unwrap();
     compactor.arm(1);
-    assert_eq!(
-        apply_and_run(&mut agent, "next").await,
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
-    );
+    // No run start resolved the target: the run is started directly.
+    agent.run("next".into()).await.unwrap();
     assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
     assert_eq!(
         compactor.last_discarded(),
@@ -1435,8 +1435,8 @@ async fn a_mid_run_compaction_keeps_the_pending_tail_request_an_entry_follows() 
 }
 
 /// A run-start fold applies the recorded target, and an empty folded set
-/// leaves no entry row. A leading-prefix-only model takes a pending revoke
-/// of its only slot this way, although the entry row the fold takes out
+/// leaves no entry row. A pending revoke of the only slot that no run start
+/// applied is taken this way, although the entry row the fold takes out
 /// still had that slot in effect: the rewrite's record validates, so a
 /// compaction that leaves no snapshot cannot be refused merely because the
 /// rows it takes out had an instruction in effect.
@@ -1464,10 +1464,8 @@ async fn a_run_start_fold_of_a_fully_revoked_target_leaves_no_entry_row() {
         .set_session_instruction(revoke("tone", 2))
         .unwrap();
     compactor.arm(1);
-    assert_eq!(
-        apply_and_run(&mut agent, "second").await,
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
-    );
+    // No run start resolved the revoke: the run is started directly.
+    agent.run("second".into()).await.unwrap();
     assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
 
     let messages = agent.session().messages().to_vec();
@@ -1615,9 +1613,9 @@ async fn chatgpt_backend_session_defers_every_entry_with_lowering_unavailable() 
 
 /// The snapshot a compaction folds the session's entry rows into is
 /// observed once its rewrite commits: one `operator_instructions_applied` of
-/// kind snapshot, projected from the snapshot row. On a model that lowers
-/// System rows only in the leading prefix the run start defers, so no delta
-/// is observed; the fold at that run's first request applies the target.
+/// kind snapshot, projected from the snapshot row. Here no run start
+/// resolved the target, so no delta is observed; the fold at the run's
+/// first request applies it.
 #[tokio::test]
 async fn operator_instructions_applied_is_published_when_a_fold_commits() {
     let client = Arc::new(FoldClient::default());
@@ -1634,12 +1632,6 @@ async fn operator_instructions_applied_is_published_when_a_fold_commits() {
         .set_session_instruction(activate("tone", 1, "Answer formally."))
         .unwrap();
     compactor.arm(1);
-    assert_eq!(
-        agent
-            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
-            .unwrap(),
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
-    );
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(512);
     agent
         .run_with_events("next".into(), event_tx)
@@ -1689,4 +1681,148 @@ async fn operator_instructions_applied_is_published_when_a_fold_commits() {
     assert!(run_id.is_some(), "the fold at a run start names that run");
     assert_eq!(active.as_slice(), snapshot.active());
     assert!(changes.is_empty(), "a snapshot carries no changes");
+}
+
+/// A session of a model that carries System rows only in the leading prefix
+/// holds an own entry after conversation rows. Its compaction asks for a
+/// summary whose request holds no operator-instruction entry row, so the
+/// summary request needs no placement of its own, and the fold leaves the
+/// instruction in effect in one snapshot inside the leading System prefix.
+#[tokio::test]
+async fn the_summary_request_of_a_prefix_only_session_with_a_late_entry_holds_no_entry_row() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut session = conversed_session();
+    // The entry of a recorded target, applied where a model that carries
+    // System rows anywhere applies it: after the conversation rows.
+    session
+        .set_session_instruction(activate("tone", 1, "Answer warmly."))
+        .unwrap();
+    assert!(matches!(
+        session
+            .apply_run_start_instructions(
+                InstructionRunStart::FreshRun,
+                InstructionLowering::MidConversation,
+                None,
+            )
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    exchange(&mut session, "and now", "still fine");
+    let late_entry = entry_index(session.messages()).expect("the session's own entry");
+    assert!(
+        late_entry > 1,
+        "the entry stands after conversation rows: {late_entry}"
+    );
+    let mut agent = build_agent(
+        session,
+        &client,
+        &compactor,
+        InstructionLowering::LeadingPrefixOnly,
+    )
+    .await;
+    compactor.arm(1);
+    apply_and_run(&mut agent, "next").await;
+    assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
+
+    let summaries = client.summaries();
+    assert_eq!(summaries.len(), 1);
+    assert_carries_no_instruction_body("the summary request", &summaries[0]);
+    assert!(
+        summaries[0]
+            .iter()
+            .skip_while(|message| matches!(message, Message::System(_)))
+            .all(|message| !matches!(message, Message::System(_))),
+        "the summary request holds no System row after a conversation row: {:?}",
+        summaries[0]
+    );
+
+    let messages = agent.session().messages().to_vec();
+    let entries = entry_identities(&messages);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind(), InstructionEntryKind::Snapshot);
+    let first_non_system = messages
+        .iter()
+        .position(|message| !matches!(message, Message::System(_)))
+        .unwrap();
+    assert!(entry_index(&messages).unwrap() < first_non_system);
+    assert!(entry_row(&messages).content.contains("Answer warmly."));
+    let request = client.requests().pop().unwrap();
+    assert!(
+        request
+            .iter()
+            .skip_while(|message| matches!(message, Message::System(_)))
+            .all(|message| !matches!(message, Message::System(_))),
+        "the request after the fold holds every System row in its leading prefix"
+    );
+}
+
+/// On a model that lowers System rows only inside the leading prefix a
+/// fresh run start applies the pending change in an entry at the transcript
+/// tail, and a compaction at that run's first request then folds it: the
+/// transcript keeps one snapshot inside the leading System prefix, the
+/// request carries it there, and nothing is pending.
+#[tokio::test]
+async fn a_run_start_entry_and_the_fold_at_that_runs_first_request_leave_one_snapshot() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        &compactor,
+        InstructionLowering::LeadingPrefixOnly,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    compactor.arm(1);
+    assert_eq!(
+        apply_and_run(&mut agent, "next").await,
+        RunStartInstructionOutcome::Applied {
+            entry_sequence: 1,
+            target_generation: 1,
+        }
+    );
+    assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
+
+    let requests = client.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    let first_non_system = request
+        .iter()
+        .position(|message| !matches!(message, Message::System(_)))
+        .unwrap();
+    assert_eq!(entry_identities(request).len(), 1);
+    assert!(entry_index(request).unwrap() < first_non_system);
+    assert!(
+        request
+            .iter()
+            .skip(first_non_system)
+            .all(|message| !matches!(message, Message::System(_))),
+        "every System row of the request leads: {request:?}"
+    );
+
+    let messages = agent.session().messages().to_vec();
+    let entries = entry_identities(&messages);
+    assert_eq!(entries.len(), 1, "the fold took the run start's entry out");
+    assert_eq!(entries[0].kind(), InstructionEntryKind::Snapshot);
+    assert_eq!(entries[0].entry_sequence(), 2);
+    assert_eq!(active_slots(&entries[0]), vec![("tone".to_string(), 1)]);
+    assert!(entry_row(&messages).content.contains("Answer formally."));
+    let state = agent.session().instruction_target_state().unwrap().unwrap();
+    assert!(state.slots()[0].pending_body.is_none());
+    assert_eq!(state.entry_sequence(), 2);
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::NotNeeded
+    );
+    assert_eq!(
+        assert_reload_validates(agent.session()),
+        1,
+        "the compaction's record validates"
+    );
 }

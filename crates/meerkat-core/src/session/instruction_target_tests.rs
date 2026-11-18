@@ -553,7 +553,7 @@ fn resume_and_no_pending_boundary_starts_never_apply() {
 }
 
 #[test]
-fn leading_prefix_only_lowering_applies_only_on_a_system_prefix() {
+fn leading_prefix_only_lowering_applies_at_the_transcript_tail() {
     let mut fresh = fresh_session();
     fresh
         .set_session_instruction(activate("tone", 1, "Answer formally."))
@@ -581,7 +581,7 @@ fn leading_prefix_only_lowering_applies_only_on_a_system_prefix() {
     conversed
         .set_session_instruction(activate("tone", 1, "Answer formally."))
         .unwrap();
-    let document = conversed.to_persisted_bytes().unwrap();
+    let rows_before = conversed.messages().len();
     let outcome = conversed
         .apply_run_start_instructions(
             InstructionRunStart::FreshRun,
@@ -589,11 +589,18 @@ fn leading_prefix_only_lowering_applies_only_on_a_system_prefix() {
             None,
         )
         .unwrap();
-    assert_eq!(
-        outcome,
-        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
+    assert!(
+        matches!(outcome, RunStartInstructionOutcome::Applied { .. }),
+        "conversation rows do not defer the entry: {outcome:?}"
     );
-    assert_eq!(conversed.to_persisted_bytes().unwrap(), document);
+    assert_eq!(conversed.messages().len(), rows_before + 1);
+    assert!(
+        matches!(
+            conversed.messages().last(),
+            Some(Message::System(system)) if system.instruction_entry.is_some()
+        ),
+        "the entry is appended at the transcript tail; the model request places it"
+    );
 }
 
 #[test]

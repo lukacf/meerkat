@@ -244,12 +244,7 @@ fn description(name: &str) -> String {
              `peers_add` and `peers_remove` change who it can message.\n\n\
              An instructions change is in the agent's record at once. {INSTRUCTIONS_REACH} \
              The result says what became of it in `agents[0].instructions.kind`: \
-             `applies_at_next_run`; `applies_after_compaction` (the agent's model takes new \
-             instructions only at the head of what it reads, so the change does not reach \
-             it at its next run: it waits for the agent's next compaction, which a short \
-             conversation may never reach, and until then the agent follows its earlier \
-             instructions; only its host can bring the change in sooner, by resetting the \
-             agent, which discards its conversation); `applies_at_next_session` with a \
+             `applies_at_next_run`; `applies_at_next_session` with a \
              `reason` (the change \
              does not reach the agent as it runs now, and applies when it next starts a new \
              conversation); `unchanged`.\n\n\

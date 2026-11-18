@@ -5184,7 +5184,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "InstructionLowering" => Ok("Unavailable"),
         "InstructionWriteOutcome" => Ok("Duplicate"),
         "InstructionWriteRefusal" => Ok("StaleRevision"),
-        "InstructionDeferReason" => Ok("LeadingPrefixOnly"),
+        "InstructionDeferReason" => Ok("LoweringUnavailable"),
         "InstructionFoldSource" => Ok("Effective"),
         "ActivationHeadOrigin" => Ok("Own"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),

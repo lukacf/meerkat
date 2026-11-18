@@ -16256,33 +16256,36 @@ mod tests {
             )
             .expect("an entry beside the prompt");
 
-        for (target, build, config) in [
-            (
-                "a leading-prefix-only model",
+        // A wire that carries one leading System row takes no entry: the
+        // resumed build is refused.
+        let Err(error) = factory
+            .build_agent(resume("gpt-5.5", beside_the_prompt), &chatgpt_config)
+            .await
+        else {
+            panic!("a resumed build on the ChatGPT backend must be refused");
+        };
+        assert!(
+            matches!(
+                &error,
+                BuildAgentError::Config(message)
+                    if message.contains("cannot represent the operator-instruction entries")
+            ),
+            "unexpected build error on the ChatGPT backend: {error}"
+        );
+
+        // A model that lowers System rows only inside the leading prefix
+        // resumes a session whose own entry stands after a conversation row:
+        // its request places the entry there.
+        factory
+            .build_agent(
                 resume(
                     "custom-prefix-model",
                     after_conversation("custom-prefix-model"),
                 ),
                 &api_config,
-            ),
-            (
-                "the ChatGPT backend",
-                resume("gpt-5.5", beside_the_prompt),
-                &chatgpt_config,
-            ),
-        ] {
-            let Err(error) = factory.build_agent(build, config).await else {
-                panic!("a resumed build on {target} must be refused");
-            };
-            assert!(
-                matches!(
-                    &error,
-                    BuildAgentError::Config(message)
-                        if message.contains("cannot represent the operator-instruction entries")
-                ),
-                "unexpected build error on {target}: {error}"
-            );
-        }
+            )
+            .await
+            .expect("a leading-prefix-only model resumes the session");
 
         factory
             .build_agent(

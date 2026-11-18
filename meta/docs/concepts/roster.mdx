@@ -357,8 +357,8 @@ Available from Meerkat Meta 0.9.15.
 An agent's instructions (`additional_instructions` in its spec) are part of
 the first prompt of its conversation, and a restart resumes that
 conversation as it stands. When the text changes afterwards, the change
-reaches the agent at its next run, or later on a model that takes a system
-instruction only ahead of the conversation (see "What to know" below); a
+reaches the agent at its next run, on every model that takes a system
+instruction (see "What to know" below for the one wire that takes none); a
 run that starts within moments of the
 change may still use the earlier instructions; earlier instructions are never
 rewritten. The agent keeps its conversation: the whole current text arrives
@@ -452,33 +452,43 @@ What to know:
   lift with work already queued may start that run before the write is
   tried; a lift, a start, a warm reload and a placed member do not pass
   this step; and the wake only tries the write, it does not guarantee it.
-- **Models that take a system instruction only ahead of the conversation**
-  apply the change once a compaction at a run's first request carries it,
-  or with a fresh conversation. The update's result says
-  `applies_after_compaction`, and `meta/instruction_status` reports such a
-  member's slot with `leading_prefix_only_lowering`. A model whose wire
-  carries no system row besides its prompt applies it only with a fresh
-  conversation. That compaction may never come by itself: a conversation is
-  compacted only when it reaches its compaction threshold (see `compaction`
-  in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)),
-  never after a time or a number of turns, and until then the agent goes on
-  following its earlier instructions. `meta/reset` is available for every
-  agent that is not archived: it
-  starts the agent on a fresh conversation, built from the current text,
-  and gives the earlier conversation up. A respawn (`meta/respawn`) and an
-  archive followed by an unarchive keep the conversation and do not bring
-  the change into effect. In the catalog of this release these models are
-  every Gemini model, the Anthropic models up to and including
-  `claude-opus-4-7`, `claude-sonnet-5` and `claude-haiku-4-5`, and the
-  OpenAI models `gpt-live-1` and `gpt-live-1-codex`; a model the catalog
-  does not know is treated the same way. Newer Anthropic models and the
-  other OpenAI models take the change at the agent's next run, except an
-  OpenAI model served through the ChatGPT backend (`chatgpt_backend`): its
-  wire is the one that carries no system row besides the prompt. A binding
-  the configuration does not resolve, or an OpenAI backend kind this
-  version does not know, is not taken to carry a system row after
-  conversation rows either. `meta/instruction_status` tells for a given
-  agent.
+- **Every model that takes a system instruction applies the change at the
+  agent's next run**, on the same conversation. A model that takes one after
+  conversation rows is asked with the entry where the run started. A model
+  that takes one only ahead of the conversation (a model whose catalog
+  capability `supports_mid_conversation_system_messages` is `false`,
+  `claude-haiku-4-5` or `gemini-3.5-flash` for instance, and a model the
+  catalog does not know; no provider name decides it) is asked
+  with the entry ahead of the conversation, after the prompt: the
+  conversation Meerkat keeps is the same on both, with the entry where the
+  run started, and nothing in it is rewritten. Nothing has to be compacted,
+  reset or respawned, and a respawn (`meta/respawn`) or an archive followed
+  by an unarchive, which keep the conversation, change nothing in this: the
+  next run follows the change. On such a model the first request after a
+  change is as a rule not served from the provider's prompt cache, because
+  what stands ahead of the conversation changed; later requests are.
+- **One wire takes none.** An OpenAI model served through the ChatGPT
+  backend (`chatgpt_backend`) is asked with no system row besides its
+  prompt, so a change applies only with a fresh conversation: the update's
+  result says `applies_at_next_session` with the reason
+  `lowering_unavailable`, and `meta/instruction_status` reports the slot
+  `pending` with the same reason. An OpenAI binding the configuration does
+  not resolve, or an OpenAI backend kind this version does not know, is
+  treated the same way. `meta/reset` is available for every agent that is not
+  archived: it starts the agent on a fresh conversation, built from the
+  current text, and gives the earlier conversation up.
+  `meta/instruction_status` tells for a given agent.
+- **An open voice channel** reads the agent's instructions when it is
+  opened: a change reaches the agent's runs as said above, and the channel
+  when it is next opened.
+- **An earlier gateway** applied a change on a model that takes a
+  system instruction only ahead of the conversation only once a compaction
+  at a run's first request carried it, which a conversation under its
+  compaction threshold never reaches; its update answered
+  `applies_after_compaction` and its status read
+  `leading_prefix_only_lowering`. After an upgrade a change that was waiting
+  applies at the agent's first run. Do not go back to such a gateway with
+  the same state: see the upgrade notes.
 - **A change made while the gateway was down** (the usual way to edit a
   configuration) is recorded after the gateway starts. For a configured
   agent: when the gateway registers it, at its start for the agents its
@@ -521,17 +531,19 @@ answer; a retry of the same request states none. The kinds:
   instructions). For an agent that has no conversation yet,
   nothing is recorded: its first run starts from the current text, unless
   that run was already being started when the update arrived.
-- `applies_after_compaction`: the change is recorded; the agent's model
-  takes a system instruction only ahead of the conversation, so the change
-  waits for a compaction at the start of a run, which a short conversation
-  may never reach. It is also the answer when how the agent's model takes
-  one could not be read: an update never answers `applies_at_next_run` for
-  an agent with a conversation without having read it.
+- `applies_after_compaction`: not answered any more. An earlier gateway
+  answered it for an agent whose model takes a system instruction
+  only ahead of the conversation; such an agent is now answered
+  `applies_at_next_run`. The value stays in the vocabulary.
 - `applies_at_next_session`, with a `reason`: the change is not recorded,
   or cannot reach this conversation, and applies from the agent's next
   fresh conversation. The reasons are `prepared_authorization_required`,
   `slot_limit_exceeded`, `active_set_budget_exceeded`, `body_too_large`,
-  `lowering_unavailable` and `record_unavailable` (the mob's record could
+  `lowering_unavailable` (the agent's model is asked with no system row
+  besides its prompt; it is also the answer when how the agent's model
+  takes a system instruction could not be read: an update never answers
+  `applies_at_next_run` for an agent with a conversation without having
+  read it) and `record_unavailable` (the mob's record could
   not be read or written now; the change is recorded by the agent's next
   update of its instructions, or at its first delivery or change after
   the gateway's next start).
@@ -549,16 +561,15 @@ the agent; while the agent is in a run, the write waits until that run has
 ended; what happens when that write fails is under "What to know"
 above. The slot then reads one of:
 `{"state": "pending", "reason": "awaiting_run_start"}`, a change that the
-agent's next run puts in effect, on a model that takes a system instruction
-after conversation rows;
-`{"state": "pending", "reason": "leading_prefix_only_lowering"}`, a change
-that is recorded and not yet in effect, on a model that takes a system
-instruction only ahead of the conversation; `{"state": "effective"}`, in
+agent's next run puts in effect; `{"state": "effective"}`, in
 effect. These are not all the values: Meerkat has more reasons
 (`session_unborn` for an agent that has no conversation yet (its first run
 starts from the current instructions),
 `lowering_unavailable` for a model whose wire carries no system row besides
-its prompt), a slot can read `blocked` with a reason of its own, and the
+its prompt, and for a conversation whose read does not tell how its model
+takes one, and `leading_prefix_only_lowering`, which an earlier gateway
+reported for a change that waited for a compaction and which is not
+reported any more), a slot can read `blocked` with a reason of its own, and the
 list of reasons can grow, so keep a reason you do not know as it is.
 
 The update of the spec itself always stands.

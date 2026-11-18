@@ -3400,38 +3400,43 @@ mod tests {
             ))
         };
 
-        for lowering in [
-            meerkat_core::InstructionLowering::LeadingPrefixOnly,
-            meerkat_core::InstructionLowering::Unavailable,
-        ] {
-            let (client, policy) = swap(lowering)?;
-            match service
-                .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
-                .await
-            {
-                Err(SessionError::Agent(meerkat_core::error::AgentError::ConfigError(message)))
-                    if message.contains("cannot represent the operator-instruction entries") => {}
-                other => {
-                    return Err(format!(
-                        "a {lowering:?} target must be refused typed, got {other:?}"
-                    ));
-                }
-            }
-            assert_eq!(
-                service
-                    .live_session_llm_identity(&created.session_id)
-                    .await
-                    .map_err(|err| err.to_string())?,
-                durable,
-                "a refused swap changes nothing"
-            );
-        }
-
-        let (client, policy) = swap(meerkat_core::InstructionLowering::MidConversation)?;
-        service
+        // A wire that carries one leading System row takes no entry.
+        let lowering = meerkat_core::InstructionLowering::Unavailable;
+        let (client, policy) = swap(lowering)?;
+        match service
             .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
             .await
-            .map_err(|err| format!("a target that lowers entries anywhere is admitted: {err}"))?;
+        {
+            Err(SessionError::Agent(meerkat_core::error::AgentError::ConfigError(message)))
+                if message.contains("cannot represent the operator-instruction entries") => {}
+            other => {
+                return Err(format!(
+                    "a {lowering:?} target must be refused typed, got {other:?}"
+                ));
+            }
+        }
+        assert_eq!(
+            service
+                .live_session_llm_identity(&created.session_id)
+                .await
+                .map_err(|err| err.to_string())?,
+            durable,
+            "a refused swap changes nothing"
+        );
+
+        // A target that lowers System rows only inside the leading prefix
+        // carries the session's own entry: its request places it there. A
+        // target that lowers them anywhere carries it where it stands.
+        for lowering in [
+            meerkat_core::InstructionLowering::LeadingPrefixOnly,
+            meerkat_core::InstructionLowering::MidConversation,
+        ] {
+            let (client, policy) = swap(lowering)?;
+            service
+                .hot_swap_session_llm_identity(&created.session_id, client, durable.clone(), policy)
+                .await
+                .map_err(|err| format!("a {lowering:?} target is admitted: {err}"))?;
+        }
         Ok(())
     }
 

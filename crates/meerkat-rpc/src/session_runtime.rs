@@ -28733,12 +28733,13 @@ mod tests {
 
     /// A live model change is refused, before any client for its target is
     /// built, where the target cannot carry the operator-instruction entry
-    /// rows the session wrote itself where they stand. The session's entry
-    /// stands after its first turn's rows: a model that lowers System rows
-    /// only in the leading prefix cannot carry it, nor can the ChatGPT
-    /// backend, whose wire takes one leading System row. Each refusal is
-    /// typed, builds no client for the target (a build resolves the
-    /// target's credential and publishes its lease), and changes nothing.
+    /// rows the session wrote itself. The session's entry stands after its
+    /// first turn's rows: the ChatGPT backend, whose wire takes one leading
+    /// System row, cannot carry it. The refusal is typed, builds no client
+    /// for the target (a build resolves the target's credential and
+    /// publishes its lease), and changes nothing. A model that lowers
+    /// System rows only in the leading prefix carries it: the session's
+    /// request places the entry there, so that change is accepted.
     #[tokio::test]
     async fn a_swap_is_refused_before_its_client_is_built_where_the_target_cannot_carry_own_entries()
      {
@@ -28776,10 +28777,7 @@ mod tests {
             model: Some("custom-prefix-model".to_string()),
             ..Default::default()
         };
-        for (target, overrides) in [
-            ("a leading-prefix-only model", prefix_only),
-            ("the ChatGPT backend", swap_onto("chatgpt")),
-        ] {
+        for (target, overrides) in [("the ChatGPT backend", swap_onto("chatgpt"))] {
             let error = runtime
                 .hot_swap_llm_client(&session_id, &overrides)
                 .await
@@ -28804,6 +28802,20 @@ mod tests {
                 "a refused swap onto {target} changes nothing"
             );
         }
+
+        runtime
+            .hot_swap_llm_client(&session_id, &prefix_only)
+            .await
+            .expect("a leading-prefix-only model carries the session's own entry");
+        assert_eq!(
+            runtime
+                .current_materialized_llm_identity(&session_id)
+                .await
+                .unwrap()
+                .model,
+            "custom-prefix-model",
+            "the accepted swap is the session's model now"
+        );
     }
 
     #[tokio::test]

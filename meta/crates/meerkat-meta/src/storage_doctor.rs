@@ -69,6 +69,18 @@
 //!   version 2 and later in the same mob stores
 //!   (`meerkat_mob::MobStorage::read_identity_record_rows`).
 //!
+//! And what a host counts before going back to any earlier release:
+//!
+//! - [`FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION`]: the sessions
+//!   of `runtime.sqlite` whose stored transcript holds the session's own
+//!   operator-instruction entry after a conversation row
+//!   (`meerkat_store::doctor::operator_instruction_entry_after_conversation_sessions`),
+//!   with the models their documents record. An earlier release refuses to
+//!   resume such a session when its model takes a system instruction only
+//!   ahead of the conversation. The store records no model capability, so
+//!   the count names the models and cannot tell which of the sessions such
+//!   a release refuses.
+//!
 //! Each census reports one finding for the state directory (its `path`) with
 //! the total, 0 included, and one more for each file that counts above 0 or
 //! could not be counted (its `path` is that file). Every finding is Info and
@@ -213,6 +225,15 @@ pub const FINDING_CONSOLE_SESSION_RECORD_UNREADABLE: &str = "console-session-rec
 /// only. Core's code and census rule, shared with `rkat storage doctor`.
 pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str =
     meerkat_store::doctor::FINDING_OPERATOR_INSTRUCTION_ENVELOPE;
+/// The count of the sessions in `runtime.sqlite` whose stored transcript
+/// holds the session's own operator-instruction entry after a conversation
+/// row, with the models their documents record. An earlier release refuses
+/// to resume such a session when its model takes a system instruction only
+/// ahead of the conversation, so a host counts them before going back (see
+/// the module docs). Info, counts only. Core's code and census rule, shared
+/// with `rkat storage doctor`.
+pub const FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION: &str =
+    meerkat_store::doctor::FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION;
 /// The rollback census of the mob events at the operator-instruction mob
 /// event schema in the state directory's own mob journal and its child mob
 /// journals, which a release on Core 0.9.8 or earlier refuses (see the
@@ -2202,6 +2223,7 @@ const ROLLBACK_TARGET_SENTENCE: &str = "A release on Core 0.9.8 or earlier (Meta
 /// schema version 2 and later. Read-only, Info, counts only.
 fn census_rollback(state_dir: &Path, out: &mut StorageDiagnosis) {
     census_operator_instruction_envelope(state_dir, out);
+    census_operator_instruction_late_entries(state_dir, out);
     let stores = RollbackCensusStores::of(state_dir);
     census_operator_instruction_mob_events(state_dir, &stores, out);
     census_identity_store_rows(state_dir, &stores, out);
@@ -2337,6 +2359,70 @@ fn count_operator_instruction_sessions(db_path: &Path) -> Result<usize, String> 
     meerkat_store::doctor::operator_instruction_envelope_sessions(&snapshot)
         .map(|sessions| sessions.len())
         .map_err(|error| error.to_string())
+}
+
+/// The count of the sessions in `runtime.sqlite` that hold their own
+/// operator-instruction entry after a conversation row, by Core's census
+/// rule: one finding on the runtime store when it holds any, with the
+/// count and the count per recorded model, and one when the store could not
+/// be read. A directory without such a session, or without a runtime store,
+/// gets no finding.
+fn census_operator_instruction_late_entries(state_dir: &Path, out: &mut StorageDiagnosis) {
+    let runtime = state_dir.join(crate::storage_layout::RUNTIME_DB_FILE_NAME);
+    if !runtime.is_file() {
+        return;
+    }
+    let message = match late_entry_sessions_by_model(&runtime) {
+        Ok(models) if models.is_empty() => return,
+        Ok(models) => {
+            let sessions: usize = models.values().sum();
+            format!(
+                "{sessions} session(s) of this runtime store hold their own \
+                 operator-instruction entry after a conversation row ({}): an earlier release, \
+                 one that does not place such an entry ahead of the conversation in the model \
+                 request, refuses to resume each of them whose model takes a system \
+                 instruction only ahead of the conversation (the model's capability \
+                 `supports_mid_conversation_system_messages` is false, or the catalog does \
+                 not know the model), so its identity does not run there; it serves the \
+                 others. The store records no model capability, so this count cannot tell \
+                 which of them such a release refuses",
+                census_map_display(&models)
+            )
+        }
+        Err(error) => format!(
+            "the sessions of this runtime store that hold their own operator-instruction entry \
+             after a conversation row could not be counted: {error}"
+        ),
+    };
+    out.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+            message,
+        )
+        .with_path(runtime),
+    );
+}
+
+/// The sessions of the runtime store at `db_path` that hold their own
+/// operator-instruction entry after a conversation row, counted per model
+/// their documents record, in one read snapshot.
+fn late_entry_sessions_by_model(db_path: &Path) -> Result<BTreeMap<String, usize>, String> {
+    let conn = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+        .map_err(|error| error.to_string())?;
+    let snapshot = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let sessions =
+        meerkat_store::doctor::operator_instruction_entry_after_conversation_sessions(&snapshot)
+            .map_err(|error| error.to_string())?;
+    let mut models = BTreeMap::new();
+    for model in sessions.into_values() {
+        *models
+            .entry(model.unwrap_or_else(|| "model not recorded".to_string()))
+            .or_insert(0) += 1;
+    }
+    Ok(models)
 }
 
 /// The census of the mob events at the operator-instruction mob event
@@ -3908,6 +3994,162 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// Before going back to an earlier release a host counts the sessions
+    /// such a release may refuse to resume. The doctor reports, by Core's
+    /// census rule, the sessions of runtime.sqlite whose stored transcript
+    /// holds the session's OWN operator-instruction entry after a
+    /// conversation row: one finding on the runtime store, Info, with the
+    /// count, the models their documents record and how many sessions of
+    /// each, and the sentence that the store cannot tell which of them such
+    /// a release refuses. It names no session. A session whose entry stands
+    /// ahead of the conversation and a session that holds another session's
+    /// entry are not counted; a directory without such a session has no
+    /// such finding; and the doctor changes no file.
+    #[test]
+    fn the_doctor_counts_the_sessions_with_their_own_late_instruction_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("with");
+        std::fs::create_dir_all(&state).unwrap();
+        let runtime = state.join("runtime.sqlite");
+        let id = || Session::new().id().to_string();
+        let (late, unnamed, leading, copied, other) = (id(), id(), id(), id(), id());
+        let prompt =
+            || serde_json::json!({"role": "system", "content": "You are a careful assistant."});
+        let question = || serde_json::json!({"role": "user", "content": "hello"});
+        let entry = |origin: &str| {
+            serde_json::json!({
+                "role": "system",
+                "content": "[meerkat-operator-instructions-v1]",
+                "instruction_entry": {
+                    "render_version": 1,
+                    "origin_session_id": origin,
+                    "entry_sequence": 1,
+                    "kind": "delta",
+                    "target_generation": 1,
+                },
+            })
+        };
+        let document = |rows: Vec<serde_json::Value>, metadata: serde_json::Value| {
+            serde_json::json!({
+                "version": census_envelope(),
+                "messages": rows,
+                "metadata": metadata,
+            })
+            .to_string()
+            .into_bytes()
+        };
+        let naming = |provider: &str, model: &str| serde_json::json!({"session_metadata": {"provider": provider, "model": model}});
+        {
+            let conn = create_census_runtime_tables(&runtime);
+            // Head-less documents: one with its own late entry on a named
+            // model, one with its entry ahead of the conversation.
+            for (session, body) in [
+                (
+                    &late,
+                    document(
+                        vec![prompt(), question(), entry(&late)],
+                        naming("gemini", "gemini-3.5-flash"),
+                    ),
+                ),
+                (
+                    &leading,
+                    document(
+                        vec![prompt(), entry(&leading), question()],
+                        naming("gemini", "gemini-3.5-flash"),
+                    ),
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions (session_id, session_json) VALUES (?1, ?2)",
+                    rusqlite::params![session, body],
+                )
+                .unwrap();
+            }
+            // WholeBlob bodies: one with its own late entry and no model in
+            // its metadata, one that holds another session's late entry.
+            for (session, blob, body) in [
+                (
+                    &unnamed,
+                    "body-unnamed",
+                    document(
+                        vec![prompt(), question(), entry(&unnamed)],
+                        serde_json::json!({}),
+                    ),
+                ),
+                (
+                    &copied,
+                    "body-copied",
+                    document(
+                        vec![prompt(), question(), entry(&other)],
+                        naming("gemini", "gemini-3.5-flash"),
+                    ),
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![blob, body],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO runtime_whole_blob_authority (runtime_id, session_id, \
+                     blob_sha256) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![format!("rt:session:{session}"), session, blob],
+                )
+                .unwrap();
+            }
+        }
+        let before = file_facts(&state);
+
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[&state]), None);
+
+        assert_eq!(file_facts(&state), before, "the doctor changes no file");
+        let findings = census_findings(
+            &diagnosis,
+            FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION,
+        );
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].0, runtime);
+        let message = &findings[0].1;
+        assert!(
+            message.starts_with(
+                "2 session(s) of this runtime store hold their own operator-instruction entry \
+                 after a conversation row (gemini/gemini-3.5-flash: 1, model not recorded: 1): "
+            ),
+            "{message}"
+        );
+        for said in [
+            "refuses to resume",
+            "supports_mid_conversation_system_messages",
+            "cannot tell",
+        ] {
+            assert!(
+                message.contains(said),
+                "the finding says {said:?}: {message}"
+            );
+        }
+        for session in [&late, &unnamed, &leading, &copied, &other] {
+            assert!(
+                !message.contains(session.as_str()),
+                "the finding names no session: {message}"
+            );
+        }
+
+        // A directory whose sessions hold no late entry of their own.
+        let quiet = temp.path().join("without");
+        std::fs::create_dir_all(&quiet).unwrap();
+        write_census_runtime_store(&quiet.join("runtime.sqlite"));
+        let diagnosis = diagnose_state_dir_blocking(&scope(&[&quiet]), None);
+        assert!(
+            census_findings(
+                &diagnosis,
+                FINDING_OPERATOR_INSTRUCTION_ENTRY_AFTER_CONVERSATION
+            )
+            .is_empty(),
+            "no such session, no such finding"
+        );
     }
 
     /// Row (RED): the rollback census of a state directory counts, by Core's

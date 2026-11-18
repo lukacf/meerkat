@@ -659,7 +659,8 @@ printf '%s\n' \
   'echo "Error: Invariant AuditEffectiveChangesOnlyAtRunStart is violated."' \
   'echo "Error: Invariant AuditMidRunFoldKeepsEffective is violated."' \
   'echo "Error: Invariant AuditSessionWriteNeverLowersRevision is violated."' \
-  'echo "Error: Invariant AuditPrefixOnlyAppliesInLeadingPrefix is violated."' \
+  'echo "Error: Invariant AuditNothingAppliesWithoutALowering is violated."' \
+  'echo "Error: Invariant AuditFreshRunStartLeavesNothingPending is violated."' \
   'echo "Error: Invariant NotAuditWitnessReboundAfterRelease is violated."' \
   'echo "Error: Invariant AuditMobTargetBoundUntilReleased is violated."' \
   'echo "Error: Invariant AuditTargetWithinBudget is violated."' \

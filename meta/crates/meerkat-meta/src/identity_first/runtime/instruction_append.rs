@@ -301,22 +301,24 @@ fn outcome_of_refusal(error: &OperatorInstructionError) -> InstructionOutcome {
 
 /// When a recorded change reaches an agent that has a conversation, by how
 /// its model takes an appended system instruction: `lowering`, as the
-/// agent's session service read it. Only a model read as taking one after
-/// conversation rows is answered the next run. A lowering that could not be
-/// read (`None`: no session service, a read that failed, a service that
-/// cannot tell) is never answered so: it is answered as a model that takes
-/// one only ahead of the conversation is, the cautious one of the answers
-/// there are. The instruction status read is the authority for whether the
-/// change is in effect.
+/// agent's session service read it. Every model whose wire carries one takes
+/// it at the agent's next run: a model that takes a system instruction after
+/// conversation rows where it stands, and a model that takes one only ahead
+/// of the conversation there, where its request places it. Only a wire that
+/// carries none (one leading system row, the agent's prompt) waits for a
+/// fresh conversation. A lowering that could not be read (`None`: no session
+/// service, a read that failed, a service that cannot tell) is never
+/// answered the next run: it is answered as that wire is, the one answer
+/// that promises nothing the agent may not get. The instruction status read
+/// is the authority for whether the change is in effect.
 fn applies_with_lowering(lowering: Option<InstructionLowering>) -> InstructionOutcome {
     match lowering {
-        Some(InstructionLowering::MidConversation) => InstructionOutcome::AppliesAtNextRun,
-        Some(InstructionLowering::Unavailable) => InstructionOutcome::AppliesAtNextSession {
+        Some(InstructionLowering::MidConversation | InstructionLowering::LeadingPrefixOnly) => {
+            InstructionOutcome::AppliesAtNextRun
+        }
+        Some(InstructionLowering::Unavailable) | None => InstructionOutcome::AppliesAtNextSession {
             reason: InstructionNextSessionReason::LoweringUnavailable,
         },
-        Some(InstructionLowering::LeadingPrefixOnly) | None => {
-            InstructionOutcome::AppliesAfterCompaction
-        }
     }
 }
 
@@ -479,9 +481,9 @@ impl IdentityRuntime {
             }
         }
 
-        // Recorded. When it applies is the agent's model's to say: one that
-        // takes a system instruction after conversation rows applies it at
-        // its next run start.
+        // Recorded. When it applies is the agent's model's to say: every
+        // model whose wire carries a system instruction applies it at its
+        // next run start.
         self.applies_when(conversation.as_ref()).await
     }
 
@@ -1146,30 +1148,32 @@ mod tests {
     }
 
     /// When a recorded change reaches an agent that has a conversation:
-    /// only a model read as taking a system instruction after conversation
-    /// rows is answered the next run. A lowering that could not be read is
-    /// answered as a model that takes one only ahead of the conversation
-    /// is, never as the next run.
+    /// every model read as taking a system instruction is answered the next
+    /// run, whether it takes one after conversation rows or only ahead of
+    /// the conversation. A wire read as carrying none, and a lowering that
+    /// could not be read, are answered the next fresh conversation, never
+    /// the next run.
     #[test]
     fn an_unreadable_lowering_never_answers_the_next_run() {
-        assert_eq!(
-            applies_with_lowering(Some(InstructionLowering::MidConversation)),
-            InstructionOutcome::AppliesAtNextRun
-        );
-        assert_eq!(
-            applies_with_lowering(Some(InstructionLowering::LeadingPrefixOnly)),
-            InstructionOutcome::AppliesAfterCompaction
-        );
-        assert_eq!(
-            applies_with_lowering(None),
-            InstructionOutcome::AppliesAfterCompaction
-        );
-        assert_eq!(
-            applies_with_lowering(Some(InstructionLowering::Unavailable)),
-            InstructionOutcome::AppliesAtNextSession {
-                reason: InstructionNextSessionReason::LoweringUnavailable
-            }
-        );
+        for lowering in [
+            InstructionLowering::MidConversation,
+            InstructionLowering::LeadingPrefixOnly,
+        ] {
+            assert_eq!(
+                applies_with_lowering(Some(lowering)),
+                InstructionOutcome::AppliesAtNextRun,
+                "{lowering:?}"
+            );
+        }
+        for lowering in [Some(InstructionLowering::Unavailable), None] {
+            assert_eq!(
+                applies_with_lowering(lowering),
+                InstructionOutcome::AppliesAtNextSession {
+                    reason: InstructionNextSessionReason::LoweringUnavailable
+                },
+                "{lowering:?}"
+            );
+        }
     }
 
     /// The outcome's wire form: a `kind`, and the reason beside it.

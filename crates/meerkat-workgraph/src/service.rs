@@ -192,10 +192,14 @@ pub struct WorkGraphCommitNotice {
 /// A host installs one with [`WorkGraphService::with_commit_observer`]; the
 /// copies of that service share it. It is called after the store answered
 /// the write, once for each item or binding whose revision the write
-/// advanced, and never for a refused write or a read. The call is
-/// synchronous, on the path of the write: an observer must not block and
-/// must not write. It is told identifiers; what it needs of the state it
-/// reads from the store, which holds the write by then.
+/// advanced, and never for a refused write or a read. One write is told for
+/// less than it advanced: the close of an item also stops the item's
+/// bindings, and it is told for the item alone. A link between two items
+/// and the writes of an execution binding advance neither an item nor an
+/// attention binding and are not told. The call is synchronous, on the
+/// path of the write: an observer must not block and must not write. It is
+/// told identifiers; what it needs of the state it reads from the store,
+/// which holds the write by then.
 pub trait WorkGraphCommitObserver: Send + Sync {
     fn committed(&self, notice: WorkGraphCommitNotice);
 }
@@ -367,7 +371,9 @@ impl WorkGraphService {
         let (realm_id, namespace) =
             self.scope(request.realm_id.clone(), request.namespace.clone())?;
         let (item, event) = WorkGraphMachine::create_item(request, realm_id, namespace, now)?;
-        self.store.insert_item(item, event).await
+        let item = self.store.insert_item(item, event).await?;
+        self.notify_item(&item);
+        Ok(item)
     }
 
     /// Create a work item exactly once under `admission_key`.
@@ -489,7 +495,10 @@ impl WorkGraphService {
             }
         };
         match inserted {
-            WorkItemAdmissionInsert::Inserted(item) => Ok(WorkAdmissionOutcome::Created(item)),
+            WorkItemAdmissionInsert::Inserted(item) => {
+                self.notify_item(&item);
+                Ok(WorkAdmissionOutcome::Created(item))
+            }
             WorkItemAdmissionInsert::Existing {
                 item: existing,
                 admission: existing_admission,
@@ -589,6 +598,8 @@ impl WorkGraphService {
             .store
             .insert_goal(item, item_event, attention, attention_event)
             .await?;
+        self.notify_item(&item);
+        self.notify_binding(&attention);
         Ok(GoalCreateResult { item, attention })
     }
 
@@ -638,6 +649,9 @@ impl WorkGraphService {
             .store
             .insert_attention_for_existing_item(attention, request.expected_item_revision, event)
             .await?;
+        // The item's revision is proved, not advanced: the binding alone is
+        // told.
+        self.notify_binding(&attention);
         Ok(GoalCreateResult { item, attention })
     }
 
@@ -760,6 +774,7 @@ impl WorkGraphService {
             .store
             .update_attention_cas(paused, expected_previous_revision, event)
             .await?;
+        self.notify_binding(&attention);
         Ok(AttentionBindingResult { attention })
     }
 
@@ -796,6 +811,7 @@ impl WorkGraphService {
             .store
             .update_attention_cas(resumed, expected_previous_revision, event)
             .await?;
+        self.notify_binding(&attention);
         Ok(AttentionBindingResult { attention })
     }
 
@@ -964,6 +980,8 @@ impl WorkGraphService {
                 replacement_event,
             )
             .await?;
+        self.notify_binding(&previous);
+        self.notify_binding(&attention);
         Ok(AttentionReassignResult {
             previous,
             attention,
@@ -1459,6 +1477,7 @@ impl WorkGraphService {
             .claim_item_atomically(&realm_id, &namespace, request, now)
             .await?
         {
+            self.notify_item(&claimed);
             return Ok(claimed);
         }
         let terminal = self
@@ -1486,8 +1505,7 @@ impl WorkGraphService {
             .await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::release_item(item, request, now)?;
-        self.store
-            .update_item_cas(item, expected_previous_revision, event)
+        self.commit_item_cas(item, expected_previous_revision, event)
             .await
     }
 
@@ -1542,8 +1560,7 @@ impl WorkGraphService {
             }),
             ..event
         };
-        self.store
-            .update_item_cas(item, expected_previous_revision, event)
+        self.commit_item_cas(item, expected_previous_revision, event)
             .await
     }
 
@@ -1562,7 +1579,7 @@ impl WorkGraphService {
             .ok_or_else(|| WorkGraphError::not_found(realm_id, namespace, request.id.clone()))?;
         let expected = item.revision;
         let (item, event) = WorkGraphMachine::observe_lease_expiry(item, request)?;
-        self.store.update_item_cas(item, expected, event).await
+        self.commit_item_cas(item, expected, event).await
     }
 
     /// Trusted host seam for a Schedule-owned readiness sweep. The caller
@@ -1582,6 +1599,7 @@ impl WorkGraphService {
             .observe_readiness_atomically(&realm_id, &namespace, request)
             .await?
         {
+            self.notify_item(&observed);
             return Ok(observed);
         }
         self.propagate_parent_join(
@@ -1629,8 +1647,7 @@ impl WorkGraphService {
         }
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::update_item(item, request, now)?;
-        self.store
-            .update_item_cas(item, expected_previous_revision, event)
+        self.commit_item_cas(item, expected_previous_revision, event)
             .await
     }
 
@@ -1671,8 +1688,7 @@ impl WorkGraphService {
             .await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::escalate_policy(item, request, now)?;
-        self.store
-            .update_item_cas(item, expected_previous_revision, event)
+        self.commit_item_cas(item, expected_previous_revision, event)
             .await
     }
 
@@ -1687,8 +1703,7 @@ impl WorkGraphService {
         let item = self.get(realm_id, namespace, id).await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::block_item(item, expected_revision, now)?;
-        self.store
-            .update_item_cas(item, expected_previous_revision, event)
+        self.commit_item_cas(item, expected_previous_revision, event)
             .await
     }
 
@@ -1713,6 +1728,9 @@ impl WorkGraphService {
                 attention_updates,
             )
             .await?;
+        // The bindings this write stopped are the closed item's own: the
+        // item's notice stands for them.
+        self.notify_item(&closed);
         // Dependent readiness and parent joins are derived from the committed
         // graph by the next atomic claim/readiness observation. Returning from
         // this method never reports failure after the close already committed.
@@ -2123,8 +2141,7 @@ impl WorkGraphService {
             .await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::add_evidence(item, request, now)?;
-        self.store
-            .update_item_cas(item, expected_previous_revision, event)
+        self.commit_item_cas(item, expected_previous_revision, event)
             .await
     }
 
@@ -2276,9 +2293,62 @@ impl WorkGraphService {
         expected_revision: u64,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<WorkItem>, WorkGraphError> {
-        self.store
+        let reconciled = self
+            .store
             .reconcile_child_join_atomically(realm_id, namespace, parent_id, expected_revision, now)
-            .await
+            .await?;
+        // A parent that was terminal already is answered as it stands, with
+        // nothing written: only a parent this call closed is told.
+        if let Some(parent) = reconciled.as_ref()
+            && parent.revision != expected_revision
+        {
+            self.notify_item(parent);
+        }
+        Ok(reconciled)
+    }
+
+    /// One item write through the store's revision check, told to the
+    /// observer once the store answered it.
+    async fn commit_item_cas(
+        &self,
+        item: WorkItem,
+        expected_previous_revision: u64,
+        event: WorkGraphEvent,
+    ) -> Result<WorkItem, WorkGraphError> {
+        let item = self
+            .store
+            .update_item_cas(item, expected_previous_revision, event)
+            .await?;
+        self.notify_item(&item);
+        Ok(item)
+    }
+
+    /// Tell the observer, when one is installed, that a committed write
+    /// advanced `item`'s revision.
+    fn notify_item(&self, item: &WorkItem) {
+        if let Some(observer) = self.commit_observer.as_ref() {
+            observer.committed(WorkGraphCommitNotice {
+                realm_id: item.realm_id.clone(),
+                namespace: item.namespace.clone(),
+                item_id: item.id.clone(),
+                binding_id: None,
+                origin: self.commit_origin.clone(),
+            });
+        }
+    }
+
+    /// Tell the observer, when one is installed, that a committed write
+    /// advanced `binding`'s revision or made the binding.
+    fn notify_binding(&self, binding: &WorkAttentionBinding) {
+        if let Some(observer) = self.commit_observer.as_ref() {
+            observer.committed(WorkGraphCommitNotice {
+                realm_id: binding.work_ref.realm_id.clone(),
+                namespace: binding.work_ref.namespace.clone(),
+                item_id: binding.work_ref.item_id.clone(),
+                binding_id: Some(binding.binding_id.clone()),
+                origin: self.commit_origin.clone(),
+            });
+        }
     }
 }
 

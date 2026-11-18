@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - The stdio gateway now tells its host of an open durable decision without being asked: it writes the `meta/decisions/notice` (`event` `held`) of a decision the gateway's own runtime opens when it opens, and of each decision already open once when the connection starts. A member's question set (`kind` `ask_user.questions`) so reaches a host that never lists decisions. `on_decision_notice` / `onDecisionNotice` receive these notices; a `held` notice that arrives before a handler is registered is kept (the newest 1024 decisions) and handed over at registration. A host's own `meta/decisions/list` writes its notices as before, also for a decision it was already told of, so a host with a handler that also lists sees `held` twice for one decision.
+- The stdio gateway's startup warning for a Console that requires sign-in while no token issuer is trusted now also says that nobody can answer a member's `ask_user` questions in that Console: the embedding host can answer or dismiss the held sets (`gating_questions`, `gating_answer`, `gating_dismiss`), and they end `timed_out` otherwise. The gating page and the tools page say the same; nothing else changes.
 
 ## [0.9.17] - 2026-11-18
 

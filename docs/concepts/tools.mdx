@@ -448,7 +448,7 @@ the MCP server or the Web SDK.
 - **The result comes in two steps.** The call returns at once; it never waits
   for the person. Its result is
   `{"outcome": "asked", "request_id", "answer_by", "answers": [], "note"}`:
-  the questions are now with a person, `request_id` names the request and
+  the host now holds the questions, `request_id` names the request and
   `answer_by` is its deadline. The answers arrive later as an input of their
   own, labelled `ask_user_result`:
   `{"outcome", "request_id", "answers": [{"question_id", "answer"}], "note"}`,
@@ -458,7 +458,11 @@ the MCP server or the Web SDK.
   call.
 - **Outcomes.** At the call: `asked`, or `no_human_surface` when the host
   has nowhere to show the questions to a person (nothing is held, and no
-  later input follows). In the later input: `answered` (the person sent
+  later input follows). `asked` says that the host holds the questions, not
+  that a person has seen them: where a host holds them and shows them to
+  nobody, they wait until `answer_by` (for Meta see
+  [Question sets](/meta/concepts/gating#question-sets)).
+  In the later input: `answered` (the person sent
   answers; a question they left out reads `unanswered`), `dismissed` (the
   person declined to answer), `timed_out` (nobody answered before
   `answer_by`; every question reads `unanswered`) and `withdrawn` (the host

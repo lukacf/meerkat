@@ -6901,6 +6901,33 @@ async fn superseding_a_waiting_attention_continuation_tells_the_host_once() {
         1,
         "superseding the waiting continuation tells the host once"
     );
+
+    // A third continuation of the binding supersedes the second. Its
+    // admission's boundary work follows the second's, so a second telling
+    // of the first supersession would be counted by now: two supersessions
+    // are two tellings.
+    assert!(
+        adapter
+            .accept_input(
+                &sid,
+                built_attention_continuation("projection-3", "binding-1")
+            )
+            .await
+            .expect("the third hand-over is answered")
+            .is_accepted()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while told.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("superseding the second continuation tells the host");
+    assert_eq!(
+        told.load(Ordering::SeqCst),
+        2,
+        "each supersession tells the host once"
+    );
 }
 
 /// Attention continuations of two bindings do not supersede each other:
@@ -7141,6 +7168,10 @@ impl HeldFirstTurnSession {
 
     /// Let the held turn end and wait until every one of `ids` is terminal.
     /// Answers the terminals, in the order of `ids`, and the turns asked for.
+    ///
+    /// One more prompt, accepted after every listed input ended, takes the
+    /// last turn alone: a turn that a listed input started late is recorded
+    /// before it, so the turns answered are all the turns of the row.
     async fn release_and_settle(
         &self,
         ids: &[InputId],
@@ -7159,7 +7190,34 @@ impl HeldFirstTurnSession {
             .await;
             terminals.push(state.seed.terminal_outcome);
         }
-        (terminals, self.turns.lock().unwrap().clone())
+        let settling = make_prompt("the turn that settles the row");
+        let settling_id = settling.id().clone();
+        assert!(
+            self.adapter
+                .accept_input(&self.sid, settling)
+                .await
+                .expect("the settling prompt is answered")
+                .is_accepted()
+        );
+        wait_for_input_state_within(
+            &self.adapter,
+            &self.sid,
+            &settling_id,
+            Duration::from_secs(10),
+            "the settling prompt reaches a terminal",
+            |state| state.seed.terminal_outcome.is_some(),
+        )
+        .await;
+        let mut turns = self.turns.lock().unwrap().clone();
+        assert_eq!(
+            turns.pop(),
+            Some(RecordedTurn {
+                inputs: vec![settling_id],
+                projection: None,
+            }),
+            "the settling prompt takes the last turn alone: {turns:#?}"
+        );
+        (terminals, turns)
     }
 }
 
@@ -7243,6 +7301,10 @@ async fn two_attention_continuations_behind_a_running_turn_give_one_turn_for_the
 /// An attention continuation whose predecessor of the same binding is
 /// already running is not a replacement for it: the running one ends, and
 /// the later one takes the next turn.
+///
+/// The executor here accepts every turn, so this row does not show what an
+/// executor answers a projection that is no longer current when its turn
+/// is applied.
 #[tokio::test]
 async fn an_attention_continuation_behind_a_running_one_of_its_binding_takes_the_next_turn() {
     let session = HeldFirstTurnSession::new().await;

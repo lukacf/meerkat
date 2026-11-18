@@ -229,6 +229,35 @@ impl From<meerkat_core::service::TurnToolOverlayComposeError>
     }
 }
 
+/// Refuse a turn whose own overlay carries a WorkGraph attention projection
+/// that the store no longer holds as current.
+///
+/// An executor calls this with the overlay the run's input was stored with,
+/// before it starts the turn: a projection is a statement of the binding and
+/// the item at the time it was made, and a turn under one that has since been
+/// stopped, paused, reassigned or revised would call the model with authority
+/// and context the store has withdrawn. The refusal is a rejected primitive,
+/// so the runtime treats it as it treats every other failed apply. An overlay
+/// with no attention projection, and a host with no WorkGraph, pass.
+pub async fn validate_workgraph_attention_turn_overlay(
+    workgraph_service: Option<&crate::WorkGraphService>,
+    overlay: Option<&meerkat_core::service::TurnToolOverlay>,
+) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+    use meerkat_core::lifecycle::core_executor::CoreExecutorError;
+
+    let Some(workgraph_service) = workgraph_service else {
+        return Ok(());
+    };
+    let projection = crate::workgraph_attention_projection_from_overlay(overlay)
+        .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))?;
+    let Some(projection) = projection else {
+        return Ok(());
+    };
+    crate::validate_workgraph_attention_projection_current(workgraph_service, &projection)
+        .await
+        .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))
+}
+
 pub async fn inject_workgraph_attention_turn_overlay(
     session_service: &dyn meerkat_core::SessionService,
     workgraph_service: Option<&crate::WorkGraphService>,

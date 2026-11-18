@@ -14039,6 +14039,20 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 self.bridge_session_id
             )));
         }
+        // An input stored with a WorkGraph attention projection is turned
+        // away when the store no longer holds that projection as current:
+        // the member's model is not called under a binding that was stopped,
+        // paused, reassigned or revised after the input was made. It is
+        // refused before the turn's context is taken, as the first check of
+        // this apply is. The overlay injected further down is read from the
+        // store at this apply and needs no such check.
+        meerkat::surface::validate_workgraph_attention_turn_overlay(
+            self.workgraph_service.as_ref(),
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.turn_tool_overlay.as_ref()),
+        )
+        .await?;
 
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
         let queued_context = self

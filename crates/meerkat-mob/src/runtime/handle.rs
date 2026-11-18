@@ -14370,14 +14370,10 @@ impl MobHandle {
     /// that was refused or failed, a provisioner that admits no
     /// continuation, and the session's own refusal
     /// ([`MobError::MemberInputRefused`]).
-    #[cfg(feature = "runtime-adapter")]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "nothing in this crate hands a continuation over yet"
-        )
-    )]
+    ///
+    /// Its one caller is the mob's idle pursuit, which exists on native
+    /// targets only.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     pub(crate) async fn start_attention_continuation(
         &self,
         identity: &AgentIdentity,

@@ -6231,9 +6231,9 @@ async fn hand_over(
 }
 
 /// A WorkGraph attention continuation handed to a member that is seated and
-/// not materialized wakes it exactly once, as a delivery of content does,
-/// and the member then takes one turn that starts from the continuation's
-/// notice, with WorkGraph tools.
+/// not materialized brings it up: the member is live afterwards, the host
+/// prepared its build exactly once, and the member takes one turn that
+/// starts from the continuation's notice, with WorkGraph tools.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_attention_continuation_wakes_a_released_member_once_and_it_takes_one_turn() {
     let host_workgraph = attention_rows_host_workgraph();
@@ -6261,12 +6261,12 @@ async fn an_attention_continuation_wakes_a_released_member_once_and_it_takes_one
     assert_eq!(
         fixture.residency(&member),
         Some(mob_dsl::MemberMaterializationPhase::Live),
-        "the continuation woke the member"
+        "the continuation brought the member up"
     );
     assert_eq!(
         fixture.preparer.prepared_count(),
         1,
-        "the member was woken exactly once"
+        "the member's build was prepared exactly once"
     );
     assert_eq!(
         fixture.client.started_count() - started_before,

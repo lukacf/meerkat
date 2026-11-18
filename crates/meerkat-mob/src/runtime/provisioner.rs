@@ -14330,9 +14330,19 @@ impl SessionBackend {
         ) && build.workgraph_tools.is_none()
         {
             build.workgraph_namespace_grant = Some(workgraph.namespace_grant().clone());
-            build.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
-                workgraph.clone(),
-            )));
+            // The member's own copy of the service says who writes through
+            // it: its commit notices carry the member's key, lowered from
+            // the build's member binding, never from a tool argument. A
+            // build with no member binding writes unattributed.
+            let members_own = match build.mob_member_binding.as_ref().and_then(|binding| {
+                meerkat::WorkOwnerKey::mob_agent(&binding.mob_id, &binding.member).ok()
+            }) {
+                Some(key) => workgraph
+                    .clone()
+                    .with_commit_origin(meerkat::WorkGraphCommitOrigin::Member(key)),
+                None => workgraph.clone(),
+            };
+            build.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(members_own)));
         }
         // Every member build carries its external tools inside this runtime's
         // receiver for its session, whatever the member's mob tools: the

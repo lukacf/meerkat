@@ -472,8 +472,14 @@ pub fn mob_scoped_workgraph_service(
     );
     // The host's session-to-member resolver (if any) keeps `Session` attention
     // targets under the same realm rule as `Owner` targets on the rescoped copy.
-    Ok(Some(match host_service.attention_realm_resolver() {
+    let scoped = match host_service.attention_realm_resolver() {
         Some(resolver) => scoped.with_attention_realm_resolver(resolver),
+        None => scoped,
+    };
+    // The host's commit observer (if any) is told of the writes made through
+    // the rescoped copy too: a mob's members and its host write there.
+    Ok(Some(match host_service.commit_observer() {
+        Some(observer) => scoped.with_commit_observer(observer),
         None => scoped,
     }))
 }

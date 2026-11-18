@@ -76,8 +76,9 @@ direct target turns.
 
 When targets register, the kennel adds their comms identities to the hive's
 trusted peer set and wires targets to each other. The hive agent can then use
-the normal comms tools (`peers`, `send_request`, `send_message`) to coordinate
-the fleet.
+the normal comms tools (`peers`, `send_message`, `send_request`) to coordinate
+the fleet. A task goes to a target with `send_message`; `send_request` takes only
+the intents the tool itself lists and has no free-form task intent.
 
 Discovery never claims a target. Releases remain released until an explicit
 `/claim`. Acknowledged leases expire even on a connected control socket;
@@ -265,7 +266,7 @@ inside tmux. The driver currently does not claim `target-a` or `target-b`
 before its direct-target steps, so it is an exploratory harness rather than a
 reliable unattended pass on a fresh topology. Claim the selected target
 manually before those steps, or update the driver, before treating its four
-effects as verified. The intended effects are Hive `send_request` to target-a,
+effects as verified. The intended effects are a Hive `send_message` to target-a,
 direct target-b shell control, target-b to target-a peer delivery, and a
 scheduled target-a wakeup. Unless overridden, the suite uses Hive on
 `gemini-4-argon`, target-a on `gpt-6-astra`, and target-b on

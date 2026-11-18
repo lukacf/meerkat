@@ -260,20 +260,20 @@ debate_nonce="debate-loop-${run_id}"
 echo "Test 1/4: peer relay and target restart"
 select_target_b
 claim_selected "target-b"
-send_prompt "ARCH SUITE ${run_id} TEST 1: use shell to write ${relay_b_file} containing relay source ok ${run_id}, hostname, and pwd. Then call peers and send_request to target-a with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${relay_a_file} containing relay target ok ${run_id}, the nonce ${relay_nonce}, hostname, and the fact that target-b delegated this work\"}. Report the file content and send status."
+send_prompt "ARCH SUITE ${run_id} TEST 1: use shell to write ${relay_b_file} containing relay source ok ${run_id}, hostname, and pwd. Then call peers and send_message to target-a with handling_mode steer and this body: \"write ${relay_a_file} containing relay target ok ${run_id}, the nonce ${relay_nonce}, hostname, and the fact that target-b delegated this work\". Report the file content and send status."
 sleep "$phase_wait"
 verify_file_contains target-b "$relay_b_file" "relay source ok ${run_id}"
 verify_file_contains target-a "$relay_a_file" "$relay_nonce"
 restart_target_b
 select_hive
-send_prompt "ARCH SUITE ${run_id} TEST 1B: call peers after the target-b restart, then send_request to target-b with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${post_restart_file} containing post restart ok ${run_id}, hostname, pwd, and current date\"}. Report the send status."
+send_prompt "ARCH SUITE ${run_id} TEST 1B: call peers after the target-b restart, then send_message to target-b with handling_mode steer and this body: \"write ${post_restart_file} containing post restart ok ${run_id}, hostname, pwd, and current date\". Report the send status."
 sleep "$phase_wait"
 verify_file_contains target-b "$post_restart_file" "post restart ok ${run_id}"
 
 echo "Test 2/4: scheduler cascade with peer wake"
 select_target_a
 claim_selected "target-a"
-send_prompt "ARCH SUITE ${run_id} TEST 2: use scheduling/reminder capability to wake yourself in about 20 seconds. The wake instruction is: write ${cascade_a_file} containing cascade scheduled ok ${run_id} and current date, then call peers and send_request to target-b with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${cascade_b_file} containing cascade received ok ${run_id}, nonce ${cascade_nonce}, sender target-a, hostname, and current date\"}. After scheduling, report only the schedule status."
+send_prompt "ARCH SUITE ${run_id} TEST 2: use scheduling/reminder capability to wake yourself in about 20 seconds. The wake instruction is: write ${cascade_a_file} containing cascade scheduled ok ${run_id} and current date, then call peers and send_message to target-b with handling_mode steer and this body: \"write ${cascade_b_file} containing cascade received ok ${run_id}, nonce ${cascade_nonce}, sender target-a, hostname, and current date\". After scheduling, report only the schedule status."
 sleep "$schedule_wait"
 verify_file_contains target-a "$cascade_a_file" "cascade scheduled ok ${run_id}"
 sleep "$peer_request_wait"
@@ -281,7 +281,7 @@ verify_file_contains target-b "$cascade_b_file" "$cascade_nonce"
 
 echo "Test 3/4: claim/release pressure while hive comms stays live"
 select_hive
-send_prompt "ARCH SUITE ${run_id} TEST 3: call peers, then send_request to target-a with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${race_file} containing hive during claim pressure ok ${run_id}, nonce ${race_nonce}, hostname, and current date\"}. Report status only."
+send_prompt "ARCH SUITE ${run_id} TEST 3: call peers, then send_message to target-a with handling_mode steer and this body: \"write ${race_file} containing hive during claim pressure ok ${run_id}, nonce ${race_nonce}, hostname, and current date\". Report status only."
 sleep 10
 select_target_a
 send_prompt "/claim"
@@ -294,13 +294,13 @@ verify_file_contains target-a "$race_file" "$race_nonce"
 
 echo "Test 4/4: multi-provider arbitration and transcript files"
 select_hive
-send_prompt "ARCH SUITE ${run_id} TEST 4A: call peers, then send_request to target-a with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${debate_a_file} containing debate target-a fact ${run_id}, provider openai, nonce ${debate_nonce}, hostname, and pwd\"}. Then send_request to target-b with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${debate_b_file} containing debate target-b fact ${run_id}, provider anthropic, nonce ${debate_nonce}, hostname, and pwd\"}. Report both send statuses."
+send_prompt "ARCH SUITE ${run_id} TEST 4A: call peers, then send_message to target-a with handling_mode steer and this body: \"write ${debate_a_file} containing debate target-a fact ${run_id}, provider openai, nonce ${debate_nonce}, hostname, and pwd\". Then send_message to target-b with handling_mode steer and this body: \"write ${debate_b_file} containing debate target-b fact ${run_id}, provider anthropic, nonce ${debate_nonce}, hostname, and pwd\". Report both send statuses."
 sleep "$phase_wait"
 verify_file_contains target-a "$debate_a_file" "$debate_nonce"
 sleep "$phase_wait"
 verify_file_contains target-b "$debate_b_file" "$debate_nonce"
 select_hive
-send_prompt "ARCH SUITE ${run_id} TEST 4B: call peers, then send_request to target-a with handling_mode steer, intent \"execute_task\", params {\"instruction\":\"write ${debate_hive_file} containing hive arbitration ok ${run_id}, nonce ${debate_nonce}, and one line naming target-a and target-b\"}. Report final status."
+send_prompt "ARCH SUITE ${run_id} TEST 4B: call peers, then send_message to target-a with handling_mode steer and this body: \"write ${debate_hive_file} containing hive arbitration ok ${run_id}, nonce ${debate_nonce}, and one line naming target-a and target-b\". Report final status."
 sleep "$phase_wait"
 verify_file_contains target-a "$debate_hive_file" "$debate_nonce"
 

@@ -77,11 +77,7 @@ wait_for_tux() {
   exit 1
 }
 
-send_prompt() {
-  local prompt="$1"
-  tmux send-keys -t "$session_name" -l "$prompt"
-  tmux send-keys -t "$session_name" Enter
-}
+source "$script_dir/tux-prompt-input.sh"
 
 start_tux_tmux() {
   local cmd

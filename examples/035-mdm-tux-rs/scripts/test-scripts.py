@@ -52,6 +52,21 @@ class Scripts(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("synthetic-session", result.stdout)
 
+    def test_never_append_to_a_retained_or_unreadable_editor(self):
+        placeholder = "[target-b unavailable] > Type a command or /help_"
+        for content, title, ok in [(placeholder, "Ready", True), (placeholder, "Disconnected", True),
+                                   ("[hive] > retained TEST 4B_", "Ready", False),
+                                   ("[hive] > retained TEST 4B_", "Running", False),
+                                   ("[hive] > first line\n  second_", "Ready", False),
+                                   ("truncated", "Ready", False)]:
+            with self.subTest(content=content, title=title):
+                pane = (f"│{placeholder}│\n┌COMMAND  {title}──┐\n│{content:<54}│\n"
+                        "│status│\n└────┘\nselected: target-b  |  timeline live\n"
+                        "[Tab] mode  [Up/Down] select  [Enter] send\n")
+                result = subprocess.run(["bash", "-c", 'source scripts/tux-prompt-input.sh\nsession_name=test\ntmux(){ case "$1" in capture-pane) printf \'%s\' "$PANE";; send-keys) printf \'%s\\n\' "${@: -1}";; *) return 2;; esac; }\nsend_prompt \'/claim\' '], cwd=ROOT, env={**os.environ, "PANE": pane}, text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, ok, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["/claim", "Enter"] if ok else [])
+
     def test_selection_and_claim_readiness_are_distinct(self):
         for target, selected, ready, hint, expected in [
             ("target-b", "target-b", "no", "Target disconnected", True),

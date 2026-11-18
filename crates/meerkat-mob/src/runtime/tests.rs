@@ -39979,6 +39979,245 @@ async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn(
     );
 }
 
+/// A mob with one turn-driven member the host bound to a goal of the mob's
+/// WorkGraph realm, the projection of that binding as the store holds it
+/// when the fixture returns, and the probes of the member's model calls.
+struct AttentionBoundMember {
+    handle: MobHandle,
+    workgraph_service: meerkat::WorkGraphService,
+    goal: meerkat::GoalCreateResult,
+    identity: AgentIdentity,
+    projection: meerkat::AttentionContextProjection,
+    provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
+    provider_turn_overlays: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
+}
+
+impl AttentionBoundMember {
+    /// How often the member's model was called so far.
+    fn model_calls(&self) -> usize {
+        self.provider_visible_tools
+            .lock()
+            .expect("provider_visible_tools lock poisoned")
+            .len()
+    }
+
+    /// A turn of the member whose input is stored with `overlay`, to its end.
+    async fn turn_stored_with(
+        &self,
+        overlay: TurnToolOverlay,
+    ) -> Result<crate::MemberDeliveryReceipt, MobError> {
+        let turn = self
+            .handle
+            .member(&self.identity)
+            .await
+            .expect("member handle")
+            .start_turn(
+                ContentInput::Text("pursue the bound item".to_string()),
+                HandlingMode::Queue,
+                crate::MemberTurnOptions::new().with_turn_tool_overlay(overlay),
+                None,
+            )
+            .await
+            .expect("a member turn stored with an attention projection is admitted");
+        tokio::time::timeout(Duration::from_secs(60), turn.wait())
+            .await
+            .expect("the member turn ends within a minute")
+    }
+}
+
+async fn attention_bound_member(member: &str) -> AttentionBoundMember {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("worker profile")
+        .external_addressable = true;
+    let identity = AgentIdentity::from(member);
+    // As in the row above: the goal is made in the mob realm, where the
+    // member's attention is resolved.
+    let host_workgraph_service = meerkat::WorkGraphService::with_scope(
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        "mob-attention-realm",
+        meerkat::WorkNamespace::new("goals").expect("namespace"),
+    );
+    let workgraph_service =
+        crate::mob_scoped_workgraph_service(&host_workgraph_service, &definition.id)
+            .expect("mob realm")
+            .expect("mob-scoped WorkGraph service");
+    let goal = workgraph_service
+        .create_goal(meerkat::GoalCreateRequest {
+            failed_child_join_policy: Default::default(),
+            cancelled_child_join_policy: Default::default(),
+            priority: Default::default(),
+            labels: Default::default(),
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+            realm_id: None,
+            namespace: None,
+            title: "A goal the member is bound to".to_string(),
+            description: None,
+            target: crate::lower_agent_identity_attention_target(&definition.id, &identity)
+                .expect("lower mob identity to owner target"),
+            mode: meerkat::WorkAttentionMode::Coordinate,
+            completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+            delegated_authority: meerkat::AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: meerkat::AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create owner-bound goal");
+    let (handle, provider_visible_tools, provider_turn_overlays, _) =
+        create_test_mob_with_overlay_probe_service_and_workgraph(
+            definition,
+            Some(host_workgraph_service),
+        )
+        .await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let projection = workgraph_service
+        .attention_projection(meerkat::AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("the binding's projection")
+        .projection;
+    AttentionBoundMember {
+        handle,
+        workgraph_service,
+        goal,
+        identity,
+        projection,
+        provider_visible_tools,
+        provider_turn_overlays,
+    }
+}
+
+/// A member's turn whose input was stored with a WorkGraph attention
+/// projection is not run once the store no longer holds that projection as
+/// current. The host closes the bound item after the projection was made,
+/// which stops the binding. The turn stored with that projection then calls
+/// the member's model zero times and ends abandoned, with the cause readable
+/// by the one who waits for it.
+#[tokio::test]
+async fn test_member_turn_stored_with_a_stale_workgraph_attention_projection_calls_no_model() {
+    let bound = attention_bound_member("w-stale-attention").await;
+    let stored =
+        meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&bound.projection)
+            .expect("the projection's turn overlay");
+
+    bound
+        .workgraph_service
+        .close(meerkat::CloseWorkItemRequest {
+            id: bound.goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: bound.goal.item.revision,
+            status: meerkat::WorkStatus::Cancelled,
+        })
+        .await
+        .expect("the host closes the bound item");
+    let active = bound
+        .workgraph_service
+        .list_attention(meerkat::AttentionListRequest {
+            realm_id: None,
+            namespace: None,
+            target: None,
+            status: Some(meerkat::WorkAttentionStatus::Active),
+        })
+        .await
+        .expect("list the active bindings")
+        .attention;
+    assert!(
+        active.is_empty(),
+        "the close stops the item's binding: {active:?}"
+    );
+
+    let calls_before = bound.model_calls();
+    let ended = bound.turn_stored_with(stored).await;
+    let calls = bound.model_calls() - calls_before;
+
+    let mut wrong = Vec::new();
+    if calls != 0 {
+        wrong.push(format!(
+            "the member's model was called {calls} time(s) under a projection the store no \
+             longer holds as current"
+        ));
+    }
+    let binding = bound.goal.attention.binding_id.to_string();
+    match &ended {
+        Ok(_) => wrong.push("the turn ended as delivered".to_string()),
+        Err(error) => {
+            let told = error.to_string();
+            if !(told.contains("turn abandoned")
+                && told.contains("runtime_apply_failure")
+                && told.contains(&binding))
+            {
+                wrong.push(format!(
+                    "the turn's end does not say that its apply failed and it was abandoned, \
+                     for the binding {binding}: {told}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    bound.handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// The control of the row above: the same turn, stored with the projection
+/// the store still holds as current, takes exactly one turn, under that
+/// projection.
+#[tokio::test]
+async fn test_member_turn_stored_with_the_current_workgraph_attention_projection_takes_one_turn() {
+    let bound = attention_bound_member("w-current-attention").await;
+    let stored =
+        meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&bound.projection)
+            .expect("the projection's turn overlay");
+
+    let calls_before = bound.model_calls();
+    let ended = bound.turn_stored_with(stored).await;
+    let calls = bound.model_calls() - calls_before;
+
+    assert!(
+        ended.is_ok(),
+        "a turn stored with the current projection is delivered: {:?}",
+        ended.as_ref().err()
+    );
+    assert_eq!(
+        calls, 1,
+        "a turn stored with the current projection calls the member's model once"
+    );
+    let applied = bound
+        .provider_turn_overlays
+        .lock()
+        .expect("provider_turn_overlays lock poisoned")
+        .last()
+        .cloned()
+        .flatten()
+        .expect("the turn's overlay");
+    let applied_projection = meerkat::workgraph_attention_projection_from_overlay(Some(&applied))
+        .expect("decode attention projection from overlay")
+        .expect("attention projection present");
+    assert_eq!(
+        applied_projection, bound.projection,
+        "the turn runs under the projection it was stored with"
+    );
+    bound.handle.shutdown().await.expect("shutdown test mob");
+}
+
 #[tokio::test]
 async fn test_spawn_member_tool_dispatches_backend_selection() {
     let mut definition = sample_definition_with_mob_tools();

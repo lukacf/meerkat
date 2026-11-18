@@ -612,3 +612,77 @@ async fn a_notice_that_does_not_reach_the_pipe_ends_the_following() {
 
     runtime.shutdown().await;
 }
+
+/// Whether `following` ended within the wait.
+async fn ended(following: &JoinHandle<()>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !following.is_finished() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    following.is_finished()
+}
+
+/// A candidate launch acts nowhere: its connection follows nothing, even
+/// with a decision open in the store it reads. The host's own list is what
+/// tells it there.
+#[tokio::test]
+async fn a_candidate_launch_follows_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let runtime = runtime(&state, None).await;
+    let owner = runtime.durable_decisions().owner();
+    let held = hold(owner, "operation-1");
+    let (connection, notices) = open_connection(&runtime, None);
+
+    let following =
+        tokio::spawn(Arc::clone(&connection).notice_openings(owner.for_candidate_launch()));
+
+    assert!(ended(&following).await, "the following ends at once");
+    let after = notices.settled().await;
+    assert!(
+        notices.events_of(&held).is_empty(),
+        "a candidate launch pushes nothing: {after:?}"
+    );
+
+    following.abort();
+    runtime.shutdown().await;
+}
+
+/// A launch that keeps no durable decisions has none to tell of: its
+/// connection follows nothing and ends at once.
+#[tokio::test]
+async fn a_launch_without_durable_decisions_follows_nothing() {
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .definition(
+                MobDefinition::from_toml(
+                    r#"
+[mob]
+id = "decision-notice-no-store"
+
+[profiles.lead]
+model = "gpt-5.5"
+"#,
+                )
+                .expect("definition"),
+            )
+            .default_llm_client(Arc::new(TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("runtime");
+    assert!(
+        !runtime.durable_decisions().is_available(),
+        "a launch without a persistent state directory keeps no durable decisions"
+    );
+    let (connection, notices) = open_connection(&runtime, None);
+
+    let following = follow(&connection, &runtime);
+
+    assert!(ended(&following).await, "the following ends at once");
+    let after = notices.settled().await;
+    assert!(after.is_empty(), "nothing is pushed: {after:?}");
+
+    following.abort();
+    runtime.shutdown().await;
+}

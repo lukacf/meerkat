@@ -461,10 +461,13 @@ pair to the same identity starts no second turn in its session, and a
 dispatch that carries one of the two without the other is refused with
 nothing delivered (`invalid delivery identity (... (half-pair))`).
 `DispatchInput.connector` accepts both keys or neither; supplying only one
-raises `ValueError` in the helper. It preserves the supplied values, including
-source-string correlation IDs. Different deliveries may use distinct
-idempotency keys with the same correlation ID. The full constructor and
-`dispatch_text` also accept the pair; the gateway refuses their half-pairs.
+raises `ValueError` in the helper. It sends the supplied values as given.
+Different deliveries may use distinct idempotency keys with the same
+correlation ID. The full constructor and `dispatch_text` also accept the
+pair; the gateway refuses their half-pairs. With the connector or system
+origin a correlation id that is not a canonical UUID is turned into one
+deterministically, and the gateway carries that UUID, not the source
+string; with another origin give a canonical UUID.
 
 ### Scope-bound dispatch
 

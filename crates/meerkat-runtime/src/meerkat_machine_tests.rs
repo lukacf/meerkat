@@ -43577,6 +43577,13 @@ fn the_recovery_witness_takes_a_stored_row_by_the_stamps_an_admission_writes() {
             Boundary::RunStart,
             true,
         ),
+        // The stamps an ordinary continuation's admission writes.
+        (
+            Kind::Continuation,
+            Execution::ResumePending,
+            Boundary::RunCheckpoint,
+            true,
+        ),
         (
             Kind::Continuation,
             Execution::ContentTurn,

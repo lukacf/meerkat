@@ -2769,6 +2769,7 @@ function plan(args) {
     mcp_confinement_positive: false,
     reader_rows: [],
     example_web_wasm: false,
+    example_035_clippy: false,
     downstream_type_check: [],
   };
   const downstreamRows = [];
@@ -2842,7 +2843,10 @@ function plan(args) {
   }
   result.example_035 = !releaseProjection && standalone.selected;
   result.example_035_manifest = EXAMPLE_035_MANIFEST;
-  result.example_035_commands = result.example_035 ? EXAMPLE_035_COMMANDS : [];
+  result.example_035_lint = result.example_035 && args.event === "push";
+  deferred.example_035_clippy = deferToPush && result.example_035;
+  result.example_035_commands = !result.example_035 ? []
+    : result.example_035_lint ? EXAMPLE_035_COMMANDS : EXAMPLE_035_COMMANDS.slice(1);
   result.example_035_reasons = releaseProjection ? ["explicit release-projection evidence reuse"]
     : result.example_035 ? standalone.reasons
     : standalone.deferredReasons.map((reason) => `deferred to push: ${reason}`);
@@ -3700,6 +3704,7 @@ function deferredSummary(deferred) {
   if (deferred.clippy_test_targets.length > 0) parts.push(`the test targets' Clippy of ${deferred.clippy_test_targets.join(", ")}`);
   if (deferred.governed_jsonl) parts.push("governed JSONL");
   if (deferred.mcp_confinement_positive) parts.push("MCP confinement positive");
+  if (deferred.example_035_clippy) parts.push("example035 is not linted on this pull request; hosted lint follows merge on main push; local: make -C examples/035-mdm-tux-rs lint");
   if (deferred.example_web_wasm) parts.push("the web wasm build and browser suites");
   if (deferred.rustdoc) parts.push("the workspace rustdoc");
   if (deferred.downstream_type_check?.length > 0) {
@@ -3724,6 +3729,7 @@ function githubOutput(result) {
   scalar("bazel_graph", String(result.bazel_graph));
   scalar("examples_browser", String(result.examples_browser));
   scalar("example_035", String(result.example_035));
+  scalar("example_035_lint", String(result.example_035_lint));
   scalar("example_035_reasons", JSON.stringify(result.example_035_reasons));
   scalar("example_035_manifest", result.example_035_manifest);
   scalar("example_035_commands", JSON.stringify(result.example_035_commands));

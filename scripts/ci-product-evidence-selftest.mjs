@@ -99,6 +99,7 @@ for (const name of Object.keys(SINGLE_JOBS)) {
 assert.deepEqual(
   SINGLE_JOBS,
   {
+    "Example035 standalone Clippy": "core",
     "Example035 standalone Rust + Python": "core",
     "Change classification": "core",
     "Stagger the short rows": "core",
@@ -255,12 +256,12 @@ expectRule(
   attestation({ jobs: fail("Main unit tests (core)"), failedLanes: ["Main unit tests"] }),
   { core: false, meta: false, connect: false },
 );
-for (const conclusion of ["failure", "cancelled", "skipped"]) {
+for (const name of ["Example035 standalone Clippy", "Example035 standalone Rust + Python"]) for (const conclusion of ["failure", "cancelled", "skipped"]) {
   expectRule(
-    `the required standalone035 row ${conclusion}`,
+    `the required ${name} row ${conclusion}`,
     attestation({
-      jobs: [...GREEN, job("Example035 standalone Rust + Python", conclusion, "core")],
-      failedLanes: ["Example035 standalone Rust + Python"],
+      jobs: [...GREEN, job(name, conclusion, "core")],
+      failedLanes: [name],
     }),
     { core: false, meta: false, connect: false },
   );

@@ -181,6 +181,7 @@ function changedPlan(paths, standalone, linked = false) {
   const mode = between(planner, "  if (releaseProjection) {\n    result.mode = RELEASE_PROJECTION_MODE;", "  // Core's own lanes");
   Object.assign(context, {
     releaseProjection: false, deferToPush: standalone.event === "pull_request",
+    args: { event: standalone.event }, deferred: {},
     EXAMPLE_035_COMMANDS, EXAMPLE_035_MANIFEST,
     allNames: packages.map((p) => p.name),
     byName: new Map(packages.map((p) => [p.name, p])),
@@ -229,10 +230,10 @@ check("actual PR leaf mode has no workspace seeds; push preserves unowned Rust f
 check("actual final flag and escaped GitHub metadata describe selected/deferred commands", () => {
   const block = between(planner, "  if (!releaseProjection) {\n    selectExample035Dependencies", "  // Core's own lanes");
   for (const event of ["pull_request", "push"]) {
-    const context = { releaseProjection: false, standalone: select([], { event }), result: { mode: "packages", packages: ["normal-input"] }, selectExample035Dependencies, EXAMPLE_035_COMMANDS, EXAMPLE_035_MANIFEST };
+    const context = { args: { event }, deferred: {}, deferToPush: event === "pull_request", releaseProjection: false, standalone: select([], { event }), result: { mode: "packages", packages: ["normal-input"] }, selectExample035Dependencies, EXAMPLE_035_COMMANDS, EXAMPLE_035_MANIFEST };
     vm.runInNewContext(block, context); assert.equal(context.result.example_035, event === "push");
     const lines = planner.split("\n").filter((l) => /scalar\("example_035(?:_|"|,)/.test(l));
-    assert.equal(lines.length, 4);
+    assert.equal(lines.length, 5);
     const output = {}; vm.runInNewContext(lines.join("\n"), { result: context.result, scalar: (k, v) => output[k] = v });
     assert.equal(output.example_035, String(event === "push"));
     assert.equal(output.example_035_manifest, `${EXAMPLE_035}/Cargo.toml`);
@@ -246,31 +247,22 @@ check("actual final flag and escaped GitHub metadata describe selected/deferred 
   assert(!encoded.includes("\n")); assert(encoded.includes("\\n"));
 });
 const workflow = text(".github/workflows/ci.yml");
-check("workflow output, immediate scheduling, Make commands and aggregate need agree", () => {
-  for (const key of ["example_035", "example_035_reasons", "example_035_manifest", "example_035_commands"]) {
+check("workflow outputs and paired aggregate dependencies agree", () => {
+  for (const key of ["example_035", "example_035_lint", "example_035_reasons", "example_035_manifest", "example_035_commands"]) {
     assert(workflow.includes(key + ": ${{ steps.plan.outputs." + key + " }}"));
   }
-  const job = between(workflow, "  example-035:\n", "  example-web:\n");
-  assert(job.includes("needs: [changes]"));
-  assert(job.includes("if: ${{ needs.changes.outputs.example_035 == 'true' }}"));
-  for (const cmd of EXAMPLE_035_COMMANDS) assert(job.includes(`run: ${cmd}`));
-  assert(workflow.slice(workflow.indexOf("  gate:\n")).includes("      - example-035\n"));
-  assert(workflow.includes("EXAMPLE_035_RESULT: ${{ needs.example-035.result }}"));
-  assert(!job.includes("continue-on-error"));
-});
-check("actual gate rejects failed, cancelled and skipped selected035", () => {
-  const block = between(workflow, '          case "${EXAMPLE_035}" in', '          if [[ "${MACHINE_AUTHORITY}" == "true" ]]; then');
-  const prelude = 'failed=0; plan_errors=0; flagged_lanes=();\n' + between(workflow, "          require_ran() {", "          # The classifier is the fail-closed authority");
-  for (const status of ["success", "failure", "cancelled", "skipped"]) {
-    const r = spawnSync("bash", ["-euc", prelude + block + '\nexit "$failed"\n'], { env: { PATH: "/usr/bin:/bin", EXAMPLE_035: "true", EXAMPLE_035_RESULT: status }, encoding: "utf8" });
-    assert.equal(r.status === 0, status === "success", status);
-  }
-  const r = spawnSync("bash", ["-euc", prelude + block + '\nexit "$failed"\n'], { env: { PATH: "/usr/bin:/bin", EXAMPLE_035: "false", EXAMPLE_035_RESULT: "skipped" } }); assert.equal(r.status, 0);
-  for (const value of ["", "TRUE", "1", "false\ntrue", "unknown"]) {
-    for (const result of ["success", "skipped"]) {
-      const invalid = spawnSync("bash", ["-euc", prelude + block + '\nexit "$failed"\n'], { env: { PATH: "/usr/bin:/bin", EXAMPLE_035: value, EXAMPLE_035_RESULT: result }, encoding: "utf8" });
-      assert.notEqual(invalid.status, 0, `${JSON.stringify(value)} / ${result}`);
-    }
+  const lint = between(workflow, "  example-035:\n", "  example-035-tests:\n");
+  const test = between(workflow, "  example-035-tests:\n", "  example-web:\n");
+  assert(lint.includes("needs: [changes]"));
+  assert(lint.includes("needs.changes.outputs.example_035_lint == 'true'"));
+  assert(test.includes("needs: [changes, example-035]"));
+  assert(lint.includes(`run: ${EXAMPLE_035_COMMANDS[0]}`));
+  assert(test.includes(`run: ${EXAMPLE_035_COMMANDS[1]}`));
+  for (const id of ["example-035", "example-035-tests"]) assert(workflow.slice(workflow.indexOf("  gate:\n")).includes(`      - ${id}\n`));
+  assert(workflow.includes("EXAMPLE_035_RESULT: ${{ needs.example-035-tests.result }}"));
+  assert(workflow.includes("EXAMPLE_035_LINT_RESULT: ${{ needs.example-035.result }}"));
+  for (const job of [lint, test]) {
+    assert(!job.includes("continue-on-error")); assert(job.includes("timeout-minutes: 40"));
   }
 });
 check("actual affected-tests block prints both exact CI commands", () => {
@@ -331,6 +323,7 @@ check("projection fixture and actual gate require standalone035 false", () => {
   }
   assert.equal(context.env.EXAMPLE_035, "false");
   assert.equal(context.env.EXAMPLE_035_RESULT, "skipped");
+  assert.equal(context.env.EXAMPLE_035_LINT, "false");
 });
 check("F1 exact Rust workflow job list equals every current YAML job id", () => {
   const rust = text("crates/xtask/tests/ci_gate_requires_rmat.rs");
@@ -458,3 +451,6 @@ try {
   });
 } finally { rmSync(scratch, { recursive: true, force: true }); }
 console.log(`${checks} focused dry contracts passed; no native or standalone test execution.`);
+
+// Additional extracted workflow/gate/budget contracts, without running the broad planner.
+await import("./ci-standalone-example-timeout-selftest.mjs");

@@ -1667,7 +1667,9 @@ for (const path of [
     assert.equal(plan.example_035, selected, label);
     assert.equal(plan.mode, mode, label);
     assert.equal(plan.example_035_manifest, EXAMPLE_035_MANIFEST, label);
-    assert.deepEqual(plan.example_035_commands, selected ? EXAMPLE_035_COMMANDS : [], label);
+    assert.equal(plan.example_035_lint, selected && event === "push", label);
+    assert.deepEqual(plan.example_035_commands, !selected ? [] : event === "push" ? EXAMPLE_035_COMMANDS : EXAMPLE_035_COMMANDS.slice(1), label);
+    assert.equal(Boolean(plan.deferred_to_push?.example_035_clippy), selected && event === "pull_request", label);
     if (mode === "none") assert.deepEqual(plan.packages, [], `${label}: no artificial dependency seeds`);
     if (label === "mixed own and Core") assert.deepEqual(plan.packages, ["meerkat-core"], label);
     if (paths.some((path) => path.startsWith(`${EXAMPLE_035}/`))) {
@@ -1691,7 +1693,7 @@ for (const path of [
       workflow_event: process.env.GITHUB_EVENT_NAME ?? null,
       label, requested_event: event, planned_event: plan.event,
       explicit_paths: paths, mode: plan.mode, packages: plan.packages,
-      example_035: plan.example_035, reasons: plan.example_035_reasons,
+      example_035: plan.example_035, example_035_lint: plan.example_035_lint, reasons: plan.example_035_reasons,
       manifest: plan.example_035_manifest, commands: plan.example_035_commands,
       integration_suites: plan.integration_suites,
       reader_rows: plan.reader_rows, deferred_to_push: plan.deferred_to_push,

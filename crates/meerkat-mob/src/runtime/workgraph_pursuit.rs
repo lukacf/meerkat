@@ -23,7 +23,13 @@
 //!   own WorkGraph tools, starts none, for that member or for another
 //!   member that pursues the item: two pursuers of one item do not keep
 //!   each other turning. Two members that each write the item the other
-//!   pursues still can;
+//!   pursues still can. A member whose own binding on the item the host
+//!   does not state is not a pursuer: its write starts the turns of those
+//!   that are. The rule reads who wrote, not what was written, so it
+//!   holds for a write to a binding too: the one member tool that writes
+//!   a binding hands the caller's own binding on to another target, the
+//!   caller's binding ends with that write, and the new target takes its
+//!   turn (unless the caller holds another pursued binding on the item);
 //! - only a binding the host's predicate says is pursued, that is active,
 //!   and whose target names a member of this mob.
 //!

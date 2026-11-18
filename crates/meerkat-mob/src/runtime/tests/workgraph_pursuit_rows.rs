@@ -946,3 +946,75 @@ async fn a_members_workgraph_tools_tell_the_member_as_the_origin() {
     );
     mob.handle.shutdown().await.expect("shutdown");
 }
+
+/// A member whose own binding on an item the host does not state is not a
+/// pursuer of the item: its write of the item, through a WorkGraph service
+/// that carries its key, starts one turn of the member whose binding the
+/// host states, and none of its own.
+#[tokio::test]
+async fn a_write_by_a_member_whose_own_binding_is_not_stated_starts_the_stated_pursuers_turn() {
+    let pursued = Pursued::new("pursuit-unstated-writer", true).await;
+    let (coordinator, coordinator_session) = pursued.mob.spawn("coordinator").await;
+    let (worker, worker_session) = pursued.mob.spawn("worker").await;
+    // The host states the coordinator's binding only.
+    let worker_target = pursued.mob.owner_target(&worker);
+    pursued.do_not_pursue(&worker_target);
+    let goal = pursued
+        .mob
+        .goal(
+            "work of a coordinator and a worker",
+            pursued.mob.owner_target(&coordinator),
+        )
+        .await;
+    let bound: meerkat::GoalBindExistingRequest = serde_json::from_value(serde_json::json!({
+        "item_id": goal.item.id,
+        "expected_item_revision": goal.item.revision,
+        "target": worker_target,
+        "mode": "coordinate",
+    }))
+    .expect("a bind request");
+    pursued
+        .mob
+        .workgraph
+        .bind_goal_attention(bound)
+        .await
+        .expect("the host binds the worker to the item");
+    pursued.settled().await;
+    let coordinator_base = pursued.mob.calls(&coordinator_session);
+    let worker_base = pursued.mob.calls(&worker_session);
+
+    // The service the worker's own WorkGraph tools write through.
+    let workers_own =
+        pursued
+            .mob
+            .workgraph
+            .clone()
+            .with_commit_origin(meerkat::WorkGraphCommitOrigin::Member(
+                crate::lower_agent_identity_owner_key(pursued.mob.handle.mob_id(), &worker)
+                    .expect("the worker's key"),
+            ));
+    pursued
+        .mob
+        .revise_through(&workers_own, &goal.item.id, "revised by the worker")
+        .await;
+    pursued
+        .mob
+        .wait_calls(&coordinator_session, coordinator_base + 1)
+        .await;
+    pursued.settled().await;
+    assert_eq!(
+        (
+            pursued.mob.calls(&coordinator_session),
+            pursued.mob.calls(&worker_session)
+        ),
+        (coordinator_base + 1, worker_base),
+        "the write of a member whose own binding is not stated starts one turn of the \
+         stated pursuer and none of its own"
+    );
+    assert_eq!(
+        pursued.mob.last_projection(&coordinator_session),
+        Some(pursued.mob.projection(&goal).await),
+        "the coordinator's turn runs under the projection of the item as the worker left it"
+    );
+    pursued.mob.handle.shutdown().await.expect("shutdown");
+}

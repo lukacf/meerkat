@@ -21680,6 +21680,19 @@ external_addressable = true
             stdout_tx: stdout_tx.clone(),
         }),
     ));
+    // The connection tells its host of each open decision without waiting
+    // for a list: of those the runtime opens from here on, and once of those
+    // already open (Ready is on the pipe before any of these notices). A
+    // launch that keeps no durable decisions has nothing to follow, and a
+    // candidate launch acts nowhere.
+    let decision_notices = {
+        let decisions = runtime.durable_decisions();
+        (decisions.is_available() && !decisions.is_candidate()).then(|| {
+            tokio::spawn(
+                Arc::clone(&decision_connection).notice_openings(decisions.owner().clone()),
+            )
+        })
+    };
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -21758,8 +21771,12 @@ external_addressable = true
             while inflight.try_join_next().is_some() {}
         };
         // The connection ended: no operator decide on it is eligible any
-        // more, one in flight included when it commits.
+        // more, one in flight included when it commits, and it tells its
+        // host of no further decision.
         decision_connection.close();
+        if let Some(following) = &decision_notices {
+            following.abort();
+        }
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`

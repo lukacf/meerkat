@@ -3,16 +3,22 @@
 //! One [`StdioDecisionConnection`] serves the `meta/decisions/*` verbs of
 //! one stdio gateway connection, over the runtime's decision owner. The
 //! host reads, presents and withdraws decisions. It is told of each open
-//! decision once per connection, when it lists it: before a
+//! decision at most twice per connection. Once without asking
+//! ([`StdioDecisionConnection::notice_openings`]): the connection writes the
+//! `held` notice of a decision when the runtime's owner opens it, after the
+//! row is stored, and of each decision already open when the connection
+//! starts to serve. And once when it lists it: before a
 //! `meta/decisions/list` answers, the connection writes one
-//! `meta/decisions/notice` for each open decision of the page it has not
-//! noticed yet. A decision the approver map lets the stdio operator decide
+//! `meta/decisions/notice` for each open decision of the page that no list
+//! of the connection noticed yet, whether or not it was pushed. At a list, a
+//! decision the approver map lets the stdio operator decide
 //! (`ingress_subjects = [{ ingress = "operator" }]`) that waits for a human
 //! is presented to the operator instead: the connection reads its clock,
 //! writes a `presented` notice carrying the whole rendering, waits until the
 //! notice is on the pipe, and only then records the presentation on its own
 //! channel under the notice's id, at that clock reading. Any other decision
-//! is noticed `held`, showing nothing.
+//! is noticed `held`, showing nothing; a push is always `held` and presents
+//! nothing.
 //!
 //! `meta/decisions/decide` without an attestation is the operator's
 //! (device trusted, in the connection's own authentication scope), eligible
@@ -48,7 +54,8 @@ use meerkat_runtime::decision::wire::{
     wire_decision_phase, wire_unreadable_decision,
 };
 use meerkat_runtime::decision::{
-    DecisionClock, DecisionListing, DecisionWithdrawer, DurableDecisionService, SystemDecisionClock,
+    DecisionClock, DecisionError, DecisionListing, DecisionOpening, DecisionWithdrawer,
+    DurableDecisionService, SystemDecisionClock,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -73,6 +80,30 @@ const DEFAULT_LIST_PAGE: usize = 100;
 /// The prefix of the channel and event references a stdio connection names.
 const REFERENCE_PREFIX: &str = "meta-stdio";
 
+/// How often a read for a pushed notice is made again while another call
+/// writes the store (the owner answers such a read as unavailable, with
+/// nothing read), and the wait before the first of them; each later wait is
+/// that much longer.
+const PUSH_STORE_RETRIES: u32 = 5;
+const PUSH_STORE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// One read of the decision store for a pushed notice, made again a few
+/// times while another call writes.
+async fn store_read<T>(
+    mut read: impl FnMut() -> Result<T, DecisionError>,
+) -> Result<T, DecisionError> {
+    let mut retries = 0;
+    loop {
+        match read() {
+            Err(DecisionError::Unavailable(_)) if retries < PUSH_STORE_RETRIES => {
+                retries += 1;
+                tokio::time::sleep(PUSH_STORE_BACKOFF * retries).await;
+            }
+            answer => return answer,
+        }
+    }
+}
+
 /// Writes one `meta/decisions/notice` line to the stdio host.
 #[async_trait]
 pub trait DecisionNoticeSink: Send + Sync {
@@ -90,10 +121,12 @@ struct StdioOperator {
     approver: AuthenticatedApprover,
 }
 
-/// What this connection told its host.
+/// What this connection told its host in its lists. What it pushed without
+/// being asked is kept by the task that pushes
+/// ([`StdioDecisionConnection::notice_openings`]).
 #[derive(Default)]
 struct ConnectionDecisions {
-    /// The decisions it noticed, held or presented.
+    /// The decisions a list of it noticed, held or presented.
     noticed: HashSet<DecisionId>,
     /// The decisions it presented to its operator.
     presented: HashSet<DecisionId>,
@@ -155,11 +188,123 @@ impl StdioDecisionConnection {
         self.open.store(false, Ordering::SeqCst);
     }
 
-    /// Tell the host of the open decisions of `owner` without waiting for
-    /// its list. Declared here for the rows that pin it; it does nothing
-    /// yet.
+    /// Tell the host of open decisions without waiting for its list: write
+    /// the `held` notice of each decision `owner` opens from now on, once
+    /// its row is stored, and of each decision that is open already (one
+    /// held before a restart, or by another owner on the store). The
+    /// connection subscribes first and then reads the open decisions, so a
+    /// decision is open in that reading or announced after it; a
+    /// subscription that fell behind reads the open decisions again. Each
+    /// decision is read again before its notice and skipped unless it is
+    /// still open, and is pushed at most once. What was pushed is this
+    /// task's own: it takes no lock of the connection, so a slow pipe holds
+    /// up no list and no decide. The host's list does not count a push and
+    /// writes its own notice. Nothing is presented to the operator here.
+    /// Ends when the connection is closed, when a notice does not reach the
+    /// pipe, or when the owner is gone.
     pub async fn notice_openings(self: Arc<Self>, owner: DurableDecisionService) {
-        drop(owner);
+        let mut openings = owner.subscribe_openings();
+        let mut pushed = HashSet::new();
+        if !self.push_open_decisions(&owner, &mut pushed).await {
+            return;
+        }
+        while let Some(opening) = openings.next().await {
+            let goes_on = match opening {
+                DecisionOpening::Opened(row) => {
+                    self.push_held(&owner, &row.decision_id, &mut pushed).await
+                }
+                DecisionOpening::Missed { missed } => {
+                    tracing::warn!(
+                        missed,
+                        "the stdio connection fell behind the decisions its runtime opened; it reads the open decisions again"
+                    );
+                    self.push_open_decisions(&owner, &mut pushed).await
+                }
+                // An opening of a kind this version does not know.
+                _ => true,
+            };
+            if !goes_on {
+                return;
+            }
+        }
+    }
+
+    /// Push the `held` notice of each open decision of `owner` that was not
+    /// pushed yet, page by page. Answers `false` once the connection can
+    /// write nothing more.
+    async fn push_open_decisions(
+        &self,
+        owner: &DurableDecisionService,
+        pushed: &mut HashSet<DecisionId>,
+    ) -> bool {
+        let open = DecisionListFilter::default().with_phase(DecisionPhase::Open);
+        let mut after: Option<String> = None;
+        loop {
+            let page = match store_read(|| owner.list(&open, after.as_deref(), DEFAULT_LIST_PAGE))
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the open decisions could not be listed; their notices wait for the host's list"
+                    );
+                    return true;
+                }
+            };
+            for row in &page.decisions {
+                if !self.push_held(owner, &row.decision_id, pushed).await {
+                    return false;
+                }
+            }
+            match page
+                .next_after
+                .filter(|next| after.as_deref() != Some(next.as_str()))
+            {
+                Some(next) => after = Some(next),
+                None => return true,
+            }
+        }
+    }
+
+    /// Push the `held` notice of `decision_id` unless it was pushed: the
+    /// decision is read again from the store, and only one that is still
+    /// open is noticed. Answers `false` once the connection can write
+    /// nothing more.
+    async fn push_held(
+        &self,
+        owner: &DurableDecisionService,
+        decision_id: &DecisionId,
+        pushed: &mut HashSet<DecisionId>,
+    ) -> bool {
+        if !self.open.load(Ordering::SeqCst) {
+            return false;
+        }
+        if pushed.contains(decision_id) {
+            return true;
+        }
+        let row = match store_read(|| owner.get(decision_id)).await {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %decision_id,
+                    "an opened decision could not be read; its notice waits for the host's list"
+                );
+                return true;
+            }
+        };
+        if row.state.phase != DecisionPhase::Open {
+            return true;
+        }
+        let Ok(line) = wire::notice_line(&held_notice(&row)) else {
+            return true;
+        };
+        if !self.notices.deliver(line).await {
+            return false;
+        }
+        pushed.insert(decision_id.clone());
+        true
     }
 
     /// The answer to `request_line` when it calls a `meta/decisions/*`

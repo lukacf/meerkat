@@ -21177,7 +21177,10 @@ external_addressable = true
         tracing::warn!(
             "console requires app auth but trusts no signing key: every console request will be \
              refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
-             runtime_options.console_require_app_auth = false for an explicitly open local console"
+             runtime_options.console_require_app_auth = false for an explicitly open local \
+             console. As it stands nobody can answer a member's ask_user questions in the \
+             console: where they are held, only the host can answer them, over stdio, and they \
+             time out otherwise"
         );
     }
     if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)

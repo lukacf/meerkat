@@ -186,7 +186,14 @@ stock tool `ask_user` (see
 for its arguments, limits and results). Meta mounts the tool for members and
 shows each set to people as one card in the [Console](/guides/console#question-sets):
 in the inbox and in the asking agent's conversation. The call returns to the
-agent at once; the answers reach it later as an input of their own.
+agent at once; the answers reach it later as an input of their own. A Console
+that requires sign-in while the gateway trusts no token issuer (a gateway
+started without `auth_config`, which is what the SDKs start by default) admits
+nobody. Where the gateway holds sets at all (a launch with a persistent state
+directory; without one the call answers `no_human_surface`), a set is still
+held and the call answers `asked`: nobody can answer it in the Console, and
+it ends `timed_out` unless the embedding host answers or dismisses it over
+the SDK transport; the gateway's startup warning says so.
 
 A question set is not a gating request. It is a durable decision of kind
 `ask_user.questions`, so it survives a restart, it ends at its deadline (the

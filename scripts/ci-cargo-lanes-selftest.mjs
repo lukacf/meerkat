@@ -1197,6 +1197,10 @@ for (const path of [
   const unlike = [];
   for (const event of ["pull_request", "push"]) {
     const expected = planFor([reference], ["--event", event]);
+    const workspaceExampleReason = (path) => `${event === "pull_request" ? "deferred to push: " : ""}workspace plan: global build configuration changed: ${path}`;
+    const referenceExampleReason = workspaceExampleReason(reference);
+    assert.equal(expected.example_035_reasons.filter((reason) => reason === referenceExampleReason).length, 1,
+      `${reference} (${event}) identifies its exact workspace reason once`);
     for (const path of [
       ".github/actions/setup-sccache-ci/action.yml",
       ".github/actions/setup-mold-ci/action.yml",
@@ -1204,8 +1208,13 @@ for (const path of [
       "scripts/ci-release-asset-download",
     ]) {
       const plan = planFor([path], ["--event", event]);
+      // This explanation names the changed setup input. Validate that exact
+      // substitution before comparing every scheduling field unchanged.
+      assert.deepEqual(plan.example_035_reasons,
+        expected.example_035_reasons.map((reason) => reason === referenceExampleReason ? workspaceExampleReason(path) : reason),
+        `${path} (${event}) preserves all standalone explanations except its exact input path`);
       const differing = Object.keys({ ...expected, ...plan }).filter(
-        (key) => key !== "changed_paths" && key !== "reason" && !isDeepStrictEqual(expected[key], plan[key]),
+        (key) => !["changed_paths", "reason", "example_035_reasons"].includes(key) && !isDeepStrictEqual(expected[key], plan[key]),
       );
       if (plan.mode !== "workspace" || plan.reason !== `global build configuration changed: ${path}` || differing.length > 0) {
         unlike.push(`${path} (${event}): mode ${plan.mode}, reason "${plan.reason}", ${differing.length} other plan fields differ`);

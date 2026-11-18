@@ -10,6 +10,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import vm from "node:vm";
 import {
   EXAMPLE_035, EXAMPLE_035_COMMANDS, EXAMPLE_035_DEPENDENCIES,
@@ -108,6 +109,59 @@ function between(source, first, last) {
   const end = source.indexOf(last, start + first.length); assert(end >= 0, last);
   return source.slice(start, end);
 }
+check("setup-input equivalence validates exact reason paths and still rejects semantic drift", () => {
+  const setupInvariant = between(text("scripts/ci-cargo-lanes-selftest.mjs"),
+    "// The other setup inputs of the Rust lanes are build configuration like the",
+    "// Pull request versus push (--event): one change, two plans.");
+  const reference = ".github/actions/setup-rust-ci/action.yml";
+  const candidate = ".github/actions/setup-sccache-ci/action.yml";
+  function run(mutate = () => {}) {
+    let comparisons = 0;
+    vm.runInNewContext(setupInvariant, {
+      assert, isDeepStrictEqual,
+      planFor: ([path], [, event]) => {
+        const reason = `global build configuration changed: ${path}`;
+        const selection = selectExample035Dependencies(select([path], { event, globalChange: true }),
+          EXAMPLE_035_DEPENDENCIES, reason);
+        const plan = {
+          mode: "workspace", reason, changed_paths: [path],
+          example_035: selection.selected, example_035_manifest: EXAMPLE_035_MANIFEST,
+          example_035_commands: selection.selected ? [...EXAMPLE_035_COMMANDS] : [],
+          example_035_reasons: selection.selected ? selection.reasons
+            : selection.deferredReasons.map((value) => `deferred to push: ${value}`),
+          packages: [...EXAMPLE_035_DEPENDENCIES],
+          integration_matrix: { include: [{ name: "xtask", package: "xtask" }] },
+        };
+        if (path !== reference) comparisons += 1;
+        mutate(plan, path, event);
+        return plan;
+      },
+    });
+    assert.equal(comparisons, 8, "all four setup inputs run on PR and push");
+  }
+  run();
+  const onCandidate = (change) => (plan, path) => { if (path === candidate) change(plan); };
+  for (const change of [
+    (plan) => { plan.example_035 = !plan.example_035; },
+    (plan) => { plan.example_035_manifest = "examples/999/Cargo.toml"; },
+    (plan) => { plan.example_035_commands = ["unexpected command"]; },
+    (plan) => { plan.integration_matrix.include = []; },
+    (plan) => { plan.packages.pop(); },
+    (plan) => { plan.example_035_reasons.pop(); },
+    (plan) => { plan.example_035_reasons.push(plan.example_035_reasons.at(-1)); },
+    (plan) => { plan.example_035_reasons.push("unexplained extra reason"); },
+    (plan) => { plan.example_035_reasons = plan.example_035_reasons.map((reason) => reason.replace(candidate, reference)); },
+    (plan) => { plan.example_035_reasons = plan.example_035_reasons.map((reason) => reason.replace(/^deferred to push: /, "")); },
+  ]) assert.throws(() => run(onCandidate(change)), assert.AssertionError);
+  for (const duplicate of [false, true]) {
+    assert.throws(() => run((plan, path) => {
+      if (path !== reference) return;
+      const reason = plan.example_035_reasons.at(-1);
+      if (duplicate) plan.example_035_reasons.push(reason);
+      else plan.example_035_reasons.pop();
+    }), assert.AssertionError, "the reference reason must occur exactly once");
+  }
+});
 const changedLoop = between(planner, "    for (const path of changed) {", "    if (result.unmapped_rust_paths.length > 0)");
 function changedPlan(paths, standalone, linked = false) {
   const result = { unmapped_rust_paths: [], lock_scope: null, packages: [], closure: [], rust_changed: false };

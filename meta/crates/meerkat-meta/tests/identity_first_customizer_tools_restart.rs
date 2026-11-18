@@ -74,6 +74,8 @@ use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
 use meerkat_mob::{MobDefinition, ProfileName};
 use tokio::time::sleep;
 
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -335,6 +337,8 @@ async fn build_runtime(
     roster: &'static [&'static str],
     restore: Option<MemberRestore>,
 ) -> meerkat_meta::UnifiedRuntime {
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(state).await;
     let mut builder = UnifiedRuntimeBuilder::default()
         .definition(
             MobDefinition::from_toml(&MOB_TOML.replace("{MOB_ID}", mob_id)).expect("definition"),
@@ -1704,6 +1708,8 @@ async fn boot_spawning(
     customizer: Arc<dyn AgentCustomizer>,
     roster: &'static [&'static str],
 ) -> meerkat_meta::UnifiedRuntime {
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(state).await;
     Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -1971,6 +1977,8 @@ async fn runs_resumed_at_boot_reach_the_event_log_from_resume_to_terminal_once()
 
     let log = RecordedEventLog::default();
     let model = WorkerModel::default();
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(&state).await;
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -2329,6 +2337,8 @@ async fn boot_agent_spawn_with(
     model: CreatorModel,
     restore: MemberRestore,
 ) -> meerkat_meta::UnifiedRuntime {
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(state).await;
     Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -2637,6 +2647,8 @@ async fn boot_agent_spawn_customized(
     model: CreatorModel,
     customizer: Arc<dyn AgentCustomizer>,
 ) -> meerkat_meta::UnifiedRuntime {
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(state).await;
     Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -3238,6 +3250,8 @@ async fn a_respawn_seats_and_builds_the_member_with_the_customizers_current_answ
     let state = temp.path().join("state");
     let customizer = Arc::new(AnsweringCustomizer::default());
     let model = RequestRecordingModel::default();
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(&state).await;
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -3391,6 +3405,8 @@ async fn a_respawn_of_a_member_never_built_builds_it_with_the_customizers_curren
     let customizer = Arc::new(AnsweringCustomizer::default());
     customizer.prompts.store(true, Ordering::SeqCst);
     let capture = CaptureClient::default();
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(&state).await;
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -3562,6 +3578,8 @@ async fn a_prompt_queued_at_a_respawn_runs_once_on_the_respawned_identity() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
     let model = HoldingModel::default();
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(&state).await;
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -4259,6 +4277,8 @@ async fn boot_governed(
     model: ToolTurnModel,
     customizer: Arc<RecordingCustomizer>,
 ) -> meerkat_meta::UnifiedRuntime {
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(state).await;
     Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -4984,6 +5004,8 @@ async fn boot_own_tools(
     state: &Path,
     model: OwnToolsModel,
 ) -> meerkat_meta::UnifiedRuntime {
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(state).await;
     Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -5830,6 +5852,8 @@ async fn a_created_agent_still_manages_the_mob_it_created_after_a_label_only_upd
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state = temp.path().join("state");
     let model = ReachModel::default();
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(&state).await;
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(
@@ -6050,6 +6074,8 @@ async fn a_created_agents_next_build_after_a_label_only_update_is_composed_with_
     let state = temp.path().join("state");
     let model = ReachModel::default();
     let customizer = Arc::new(LabelRecordingCustomizer::default());
+    // A boot may reopen the directory: wait for the predecessor's custody.
+    custody_wait::predecessor_custody_released(&state).await;
     let runtime = Box::pin(
         UnifiedRuntimeBuilder::default()
             .definition(

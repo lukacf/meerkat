@@ -35,6 +35,12 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `ask_user`: the note of an `asked` result and the tool's description say
+  that the host holds the questions for a person, no longer that a person is
+  being asked.
+
 ## [0.9.17] - 2026-11-18
 
 ### Breaking

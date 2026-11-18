@@ -164,11 +164,10 @@ If suspension succeeds and the session reopens within the configured maximum
 age, a session with per-round commits can resume the run from its last
 committed round.
 
-On 0.9.10, a run was reported cancelled rather than resumed after its session
-reopened. Store work was in flight at the time of the graceful stop; the cause
-has not been established. This is distinct from a waiting JSON-RPC client
-receiving no reply at process exit: the run can be kept even if the reply
-never reaches the client.
+A run was reported cancelled rather than resumed after its session reopened.
+The cause has not been established. This is distinct from a waiting JSON-RPC
+client receiving no reply at process exit: the run can be kept even if the
+reply never reaches the client.
 
 Such a stop is an unregister with
 `UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown with
@@ -238,8 +237,8 @@ When suspension succeeds and the run resumes within the configured maximum age:
   or its mob rebuilds the member, before the kept queued prompts run.
   Meerkat does not look for such runs at start-up.
 
-**The max age still applies.** If more than `max_age` has passed since
-the stop when the next start finds the run, the run's inputs end as
+**The max age applies to a successfully suspended run.** If the next start
+finds that run more than `max_age` after the stop, the run's inputs end as
 `requeue_expired` (as `cancelled` when the run's stop was asked after that
 start registered it) and the run does not continue: it is closed as
 interrupted, with the rounds it committed kept. The age counts from the

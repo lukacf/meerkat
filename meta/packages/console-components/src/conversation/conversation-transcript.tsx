@@ -43,7 +43,18 @@ function groupDayKey(group: ConversationTimelineGroup): string | null {
   return null;
 }
 
-export function ConversationTranscript({
+/** A conversation's turns. A transcript with nothing to draw (no group, no
+ * turn diff, no pending request) renders nothing and reads nothing from the
+ * page around it: what it reads there (the question sets' receipts) is read
+ * only by the transcript that draws something. */
+export function ConversationTranscript(props: ConversationTranscriptProps) {
+  const { viewState, approvalSnapshot, showTurnDiff = true, onToggleDiffFile = null } = props;
+  const hasTurnDiff = Boolean(showTurnDiff && viewState.turnDiff && onToggleDiffFile);
+  if (!viewState.groups.length && !hasTurnDiff && !approvalSnapshot?.requests.length) return null;
+  return <ConversationTranscriptTurns {...props} />;
+}
+
+function ConversationTranscriptTurns({
   viewState,
   approvalSnapshot,
   approvalIdentity,
@@ -80,10 +91,6 @@ export function ConversationTranscript({
     }
     return null;
   }));
-
-  if (!groups.length && !renderableTurnDiff && !approvalSnapshot?.requests.length) {
-    return null;
-  }
 
   // Day separators before the first dated group and at each local
   // calendar-day change, so row times are never ambiguous.

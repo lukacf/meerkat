@@ -1,17 +1,20 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 //! The notices a WorkGraph service gives its commit observer: one for each
-//! item or attention binding whose revision a committed write advanced, and
-//! none for a refused write, a read, or a write that advances neither.
+//! item or attention binding whose revision a committed write advanced (the
+//! close of an item is told for the item alone), and none for a refused
+//! write, a read, or a write that advances neither.
 
 use std::sync::{Arc, Mutex};
 
+use chrono::{Duration, Utc};
 use meerkat_core::SessionId;
 use meerkat_workgraph::{
     AddEvidenceRequest, AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest,
-    AttentionProjectionRequest, AttentionReassignRequest, AttentionResumeRequest,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
-    GoalCreateRequest, GoalCreateResult, LinkWorkItemsRequest, MemoryWorkGraphStore,
+    AttentionProjectionRequest, AttentionPruneRequest, AttentionReassignRequest,
+    AttentionResumeRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    FailedChildJoinPolicy, GoalAttentionTarget, GoalBindExistingRequest, GoalCreateRequest,
+    GoalCreateResult, LinkWorkItemsRequest, MemoryWorkGraphStore, ObserveReadinessRequest,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAdmissionKey, WorkEdgeKind,
     WorkGraphCommitNotice, WorkGraphCommitObserver, WorkGraphCommitOrigin, WorkGraphService,
     WorkItem, WorkOwner, WorkOwnerKey, WorkStatus,
@@ -371,4 +374,185 @@ async fn a_notice_carries_the_origin_of_the_service_value_that_wrote() {
         recorder.taken(),
         vec![of_item(&by_host, WorkGraphCommitOrigin::Unattributed)]
     );
+}
+
+/// Binding attention to an item that exists makes a binding and proves the
+/// item's revision without advancing it: it is told for the binding alone.
+#[tokio::test]
+async fn binding_an_existing_item_is_told_for_the_binding_alone() {
+    let (service, recorder) = observed_service();
+    let item = created(&service, "an item").await;
+    assert_eq!(
+        recorder.taken(),
+        vec![of_item(&item, WorkGraphCommitOrigin::Unattributed)]
+    );
+
+    let request: GoalBindExistingRequest = serde_json::from_value(json!({
+        "item_id": item.id,
+        "expected_item_revision": item.revision,
+        "target": { "kind": "session", "session_id": BOUND_SESSION },
+    }))
+    .expect("a bind request");
+    let bound = service
+        .bind_goal_attention(request)
+        .await
+        .expect("bind the item");
+    assert_eq!(
+        recorder.taken(),
+        vec![of_binding(&bound, WorkGraphCommitOrigin::Unattributed)]
+    );
+    let after = service
+        .get(None, None, item.id.clone())
+        .await
+        .expect("read the item");
+    assert_eq!(after.revision, item.revision, "the bind advanced no item");
+}
+
+/// A block and a recorded readiness observation are item writes like any
+/// other: each is told once, for the item.
+#[tokio::test]
+async fn a_block_and_a_readiness_observation_are_each_told_once() {
+    let (service, recorder) = observed_service();
+    let unattributed = WorkGraphCommitOrigin::Unattributed;
+    let item = created(&service, "an item").await;
+    recorder.taken();
+    let blocked = service
+        .block(None, None, item.id.clone(), item.revision)
+        .await
+        .expect("block the item");
+    assert_eq!(
+        recorder.taken(),
+        vec![of_item(&blocked, unattributed.clone())]
+    );
+
+    let observed_at = Utc::now() + Duration::hours(1);
+    let gated = service
+        .create(CreateWorkItemRequest {
+            title: "a time-gated item".to_string(),
+            not_before: Some(observed_at),
+            ..Default::default()
+        })
+        .await
+        .expect("create the time-gated item");
+    recorder.taken();
+    let observed = service
+        .observe_readiness(ObserveReadinessRequest {
+            id: gated.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: gated.revision,
+            observed_at,
+        })
+        .await
+        .expect("record the readiness observation");
+    assert_eq!(recorder.taken(), vec![of_item(&observed, unattributed)]);
+}
+
+/// A parent whose policy takes a child's failure as its own is closed by
+/// the claim that finds the failed child: that close is told once, for the
+/// parent. A second claim finds the parent closed already and writes
+/// nothing, and nothing is told.
+#[tokio::test]
+async fn a_parent_closed_for_its_childs_failure_is_told_once() {
+    let (service, recorder) = observed_service();
+    let unattributed = WorkGraphCommitOrigin::Unattributed;
+    let parent = service
+        .create(CreateWorkItemRequest {
+            title: "a parent".to_string(),
+            failed_child_join_policy: FailedChildJoinPolicy::Propagate,
+            ..Default::default()
+        })
+        .await
+        .expect("create the parent");
+    let child = created(&service, "a child").await;
+    service
+        .link(LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: WorkEdgeKind::Parent,
+            from_id: child.id.clone(),
+            to_id: parent.id.clone(),
+        })
+        .await
+        .expect("make the child a part of the parent");
+    assert_eq!(
+        recorder.taken(),
+        vec![
+            of_item(&parent, unattributed.clone()),
+            of_item(&child, unattributed.clone()),
+        ],
+        "the two creates; the link is not told"
+    );
+    let failed = service
+        .close(CloseWorkItemRequest {
+            id: child.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: child.revision,
+            status: WorkStatus::Failed,
+        })
+        .await
+        .expect("fail the child");
+    assert_eq!(
+        recorder.taken(),
+        vec![of_item(&failed, unattributed.clone())]
+    );
+
+    let claim = |revision: u64| ClaimWorkItemRequest {
+        id: parent.id.clone(),
+        realm_id: None,
+        namespace: None,
+        expected_revision: revision,
+        owner: WorkOwner::new(WorkOwnerKey::agent("worker-1").expect("owner key")),
+        lease_seconds: None,
+        lease_expires_at: None,
+    };
+    let closed = service
+        .claim(claim(parent.revision))
+        .await
+        .expect("the claim answers the closed parent");
+    assert_eq!(closed.status, WorkStatus::Failed);
+    assert!(closed.revision > parent.revision, "the parent was closed");
+    assert_eq!(recorder.taken(), vec![of_item(&closed, unattributed)]);
+
+    let again = service
+        .claim(claim(closed.revision))
+        .await
+        .expect("the claim answers the parent as it stands");
+    assert_eq!(again.revision, closed.revision, "nothing was written");
+    assert_eq!(recorder.taken(), Vec::new());
+}
+
+/// Pruning the rows of ended bindings advances nothing and is not told.
+#[tokio::test]
+async fn pruning_ended_bindings_tells_nothing() {
+    let (service, recorder) = observed_service();
+    let goal = goal_for(&service, BOUND_SESSION, "pursue").await;
+    service
+        .close(CloseWorkItemRequest {
+            id: goal.item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.item.revision,
+            status: WorkStatus::Cancelled,
+        })
+        .await
+        .expect("close the item");
+    assert_eq!(
+        recorder.taken().len(),
+        3,
+        "the goal's item and binding, then the close"
+    );
+
+    let pruned = service
+        .prune_terminal_attention(AttentionPruneRequest {
+            realm_id: None,
+            namespace: None,
+            updated_before: None,
+        })
+        .await
+        .expect("prune the ended bindings")
+        .pruned;
+    assert_eq!(pruned, 1, "the stopped binding's row is gone");
+    assert_eq!(recorder.taken(), Vec::new());
 }

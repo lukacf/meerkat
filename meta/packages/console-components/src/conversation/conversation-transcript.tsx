@@ -81,8 +81,13 @@ function ConversationTranscriptTurns({
   const approvalInteractions = approvalInteractionIdsByTurn(turns.map((turn) =>
     turn.groups.flatMap((group) => group.entries.flatMap((entry) => entry.interactionId ? [entry.interactionId] : []))));
   // A question set this console answered or dismissed is kept as a receipt
-  // after the turn that was the newest when it was closed.
-  const questionReceipts = useQuestionReceiptPlacement(approvalIdentity, turns.map((turn) => {
+  // after the turn that was the newest when it was closed. The placement is
+  // over all the conversation's turns: where only the newest groups are
+  // shown, the turns shown are the last of them, and a set that was closed
+  // after a turn that is not shown has no line here.
+  const allTurns = groups === viewState.groups ? turns : groupConversationTranscriptTurns(viewState.groups);
+  const hiddenTurns = Math.max(0, allTurns.length - turns.length);
+  const questionReceipts = useQuestionReceiptPlacement(approvalIdentity, allTurns.map((turn) => {
     for (const group of turn.groups) {
       for (const entry of group.entries) {
         const at = Date.parse(entry.createdAt ?? "");
@@ -136,7 +141,7 @@ function ConversationTranscriptTurns({
                 />
               </Fragment>
             ))}
-            <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} interactionIds={approvalInteractions[turnIndex]} questionReceiptIds={questionReceipts.byTurn[turnIndex]} />
+            <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} interactionIds={approvalInteractions[turnIndex]} questionReceiptIds={questionReceipts.byTurn[hiddenTurns + turnIndex]} />
             {isLastTurn && renderableTurnDiff && onToggleDiffFile ? (
               <TurnDiffCard
                 expandedFile={expandedDiffFile}

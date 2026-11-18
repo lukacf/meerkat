@@ -425,6 +425,8 @@ pub mod turn_executor;
 mod uncertain_durability;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) mod upcall_responder;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub mod workgraph_pursuit;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

@@ -6407,3 +6407,326 @@ async fn an_attention_continuation_whose_wake_is_refused_is_answered_with_the_re
     );
     fixture.finish().await;
 }
+
+/// A continuation for a released member whose wake fails for good is
+/// answered with the wake's failure, and nothing was handed over: the
+/// member's model is not called.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attention_continuation_whose_wake_fails_is_answered_with_the_failure() {
+    let host_workgraph = attention_rows_host_workgraph();
+    let fixture =
+        WakeFixture::with_workgraph("wake-attention-failed", host_workgraph.clone(), None).await;
+    let member = fixture.spawn("attention-failed").await;
+    let projection = bound_goal_projection(&fixture, &host_workgraph, &member).await;
+    fixture.release(&member).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.preparer.answer_with(PreparerAnswer::Final);
+    let failed = hand_over(&fixture, &member, &projection).await.map(|_| ());
+    assert!(
+        matches!(failed, Err(MobError::MemberRestoreFailed { ref member_id, .. }) if member_id == &member),
+        "the one who handed the continuation over is answered with the wake's failure: \
+         {failed:?}"
+    );
+    assert_eq!(
+        fixture.client.started_count(),
+        started_before,
+        "the member's model is not called for a continuation whose wake failed"
+    );
+    fixture.finish().await;
+}
+
+/// With pursuit attached, a write to the item of a released member's
+/// pursued binding wakes that member exactly once and it takes one turn
+/// that starts from the continuation's notice. A released member whose
+/// binding the host does not state is not woken by a write to its item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_wakes_a_released_member_whose_binding_is_pursued_and_no_other() {
+    let not_pursued = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+    let excluded = Arc::clone(&not_pursued);
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(move |binding: &meerkat::WorkAttentionBinding| {
+            !excluded
+                .lock()
+                .expect("not pursued")
+                .contains(&binding.target.target_key())
+        }),
+    );
+    let fixture =
+        WakeFixture::with_workgraph("wake-pursuit", pursuit.workgraph_service().clone(), None)
+            .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let stated = fixture.spawn("pursuit-stated").await;
+    let unstated = fixture.spawn("pursuit-unstated").await;
+    not_pursued.lock().expect("not pursued").insert(
+        crate::lower_agent_identity_attention_target(fixture.handle.mob_id(), &unstated)
+            .expect("the member's owner target")
+            .to_attention_target()
+            .target_key(),
+    );
+    fixture.release(&stated).await;
+    fixture.release(&unstated).await;
+    let started_before = fixture.client.started_count();
+
+    // The host binds a goal to each: two writes each, told in this order.
+    bound_goal_projection(&fixture, pursuit.workgraph_service(), &unstated).await;
+    bound_goal_projection(&fixture, pursuit.workgraph_service(), &stated).await;
+
+    fixture
+        .wait_residency(&stated, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    fixture.client.wait_started(started_before + 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fixture.residency(&unstated),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "a member whose binding is not stated is not woken"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "exactly one member was woken, once"
+    );
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the woken member's model is called once"
+    );
+    assert_eq!(
+        fixture.client.requests_mentioning(ATTENTION_NOTICE),
+        1,
+        "that call starts from the continuation's notice"
+    );
+    fixture.finish().await;
+}
+
+/// A continuation the pursuit could not hand over, because the member's
+/// wake was refused, leaves nothing behind: the same write told again, once
+/// the host prepares the member's build, wakes the member and starts its
+/// turn. Told once more after that, it starts no second turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_whose_wake_was_refused_starts_its_turn_when_it_is_told_again() {
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
+    );
+    let fixture = WakeFixture::with_workgraph(
+        "wake-pursuit-refused",
+        pursuit.workgraph_service().clone(),
+        Some((PREPARATION_RETRY, PREPARATION_RETRY)),
+    )
+    .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let member = fixture.spawn("pursuit-refused").await;
+    fixture.release(&member).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.preparer.answer_with(PreparerAnswer::Retryable);
+    let projection = bound_goal_projection(&fixture, pursuit.workgraph_service(), &member).await;
+    fixture
+        .wait_host_preparation(
+            &member,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
+        .await;
+    fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    fixture.wait_host_preparation(&member, None).await;
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the refused continuation left nothing that wakes the member later"
+    );
+    assert_eq!(
+        fixture.client.started_count(),
+        started_before,
+        "the member's model is not called for a continuation whose wake was refused"
+    );
+
+    let told_again = || {
+        pursuit
+            .workgraph_service()
+            .commit_observer()
+            .expect("the pursuit's service has its observer")
+            .committed(meerkat::WorkGraphCommitNotice {
+                realm_id: projection.work_ref.realm_id.clone(),
+                namespace: projection.work_ref.namespace.clone(),
+                item_id: projection.work_ref.item_id.clone(),
+                binding_id: None,
+                origin: meerkat::WorkGraphCommitOrigin::Unattributed,
+            });
+    };
+    told_again();
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    fixture.client.wait_started(started_before + 1).await;
+    told_again();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the refused hand-over left nothing behind, so the write told again starts the turn; \
+         told once more, it starts no second one"
+    );
+    assert_eq!(fixture.client.requests_mentioning(ATTENTION_NOTICE), 1);
+    fixture.finish().await;
+}
+
+/// The host revises the item of `projection`, in the realm of the fixture's
+/// mob.
+async fn revise_bound_item(
+    host_workgraph: &meerkat::WorkGraphService,
+    fixture: &WakeFixture,
+    projection: &meerkat::AttentionContextProjection,
+    text: &str,
+) {
+    let mob_workgraph =
+        crate::mob_scoped_workgraph_service(host_workgraph, fixture.handle.mob_id())
+            .expect("mob realm")
+            .expect("the mob's WorkGraph service");
+    let item = mob_workgraph
+        .get(None, None, projection.work_ref.item_id.clone())
+        .await
+        .expect("read the item");
+    let revision: meerkat::UpdateWorkItemRequest = serde_json::from_value(serde_json::json!({
+        "id": item.id,
+        "expected_revision": item.revision,
+        "description": text,
+    }))
+    .expect("an item revision");
+    mob_workgraph
+        .update(revision)
+        .await
+        .expect("the host revises the item");
+}
+
+/// What the member of a pursued binding does with a peer's message and a
+/// continuation that both wait while its turn runs. The row asserts the
+/// facts of one run as one value: how many model calls follow the held
+/// turn, whether one call holds both the peer's message and the
+/// continuation's notice, which tools other than WorkGraph's that call
+/// has, and how often the peer's message reached the member's transcript.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_and_a_continuation_that_wait_together_are_one_turn() {
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
+    );
+    let fixture = WakeFixture::with_workgraph(
+        "wake-pursuit-beside-peer",
+        pursuit.workgraph_service().clone(),
+        None,
+    )
+    .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let sender = fixture.spawn("pursuit-peer-sender").await;
+    let recipient = fixture.spawn("pursuit-peer-recipient").await;
+    fixture.wire(&sender, &recipient).await;
+    let started_before = fixture.client.started_count();
+
+    // The recipient's first turn, for its goal's creation, is held open.
+    fixture.client.block();
+    let projection = bound_goal_projection(&fixture, pursuit.workgraph_service(), &recipient).await;
+    fixture.client.wait_started(started_before + 1).await;
+
+    // A peer's message and a revision's continuation wait behind it.
+    let body = token("pursuit-beside-peer");
+    fixture
+        .raw_peer_send(&sender, &recipient, &body)
+        .await
+        .expect("the peer's message is accepted");
+    revise_bound_item(
+        pursuit.workgraph_service(),
+        &fixture,
+        &projection,
+        "revised",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    fixture.client.release();
+    let delivered = fixture.delivered_count(&recipient, &body).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let calls_after_the_held_turn = fixture.client.started_count() - started_before - 1;
+    let one_call_holds_both = fixture
+        .client
+        .requests_mentioning_all(&[&body, ATTENTION_NOTICE]);
+    let tools = fixture.client.tools_of_request_mentioning(&body);
+    let other_than_workgraph_tools = tools
+        .iter()
+        .filter(|tool| !tool.starts_with("workgraph_"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (
+            calls_after_the_held_turn,
+            one_call_holds_both,
+            other_than_workgraph_tools,
+            delivered,
+        ),
+        (1, 1, Vec::<String>::new(), 1),
+        "the peer's message and the continuation are one turn, with the continuation's \
+         tool set: {tools:?}"
+    );
+    fixture.finish().await;
+}
+
+/// What the member of a pursued binding does with a peer's message that
+/// waits beside TWO continuations while its turn runs: the two
+/// continuations cannot be one turn, and the peer's message is taken up
+/// with them. The row asserts the facts of one run as one value: how many
+/// model calls follow the held turn, and whether the peer's message reached
+/// the member's transcript within the row's wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_that_waits_beside_two_continuations_is_ended_with_them() {
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
+    );
+    let fixture = WakeFixture::with_workgraph(
+        "wake-pursuit-peer-two",
+        pursuit.workgraph_service().clone(),
+        None,
+    )
+    .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let sender = fixture.spawn("pursuit-two-sender").await;
+    let recipient = fixture.spawn("pursuit-two-recipient").await;
+    fixture.wire(&sender, &recipient).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.client.block();
+    let projection = bound_goal_projection(&fixture, pursuit.workgraph_service(), &recipient).await;
+    fixture.client.wait_started(started_before + 1).await;
+
+    let body = token("pursuit-peer-two");
+    fixture
+        .raw_peer_send(&sender, &recipient, &body)
+        .await
+        .expect("the peer's message is accepted");
+    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, "first").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, "second").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    fixture.client.release();
+    let session = fixture.session(&recipient).await;
+    let reached_the_transcript = tokio::time::timeout(STEP, async {
+        loop {
+            if fixture.transcript(&session).await.contains(&body) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let calls_after_the_held_turn = fixture.client.started_count() - started_before - 1;
+    assert_eq!(
+        (calls_after_the_held_turn, reached_the_transcript),
+        (0, false),
+        "the peer's message is ended with the two continuations it waited beside"
+    );
+    fixture.finish().await;
+}

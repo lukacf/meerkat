@@ -180,9 +180,10 @@ fn grant(
 /// path. A program that resolves a path one component at a time (a script
 /// runtime resolving its main file, `realpath`) reads it; without it such a
 /// program fails inside its own grant. The root is readable by the baseline
-/// and a granted path is granted whole, so neither is named. These rules
-/// precede every deny rule, and a later deny wins. With every read allowed
-/// there is nothing left to allow.
+/// and a path granted for reading is granted whole, so neither is named; a
+/// path granted for writing alone carries no read and is named where it
+/// lies above another grant. These rules precede every deny rule, and a
+/// later deny wins. With every read allowed there is nothing left to allow.
 fn allow_metadata_above_grants(
     policy: &mut String,
     read: &FilesystemAccess,
@@ -195,8 +196,12 @@ fn allow_metadata_above_grants(
         FilesystemAccess::Unrestricted => &[],
         FilesystemAccess::Paths(paths) => paths.as_slice(),
     };
-    let mut granted = BTreeSet::new();
-    for access in read.iter().chain(write) {
+    let mut readable = BTreeSet::new();
+    for access in read {
+        readable.insert(normalize(access.path())?);
+    }
+    let mut granted = readable.clone();
+    for access in write {
         granted.insert(normalize(access.path())?);
     }
     let mut above = BTreeSet::new();
@@ -204,7 +209,7 @@ fn allow_metadata_above_grants(
         above.extend(
             path.ancestors()
                 .skip(1)
-                .filter(|ancestor| ancestor.parent().is_some() && !granted.contains(*ancestor)),
+                .filter(|ancestor| ancestor.parent().is_some() && !readable.contains(*ancestor)),
         );
     }
     for directory in above {

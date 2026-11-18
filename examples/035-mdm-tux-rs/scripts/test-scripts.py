@@ -52,6 +52,26 @@ class Scripts(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("synthetic-session", result.stdout)
 
+    def test_selection_and_claim_readiness_are_distinct(self):
+        for target, selected, ready, hint, expected in [
+            ("target-b", "target-b", "no", "Target disconnected", True),
+            ("target-b", "target-b", "yes", "Target disconnected", False),
+            ("target-b", "target-b", "yes", "Ready to send to target-b.", True),
+            ("target-b", "target-a", "no", "Ready to send to target-b.", False),
+            ("hive", "hive", "yes", "hive is working", False),
+            ("hive", "hive", "yes", "Ready to send to hive.", True),
+            ("hive", "hive", "yes", "Ready to send to hive. not really", False),
+        ]:
+            with self.subTest(target=target, selected=selected, hint=hint, ready=ready):
+                pane = ("selected: target-b  |  timeline live\nReady to send to hive.\n"
+                        f"│{hint:<48}│\n└────┘\nselected: {selected}  |  timeline live\n"
+                        "[Tab] mode  [Up/Down] select  [Enter] send\n")
+                result = subprocess.run(
+                    ["bash", "-c", 'source scripts/tmux-architecture-suite.sh; pane_matches_target "$1" "$2"',
+                     "_", target, ready], cwd=ROOT, input=pane, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode == 0, expected, result.stderr)
+
     def test_restart_rejects_historical_readiness(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as scratch:
             docker = Path(scratch) / "docker"

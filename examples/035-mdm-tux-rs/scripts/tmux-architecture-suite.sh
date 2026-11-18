@@ -123,9 +123,26 @@ wait_for_target_ready() {
   exit 1
 }
 
+# Do not match status-like text in the scrollable agent transcript.
+pane_matches_target() {
+  local target="$1" require_ready="$2" hint prefix
+  local -a rows
+  mapfile -t rows
+  (( ${#rows[@]} >= 4 )) || return 1
+  [[ "${rows[-1]}" == '[Tab] mode  [Up/Down] select'* ]] || return 1
+  case "${rows[-2]}" in
+    "selected: ${target}  |  timeline live"|"selected: ${target}  |  timeline paused") ;;
+    *) return 1 ;;
+  esac
+  [[ "$require_ready" == no ]] && return 0
+  hint="${rows[-4]}"; prefix="│Ready to send to ${target}."
+  [[ "$hint" == "$prefix"*'│' ]] || return 1
+  hint="${hint#"$prefix"}"; hint="${hint%│}"
+  [[ -z "${hint// /}" ]]
+}
+
 target_ready_now() {
-  local target="$1"
-  tmux capture-pane -t "$session_name" -p 2>/dev/null | grep -q "Ready to send to ${target}"
+  tmux capture-pane -t "$session_name" -p 2>/dev/null | pane_matches_target "$1" yes
 }
 
 select_with_keys() {
@@ -136,7 +153,11 @@ select_with_keys() {
   while (( SECONDS < deadline )); do
     press_keys "$@"
     sleep 1
-    if target_ready_now "$target"; then
+    # The hive is directly connected. Other targets are selected first,
+    # claimed next, and checked for readiness by claim_selected.
+    local require_ready=no
+    [[ "$target" != hive ]] || require_ready=yes
+    if tmux capture-pane -t "$session_name" -p 2>/dev/null | pane_matches_target "$target" "$require_ready"; then
       return 0
     fi
     sleep 2

@@ -4,7 +4,9 @@ import { groupConversationTimelineEntries, type ConversationTimelineEntry, type 
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { normalizePendingApproval } from "../../../console-core/src/pending-approvals";
+import type { QuestionSetSnapshot } from "../../../console-core/src/pending-questions";
 import { ConversationTranscript } from "./conversation-transcript";
+import { QuestionSetsProvider } from "./question-set-card";
 
 function Icon({ name }: { name: string; className?: string }) {
   return <span>{name}</span>;
@@ -189,6 +191,30 @@ describe("ConversationTranscript", () => {
     expect(screen.getByTestId("gating-pending:deployment").closest("section.cc-conversation-turn")).toBe(screen.getByTestId("conversation-turn:1"));
     view.rerender(<ConversationTranscript viewState={viewState} maxGroups={2} approvalIdentity="agent" approvalSnapshot={{ scopeKey: "scope", status: "ready", requests: [request], decisions: {}, readOnly: false }} onApprovalDecision={() => {}} />);
     expect(screen.getAllByTestId("gating-pending:deployment")).toHaveLength(1);
+  });
+
+  test("a transcript with nothing to draw renders nothing and reads nothing of the question sets", () => {
+    // A host can render an empty transcript where the page's question sets
+    // cannot be read: it must not ask for them.
+    let reads = 0;
+    const snapshot: QuestionSetSnapshot = { scopeKey: "scope", status: "ready", readOnly: false, sets: [], closed: [], decisions: {}, notices: [], slots: {} };
+    const view = { get snapshot() { reads += 1; return snapshot; }, onAnswer: () => {}, onDismiss: () => {} };
+    const empty: ConversationViewState = { conversationId: "empty", entries: [], groups: [], turnDiff: null, emptyState: null };
+    const rendered = render(
+      <QuestionSetsProvider value={view}>
+        <div data-testid="host"><ConversationTranscript viewState={empty} approvalIdentity="agent" /></div>
+      </QuestionSetsProvider>,
+    );
+    expect(rendered.getByTestId("host").innerHTML).toBe("");
+    expect(reads).toBe(0);
+    // A transcript that draws a turn does read them: it places their receipts.
+    rendered.rerender(
+      <QuestionSetsProvider value={view}>
+        <div data-testid="host"><ConversationTranscript viewState={buildViewState()} approvalIdentity="agent" /></div>
+      </QuestionSetsProvider>,
+    );
+    expect(rendered.getByTestId("conversation-turn:0")).toBeTruthy();
+    expect(reads > 0).toBe(true);
   });
 });
 

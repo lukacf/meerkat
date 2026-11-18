@@ -6792,11 +6792,10 @@ async fn an_attention_continuation_handed_over_twice_is_one_input() {
 }
 
 /// Two attention continuations of one binding, for two projections of it,
-/// carry the binding's key and both wait: the later one does not replace
-/// the earlier one at admission. The earlier one is refused when it is
-/// applied, because the store no longer holds its projection as current.
+/// carry the binding's key: the later one supersedes the earlier one that
+/// still waits, so one continuation waits, for the newest projection.
 #[tokio::test]
-async fn two_attention_continuations_of_one_binding_both_wait() {
+async fn a_later_attention_continuation_supersedes_an_earlier_one_that_waits() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
@@ -6821,8 +6820,105 @@ async fn two_attention_continuations_of_one_binding_both_wait() {
     let earlier_id = earlier.id().clone();
     let later_id = later.id().clone();
 
-    // No executor serves the session, so both stay queued.
+    // No executor serves the session, so an admitted input stays queued.
     for input in [earlier, later] {
+        assert!(
+            adapter
+                .accept_input(&sid, input)
+                .await
+                .expect("the hand-over is answered")
+                .is_accepted()
+        );
+    }
+    let earlier_state = adapter
+        .input_state(&sid, &earlier_id)
+        .await
+        .expect("read the earlier continuation")
+        .expect("the earlier continuation is recorded");
+    assert_eq!(
+        earlier_state.seed.terminal_outcome,
+        Some(InputTerminalOutcome::Superseded {
+            superseded_by: later_id.clone()
+        }),
+        "the later continuation supersedes the earlier one that waits"
+    );
+    assert_eq!(
+        adapter
+            .list_active_inputs(&sid)
+            .await
+            .expect("list the active inputs"),
+        vec![later_id],
+        "one continuation waits, for the newest projection"
+    );
+}
+
+/// Superseding a waiting attention continuation tells the host once, as a
+/// coalescing admission does.
+#[tokio::test]
+async fn superseding_a_waiting_attention_continuation_tells_the_host_once() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+    let told = count_runless_input_terminal_hints(&adapter);
+
+    assert!(
+        adapter
+            .accept_input(
+                &sid,
+                built_attention_continuation("projection-1", "binding-1")
+            )
+            .await
+            .expect("the first hand-over is answered")
+            .is_accepted()
+    );
+    assert_eq!(
+        told.load(Ordering::SeqCst),
+        0,
+        "the first admission displaces nothing"
+    );
+    assert!(
+        adapter
+            .accept_input(
+                &sid,
+                built_attention_continuation("projection-2", "binding-1")
+            )
+            .await
+            .expect("the second hand-over is answered")
+            .is_accepted()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while told.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("superseding the waiting continuation tells the host");
+    assert_eq!(
+        told.load(Ordering::SeqCst),
+        1,
+        "superseding the waiting continuation tells the host once"
+    );
+}
+
+/// Attention continuations of two bindings do not supersede each other:
+/// both wait.
+#[tokio::test]
+async fn attention_continuations_of_two_bindings_both_wait() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+
+    let one = built_attention_continuation("projection-1", "binding-1");
+    let other = built_attention_continuation("projection-2", "binding-2");
+    let one_id = one.id().clone();
+    let other_id = other.id().clone();
+    for input in [one, other] {
         assert!(
             adapter
                 .accept_input(&sid, input)
@@ -6836,17 +6932,484 @@ async fn two_attention_continuations_of_one_binding_both_wait() {
         .await
         .expect("list the active inputs");
     assert!(
-        active.len() == 2 && active.contains(&earlier_id) && active.contains(&later_id),
+        active.len() == 2 && active.contains(&one_id) && active.contains(&other_id),
         "both continuations wait: {active:?}"
     );
-    let earlier_state = adapter
+    for id in [&one_id, &other_id] {
+        let state = adapter
+            .input_state(&sid, id)
+            .await
+            .expect("read the continuation")
+            .expect("the continuation is recorded");
+        assert_eq!(
+            state.seed.terminal_outcome, None,
+            "a continuation of another binding supersedes nothing"
+        );
+    }
+}
+
+/// The waiter of an attention continuation that a later one supersedes is
+/// answered: it is not left waiting for a turn that never comes.
+#[tokio::test]
+async fn the_waiter_of_a_superseded_attention_continuation_is_answered() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let earlier_id = earlier.id().clone();
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, earlier)
+        .await
+        .expect("the first hand-over is answered");
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("an accepted continuation carries its completion");
+
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let later_id = later.id().clone();
+    assert!(
+        adapter
+            .accept_input(&sid, later)
+            .await
+            .expect("the second hand-over is answered")
+            .is_accepted()
+    );
+
+    let answered = tokio::time::timeout(Duration::from_secs(5), handle.wait())
+        .await
+        .expect("the superseded continuation's waiter is answered");
+    eprintln!("the superseded continuation's waiter was answered: {answered:?}");
+    let state = adapter
         .input_state(&sid, &earlier_id)
         .await
         .expect("read the earlier continuation")
         .expect("the earlier continuation is recorded");
     assert_eq!(
-        earlier_state.seed.terminal_outcome, None,
-        "the earlier continuation has no terminal: the later one did not replace it"
+        state.seed.terminal_outcome,
+        Some(InputTerminalOutcome::Superseded {
+            superseded_by: later_id
+        }),
+        "the earlier continuation ended superseded"
+    );
+}
+
+/// An executor that records, for every turn it is asked for, the inputs the
+/// turn carries and whether the turn carries an attention projection, and
+/// holds its first turn until it is told to end it.
+struct RecordsTurnsAndHoldsTheFirst {
+    turns: Arc<std::sync::Mutex<Vec<RecordedTurn>>>,
+    first_turn_started: Arc<tokio::sync::Notify>,
+    first_turn_may_end: Arc<tokio::sync::Notify>,
+}
+
+/// One turn the executor was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedTurn {
+    inputs: Vec<InputId>,
+    /// The projection named in the turn's tool overlay, when it carries one.
+    projection: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutor for RecordsTurnsAndHoldsTheFirst {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::lifecycle::core_executor::CoreExecutorError,
+    > {
+        let contributing = primitive.contributing_input_ids().to_vec();
+        let projection = primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.turn_tool_overlay.as_ref())
+            .and_then(|overlay| {
+                overlay
+                    .dispatch_context
+                    .get("workgraph.attention_projection")
+            })
+            .and_then(|value| value.get("projection"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let first = {
+            let mut turns = self.turns.lock().unwrap();
+            turns.push(RecordedTurn {
+                inputs: contributing.clone(),
+                projection,
+            });
+            turns.len() == 1
+        };
+        if first {
+            self.first_turn_started.notify_one();
+            self.first_turn_may_end.notified().await;
+        }
+        Ok(
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    contributing_input_ids: contributing,
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ),
+        )
+    }
+
+    async fn cancel_after_boundary(
+        &mut self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(
+        &mut self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        Ok(())
+    }
+}
+
+/// A session whose executor holds its first turn: the turns it is asked
+/// for, and the two signals of the first turn.
+struct HeldFirstTurnSession {
+    adapter: Arc<MeerkatMachine>,
+    sid: SessionId,
+    turns: Arc<std::sync::Mutex<Vec<RecordedTurn>>>,
+    first_turn_started: Arc<tokio::sync::Notify>,
+    first_turn_may_end: Arc<tokio::sync::Notify>,
+}
+
+impl HeldFirstTurnSession {
+    async fn new() -> Self {
+        let turns = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_turn_started = Arc::new(tokio::sync::Notify::new());
+        let first_turn_may_end = Arc::new(tokio::sync::Notify::new());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let sid = SessionId::new();
+        adapter
+            .register_session_with_executor(
+                sid.clone(),
+                Box::new(RecordsTurnsAndHoldsTheFirst {
+                    turns: Arc::clone(&turns),
+                    first_turn_started: Arc::clone(&first_turn_started),
+                    first_turn_may_end: Arc::clone(&first_turn_may_end),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        Self {
+            adapter,
+            sid,
+            turns,
+            first_turn_started,
+            first_turn_may_end,
+        }
+    }
+
+    /// Accept `first` and wait until its turn is held open.
+    async fn hold_a_turn_for(&self, first: Input) {
+        assert!(
+            self.adapter
+                .accept_input(&self.sid, first)
+                .await
+                .expect("the held turn's input is answered")
+                .is_accepted()
+        );
+        tokio::time::timeout(Duration::from_secs(10), self.first_turn_started.notified())
+            .await
+            .expect("the first turn starts");
+    }
+
+    /// Accept `input` while the first turn is held.
+    async fn accept_while_held(&self, input: Input) {
+        assert!(
+            self.adapter
+                .accept_input(&self.sid, input)
+                .await
+                .expect("an input that waits is answered")
+                .is_accepted()
+        );
+    }
+
+    /// Let the held turn end and wait until every one of `ids` is terminal.
+    /// Answers the terminals, in the order of `ids`, and the turns asked for.
+    async fn release_and_settle(
+        &self,
+        ids: &[InputId],
+    ) -> (Vec<Option<InputTerminalOutcome>>, Vec<RecordedTurn>) {
+        self.first_turn_may_end.notify_one();
+        let mut terminals = Vec::new();
+        for id in ids {
+            let state = wait_for_input_state_within(
+                &self.adapter,
+                &self.sid,
+                id,
+                Duration::from_secs(10),
+                "the input reaches a terminal",
+                |state| state.seed.terminal_outcome.is_some(),
+            )
+            .await;
+            terminals.push(state.seed.terminal_outcome);
+        }
+        (terminals, self.turns.lock().unwrap().clone())
+    }
+}
+
+/// A plain peer message of the queue lane: an input that is no prompt and
+/// carries no turn settings of its own.
+fn waiting_peer_message(label: &str) -> Input {
+    Input::Peer(meerkat_runtime::input::PeerInput {
+        directed_interaction_id: None,
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+        sender_taint: None,
+        header: InputHeader {
+            ingress_context: None,
+            retained_resume: None,
+            authority_association: None,
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+            requester: None,
+        },
+        convention: Some(meerkat_runtime::input::PeerConvention::Message),
+        content: format!("a message from a peer: {label}").into(),
+        payload: None,
+        handling_mode: None,
+        in_reply_to: None,
+    })
+}
+
+/// Two attention continuations of one binding wait behind a running turn:
+/// the earlier one is superseded and the later one takes exactly one turn,
+/// under its own projection.
+#[tokio::test]
+async fn two_attention_continuations_behind_a_running_turn_give_one_turn_for_the_newer() {
+    let session = HeldFirstTurnSession::new().await;
+    session
+        .hold_a_turn_for(make_prompt(
+            "the turn that runs while the continuations arrive",
+        ))
+        .await;
+
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let earlier_id = earlier.id().clone();
+    let later_id = later.id().clone();
+    session.accept_while_held(earlier).await;
+    session.accept_while_held(later).await;
+
+    let (terminals, turns) = session
+        .release_and_settle(&[earlier_id, later_id.clone()])
+        .await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Superseded {
+                superseded_by: later_id.clone()
+            }),
+            Some(InputTerminalOutcome::Consumed),
+        ],
+        "the earlier continuation is superseded and the later one runs: {turns:#?}"
+    );
+    assert_eq!(
+        turns[1..],
+        [RecordedTurn {
+            inputs: vec![later_id],
+            projection: Some("projection-2".to_string()),
+        }],
+        "one turn follows the held one, the later continuation's, under its projection"
+    );
+}
+
+/// An attention continuation whose predecessor of the same binding is
+/// already running is not a replacement for it: the running one ends, and
+/// the later one takes the next turn.
+#[tokio::test]
+async fn an_attention_continuation_behind_a_running_one_of_its_binding_takes_the_next_turn() {
+    let session = HeldFirstTurnSession::new().await;
+    let running = built_attention_continuation("projection-1", "binding-1");
+    let running_id = running.id().clone();
+    session.hold_a_turn_for(running).await;
+
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let later_id = later.id().clone();
+    session.accept_while_held(later).await;
+
+    let (terminals, turns) = session
+        .release_and_settle(&[running_id.clone(), later_id.clone()])
+        .await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "the running continuation is not superseded and both run: {turns:#?}"
+    );
+    assert_eq!(
+        turns,
+        vec![
+            RecordedTurn {
+                inputs: vec![running_id],
+                projection: Some("projection-1".to_string()),
+            },
+            RecordedTurn {
+                inputs: vec![later_id],
+                projection: Some("projection-2".to_string()),
+            },
+        ],
+        "two turns, each continuation's own"
+    );
+}
+
+/// A peer's message that waits beside an attention continuation takes a
+/// turn of its own, with no attention projection: the continuation never
+/// shares a turn with another input.
+#[tokio::test]
+async fn a_peer_message_beside_a_waiting_attention_continuation_takes_a_turn_of_its_own() {
+    let session = HeldFirstTurnSession::new().await;
+    session
+        .hold_a_turn_for(make_prompt("the turn that runs while the two arrive"))
+        .await;
+
+    let message = waiting_peer_message("beside one continuation");
+    let continuation = built_attention_continuation("projection-1", "binding-1");
+    let message_id = message.id().clone();
+    let continuation_id = continuation.id().clone();
+    session.accept_while_held(message).await;
+    session.accept_while_held(continuation).await;
+
+    let (terminals, turns) = session
+        .release_and_settle(&[message_id.clone(), continuation_id.clone()])
+        .await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "the message and the continuation both run: {turns:#?}"
+    );
+    assert_eq!(
+        turns[1..],
+        [
+            RecordedTurn {
+                inputs: vec![message_id],
+                projection: None,
+            },
+            RecordedTurn {
+                inputs: vec![continuation_id],
+                projection: Some("projection-1".to_string()),
+            },
+        ],
+        "two turns follow the held one: the message's without a projection, then the \
+         continuation's"
+    );
+}
+
+/// A peer's message that waits beside two attention continuations of one
+/// binding is not ended with them: the earlier continuation is superseded,
+/// and the message and the later continuation each take a turn.
+#[tokio::test]
+async fn a_peer_message_beside_two_attention_continuations_is_not_ended_with_them() {
+    let session = HeldFirstTurnSession::new().await;
+    session
+        .hold_a_turn_for(make_prompt("the turn that runs while the three arrive"))
+        .await;
+
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let message = waiting_peer_message("beside two continuations");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let earlier_id = earlier.id().clone();
+    let message_id = message.id().clone();
+    let later_id = later.id().clone();
+    session.accept_while_held(earlier).await;
+    session.accept_while_held(message).await;
+    session.accept_while_held(later).await;
+
+    let (terminals, turns) = session
+        .release_and_settle(&[earlier_id, message_id.clone(), later_id.clone()])
+        .await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Superseded {
+                superseded_by: later_id.clone()
+            }),
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Consumed),
+        ],
+        "the message is not ended with the continuations: {turns:#?}"
+    );
+    assert_eq!(
+        turns[1..],
+        [
+            RecordedTurn {
+                inputs: vec![message_id],
+                projection: None,
+            },
+            RecordedTurn {
+                inputs: vec![later_id],
+                projection: Some("projection-2".to_string()),
+            },
+        ],
+        "two turns follow the held one: the message's, then the later continuation's"
+    );
+}
+
+/// Inputs that carry no attention projection are taken up as before: two
+/// peer messages that wait behind a running turn share one turn.
+#[tokio::test]
+async fn two_peer_messages_that_wait_behind_a_running_turn_share_one_turn() {
+    let session = HeldFirstTurnSession::new().await;
+    session
+        .hold_a_turn_for(make_prompt("the turn that runs while the messages arrive"))
+        .await;
+
+    let one = waiting_peer_message("one");
+    let other = waiting_peer_message("other");
+    let one_id = one.id().clone();
+    let other_id = other.id().clone();
+    session.accept_while_held(one).await;
+    session.accept_while_held(other).await;
+
+    let (terminals, turns) = session
+        .release_and_settle(&[one_id.clone(), other_id.clone()])
+        .await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "both messages run: {turns:#?}"
+    );
+    assert_eq!(
+        turns[1..],
+        [RecordedTurn {
+            inputs: vec![one_id, other_id],
+            projection: None,
+        }],
+        "one turn follows the held one and carries both messages"
     );
 }
 

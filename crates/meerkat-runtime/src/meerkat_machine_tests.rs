@@ -43538,6 +43538,97 @@ async fn a_peer_message_s_run_resumed_after_a_restart_takes_a_join() {
     );
 }
 
+/// The recovery witness takes a stored row only with a pair of stamps an
+/// admission writes: a continuation stored as resume-pending; a
+/// continuation stored as a content turn at a run's start; any other kind
+/// stored as a content turn. A continuation stored as a content turn at
+/// another boundary, and another kind stored as resume-pending, are
+/// refused.
+#[test]
+fn the_recovery_witness_takes_a_stored_row_by_the_stamps_an_admission_writes() {
+    use mm_dsl::RecoveredInputKind as Kind;
+    use mm_dsl::RecoveredRunApplyBoundary as Boundary;
+    use mm_dsl::RecoveredRuntimeExecutionKind as Execution;
+
+    let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+        "recovery-witness-stamps",
+    )));
+    let witness = |input_kind: Kind, runtime_execution_kind: Execution, boundary: Boundary| {
+        MeerkatMachine::preview_dsl_input_on_shared_authority(
+            &driver.shared_dsl_authority(),
+            mm_dsl::MeerkatMachineInput::RecoverAdmittedInput {
+                input_id: InputId::new().to_string(),
+                input_kind,
+                runtime_boundary: boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent: None,
+                // The Steer lane, so that the immediate boundary's own guard
+                // refuses nothing here.
+                lane: mm_dsl::InputLane::Steer,
+            },
+            "RecoverAdmittedInput",
+        )
+        .map(|_| ())
+    };
+    for (input_kind, runtime_execution_kind, boundary, taken) in [
+        (
+            Kind::Continuation,
+            Execution::ResumePending,
+            Boundary::RunStart,
+            true,
+        ),
+        (
+            Kind::Continuation,
+            Execution::ContentTurn,
+            Boundary::RunStart,
+            true,
+        ),
+        (
+            Kind::Continuation,
+            Execution::ContentTurn,
+            Boundary::RunCheckpoint,
+            false,
+        ),
+        (
+            Kind::Continuation,
+            Execution::ContentTurn,
+            Boundary::Immediate,
+            false,
+        ),
+        (
+            Kind::PeerMessage,
+            Execution::ContentTurn,
+            Boundary::RunStart,
+            true,
+        ),
+        (
+            Kind::PeerMessage,
+            Execution::ContentTurn,
+            Boundary::RunCheckpoint,
+            true,
+        ),
+        (
+            Kind::PeerMessage,
+            Execution::ResumePending,
+            Boundary::RunStart,
+            false,
+        ),
+    ] {
+        let answer = witness(input_kind, runtime_execution_kind, boundary);
+        assert_eq!(
+            answer.is_ok(),
+            taken,
+            "{input_kind:?} stored as {runtime_execution_kind:?} at {boundary:?}: {answer:?}"
+        );
+        if let Err(refusal) = answer {
+            assert!(
+                refusal.contains("guard rejected"),
+                "a generated guard refuses the witness: {refusal}"
+            );
+        }
+    }
+}
+
 /// Two people's steers waiting in the Steer lane at once (both admitted
 /// while the runtime is idle) are two runs: the generated plan's steer batch
 /// takes the earlier person's steer alone. Staging is never asked to mix

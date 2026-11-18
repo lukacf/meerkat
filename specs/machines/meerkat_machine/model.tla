@@ -16005,7 +16005,7 @@ RecycleFromAttached ==
 
 RecoverAdmittedInputIdle(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Idle"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Idle"
@@ -16017,7 +16017,7 @@ RecoverAdmittedInputIdle(input_id, input_kind, runtime_boundary, runtime_executi
 
 RecoverAdmittedInputAttached(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Attached"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Attached"
@@ -16029,7 +16029,7 @@ RecoverAdmittedInputAttached(input_id, input_kind, runtime_boundary, runtime_exe
 
 RecoverAdmittedInputRunning(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Running"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Running"
@@ -16041,7 +16041,7 @@ RecoverAdmittedInputRunning(input_id, input_kind, runtime_boundary, runtime_exec
 
 RecoverAdmittedInputRetired(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Retired"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Retired"
@@ -16053,7 +16053,7 @@ RecoverAdmittedInputRetired(input_id, input_kind, runtime_boundary, runtime_exec
 
 RecoverAdmittedInputStopped(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Stopped"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Stopped"

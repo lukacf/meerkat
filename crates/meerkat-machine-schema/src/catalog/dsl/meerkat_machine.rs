@@ -26410,9 +26410,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_peer_response_terminal_apply_intent,
                 lane
             }
+            // The stored kind and the stored execution kind agree, in three
+            // cases, each a pair an admission writes: a continuation stored
+            // as resume-pending resumes the pending run; a continuation
+            // stored as a content turn at a run's start is taken as that
+            // content turn; every other kind is a content turn.
             guard "recovered_execution_kind_matches_input" {
                 (input_kind == RecoveredInputKind::Continuation
                     && runtime_execution_kind == RecoveredRuntimeExecutionKind::ResumePending)
+                || (input_kind == RecoveredInputKind::Continuation
+                    && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
                 || (input_kind != RecoveredInputKind::Continuation
                     && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn)
             }

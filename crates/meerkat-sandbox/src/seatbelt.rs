@@ -583,4 +583,110 @@ mod tests {
             }
         }
     }
+
+    /// A write grant carries no read of its own. A directory that is granted
+    /// for writing alone and lies above another grant is still a directory
+    /// above a grant: its metadata is allowed like any other's.
+    #[test]
+    fn profile_allows_metadata_on_a_write_only_grant_above_another_grant() {
+        let policy = policy(
+            subtrees(&["/meerkat-row/work/project/src"]),
+            subtrees(&["/meerkat-row/work"]),
+            &[],
+            IpNetworkAccess::Denied,
+        );
+        for above in [
+            "/meerkat-row",
+            "/meerkat-row/work",
+            "/meerkat-row/work/project",
+        ] {
+            assert_eq!(
+                policy.matches(&metadata(above)).count(),
+                1,
+                "{above}: {policy}"
+            );
+        }
+        assert!(
+            !policy.contains(&metadata("/meerkat-row/work/project/src")),
+            "{policy}"
+        );
+    }
+
+    /// A Unix socket grant and IP access each need Unix sockets; a launch
+    /// with both gets the socket allowance once. The granted socket and the
+    /// resolver's are the only ones a launch connects to, and without IP
+    /// access the granted socket is the only one.
+    #[test]
+    fn unix_socket_allowance_is_stated_once_with_and_without_ip_access() {
+        let granted = "(allow network-outbound (remote unix-socket (literal \"/meerkat-row/run/app.sock\")))\n";
+        for (network, sockets) in [
+            (IpNetworkAccess::Denied, 1),
+            (IpNetworkAccess::Unrestricted, 2),
+        ] {
+            let requirement = ExecutionConfinement::try_from(ConfinementSpec {
+                baseline: PlatformBaseline::CommandRuntimeV1,
+                read: subtrees(&[]),
+                write: subtrees(&[]),
+                deny_read: Vec::new(),
+                deny_write: Vec::new(),
+                network,
+                unix_connect: vec![PathAccess::Literal(PathBuf::from(
+                    "/meerkat-row/run/app.sock",
+                ))],
+                require_descendant_termination: false,
+            })
+            .unwrap();
+            let policy = lower(&requirement, &[]).unwrap();
+            assert_eq!(
+                policy
+                    .matches("(allow system-socket (socket-domain AF_UNIX))\n")
+                    .count(),
+                1,
+                "{policy}"
+            );
+            assert_eq!(policy.matches(granted).count(), 1, "{policy}");
+            assert_eq!(
+                policy
+                    .matches("(allow network-outbound (remote unix-socket")
+                    .count(),
+                sockets,
+                "{policy}"
+            );
+            assert_eq!(
+                policy.matches(RESOLVER_SOCKET).count(),
+                sockets - 1,
+                "{policy}"
+            );
+        }
+    }
+
+    /// A denied read wins over what IP access allows: the certificate
+    /// authority files and the resolver's socket are allowed first, and the
+    /// deny rules for the same paths follow.
+    #[test]
+    fn profile_denies_a_read_after_the_ca_files_and_resolver_socket_allowances() {
+        let policy = policy(
+            subtrees(&[]),
+            subtrees(&[]),
+            &["/private/etc/ssl", "/private/var/run/mDNSResponder"],
+            IpNetworkAccess::Unrestricted,
+        );
+        for (allow, deny) in [
+            (
+                SYSTEM_CA_FILES,
+                "(deny file-read* (require-any (literal \"/private/etc/ssl\") (subpath \"/private/etc/ssl\")))\n",
+            ),
+            (
+                RESOLVER_SOCKET,
+                "(deny network-outbound (remote unix-socket (require-any (literal \"/private/var/run/mDNSResponder\") (subpath \"/private/var/run/mDNSResponder\"))))\n",
+            ),
+        ] {
+            let allowed = policy.find(allow);
+            let denied = policy.find(deny);
+            assert!(
+                matches!((allowed, denied), (Some(allowed), Some(denied)) if allowed < denied),
+                "{deny}: {policy}"
+            );
+        }
+    }
 }

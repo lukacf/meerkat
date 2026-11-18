@@ -40177,6 +40177,75 @@ async fn test_member_turn_stored_with_a_stale_workgraph_attention_projection_cal
     bound.handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// The same for a binding that still stands: the host revises the bound
+/// item after the projection was made. The turn stored with the older
+/// projection calls the member's model zero times and ends abandoned, and
+/// the one who waits is told the projection is stale.
+#[tokio::test]
+async fn test_member_turn_stored_with_a_revised_items_older_attention_projection_calls_no_model() {
+    let bound = attention_bound_member("w-revised-attention").await;
+    let stored =
+        meerkat::WorkGraphToolSurface::turn_overlay_for_attention_projection(&bound.projection)
+            .expect("the projection's turn overlay");
+
+    let revision: meerkat::UpdateWorkItemRequest = serde_json::from_value(serde_json::json!({
+        "id": bound.goal.item.id,
+        "expected_revision": bound.goal.item.revision,
+        "description": "Revised after the projection was made",
+    }))
+    .expect("an item revision");
+    bound
+        .workgraph_service
+        .update(revision)
+        .await
+        .expect("the host revises the bound item");
+    let active = bound
+        .workgraph_service
+        .list_attention(meerkat::AttentionListRequest {
+            realm_id: None,
+            namespace: None,
+            target: None,
+            status: Some(meerkat::WorkAttentionStatus::Active),
+        })
+        .await
+        .expect("list the active bindings")
+        .attention;
+    assert_eq!(
+        active.len(),
+        1,
+        "the binding still stands after the revision: {active:?}"
+    );
+
+    let calls_before = bound.model_calls();
+    let ended = bound.turn_stored_with(stored).await;
+    let calls = bound.model_calls() - calls_before;
+
+    let mut wrong = Vec::new();
+    if calls != 0 {
+        wrong.push(format!(
+            "the member's model was called {calls} time(s) under a projection of the item \
+             before its revision"
+        ));
+    }
+    match &ended {
+        Ok(_) => wrong.push("the turn ended as delivered".to_string()),
+        Err(error) => {
+            let told = error.to_string();
+            if !(told.contains("turn abandoned")
+                && told.contains("runtime_apply_failure")
+                && told.contains("stale WorkGraph attention projection"))
+            {
+                wrong.push(format!(
+                    "the turn's end does not say that its apply failed for a stale projection \
+                     and it was abandoned: {told}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    bound.handle.shutdown().await.expect("shutdown test mob");
+}
+
 /// The control of the row above: the same turn, stored with the projection
 /// the store still holds as current, takes exactly one turn, under that
 /// projection.

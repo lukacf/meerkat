@@ -7413,6 +7413,160 @@ async fn two_peer_messages_that_wait_behind_a_running_turn_share_one_turn() {
     );
 }
 
+/// The inputs a session accepted and never ran, taken up after a restart:
+/// a store-backed session accepts `inputs` with no executor to run them,
+/// the machine is dropped, and a new machine on the same store registers
+/// the session with an executor that records its turns and holds none.
+/// Answers the terminals, in the order of `inputs`, and the turns.
+async fn turns_taken_after_a_restart(
+    inputs: Vec<Input>,
+) -> (Vec<Option<InputTerminalOutcome>>, Vec<RecordedTurn>) {
+    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let sid = SessionId::new();
+    let before = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
+    before
+        .register_session(sid.clone())
+        .await
+        .expect("register session");
+    let ids: Vec<InputId> = inputs.iter().map(|input| input.id().clone()).collect();
+    for input in inputs {
+        assert!(
+            before
+                .accept_input(&sid, input)
+                .await
+                .expect("an input that waits is answered")
+                .is_accepted()
+        );
+    }
+    drop(before);
+
+    let turns = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let first_turn_started = Arc::new(tokio::sync::Notify::new());
+    let first_turn_may_end = Arc::new(tokio::sync::Notify::new());
+    // Nothing holds the first turn after the restart.
+    first_turn_may_end.notify_one();
+    let adapter = Arc::new(
+        MeerkatMachine::persistent(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )
+        .expect("persistent machine"),
+    );
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(RecordsTurnsAndHoldsTheFirst {
+                turns: Arc::clone(&turns),
+                first_turn_started: Arc::clone(&first_turn_started),
+                first_turn_may_end: Arc::clone(&first_turn_may_end),
+            }),
+        )
+        .await
+        .expect("the restart recovers the inputs that waited");
+    let session = HeldFirstTurnSession {
+        adapter,
+        sid,
+        turns,
+        first_turn_started,
+        first_turn_may_end,
+    };
+    session.release_and_settle(&ids).await
+}
+
+/// After a restart an attention continuation that still waited takes a
+/// turn of its own: a peer's message recovered beside it runs first, in a
+/// turn without the attention projection.
+#[tokio::test]
+async fn a_recovered_attention_continuation_takes_a_turn_of_its_own() {
+    let message = waiting_peer_message("recovered beside a continuation");
+    let continuation = built_attention_continuation("projection-1", "binding-1");
+    let message_id = message.id().clone();
+    let continuation_id = continuation.id().clone();
+
+    let (terminals, turns) = turns_taken_after_a_restart(vec![message, continuation]).await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "the recovered message and continuation both run: {turns:#?}"
+    );
+    assert_eq!(
+        turns,
+        vec![
+            RecordedTurn {
+                inputs: vec![message_id],
+                projection: None,
+            },
+            RecordedTurn {
+                inputs: vec![continuation_id],
+                projection: Some("projection-1".to_string()),
+            },
+        ],
+        "two turns after the restart: the message's without a projection, then the \
+         continuation's"
+    );
+}
+
+/// Inputs that carry no attention projection are taken up after a restart
+/// as before: two recovered peer messages share one turn.
+#[tokio::test]
+async fn two_recovered_peer_messages_share_one_turn() {
+    let one = waiting_peer_message("recovered one");
+    let other = waiting_peer_message("recovered other");
+    let one_id = one.id().clone();
+    let other_id = other.id().clone();
+
+    let (terminals, turns) = turns_taken_after_a_restart(vec![one, other]).await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "both recovered messages run: {turns:#?}"
+    );
+    assert_eq!(
+        turns,
+        vec![RecordedTurn {
+            inputs: vec![one_id, other_id],
+            projection: None,
+        }],
+        "one turn after the restart carries both messages"
+    );
+}
+
+/// An attention continuation that still waited when the process ended is
+/// taken up after the restart: the session registers again and the
+/// continuation takes its turn, under its projection.
+#[tokio::test]
+async fn a_waiting_attention_continuation_is_taken_up_after_a_restart() {
+    let continuation = built_attention_continuation("projection-1", "binding-1");
+    let continuation_id = continuation.id().clone();
+
+    let (terminals, turns) = turns_taken_after_a_restart(vec![continuation]).await;
+    assert_eq!(
+        terminals,
+        vec![Some(InputTerminalOutcome::Consumed)],
+        "the recovered continuation runs: {turns:#?}"
+    );
+    assert_eq!(
+        turns,
+        vec![RecordedTurn {
+            inputs: vec![continuation_id],
+            projection: Some("projection-1".to_string()),
+        }],
+        "one turn after the restart, the continuation's"
+    );
+}
+
 /// An attention continuation handed to a session whose runtime does not
 /// serve input is refused, not kept: a runtime that was retired answers
 /// that it is not ready and names its state, and a session the machine

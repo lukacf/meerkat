@@ -35,6 +35,26 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mob`: a member's turn that was stored with a WorkGraph attention
+  projection is not run once the store no longer holds that projection as
+  current. A turn's overlay can carry the projection of an attention binding
+  (a Rust host of the mob crate can store one with
+  `MemberTurnOptions::with_turn_tool_overlay`); it states the binding and
+  its item as they were when it was made. Before, a member's turn stored
+  with a projection whose binding had since been stopped (its item was
+  closed, for one) ran under it and called the model once, with that
+  projection's tool list and context. Such a turn is now refused before it
+  starts, as it already was on the runtime-backed surfaces and in the CLI:
+  no model call is made, and the caller that waits for the turn is told that
+  the turn was abandoned with the store's reason, an apply failure
+  (`runtime_apply_failure`). The same holds for a projection whose binding
+  or item was revised, paused or reassigned after it was made. A turn stored
+  with the current projection, and a turn stored with none, run as before.
+  The check is one function of the facade,
+  `meerkat::surface::validate_workgraph_attention_turn_overlay`.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

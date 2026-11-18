@@ -203,20 +203,29 @@ async def test_a_notice_with_no_handler_answers_nothing():
 
 
 @pytest.mark.asyncio
-async def test_notices_before_a_handler_reach_the_handler_when_it_registers():
-    """The gateway writes a notice when a decision opens, which can be before
-    the host registered its handler (``build()`` returns a connected
-    runtime). The SDK keeps one notice per decision, drops none, and hands
-    them to the handler when it registers, once."""
+async def test_held_notices_before_a_handler_reach_the_handler_when_it_registers():
+    """The gateway writes a ``held`` notice when a decision opens, which can
+    be before the host registered its handler (``build()`` returns a
+    connected runtime). The SDK keeps the ``held`` notice of the newest 1024
+    decisions, one per decision, and hands them to the handler when it
+    registers, once. A ``presented`` notice carries a whole rendering and is
+    not kept."""
     runtime = _runtime()
     dispatch = runtime._dispatcher.handle_callback
     ids = [f"decision:{index:064x}" for index in range(3000)]
     for decision_id in ids:
         early = {**NOTICE, "decision_id": decision_id, "notice_id": f"early-{decision_id}"}
         assert await dispatch("meta/decisions/notice", early) is None
-    # A later notice of a decision replaces the one kept for it.
-    later = {**NOTICE, "decision_id": ids[0], "notice_id": "later", "event": "presented"}
-    assert await dispatch("meta/decisions/notice", later) is None
+    presented = {
+        **NOTICE,
+        "decision_id": "decision:" + "f" * 64,
+        "notice_id": "presented",
+        "event": "presented",
+    }
+    assert await dispatch("meta/decisions/notice", presented) is None
+    # A later notice of a kept decision replaces the one kept for it.
+    again = {**NOTICE, "decision_id": ids[2000], "notice_id": "again"}
+    assert await dispatch("meta/decisions/notice", again) is None
 
     received = []
 
@@ -225,16 +234,20 @@ async def test_notices_before_a_handler_reach_the_handler_when_it_registers():
 
     runtime.on_decision_notice(handler)
     for _ in range(500):
-        if len(received) >= len(ids):
+        if len(received) >= 1024:
             break
         await asyncio.sleep(0.01)
-    assert len(received) == len(ids), "one notice per decision, none dropped"
-    assert sorted(notice["decision_id"] for notice in received) == sorted(ids)
-    assert [notice for notice in received if notice["decision_id"] == ids[0]] == [later]
+    await asyncio.sleep(0.05)
+    # The newest 1024 decisions, in order of arrival; the replaced one last.
+    kept = ids[1976:2000] + ids[2001:] + [ids[2000]]
+    assert len(kept) == 1024
+    assert [notice["decision_id"] for notice in received] == kept
+    assert received[-1] == again
+    assert all(notice["event"] == "held" for notice in received)
 
     # They are handed over once: the next notice arrives alone.
     await dispatch("meta/decisions/notice", NOTICE)
-    assert len(received) == len(ids) + 1
+    assert len(received) == 1025
     assert received[-1] == NOTICE
     other = []
     runtime.on_decision_notice(other.append)

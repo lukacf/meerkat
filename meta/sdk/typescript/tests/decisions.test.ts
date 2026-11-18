@@ -194,11 +194,13 @@ describe("decision notices and later turns", () => {
     assert.equal(answer, null);
   });
 
-  // The gateway writes a notice when a decision opens, which can be before
-  // the host registered its handler (`build()` resolves to a connected
-  // runtime). The SDK keeps one notice per decision, drops none, and hands
-  // them to the handler when it registers, once.
-  it("notices before a handler reach the handler when it registers", async () => {
+  // The gateway writes a `held` notice when a decision opens, which can be
+  // before the host registered its handler (`build()` resolves to a
+  // connected runtime). The SDK keeps the `held` notice of the newest 1024
+  // decisions, one per decision, and hands them to the handler when it
+  // registers, once. A `presented` notice carries a whole rendering and is
+  // not kept.
+  it("held notices before a handler reach the handler when it registers", async () => {
     const rt = new MetaRuntime(runtimeConfig());
     const dispatcher = (rt as any)._dispatcher as CallbackDispatcher;
     const ids = Array.from(
@@ -209,27 +211,38 @@ describe("decision notices and later turns", () => {
       const early = { ...NOTICE, decision_id: decisionId, notice_id: `early-${decisionId}` };
       assert.equal(await dispatcher.handleCallback("meta/decisions/notice", early), null);
     }
-    // A later notice of a decision replaces the one kept for it.
-    const later = { ...NOTICE, decision_id: ids[0], notice_id: "later", event: "presented" };
-    assert.equal(await dispatcher.handleCallback("meta/decisions/notice", later), null);
+    const presented = {
+      ...NOTICE,
+      decision_id: `decision:${"f".repeat(64)}`,
+      notice_id: "presented",
+      event: "presented",
+    };
+    assert.equal(await dispatcher.handleCallback("meta/decisions/notice", presented), null);
+    // A later notice of a kept decision replaces the one kept for it.
+    const again = { ...NOTICE, decision_id: ids[2000], notice_id: "again" };
+    assert.equal(await dispatcher.handleCallback("meta/decisions/notice", again), null);
 
     const received: Array<Record<string, unknown>> = [];
     rt.onDecisionNotice(async (notice) => {
       received.push(notice);
     });
-    for (let turn = 0; turn < 500 && received.length < ids.length; turn += 1) {
+    for (let turn = 0; turn < 500 && received.length < 1024; turn += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(received.length, ids.length, "one notice per decision, none dropped");
-    assert.deepEqual(received.map((notice) => notice.decision_id).sort(), [...ids].sort());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The newest 1024 decisions, in order of arrival; the replaced one last.
+    const kept = [...ids.slice(1976, 2000), ...ids.slice(2001), ids[2000]];
+    assert.equal(kept.length, 1024);
     assert.deepEqual(
-      received.filter((notice) => notice.decision_id === ids[0]),
-      [later],
+      received.map((notice) => notice.decision_id),
+      kept,
     );
+    assert.deepEqual(received[received.length - 1], again);
+    assert.ok(received.every((notice) => notice.event === "held"));
 
     // They are handed over once: the next notice arrives alone.
     await dispatcher.handleCallback("meta/decisions/notice", NOTICE);
-    assert.equal(received.length, ids.length + 1);
+    assert.equal(received.length, 1025);
     assert.deepEqual(received[received.length - 1], NOTICE);
     const other: unknown[] = [];
     rt.onDecisionNotice((notice) => {

@@ -294,9 +294,11 @@ were present, but **all agent memory records were missing**. A copy of the
 whole directory retained those records. When checking a restored copy, verify
 an agent memory record you expect to find, not just that the gateway starts.
 
-The state directory is only part of a deployment backup. Account separately
-for the credentials store, the session comms identity directory and any host
-store realm kept outside it.
+The state directory is only part of a deployment backup. The credentials
+store, the session comms identity directory and any host store realm are kept
+outside it: back them up with it, and move them with it. A gateway started
+without the session comms identity directory brings every restored member up
+broken (see [Keeping a Meta realm in your own database](/guides/unified-runtime#keeping-a-meta-realm-in-your-own-database)).
 
 ## Lifecycle side effects across a restart
 

@@ -40287,6 +40287,205 @@ async fn test_member_turn_stored_with_the_current_workgraph_attention_projection
     bound.handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// The refusal a WorkGraph attention continuation is answered with when its
+/// member is hosted elsewhere or has no session of this process.
+#[cfg(feature = "runtime-adapter")]
+const ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION: &str =
+    "a WorkGraph attention continuation requires a local session-backed member";
+
+/// A WorkGraph attention continuation made from a binding in a store no mob
+/// reads: for the rows where the continuation is refused before any member
+/// looks at its projection.
+#[cfg(feature = "runtime-adapter")]
+async fn unread_attention_continuation() -> meerkat_runtime::ContinuationInput {
+    let service = meerkat::WorkGraphService::with_scope(
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        "attention-refusal-realm",
+        meerkat::WorkNamespace::new("goals").expect("namespace"),
+    );
+    let request: meerkat::GoalCreateRequest = serde_json::from_value(serde_json::json!({
+        "title": "A goal no member of the row is asked about",
+        "target": { "kind": "session", "session_id": SessionId::new().to_string() },
+    }))
+    .expect("a goal request");
+    let goal = service.create_goal(request).await.expect("create the goal");
+    let projection = service
+        .attention_projection(meerkat::AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("the binding's projection")
+        .projection;
+    meerkat::surface::workgraph_attention_continuation(&projection)
+        .expect("the projection's continuation")
+}
+
+/// A WorkGraph attention continuation handed to a bound member is admitted
+/// by the member's session as a continuation and the member takes exactly
+/// one turn, under the continuation's projection. The one who handed it
+/// over is answered with the session's admission.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_an_attention_continuation_handed_to_a_member_takes_one_turn_under_its_projection() {
+    let bound = attention_bound_member("w-attention-continuation").await;
+    let continuation = meerkat::surface::workgraph_attention_continuation(&bound.projection)
+        .expect("the projection's continuation");
+    let handed_over = continuation.header.id.clone();
+
+    let calls_before = bound.model_calls();
+    let turn = bound
+        .handle
+        .start_attention_continuation(&bound.identity, continuation)
+        .await
+        .expect("the member's session admits the continuation");
+    let admission = turn
+        .admission()
+        .expect("the one who handed it over is answered with the admission");
+    assert!(
+        !admission.deduplicated,
+        "the first handover of a continuation matches no earlier one"
+    );
+    assert_eq!(
+        admission.input_id, handed_over,
+        "the session admitted the continuation that was handed over"
+    );
+    let ended = tokio::time::timeout(Duration::from_mins(1), turn.wait())
+        .await
+        .expect("the continuation's turn ends within a minute");
+    assert!(
+        ended.is_ok(),
+        "the continuation's turn is delivered: {:?}",
+        ended.as_ref().err()
+    );
+    assert_eq!(
+        bound.model_calls() - calls_before,
+        1,
+        "a continuation calls the member's model once"
+    );
+    let applied = bound
+        .provider_turn_overlays
+        .lock()
+        .expect("provider_turn_overlays lock poisoned")
+        .last()
+        .cloned()
+        .flatten()
+        .expect("the turn's overlay");
+    let applied_projection = meerkat::workgraph_attention_projection_from_overlay(Some(&applied))
+        .expect("decode attention projection from overlay")
+        .expect("attention projection present");
+    assert_eq!(
+        applied_projection, bound.projection,
+        "the turn runs under the continuation's projection"
+    );
+    bound.handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A member hosted by another host takes no WorkGraph attention
+/// continuation: the handover is refused, typed, and nothing is delivered
+/// to the member's host for it.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_an_attention_continuation_for_a_member_hosted_elsewhere_is_refused() {
+    let _guard = placement_support::REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = placement_support::spawn_scripted_host_peer("attention-placed-host").await;
+    let member_endpoint = Arc::new(
+        placement_support::spawn_peer_comms_endpoint("attention-placed-member", true, None).await,
+    );
+    let member =
+        placement_support::spawn_scripted_member_turn_responder(Arc::clone(&member_endpoint));
+    scripted.script_member_identity(
+        "attention-placed",
+        placement_support::member_identity_of(&member_endpoint),
+    );
+    scripted.bind_member_endpoint("attention-placed", member_endpoint);
+    let controlling = placement_support::create_controlling_mob("attention-placed").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    let spec = placement_support::placed_spawn_spec("worker", "attention-placed", &report.host_id)
+        .with_runtime_mode(crate::MobRuntimeMode::TurnDriven);
+    tokio::time::timeout(Duration::from_secs(10), controlling.handle.spawn_spec(spec))
+        .await
+        .expect("the placed spawn settles")
+        .expect("the placed spawn commits");
+    let delivered_before = member.admitted_delivery_count();
+
+    let refused = controlling
+        .handle
+        .start_attention_continuation(
+            &AgentIdentity::from("attention-placed"),
+            unread_attention_continuation().await,
+        )
+        .await
+        .map(|_| ());
+
+    match refused {
+        Err(MobError::UnsupportedForMode { reason, .. }) => {
+            assert_eq!(reason, ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION);
+        }
+        other => panic!("a member hosted elsewhere is refused the continuation: {other:?}"),
+    }
+    assert_eq!(
+        member.admitted_delivery_count(),
+        delivered_before,
+        "nothing is delivered to the member's host for a refused continuation"
+    );
+    member.shutdown();
+    scripted.shutdown();
+}
+
+/// A member with no session of this process (a peer-only member of an
+/// external backend) takes no WorkGraph attention continuation: the
+/// handover is refused, typed, and nothing is sent to the member.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_an_attention_continuation_for_a_member_without_a_session_is_refused() {
+    let _serial = lock_real_comms_tests();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-attention-continuation",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext-attention")).await;
+    {
+        let mut spec = SpawnMemberSpec::new("lead", "l-ext-attention");
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        spec.binding = Some(external.binding());
+        spawn_spec_with_test_ops_owner(&handle, spec)
+            .await
+            .expect("spawn external turn-driven lead");
+    }
+    let baseline_start_turn = service.start_turn_call_count();
+    let baseline_inject = service.inject_call_count();
+
+    let refused = handle
+        .start_attention_continuation(
+            &AgentIdentity::from("l-ext-attention"),
+            unread_attention_continuation().await,
+        )
+        .await
+        .map(|_| ());
+
+    match refused {
+        Err(MobError::UnsupportedForMode { reason, .. }) => {
+            assert_eq!(reason, ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION);
+        }
+        other => panic!("a member without a session is refused the continuation: {other:?}"),
+    }
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn,
+        "no turn is started for a refused continuation"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_inject,
+        "nothing is injected for a refused continuation"
+    );
+}
+
 #[tokio::test]
 async fn test_spawn_member_tool_dispatches_backend_selection() {
     let mut definition = sample_definition_with_mob_tools();

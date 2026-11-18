@@ -14351,6 +14351,27 @@ impl MobHandle {
         })
     }
 
+    /// Hand one WorkGraph attention continuation to a member's current
+    /// session through its native admission, as internal work of the mob.
+    #[cfg(feature = "runtime-adapter")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "nothing in this crate hands a continuation over yet"
+        )
+    )]
+    pub(crate) async fn start_attention_continuation(
+        &self,
+        identity: &AgentIdentity,
+        input: meerkat_runtime::ContinuationInput,
+    ) -> Result<MemberTurnHandle, MobError> {
+        let _ = (identity, input);
+        Err(MobError::Internal(
+            "a WorkGraph attention continuation is not delivered yet".to_string(),
+        ))
+    }
+
     /// Acquire a capability-bearing handle for a specific member.
     pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
         if let Some(diag) = self.restore_failure_for(identity).await {

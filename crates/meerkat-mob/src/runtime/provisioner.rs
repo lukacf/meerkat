@@ -2069,6 +2069,20 @@ pub trait MobProvisioner: Send + Sync {
             reason: "governed input is not supported by this provisioner".to_string(),
         })
     }
+    /// Admit one WorkGraph attention continuation to the member's session
+    /// through native admission, as a continuation.
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_attention_continuation(
+        &self,
+        member_ref: &MemberRef,
+        input: meerkat_runtime::ContinuationInput,
+        completion_tx: super::handle::ExactTurnCompletionSender,
+    ) -> Result<super::handle::MemberInputAdmission, MobError> {
+        let _ = (member_ref, input, completion_tx);
+        Err(MobError::Internal(
+            "a WorkGraph attention continuation is not delivered yet".to_string(),
+        ))
+    }
     async fn admit_turn_for_operation(
         &self,
         member_ref: &MemberRef,

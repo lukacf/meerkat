@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Console: a set of questions that a person answered or dismissed in the
+  asking agent's chat stayed drawn in full below the chat's newest turn, and
+  so below every later turn, for as long as the page was open. The place
+  below the newest turn now holds only the sets that still need the person.
+  An answered or dismissed set is kept as one line after the turn it was
+  answered after, which opens to the questions with the answers given;
+  nothing in it can be sent again. The page keeps the lines of the 20 sets
+  it answered or dismissed most recently, over all agents, until it is
+  reloaded: after a reload the answered set is not shown again. The Pending
+  tab of Approvals keeps its cards as before.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

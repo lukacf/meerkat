@@ -1,6 +1,7 @@
 import { QuoteSelectionAction } from "./quote-selection-action";
 import { JumpToLatest } from "./jump-to-latest";
 import { ConversationApprovals, type ConversationApprovalProps } from "./conversation-approvals";
+import { useQuestionReceiptPlacement } from "./question-set-card";
 import type { ConsoleQuoteSelection } from "./context-selection";
 import { ConversationHeader, ConversationPresentationProvider, type ConversationDisplayLabels, type ConversationHeaderProps } from "./presentation-policy";
 import clsx from "clsx";
@@ -64,6 +65,9 @@ export type ConversationPaneProps = ConversationApprovalProps & {
   showTurnRail?: boolean;
 };
 
+/** The turn starts of a conversation that has no turn. */
+const NO_TURNS: readonly number[] = [];
+
 function visibleTranscriptGroups(viewState: ConversationViewState, maxGroups: number | null) {
   return typeof maxGroups === "number" && maxGroups > 0
     ? viewState.groups.slice(-maxGroups)
@@ -124,6 +128,9 @@ export function ConversationPane({
   const [visibleTurnIndexes, setVisibleTurnIndexes] = useState<number[]>([]);
   const canRenderTurnDiff = Boolean(showTurnDiff && viewState.turnDiff && onToggleDiffFile);
   const showEmptyState = Boolean(viewState.emptyState && viewState.entries.length === 0 && !canRenderTurnDiff);
+  // A conversation with no turn keeps the receipts of its answered question
+  // sets in its one place for approvals.
+  const emptyReceipts = useQuestionReceiptPlacement(approvalIdentity ?? viewportKey?.identity, NO_TURNS).unplaced;
   const visibleTurns = useMemo(
     () => groupConversationTranscriptTurns(visibleTranscriptGroups(viewState, maxGroups)),
     [maxGroups, viewState],
@@ -358,7 +365,7 @@ export function ConversationPane({
               onApprovalDecision={onApprovalDecision}
             />
           )}
-          {showEmptyState ? <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity ?? viewportKey?.identity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} /> : null}
+          {showEmptyState ? <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity ?? viewportKey?.identity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} questionReceiptIds={emptyReceipts} /> : null}
           {scrollTail}
         </div>
       </section>

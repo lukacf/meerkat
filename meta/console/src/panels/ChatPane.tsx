@@ -6,6 +6,7 @@ import { DeliveredContextMessage } from "../../../packages/console-components/sr
 import type { ConsoleContextMessage } from "../../../packages/console-core/src/context-record";
 import { JumpToLatest } from "../../../packages/console-components/src/conversation/jump-to-latest";
 import { approvalInteractionIdsByTurn, ConversationApprovals, pendingApprovalTurns, type ConversationApprovalProps } from "../../../packages/console-components/src/conversation/conversation-approvals";
+import { useQuestionReceiptPlacement } from "../../../packages/console-components/src/conversation/question-set-card";
 import type { ConsoleQuoteSelection } from "../../../packages/console-components/src/conversation/context-selection";
 import type { MarkdownUrlPolicy } from "../../../packages/console-components/src/conversation/conversation-markdown";
 import { CompletedToolDisclosure, groupRoutineToolRows, ConversationPresentationProvider, ConversationRowStateScope, RowDetails, type ConversationDisplayLabels } from "../../../packages/console-components/src/conversation/presentation-policy";
@@ -1365,6 +1366,7 @@ const TranscriptTurn = React.memo(function TranscriptTurn({
   onApprovalDecision,
   conversationId,
   approvalInteractionIds,
+  questionReceiptIds,
   setSize,
   parkedHeight,
 }: {
@@ -1380,6 +1382,8 @@ const TranscriptTurn = React.memo(function TranscriptTurn({
   onApprovalDecision?: ConversationApprovalProps["onApprovalDecision"];
   conversationId?: string;
   approvalInteractionIds: string[];
+  /** The question sets answered or dismissed after this turn: their receipts. */
+  questionReceiptIds?: readonly string[];
   /** Turns in the feed, or -1 while earlier turns can still load. */
   setSize: number;
   /** Set while parked outside the transcript window: in the DOM for
@@ -1450,7 +1454,7 @@ const TranscriptTurn = React.memo(function TranscriptTurn({
         return <React.Fragment key={run.rows[0].scrollRowId ?? run.rows[0].id}>{run.tools.length >= 2 ? <CompletedToolDisclosure blocks={run.tools}>{rows}</CompletedToolDisclosure> : rows}</React.Fragment>;
       })}
       <ConversationRowStateScope rowId={`approvals:${turn.id}`}>
-        <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={identity} onApprovalDecision={onApprovalDecision} conversationId={conversationId} interactionIds={approvalInteractionIds} />
+        <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={identity} onApprovalDecision={onApprovalDecision} conversationId={conversationId} interactionIds={approvalInteractionIds} questionReceiptIds={questionReceiptIds} />
       </ConversationRowStateScope>
     </div>
   );
@@ -1527,6 +1531,14 @@ const TranscriptView = React.memo(function TranscriptView({
     approvalIdsRef.current = interned;
     return result;
   }, [windowedTurns]);
+  // A question set this console answered or dismissed is kept as a receipt
+  // after the turn that was the newest when it was closed, so later turns
+  // come below it. Placed over every turn, also the ones not mounted.
+  const turnStartsMs = React.useMemo(() => turns.map((turn) => {
+    const at = Date.parse(turn.messages[0]?.createdAt ?? "");
+    return Number.isFinite(at) ? at : null;
+  }), [turns]);
+  const questionReceipts = useQuestionReceiptPlacement(identity, turnStartsMs);
   // Day separators sit before the first mounted row and at every local
   // calendar-day change; each turn needs the day its predecessor ended on.
   const previousDays = React.useMemo(() => {
@@ -1561,6 +1573,7 @@ const TranscriptView = React.memo(function TranscriptView({
         onApprovalDecision={onApprovalDecision}
         conversationId={conversationId}
         approvalInteractionIds={approvalInteractions[offset]}
+        questionReceiptIds={questionReceipts.byTurn[windowStart + offset]}
         setSize={setSize}
         parkedHeight={parkedHeight}
       />
@@ -1644,7 +1657,7 @@ const TranscriptView = React.memo(function TranscriptView({
           style={{ height: slot.height, flex: "none" }}
         />
       ) : renderTurn(slot.index, slot.kind === "parked" ? slot.height : undefined))}
-      <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={identity} onApprovalDecision={onApprovalDecision} conversationId={conversationId} />
+      <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={identity} onApprovalDecision={onApprovalDecision} conversationId={conversationId} questionReceiptIds={questionReceipts.unplaced} />
       {liveSpeech && liveSpeech.length > 0 && (
         <div
           aria-label="Live speech"

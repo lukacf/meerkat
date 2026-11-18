@@ -1,4 +1,5 @@
 import { approvalInteractionIdsByTurn, ConversationApprovals, type ConversationApprovalProps } from "./conversation-approvals";
+import { useQuestionReceiptPlacement } from "./question-set-card";
 import type { MarkdownUrlPolicy } from "./conversation-markdown";
 import clsx from "clsx";
 import { Fragment } from "react";
@@ -68,6 +69,17 @@ export function ConversationTranscript({
   const turns = groupConversationTranscriptTurns(groups);
   const approvalInteractions = approvalInteractionIdsByTurn(turns.map((turn) =>
     turn.groups.flatMap((group) => group.entries.flatMap((entry) => entry.interactionId ? [entry.interactionId] : []))));
+  // A question set this console answered or dismissed is kept as a receipt
+  // after the turn that was the newest when it was closed.
+  const questionReceipts = useQuestionReceiptPlacement(approvalIdentity, turns.map((turn) => {
+    for (const group of turn.groups) {
+      for (const entry of group.entries) {
+        const at = Date.parse(entry.createdAt ?? "");
+        if (Number.isFinite(at)) return at;
+      }
+    }
+    return null;
+  }));
 
   if (!groups.length && !renderableTurnDiff && !approvalSnapshot?.requests.length) {
     return null;
@@ -117,7 +129,7 @@ export function ConversationTranscript({
                 />
               </Fragment>
             ))}
-            <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} interactionIds={approvalInteractions[turnIndex]} />
+            <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} interactionIds={approvalInteractions[turnIndex]} questionReceiptIds={questionReceipts.byTurn[turnIndex]} />
             {isLastTurn && renderableTurnDiff && onToggleDiffFile ? (
               <TurnDiffCard
                 expandedFile={expandedDiffFile}
@@ -128,7 +140,7 @@ export function ConversationTranscript({
           </section>
         );
       })}
-      <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} />
+      <ConversationApprovals approvalSnapshot={approvalSnapshot} approvalIdentity={approvalIdentity} onApprovalDecision={onApprovalDecision} conversationId={viewState.conversationId} questionReceiptIds={questionReceipts.unplaced} />
       {!turns.length && renderableTurnDiff && onToggleDiffFile ? (
         <section
           aria-label={`Turn ${turnIndexOffset + 1}`}

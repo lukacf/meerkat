@@ -3,7 +3,8 @@
 //! One [`StdioDecisionConnection`] serves the `meta/decisions/*` verbs of
 //! one stdio gateway connection, over the runtime's decision owner. The
 //! host reads, presents and withdraws decisions. It is told of each open
-//! decision at most twice per connection. Once without asking
+//! decision at most twice per connection, with the one exception named
+//! below. Once without asking
 //! ([`StdioDecisionConnection::notice_openings`]): the connection writes the
 //! `held` notice of a decision when the runtime's owner opens it, after the
 //! row is stored, and of each decision already open when the connection
@@ -18,7 +19,10 @@
 //! notice is on the pipe, and only then records the presentation on its own
 //! channel under the notice's id, at that clock reading. Any other decision
 //! is noticed `held`, showing nothing; a push is always `held` and presents
-//! nothing.
+//! nothing. The exception: a decision a list noticed `held` while it waited
+//! for its review, and which the operator may decide once it waits for a
+//! human, is presented at a later list, as it was before pushes existed; a
+//! pushed notice can so be the first of three.
 //!
 //! `meta/decisions/decide` without an attestation is the operator's
 //! (device trusted, in the connection's own authentication scope), eligible
@@ -55,7 +59,7 @@ use meerkat_runtime::decision::wire::{
 };
 use meerkat_runtime::decision::{
     DecisionClock, DecisionError, DecisionListing, DecisionOpening, DecisionWithdrawer,
-    DurableDecisionService, SystemDecisionClock,
+    DecisionWriteMode, DurableDecisionService, SystemDecisionClock,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -196,13 +200,27 @@ impl StdioDecisionConnection {
     /// decision is open in that reading or announced after it; a
     /// subscription that fell behind reads the open decisions again. Each
     /// decision is read again before its notice and skipped unless it is
-    /// still open, and is pushed at most once. What was pushed is this
-    /// task's own: it takes no lock of the connection, so a slow pipe holds
-    /// up no list and no decide. The host's list does not count a push and
-    /// writes its own notice. Nothing is presented to the operator here.
-    /// Ends when the connection is closed, when a notice does not reach the
-    /// pipe, or when the owner is gone.
+    /// still open, and is pushed at most once. Reading it again records an
+    /// expiry the read observes, as every read of a decision does; of an
+    /// open decision it writes nothing. What was pushed is this task's own
+    /// and grows with the connection's life, as what its lists noticed
+    /// does: it takes no lock of the connection, so a slow pipe holds up no
+    /// list and no decide. The host's list does not count a push and writes
+    /// its own notice. Nothing is presented to the operator here.
+    ///
+    /// A launch that keeps no durable decisions has none to tell of, and a
+    /// candidate launch acts nowhere: for an owner of either, this follows
+    /// nothing and ends at once.
+    ///
+    /// It writes nothing more once the connection is closed, and ends at
+    /// the first notice that does not reach the pipe. It holds a clone of
+    /// the owner, so the subscription does not end on its own: whoever
+    /// starts the task aborts it when the connection ends.
     pub async fn notice_openings(self: Arc<Self>, owner: DurableDecisionService) {
+        if !owner.is_available() || matches!(owner.write_mode(), DecisionWriteMode::CandidateLaunch)
+        {
+            return;
+        }
         let mut openings = owner.subscribe_openings();
         let mut pushed = HashSet::new();
         if !self.push_open_decisions(&owner, &mut pushed).await {

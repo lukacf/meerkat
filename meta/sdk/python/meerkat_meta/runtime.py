@@ -1850,8 +1850,10 @@ class MetaRuntime:
         (one per decision, the newest 1024 decisions) and handed to the
         handler when it registers; an older one comes again at the host's
         own list, so a host that registers late, never lists and had more
-        than 1024 decisions open before can miss the oldest. The handler may
-        be a coroutine function."""
+        than 1024 decisions open before can miss the oldest. Register the
+        handler from the runtime's running event loop: registered where no
+        loop runs, it receives the kept notices only before the next notice
+        that arrives. The handler may be a coroutine function."""
         self._dispatcher.register_decision_notice_handler(handler)
 
     def sse_bridge(self) -> SseBridge:

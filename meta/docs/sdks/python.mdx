@@ -2061,7 +2061,9 @@ each handler on its own, so a handler may still be running after
 `decisions_list` returns. A `held` notice that arrives before a handler is
 registered is kept (one per decision, the newest 1024 decisions) and handed
 to the handler when it registers; an older one comes again at the host's own
-list. Without an `attestation` the stdio
+list. Register the handler from the runtime's running event loop: registered
+where no loop runs, it receives the kept notices only before the next notice
+that arrives. Without an `attestation` the stdio
 operator decides, eligible only for a decision presented to it on this
 connection. A decide called while the SDK serves a host tool callback raises
 `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`) and

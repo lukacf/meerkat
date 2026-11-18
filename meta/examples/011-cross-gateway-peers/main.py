@@ -2,6 +2,7 @@
 import asyncio
 import os
 import secrets
+import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
 
@@ -10,9 +11,15 @@ from meerkat_meta import Meta
 HERE = Path(__file__).resolve().parent
 
 
-async def exchange(stack: AsyncExitStack) -> None:
+def require_signed_loopback(member: str, info: dict) -> None:
+    address = info.get('dialable_address')
+    if not isinstance(address, str) or not address.startswith('tcp://127.0.0.1:') or not info.get('pubkey_b64'):
+        raise RuntimeError(f'{member} has no signed loopback endpoint')
+
+
+async def exchange(stack: AsyncExitStack, gateway: str) -> None:
     async def start(config):
-        rt = await (Meta.builder().gateway(os.environ['META_GATEWAY_BIN'])
+        rt = await (Meta.builder().gateway(gateway)
                     .mob(str(HERE / config)).member_comms_tcp('127.0.0.1:0')
                     .init_deadline(60).build())
         stack.push_async_callback(rt.shutdown)
@@ -32,11 +39,10 @@ async def exchange(stack: AsyncExitStack) -> None:
     ])
     for handle, member in ((desk, 'editor'), (records, 'archivist')):
         info = await handle.peer_info(member)
-        if not info['dialable_address'].startswith('tcp://127.0.0.1:') or not info['pubkey_b64']:
-            raise RuntimeError(f'{member} has no signed loopback endpoint')
+        require_signed_loopback(member, info)
     await desk.wire_cross_mob('editor', 'archivist', records)
     # The host gives work to just one member. It never delivers the ticket to
-    # the archivist or supplies the archivist’s shelf code to the editor.
+    # the archivist or supplies the archivist's shelf code to the editor.
     await desk.send('editor', f'Ask the archivist for the shelf code for {ticket}.')
     quiet = 0
     for _ in range(120):
@@ -56,10 +62,15 @@ async def exchange(stack: AsyncExitStack) -> None:
     raise RuntimeError('The round trip was not confirmed by both recipients.')
 
 
-async def main():
+async def main() -> int:
+    gateway = os.environ.get('META_GATEWAY_BIN', '').strip()
+    if not gateway:
+        print('Set META_GATEWAY_BIN to the matching rpc_gateway executable.', file=sys.stderr)
+        return 2
     async with AsyncExitStack() as stack:
-        await asyncio.wait_for(exchange(stack), timeout=180)
+        await asyncio.wait_for(exchange(stack, gateway), timeout=180)
+    return 0
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

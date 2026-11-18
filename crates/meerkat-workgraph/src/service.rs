@@ -152,6 +152,52 @@ pub struct WorkGraphService {
     default_namespace: WorkNamespace,
     namespace_grant: WorkGraphNamespaceGrant,
     attention_realm_resolver: Option<Arc<dyn AttentionTargetRealmResolver>>,
+    commit_observer: Option<Arc<dyn WorkGraphCommitObserver>>,
+    commit_origin: WorkGraphCommitOrigin,
+}
+
+/// Who made a committed write, as the service that made it was told.
+///
+/// The origin belongs to a service value: a host hands a member's tools a
+/// copy of its service with the member's key set
+/// ([`WorkGraphService::with_commit_origin`]). It is never read from a
+/// request.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WorkGraphCommitOrigin {
+    /// Attributed to nobody: a host's own write, or a write through a
+    /// service no origin was set on.
+    #[default]
+    Unattributed,
+    /// Made through the WorkGraph tools of the member this key names.
+    Member(WorkOwnerKey),
+}
+
+/// What one committed write advanced, by identifiers only.
+///
+/// A notice names one thing whose revision the write advanced. Without a
+/// binding id it is the item. With one it is that attention binding, and
+/// `item_id` is the binding's item. A write that advances both (a goal
+/// creates its item and its binding) is told once for each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkGraphCommitNotice {
+    pub realm_id: String,
+    pub namespace: WorkNamespace,
+    pub item_id: WorkItemId,
+    pub binding_id: Option<WorkAttentionBindingId>,
+    pub origin: WorkGraphCommitOrigin,
+}
+
+/// Told of the writes a [`WorkGraphService`] committed.
+///
+/// A host installs one with [`WorkGraphService::with_commit_observer`]; the
+/// copies of that service share it. It is called after the store answered
+/// the write, once for each item or binding whose revision the write
+/// advanced, and never for a refused write or a read. The call is
+/// synchronous, on the path of the write: an observer must not block and
+/// must not write. It is told identifiers; what it needs of the state it
+/// reads from the store, which holds the write by then.
+pub trait WorkGraphCommitObserver: Send + Sync {
+    fn committed(&self, notice: WorkGraphCommitNotice);
 }
 
 /// Resolves a `Session` attention target to the mob member that owns the
@@ -210,6 +256,8 @@ impl WorkGraphService {
                 namespace: default_namespace.as_str().to_string(),
             },
             attention_realm_resolver: None,
+            commit_observer: None,
+            commit_origin: WorkGraphCommitOrigin::Unattributed,
         }
     }
 
@@ -230,6 +278,26 @@ impl WorkGraphService {
         self.attention_realm_resolver.clone()
     }
 
+    /// Install the observer that is told of the writes this service and its
+    /// copies commit ([`WorkGraphCommitObserver`]). A rescoped copy of this
+    /// service should carry it along with [`Self::commit_observer`].
+    pub fn with_commit_observer(mut self, observer: Arc<dyn WorkGraphCommitObserver>) -> Self {
+        self.commit_observer = Some(observer);
+        self
+    }
+
+    pub fn commit_observer(&self) -> Option<Arc<dyn WorkGraphCommitObserver>> {
+        self.commit_observer.clone()
+    }
+
+    /// Set who the writes made through this service value are attributed to
+    /// in its commit notices. The copies made of it afterwards carry the
+    /// same origin; the value it was copied from keeps its own.
+    pub fn with_commit_origin(mut self, origin: WorkGraphCommitOrigin) -> Self {
+        self.commit_origin = origin;
+        self
+    }
+
     pub fn with_namespace_grant(
         store: Arc<dyn WorkGraphStore>,
         namespace_grant: WorkGraphNamespaceGrant,
@@ -244,6 +312,8 @@ impl WorkGraphService {
             default_namespace,
             namespace_grant,
             attention_realm_resolver: None,
+            commit_observer: None,
+            commit_origin: WorkGraphCommitOrigin::Unattributed,
         })
     }
 

@@ -193,7 +193,8 @@ nobody. Where the gateway holds sets at all (a launch with a persistent state
 directory; without one the call answers `no_human_surface`), a set is still
 held and the call answers `asked`: nobody can answer it in the Console, and
 it ends `timed_out` unless the embedding host answers or dismisses it over
-the SDK transport; the gateway's startup warning says so.
+the SDK transport; the gateway's startup warning says so, and the host is
+told of each by a `held` notice.
 
 A question set is not a gating request. It is a durable decision of kind
 `ask_user.questions`, so it survives a restart, it ends at its deadline (the

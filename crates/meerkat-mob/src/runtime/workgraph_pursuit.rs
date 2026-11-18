@@ -221,7 +221,7 @@ async fn hand_over_for(
             continue;
         }
         // A paused binding has no projection: it takes no turn.
-        let Some(projection) = pursuable_projection(service, &binding).await else {
+        let Some(projection) = pursuable_projection(mob, service, &binding).await else {
             continue;
         };
         let continuation = match meerkat::surface::workgraph_attention_continuation(&projection) {
@@ -321,18 +321,34 @@ fn written_by(
 
 /// Whether the binding's work may be pursued now, with the projection a
 /// turn for it runs under. The rule is the projection's own: the binding
-/// is eligible and its item is not terminal.
+/// is eligible and its item is not terminal. A binding that is not
+/// eligible, or whose item is terminal, has no projection, and that is
+/// how the store says so. A projection that could not be read for any
+/// other reason is logged: no turn is started for it either, and the next
+/// write is weighed anew.
 async fn pursuable_projection(
+    mob: &MobHandle,
     service: &meerkat::WorkGraphService,
     binding: &meerkat::WorkAttentionBinding,
 ) -> Option<meerkat::AttentionContextProjection> {
-    service
+    match service
         .attention_projection(meerkat::AttentionProjectionRequest {
             binding_id: binding.binding_id.clone(),
             realm_id: None,
             namespace: None,
         })
         .await
-        .ok()
-        .map(|result| result.projection)
+    {
+        Ok(result) => Some(result.projection),
+        Err(meerkat::WorkGraphError::InvalidTransition(_)) => None,
+        Err(error) => {
+            tracing::warn!(
+                mob_id = %mob.mob_id(),
+                binding_id = %binding.binding_id,
+                %error,
+                "a binding's projection could not be read after a WorkGraph write; no turn is started for it"
+            );
+            None
+        }
+    }
 }

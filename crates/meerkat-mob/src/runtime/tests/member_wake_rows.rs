@@ -6607,6 +6607,12 @@ async fn revise_bound_item(
 /// turn, whether one call holds both the peer's message and the
 /// continuation's notice, which tools other than WorkGraph's that call
 /// has, and how often the peer's message reached the member's transcript.
+///
+/// This row pins what happens today: one turn for both, with the
+/// continuation's tools only, so the member answers its peer without its
+/// ordinary tools. It is not the behaviour that is wanted. The rule that
+/// gives a continuation a turn of its own turns it: the peer's message
+/// then takes a turn of its own, with the member's ordinary tools.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_peer_message_and_a_continuation_that_wait_together_are_one_turn() {
     let pursuit = crate::WorkGraphPursuit::new(
@@ -6678,6 +6684,12 @@ async fn a_peer_message_and_a_continuation_that_wait_together_are_one_turn() {
 /// with them. The row asserts the facts of one run as one value: how many
 /// model calls follow the held turn, and whether the peer's message reached
 /// the member's transcript within the row's wait.
+///
+/// This row pins what happens today, and what it pins is a loss: the
+/// peer's message is never delivered to the member. It is not the
+/// behaviour that is wanted. The rule that gives a continuation a turn of
+/// its own turns it: the peer's message then takes a turn of its own and
+/// is not ended with the continuations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_peer_message_that_waits_beside_two_continuations_is_ended_with_them() {
     let pursuit = crate::WorkGraphPursuit::new(

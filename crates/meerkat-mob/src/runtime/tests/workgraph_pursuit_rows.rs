@@ -427,6 +427,11 @@ async fn a_host_write_starts_one_turn_of_the_bound_idle_member_under_the_current
 /// member takes no turn for either revision. It is not stuck: the next
 /// write of the item starts one turn under the projection the store holds
 /// then.
+///
+/// This row pins what happens today; it is not the behaviour that is
+/// wanted. The change that makes a newer waiting continuation replace the
+/// older one of the same binding turns it: the member then takes one turn,
+/// for the newer.
 #[tokio::test]
 async fn two_revisions_while_the_member_runs_start_no_turn_and_the_next_write_starts_one() {
     let pursued = Pursued::new("pursuit-while-running", true).await;

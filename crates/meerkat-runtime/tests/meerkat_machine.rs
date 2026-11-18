@@ -7008,7 +7008,14 @@ async fn the_waiter_of_a_superseded_attention_continuation_is_answered() {
     let answered = tokio::time::timeout(Duration::from_secs(5), handle.wait())
         .await
         .expect("the superseded continuation's waiter is answered");
-    eprintln!("the superseded continuation's waiter was answered: {answered:?}");
+    assert!(
+        matches!(
+            &answered,
+            Err(meerkat_runtime::completion::CompletionWaitError::Superseded { superseded_by })
+                if superseded_by == &later_id
+        ),
+        "the waiter is answered that the later continuation superseded its input: {answered:?}"
+    );
     let state = adapter
         .input_state(&sid, &earlier_id)
         .await

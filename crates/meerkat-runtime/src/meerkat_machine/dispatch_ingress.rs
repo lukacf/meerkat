@@ -1713,29 +1713,47 @@ impl MeerkatMachine {
     }
 
     /// Wake terminal-receipt waiters parked on the queued input this committed
-    /// admission's generated plan coalesced or superseded, and owe
-    /// `runless_terminal` its terminal.
+    /// admission's generated plan coalesced or superseded, answer a
+    /// superseded input's completion waiters, and owe `runless_terminal` its
+    /// terminal.
     ///
-    /// Neither transition stages a terminal-completion receipt or resolves a
-    /// completion waiter, so this commit is the only boundary that can wake
-    /// them. The wake carries no fact and decides nothing: a woken wait
-    /// re-reads the machine-owned lifecycle. Callers hold (or have released)
-    /// the driver lock the commit took, keeping the driver-then-registry order,
-    /// and took `runless_terminal` before their native locks, so that it tells
-    /// the host only after them.
+    /// Neither transition stages a terminal-completion receipt, so this
+    /// commit is the only boundary that can reach those waiters. A superseded
+    /// input's completion waiters are answered here with the typed
+    /// supersession, which names the admitted input; a coalesced input's
+    /// completion waiters are not resolved. The wake carries no fact and
+    /// decides nothing: a woken wait re-reads the machine-owned lifecycle.
+    /// Callers hold (or have released) the driver lock the commit took,
+    /// keeping the driver-then-registry order, and took `runless_terminal`
+    /// before their native locks, so that it tells the host only after them.
     pub(super) async fn wake_displaced_input_observers(
         completions: &SharedCompletionRegistry,
-        displaced_input_id: Option<InputId>,
+        displaced: Option<crate::accept::DisplacedQueuedInput>,
         outcome: &AcceptOutcome,
         runless_terminal: &mut super::RunlessTerminalAnnouncement,
     ) {
-        if let (Some(displaced_input_id), AcceptOutcome::Accepted { .. }) =
-            (displaced_input_id, outcome)
+        if let (
+            Some(displaced),
+            AcceptOutcome::Accepted {
+                input_id: admitted_input_id,
+                ..
+            },
+        ) = (displaced, outcome)
         {
-            completions
-                .lock()
-                .await
-                .wake_receipt_less_terminal_observers([displaced_input_id]);
+            {
+                let mut registry = completions.lock().await;
+                if let crate::accept::DisplacedQueuedInput::Superseded(superseded_input_id) =
+                    &displaced
+                {
+                    registry.fail_inputs(
+                        [superseded_input_id.clone()],
+                        crate::completion::CompletionWaitError::Superseded {
+                            superseded_by: admitted_input_id.clone(),
+                        },
+                    );
+                }
+                registry.wake_receipt_less_terminal_observers([displaced.input_id().clone()]);
+            }
             // The admission that superseded or coalesced it is committed, so
             // the displaced input's terminal is readable.
             runless_terminal.owe();
@@ -2257,7 +2275,7 @@ impl MeerkatMachine {
                         );
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
-                    let displaced_input_id = resolved.displaced_queued_input_id().cloned();
+                    let displaced_input = resolved.displaced_queued_input();
                     if let Some(custody) = admission_custody.as_mut() {
                         custody.begin_admission_attempt();
                     }
@@ -2325,7 +2343,7 @@ impl MeerkatMachine {
                     }
                     Self::wake_displaced_input_observers(
                         &completions,
-                        displaced_input_id,
+                        displaced_input,
                         &result,
                         &mut runless_terminal,
                     )
@@ -2676,7 +2694,7 @@ impl MeerkatMachine {
                         );
                         return Err(error);
                     }
-                    let displaced_input_id = resolved.displaced_queued_input_id().cloned();
+                    let displaced_input = resolved.displaced_queued_input();
                     let answered = self
                         .write_admission_within_commit_deadline(
                             &session_id,
@@ -2696,7 +2714,7 @@ impl MeerkatMachine {
                     };
                     Self::wake_displaced_input_observers(
                         &completions,
-                        displaced_input_id,
+                        displaced_input,
                         &result,
                         &mut runless_terminal,
                     )

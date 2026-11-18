@@ -1004,10 +1004,11 @@ impl ContinuationInput {
     ///
     /// `idempotency_key` names the projection: the same projection handed
     /// over twice is one input. `supersession_key` names the binding the
-    /// projection is of. It is carried and not acted on: a later
-    /// continuation of the same binding does not replace an earlier one at
-    /// admission. `turn_tool_overlay` carries the projection and the turn's
-    /// tools, and `turn_append` is the notice the turn starts from.
+    /// projection is of: a later continuation of the same binding
+    /// supersedes an earlier one that still waits, and is admitted beside
+    /// one that was already staged or runs. `turn_tool_overlay` carries the
+    /// projection and the turn's tools, and `turn_append` is the notice the
+    /// turn starts from.
     ///
     /// Properties: `System` origin, the attention kind (admitted as a queued
     /// content turn at a run's start), `Queue` handling mode, `Durable`,

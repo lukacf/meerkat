@@ -4,7 +4,7 @@ import { groupConversationTimelineEntries, type ConversationTimelineEntry, type 
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { normalizePendingApproval } from "../../../console-core/src/pending-approvals";
-import type { QuestionSetSnapshot } from "../../../console-core/src/pending-questions";
+import { normalizeQuestionSet, type QuestionSetSnapshot } from "../../../console-core/src/pending-questions";
 import { ConversationTranscript } from "./conversation-transcript";
 import { QuestionSetsProvider } from "./question-set-card";
 
@@ -215,6 +215,44 @@ describe("ConversationTranscript", () => {
     );
     expect(rendered.getByTestId("conversation-turn:0")).toBeTruthy();
     expect(reads > 0).toBe(true);
+  });
+
+  test("a transcript that shows only its newest groups draws no line of a question set answered after a turn it does not show", () => {
+    const at = (minute: number) => new Date(Date.UTC(2026, 0, 5, 10, minute)).toISOString();
+    const entries: ConversationTimelineEntry[] = [
+      { id: "ask-1", kind: "message", variant: "plain", identity: { id: "operator", label: "You", role: "user" }, text: "Plan the release.", createdAt: at(0) },
+      { id: "work-1", kind: "message", variant: "plain", identity: { id: "agent", label: "Agent", role: "assistant" }, text: "Which region first?", createdAt: at(1) },
+      { id: "ask-2", kind: "message", variant: "plain", identity: { id: "operator", label: "You", role: "user" }, text: "Go on.", createdAt: at(10) },
+      { id: "work-2", kind: "message", variant: "plain", identity: { id: "agent", label: "Agent", role: "assistant" }, text: "Europe goes first.", createdAt: at(11) },
+    ];
+    const viewState: ConversationViewState = { conversationId: "plan", entries, groups: groupConversationTimelineEntries(entries), turnDiff: null, emptyState: null };
+    const pendingId = `decision:${"a".repeat(64)}`;
+    const set = normalizeQuestionSet({
+      pending_id: pendingId, origin: { identity: "agent" }, title: "Release plan", subject_digest: `sha256:${"b".repeat(64)}`,
+      questions: [{ id: "q-region", prompt: "Which region goes first?", choices: [{ id: "c-eu", label: "Europe" }, { id: "c-us", label: "United States" }] }],
+      created_at_ms: Date.parse(at(1)),
+    })!;
+    // Answered between the first turn and the second, by the gateway's clock.
+    const decidedAtMs = Date.parse(at(5));
+    const snapshot: QuestionSetSnapshot = {
+      scopeKey: "scope", status: "ready", readOnly: false, sets: [], notices: [], slots: { [pendingId]: 1 },
+      closed: [{ set, outcome: "answered", closedAtMs: decidedAtMs }],
+      decisions: { [pendingId]: { phase: "answered", action: "answer", answers: { "q-region": { kind: "choice", choiceId: "c-eu" } }, decidedAtMs } },
+    };
+    const transcript = (maxGroups: number | null) => (
+      <QuestionSetsProvider value={{ snapshot, onAnswer: () => {}, onDismiss: () => {} }}>
+        <ConversationTranscript viewState={viewState} maxGroups={maxGroups} approvalIdentity="agent" />
+      </QuestionSetsProvider>
+    );
+    // The whole conversation: the line stands with the first turn.
+    const view = render(transcript(null));
+    expect(screen.getByTestId(`question-set-receipt:${pendingId}`).closest("section.cc-conversation-turn")).toBe(screen.getByTestId("conversation-turn:0"));
+    // Only the newest turn is shown: the line goes with its turn, and is not
+    // drawn with a turn it was not answered after.
+    view.rerender(transcript(2));
+    expect(screen.getAllByTestId(/^conversation-turn:/)).toHaveLength(1);
+    expect(screen.getByTestId("conversation-turn:0")).toHaveTextContent("Europe goes first.");
+    expect(screen.queryByTestId(`question-set-receipt:${pendingId}`)).toBeNull();
   });
 });
 

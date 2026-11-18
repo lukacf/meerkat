@@ -105,6 +105,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "closure-tests",
             "closure-tests-rest",
             "connect-checks",
+            "example-035",
             "example-web",
             "feature-check",
             "feature-check-rest",

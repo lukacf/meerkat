@@ -146,6 +146,8 @@ try {
   const projectionPlan = JSON.parse(reduced.stdout);
   assert.equal(projectionPlan.mode, "release-projection");
   assert.equal(projectionPlan.rust_changed, false);
+  assert.equal(projectionPlan.example_035, false, "a projection plans no standalone035 run");
+  assert.deepEqual(projectionPlan.example_035_commands, []);
   for (const field of [
     "packages", "closure", "shards", "unit_feature_shards", "main_unit_shards",
     "main_feature_unit_shards", "main_archive_builds", "main_archive_runs", "feature_check_jobs",
@@ -552,6 +554,7 @@ if (args[0] === "api") {
     MAIN_ARCHIVE_BUILD_COUNT: "0", MAIN_ARCHIVE_RUN_COUNT: "0",
     CLOSURE_CHECK_RESULT: "skipped", RUSTDOC_RESULT: "skipped", FEATURE_CHECK_RESULT: "skipped", FEATURE_CHECK_COUNT: "0",
     WASM: "false", WASM_CHECK_RESULT: "skipped", SDK_HOST_RESULT: "skipped", EXAMPLE_WEB_RESULT: "skipped",
+    EXAMPLE_035: "false", EXAMPLE_035_RESULT: "skipped",
     WASM_TIMERS_RESULT: "skipped", BAZEL_GRAPH_RESULT: "success", RUST_CHANGED: "false", IS_MAIN_PUSH: "true",
     IS_PULL_REQUEST: "false", PLAN_EVENT: "push", CLOSURE_CHECK: "false", RUSTDOC: "false", GOVERNED_JSONL: "false",
     MCP_CONFINEMENT_POSITIVE: "false", DEFERRED_TO_PUSH: "", READER_NOT_RUN: "",
@@ -622,6 +625,9 @@ if (args[0] === "api") {
   const wasmProjection = gate({ EXAMPLE_WEB_WASM: "true", WASM_TIMERS_RESULT: "success" });
   assert.equal(wasmProjection.status, 1, "the gate refuses a projection plan that builds the web wasm");
   assert.match(wasmProjection.stdout, /an inconsistent release-projection plan \(.*example_web_wasm=true/);
+  const example035Projection = gate({ EXAMPLE_035: "true", EXAMPLE_035_RESULT: "success" });
+  assert.equal(example035Projection.status, 1, "the gate refuses a projection that runs standalone035");
+  assert.match(example035Projection.stdout, /an inconsistent release-projection plan \(.*example_035=true/);
   // An ordinary plan: a pull request passes without the lanes it left to
   // the push and names them; the push must run them, and the gate refuses a
   // push plan that left any.

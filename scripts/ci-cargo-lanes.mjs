@@ -269,6 +269,7 @@
 // changed: the explicit way to give a release's parent the workspace-mode
 // evidence a release projection reuses. It only ever adds lanes.
 
+import { EXAMPLE_035_COMMANDS, EXAMPLE_035_MANIFEST, example035Selection, readExample035Inputs, selectExample035Dependencies } from "./ci-standalone-example.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -624,7 +625,9 @@ export const INTEGRATION_SUITES = [
   },
   // buildbuddy_static_lanes also reads the SDK manifests and generated types
   // and walks sdks/ (version parity, generated-type and banned-name checks).
-  { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/", "sdks/"] },
+  // The live runtime-bypass and effect-authority audits read standalone035;
+  // keep them when its PR has no workspace package seeds.
+  { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/", "sdks/", "examples/035-mdm-tux-rs/"] },
   // kernel_typed_round_trip drives the generated kernels with hand-built
   // inputs, so any machine DSL change can break it; it needs `test-oracle`.
   { package: "meerkat-machine-kernels", features: ["test-oracle"], triggers: MACHINE_AUTHORITY_PACKAGES },
@@ -1549,6 +1552,8 @@ function isLaneDefinitionPath(path) {
     path === ".github/workflows/ci.yml" ||
     path === "scripts/ci-cargo-lanes.mjs" ||
     path === "scripts/ci-cargo-lanes-selftest.mjs" ||
+    path === "scripts/ci-standalone-example.mjs" ||
+    path === "scripts/ci-standalone-example-selftest.mjs" ||
     path === "scripts/ci-hook-coverage.mjs" ||
     path === "scripts/ci-verify-row-binaries.mjs" ||
     path === "scripts/ci-non-rust-readers.mjs" ||
@@ -1652,6 +1657,8 @@ function isGlobalPath(path) {
     path === "scripts/rust-lane-doctor" ||
     path === "scripts/ci-cargo-lanes.mjs" ||
     path === "scripts/ci-cargo-lanes-selftest.mjs" ||
+    path === "scripts/ci-standalone-example.mjs" ||
+    path === "scripts/ci-standalone-example-selftest.mjs" ||
     path === "scripts/ci-hook-coverage.mjs" ||
     path === "scripts/ci-verify-row-binaries.mjs" ||
     path === "scripts/ci-non-rust-readers.mjs" ||
@@ -2519,6 +2526,18 @@ function plan(args) {
   if (requestedBy) {
     workspaceReason = `commit ${requestedBy} requests a workspace plan (CI-Plan: workspace)`;
   }
+  const standalone = example035Selection({
+    event: args.event,
+    packages,
+    changed,
+    inputs: readExample035Inputs(root, changed ?? []),
+    globalChange: Boolean(requestedBy) || (changed?.some(isGlobalPath) ?? false),
+  });
+  // A release projection explicitly reuses its parent CI evidence. It must
+  // not acquire an ordinary native example row through its version-only lock.
+  if (!releaseProjection) {
+    workspaceReason ||= standalone.fallback;
+  }
   if (releaseProjection) {
     // Every changed path is a version projection (checked above): nothing
     // selects a package, and nothing is global.
@@ -2577,6 +2596,12 @@ function plan(args) {
         continue;
       }
       const pathPackages = packagesForFile(path, dirs);
+      // Keep workspace symlink readers before applying the registered
+      // standalone exception. Unknown examples still escalate below.
+      if (standalone.ownedPaths.includes(path)) {
+        for (const pkg of pathPackages) seeds.add(pkg.name);
+        continue;
+      }
       if (pathPackages.length > 0) {
         for (const pkg of pathPackages) seeds.add(pkg.name);
       } else if (owner !== CORE) {
@@ -2811,6 +2836,18 @@ function plan(args) {
     result.docs_only = changed !== null && changed.every(
       (path) => /^(docs\/|docs\/internal\/|CHANGELOG\.md|README\.md|AGENTS\.md|CLAUDE\.md|.*\.mdx?$)/.test(path),
     );
+  }
+  if (!releaseProjection) {
+    selectExample035Dependencies(standalone, result.packages, result.mode === "workspace" ? result.reason : "");
+  }
+  result.example_035 = !releaseProjection && standalone.selected;
+  result.example_035_manifest = EXAMPLE_035_MANIFEST;
+  result.example_035_commands = result.example_035 ? EXAMPLE_035_COMMANDS : [];
+  result.example_035_reasons = releaseProjection ? ["explicit release-projection evidence reuse"]
+    : result.example_035 ? standalone.reasons
+    : standalone.deferredReasons.map((reason) => `deferred to push: ${reason}`);
+  if (result.mode === "none" && result.example_035) {
+    result.reason = "no workspace-owned Rust paths changed; standalone035 coverage selected";
   }
   // Core's own lanes (its whole-workspace unit sweep and feature suites, the
   // exact-profile guard lanes, the wasm and SDK lanes of a push) run when the
@@ -3686,6 +3723,10 @@ function githubOutput(result) {
   scalar("sdk_host", String(result.sdk_host));
   scalar("bazel_graph", String(result.bazel_graph));
   scalar("examples_browser", String(result.examples_browser));
+  scalar("example_035", String(result.example_035));
+  scalar("example_035_reasons", JSON.stringify(result.example_035_reasons));
+  scalar("example_035_manifest", result.example_035_manifest);
+  scalar("example_035_commands", JSON.stringify(result.example_035_commands));
   scalar("example_web", String(result.example_web));
   scalar("example_web_wasm", String(result.example_web_wasm));
   scalar("docs_only", String(result.docs_only));

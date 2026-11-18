@@ -71,6 +71,7 @@ export const EVIDENCE_INPUTS = [
   ".github/workflows/ci.yml",
   "ci/products.json",
   "scripts/ci-cargo-lanes.mjs",
+  "scripts/ci-standalone-example.mjs",
   "scripts/ci-hook-coverage.mjs",
   "scripts/ci-non-rust-readers.json",
   "scripts/ci-non-rust-readers.mjs",
@@ -105,6 +106,7 @@ export const LANE_JOBS = {
 // Jobs without a planned matrix, by display name. TLC audit parts are Core's;
 // a published-floor row is its product's.
 export const SINGLE_JOBS = {
+  "Example035 standalone Rust + Python": "core",
   "Change classification": "core",
   "Stagger the short rows": "core",
   "Format + governance": "core",
@@ -128,6 +130,7 @@ export const PUBLISHED_FLOOR = /^Published floor \((.+)\)$/;
 // The lanes the gate's lane check names (require_success, require_ran,
 // forbid_failure) and the jobs each one judges.
 export const GATE_LANES = {
+  "Example035 standalone Rust + Python": { exact: ["Example035 standalone Rust + Python"] },
   "Change classification": { exact: ["Change classification"] },
   "Format + governance": { exact: ["Format + governance"] },
   "CI lane classifier selftest": { exact: ["CI lane classifier selftest"] },

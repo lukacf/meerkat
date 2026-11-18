@@ -99,6 +99,7 @@ for (const name of Object.keys(SINGLE_JOBS)) {
 assert.deepEqual(
   SINGLE_JOBS,
   {
+    "Example035 standalone Rust + Python": "core",
     "Change classification": "core",
     "Stagger the short rows": "core",
     "Format + governance": "core",
@@ -254,6 +255,16 @@ expectRule(
   attestation({ jobs: fail("Main unit tests (core)"), failedLanes: ["Main unit tests"] }),
   { core: false, meta: false, connect: false },
 );
+for (const conclusion of ["failure", "cancelled", "skipped"]) {
+  expectRule(
+    `the required standalone035 row ${conclusion}`,
+    attestation({
+      jobs: [...GREEN, job("Example035 standalone Rust + Python", conclusion, "core")],
+      failedLanes: ["Example035 standalone Rust + Python"],
+    }),
+    { core: false, meta: false, connect: false },
+  );
+}
 expectRule(
   "a Core row cancelled",
   attestation({ jobs: fail("Clippy (core)", "cancelled"), failedLanes: ["Clippy"] }),
@@ -373,6 +384,7 @@ assert.match(
       "scripts/ci-product-evidence.mjs",
       "scripts/ci-products.mjs",
       "scripts/ci-release-evidence.mjs",
+      "scripts/ci-standalone-example.mjs",
       "scripts/release-projection-only.mjs",
       "scripts/release-version-pins.mjs",
       "scripts/rust-test-selector.mjs",

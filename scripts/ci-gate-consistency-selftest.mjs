@@ -55,6 +55,8 @@ for (const event of ["pull_request", "push"]) {
     ["the web runtime", ["crates/meerkat-web-runtime/src/lib.rs"]],
     ["the web runtime and a crate it builds on", ["crates/meerkat-web-runtime/src/lib.rs", "crates/meerkat-core/src/lib.rs"]],
     ["meerkat-cli", ["crates/meerkat-cli/src/main.rs"]],
+    ["standalone example035", ["examples/035-mdm-tux-rs/tests/suite_dispatch.rs"]],
+    ["example035 docs", ["examples/035-mdm-tux-rs/README.md"]],
     ["example 031", ["examples/031-wasm-mini-diplomacy-sh/web/package.json"]],
     ["the Web SDK", ["sdks/web/src/index.ts"]],
     ["the CI workflow", [".github/workflows/ci.yml"]],

@@ -43636,6 +43636,246 @@ fn the_recovery_witness_takes_a_stored_row_by_the_stamps_an_admission_writes() {
     }
 }
 
+/// What the machine answers and records when a continuation's admission
+/// plan is resolved with `named` as the earlier input of its key: the plan's
+/// existing action, target and queue mode, and the action and target the
+/// machine then holds authorized for the continuation.
+struct AttentionPlanAnswer {
+    emitted_action: mm_dsl::AdmissionExistingQueuedActionKind,
+    emitted_target: Option<String>,
+    queue_mode: mm_dsl::AdmissionPolicyQueueMode,
+    authorized_action: Option<mm_dsl::AdmissionExistingQueuedActionKind>,
+    authorized_target: Option<String>,
+}
+
+fn resolve_attention_plan_naming(
+    driver: &DriverEntry,
+    continuation: &Input,
+    named: Option<&InputId>,
+) -> AttentionPlanAnswer {
+    let authority = driver.shared_dsl_authority();
+    let mut owner = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let running = owner.state().lifecycle_phase == mm_dsl::MeerkatPhase::Running;
+    let plan = crate::accept::MachineAdmissionAuthority::new(
+        continuation.id().to_string(),
+        mm_dsl::AdmissionInputKind::from(continuation.kind()),
+        continuation.handling_mode().map(mm_dsl::InputLane::from),
+        mm_dsl::AdmissionContinuationKind::from(continuation.continuation_kind()),
+        crate::input::admission_turn_append_shape(continuation),
+        false,
+        named.cloned(),
+        running,
+        false,
+        false,
+    )
+    .to_dsl_input();
+    let transition = mm_dsl::MeerkatMachineMutator::apply(&mut *owner, plan)
+        .expect("the attention arm resolves the plan");
+    let (emitted_action, emitted_target, queue_mode) = transition
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::AdmissionResolved {
+                existing_action,
+                existing_input_id,
+                policy_queue_mode,
+                ..
+            } => Some((
+                *existing_action,
+                existing_input_id.clone(),
+                *policy_queue_mode,
+            )),
+            _ => None,
+        })
+        .expect("the resolved plan is emitted");
+    let key = continuation.id().to_string();
+    let state = owner.state();
+    AttentionPlanAnswer {
+        emitted_action,
+        emitted_target,
+        queue_mode,
+        authorized_action: state
+            .admission_authorized_existing_actions
+            .get(&key)
+            .copied(),
+        authorized_target: state
+            .admission_authorized_existing_targets
+            .get(&key)
+            .cloned(),
+    }
+}
+
+/// The attention arm authorizes superseding only for ANOTHER input that
+/// STILL WAITS. Named itself, named an input the machine does not track,
+/// named an input that was staged, or named nothing, a continuation is
+/// admitted and supersedes nothing: it is never refused for it. What the
+/// plan emits and what the machine holds authorized agree in every case.
+#[tokio::test]
+async fn the_attention_arm_supersedes_only_another_input_that_still_waits() {
+    use mm_dsl::AdmissionExistingQueuedActionKind as Action;
+
+    let mut driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+        "attention-arm-supersede",
+    )));
+    let waiting = an_attention_continuation("projection-1", "binding-1");
+    let waiting_id = waiting.id().clone();
+    assert!(
+        driver
+            .as_driver_mut()
+            .accept_input(waiting.clone())
+            .await
+            .expect("the first continuation is answered")
+            .is_accepted()
+    );
+
+    // Another input that still waits: superseded.
+    let later = an_attention_continuation("projection-2", "binding-1");
+    let answer = resolve_attention_plan_naming(&driver, &later, Some(&waiting_id));
+    assert_eq!(answer.emitted_action, Action::Supersede);
+    assert_eq!(answer.emitted_target, Some(waiting_id.to_string()));
+    assert_eq!(answer.authorized_action, Some(Action::Supersede));
+    assert_eq!(answer.authorized_target, Some(waiting_id.to_string()));
+    assert_eq!(
+        answer.queue_mode,
+        mm_dsl::AdmissionPolicyQueueMode::Supersede,
+        "the plan states the continuation's queue mode"
+    );
+
+    // Named itself, an untracked input, or nothing: admitted, nothing
+    // superseded.
+    let untracked = InputId::new();
+    for (case, continuation, named) in [
+        ("itself", waiting.clone(), Some(&waiting_id)),
+        (
+            "an untracked input",
+            an_attention_continuation("projection-3", "binding-1"),
+            Some(&untracked),
+        ),
+        (
+            "nothing",
+            an_attention_continuation("projection-4", "binding-1"),
+            None,
+        ),
+    ] {
+        let answer = resolve_attention_plan_naming(&driver, &continuation, named);
+        assert_eq!(answer.emitted_action, Action::None, "named {case}");
+        assert_eq!(answer.emitted_target, None, "named {case}");
+        assert_eq!(answer.authorized_action, None, "named {case}");
+        assert_eq!(answer.authorized_target, None, "named {case}");
+    }
+
+    // An input that was staged: admitted beside it, nothing superseded.
+    let staged = an_attention_continuation("projection-5", "binding-2");
+    let staged_id = staged.id().clone();
+    let (_adapter, staged_driver, _run_id) = a_run_in_flight_for(staged).await;
+    let staged_driver = staged_driver.lock().await;
+    assert_eq!(
+        staged_driver
+            .shared_dsl_authority()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .input_phases
+            .get(&staged_id.to_string()),
+        Some(&mm_dsl::InputPhase::Staged),
+        "the named continuation is staged"
+    );
+    let answer = resolve_attention_plan_naming(
+        &staged_driver,
+        &an_attention_continuation("projection-6", "binding-2"),
+        Some(&staged_id),
+    );
+    assert_eq!(answer.emitted_action, Action::None, "named a staged input");
+    assert_eq!(answer.emitted_target, None, "named a staged input");
+    assert_eq!(answer.authorized_action, None, "named a staged input");
+    assert_eq!(answer.authorized_target, None, "named a staged input");
+}
+
+/// The machine supersedes only an input that still waits, whatever an
+/// earlier resolution authorized: once the named input is staged, the
+/// supersede is refused and the staged input keeps its turn.
+#[tokio::test]
+async fn supersede_is_refused_for_an_input_that_no_longer_waits() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let earlier = an_attention_continuation("projection-1", "binding-1");
+    let earlier_id = earlier.id().clone();
+    assert!(
+        adapter
+            .accept_input(&session_id, earlier)
+            .await
+            .expect("the earlier continuation is answered")
+            .is_accepted()
+    );
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let later = an_attention_continuation("projection-2", "binding-1");
+    let supersede = |entry: &DriverEntry| {
+        MeerkatMachine::preview_dsl_input_on_shared_authority(
+            &entry.shared_dsl_authority(),
+            mm_dsl::MeerkatMachineInput::SupersedeInput {
+                input_id: earlier_id.to_string(),
+                superseded_by: later.id().to_string(),
+            },
+            "SupersedeInput",
+        )
+        .map(|_| ())
+    };
+    {
+        let entry = driver.lock().await;
+        let answer = resolve_attention_plan_naming(&entry, &later, Some(&earlier_id));
+        assert_eq!(
+            answer.authorized_action,
+            Some(mm_dsl::AdmissionExistingQueuedActionKind::Supersede),
+            "the later continuation is authorized to supersede the one that waits"
+        );
+        supersede(&entry).expect("the supersede is taken while the earlier one waits");
+    }
+
+    let run_id = RunId::new();
+    let batch = {
+        let entry = driver.lock().await;
+        machine_authorize_runtime_loop_batch(&entry).expect("the earlier continuation is a batch")
+    };
+    assert_eq!(batch.input_ids(), std::slice::from_ref(&earlier_id));
+    let outcome = prepare_runtime_loop_batch_start(
+        &driver,
+        run_id,
+        batch,
+        crate::meerkat_machine::RunlessTerminalAnnouncement::default(),
+    )
+    .await
+    .expect("the run's start is answered");
+    assert!(
+        matches!(
+            outcome,
+            crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+        ),
+        "the earlier continuation is staged, got {outcome:?}"
+    );
+
+    let entry = driver.lock().await;
+    let refusal =
+        supersede(&entry).expect_err("the machine refuses to supersede an input that was staged");
+    assert!(
+        refusal.contains("guard rejected"),
+        "a generated guard refuses the supersede: {refusal}"
+    );
+}
+
 /// Two people's steers waiting in the Steer lane at once (both admitted
 /// while the runtime is idle) are two runs: the generated plan's steer batch
 /// takes the earlier person's steer alone. Staging is never asked to mix

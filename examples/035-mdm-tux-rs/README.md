@@ -172,6 +172,14 @@ The kennel-mode path below is the supported fresh-start demo.
 
 ### Kennel mode (brokered discovery)
 
+The `send_message` dispatch instruction applies to **new hive sessions**. If the
+kennel data directory already contains a hive, the kennel resumes that session
+with its saved prompt; upgrading the binary does not replace it. To try the new
+instruction without changing the old hive, run `kennel_dir=$(mktemp -d "$HOME/mdm-kennel.XXXXXXXX")`
+once and add `--data-dir "$kennel_dir"` to the **Terminal 1** command below.
+Keep that path to resume the new hive later. Leave the old directory intact;
+point `--data-dir` back to it to resume the old hive.
+
 ```bash
 # Terminal 1 - kennel broker and hosted hive agent
 OPENAI_API_KEY=sk-... ./scripts/repo-cargo run \

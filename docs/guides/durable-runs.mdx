@@ -153,15 +153,24 @@ for all of them and for what to do.
   destroying, resetting or unregistering the session abandons its inputs
   too, and the run never continues. The exception is a graceful stop that
   keeps queued work (see
-  [Graceful Stops And Deploys](#graceful-stops-and-deploys)): the run then
-  continues at the session's next start, unless the stop's max age has
-  passed since the stop by then.
+  [Graceful Stops And Deploys](#graceful-stops-and-deploys)): a session with per-round commits can resume
+  the run if suspension succeeds and the session reopens within the configured
+  maximum age.
 
 ### Graceful Stops And Deploys
 
-A graceful stop that keeps queued work, the kind a deploy uses, does not end
-the run in flight of a session with per-round commits: the run continues
-afterwards, exactly as after a crash. Such a stop is an unregister with
+A graceful stop that keeps queued work requests suspension of the running turn.
+If suspension succeeds and the session reopens within the configured maximum
+age, a session with per-round commits can resume the run from its last
+committed round.
+
+On 0.9.10, a run was reported cancelled rather than resumed after its session
+reopened. Store work was in flight at the time of the graceful stop; the cause
+has not been established. This is distinct from a waiting JSON-RPC client
+receiving no reply at process exit: the run can be kept even if the reply
+never reaches the client.
+
+Such a stop is an unregister with
 `UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown with
 `ShutdownOptions::with_queued_inputs(QueuedInputsOnShutdown::Requeue(max_age))`.
 
@@ -213,6 +222,8 @@ registered it: the inputs bound to it end as `stopped`, and no later start
 resumes it. The boot's ordinary recovery may still normalize a staged input
 whose run cannot continue to queued, as every start does.
 
+When suspension succeeds and the run resumes within the configured maximum age:
+
 - **The stop does not wait for the round.** It stops the turn at once. The
   run continues from its last committed round, and the work since that
   commit is redone: an uncommitted model response is asked for again, and
@@ -226,19 +237,20 @@ whose run cannot continue to queued, as every start does.
 - **The run continues at the next start**, when its session is opened again
   or its mob rebuilds the member, before the kept queued prompts run.
   Meerkat does not look for such runs at start-up.
-- **The max age still applies.** If more than `max_age` has passed since
-  the stop when the next start finds the run, the run's inputs end as
-  `requeue_expired` (as `cancelled` when the run's stop was asked after that
-  start registered it) and the run does not continue: it is closed as
-  interrupted, with the rounds it committed kept. The age counts from the
-  stop, not from when the run's inputs were admitted, so `max_age` bounds
-  how long the session may stay down: a run admitted long before a short
-  restart continues. Through 0.9.10 it counted from each input's admission,
-  so a run admitted more than `max_age` before a graceful restart ended
-  `requeue_expired`, however short the restart. An explicit `max_age` lies
-  between 1 millisecond and 24 hours; the default shutdowns above use 15
-  minutes (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`, and
-  `RequeueMaxAge::DEFAULT` for a mob Shutdown).
+
+**The max age still applies.** If more than `max_age` has passed since
+the stop when the next start finds the run, the run's inputs end as
+`requeue_expired` (as `cancelled` when the run's stop was asked after that
+start registered it) and the run does not continue: it is closed as
+interrupted, with the rounds it committed kept. The age counts from the
+stop, not from when the run's inputs were admitted, so `max_age` bounds
+how long the session may stay down: a run admitted long before a short
+restart can still continue. Through 0.9.10 it counted from each input's admission,
+so a run admitted more than `max_age` before a graceful restart ended
+`requeue_expired`, however short the restart. An explicit `max_age` lies
+between 1 millisecond and 24 hours; the default shutdowns above use 15
+minutes (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`, and
+`RequeueMaxAge::DEFAULT` for a mob Shutdown).
 
 Any other way of stopping still ends the run in flight: a graceful stop
 that chooses Stop, an explicit stop or cancel, retiring, destroying or

@@ -40019,7 +40019,7 @@ impl AttentionBoundMember {
             )
             .await
             .expect("a member turn stored with an attention projection is admitted");
-        tokio::time::timeout(Duration::from_secs(60), turn.wait())
+        tokio::time::timeout(Duration::from_mins(1), turn.wait())
             .await
             .expect("the member turn ends within a minute")
     }

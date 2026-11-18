@@ -31,7 +31,9 @@ name: Meta CI
 # budget on that compile (the library 337 s, its test harness 505 s, on 4
 # CPUs of the machine the jobs were sized on; hosted runners compiled Meta
 # 1.4 to 1.65 times slower), so each job compiles one configuration of it
-# and the long ones are split by test.
+# and the long ones are split by test. The lib test harness, the longest
+# compile, is built once per run (rust-unit-build) and its tests run in
+# four jobs from that build's archive.
 #
 # Jobs (each runs only when `changes` says Meta is reached; lane jobs only
 # when their lane is):
@@ -41,8 +43,10 @@ name: Meta CI
 #   test-typescript          - the TypeScript SDK suite
 #   test-python              - the Python SDK suite against a fresh
 #                              rpc_gateway
+#   rust-unit-build          - pull requests: Meta's lib test harness,
+#                              compiled once into a nextest archive
 #   rust-unit (x4)           - pull requests: Meta's lib tests, a nextest
-#                              partition per leg
+#                              partition per leg, run from that archive
 #   rust-examples            - every example built and linked (a pull
 #                              request also runs the bin tests and
 #                              meta-extension-state's suite)
@@ -337,24 +341,25 @@ jobs:
   # Meta's lib tests with default features, on a pull request that reaches
   # the rust lane. The root CI runs them on the push (main unit,
   # closure-tests), where its plan leaves every crate that compiles the
-  # meerkat-mob chain, so a push does not run this job. The lib's test
+  # meerkat-mob chain, so a push does not run these jobs. The lib's test
   # harness is one rustc process: 505 s on 4 CPUs of the machine the budget
   # was sized on, and hosted runners compiled Meta 1.4 to 1.65 times slower
-  # than that (Meta CI run 40465856836), so the compile alone takes most of
-  # the budget. Four legs each compile it and run a quarter of the tests
-  # (nextest --partition count:i/4; all of them took 253 s on a runner).
-  # Each Cargo invocation selects one package, as the root CI's main unit
+  # than that (Meta CI run 40465856836). A leg that compiled it itself spent
+  # 1745 to 2180 s on that one crate after its dependencies came from the
+  # cache (three legs read, of Meta CI runs 44384937646, 44374539616 and
+  # 44388159849), and then ran a quarter of the tests in 144 to 188 s. So
+  # this job compiles it once per run into a nextest archive, as the root
+  # CI's main-unit-archive-build does, and the rust-unit legs run it. One
+  # compile is still longer than the budget: building once takes three
+  # compiles off a run, it does not bring the lane's path under the budget.
+  # The Cargo invocation selects one package, as the root CI's main unit
   # rows do: Cargo resolves features per invocation, so Core's crates then
   # compile with the same features and are those rows' sccache objects; the
   # job compiles Meta's crates only.
-  rust-unit:
-    name: rust-unit (${{ matrix.partition }}/4)
+  rust-unit-build:
+    name: rust-unit-build
     needs: changes
     if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4]
     runs-on: ubuntu-24.04
     # With no sccache objects for the current lock state or version, Meta's
     # Rust lanes ran 54 to over 60 minutes (rust-unit legs were cut at 60).
@@ -391,14 +396,116 @@ jobs:
         uses: ./.github/actions/setup-cargo-tool-ci
         with:
           tool: nextest
+      # The selection, features and profile the legs' own `nextest run`
+      # compiled: the package's lib tests, default features, Cargo's test
+      # profile. Meta's 16 MiB stack (ci/products.json test_stack) is set
+      # here too, as it was for that compile.
+      - name: Build the lib test archive
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo nextest archive -p meerkat-meta --lib --archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
+      # The lib's tests read fixtures by this checkout's absolute path
+      # (env!("CARGO_MANIFEST_DIR")); a leg refuses to run at another one.
+      - name: Record the workspace path the archive was built at
+        run: printf '%s\n' "${GITHUB_WORKSPACE}" > "${RUNNER_TEMP}/nextest-meta-unit.workspace"
+      # The root CI's check of its own archives (main-unit-archive-build),
+      # with the legs' count partitions and nextest's default profile: the
+      # partitions' lists, together, are the archive's whole list with no
+      # test twice. It prints the count and the list's digest.
+      - name: Verify the partitions cover every test exactly once
+        working-directory: .
+        shell: bash
+        env:
+          PARTITIONS: "4"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
+          list() {
+            cargo-nextest nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
+              --message-format oneline "$@" | LC_ALL=C sort
+          }
+          list > "${RUNNER_TEMP}/all.txt"
+          [[ -s "${RUNNER_TEMP}/all.txt" ]] || { echo "::error::the lib test archive lists no test"; exit 1; }
+          : > "${RUNNER_TEMP}/union.txt"
+          for (( index = 1; index <= PARTITIONS; index++ )); do
+            list --partition "count:${index}/${PARTITIONS}" >> "${RUNNER_TEMP}/union.txt"
+          done
+          LC_ALL=C sort "${RUNNER_TEMP}/union.txt" -o "${RUNNER_TEMP}/union.txt"
+          duplicates="$(uniq -d "${RUNNER_TEMP}/union.txt" | wc -l)"
+          if [[ "${duplicates}" != "0" ]] || ! cmp -s "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt"; then
+            echo "::error::the ${PARTITIONS} partitions do not cover the archive's $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once (duplicates: ${duplicates})"
+            diff "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt" | head -20 || true
+            exit 1
+          fi
+          echo "meta-unit: ${PARTITIONS} partitions cover all $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once (sha256 of the sorted list: $(sha256sum < "${RUNNER_TEMP}/all.txt" | cut -d ' ' -f 1))"
+      - name: Retain the lib test archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          # Keyed by the run, not the attempt: a rerun of one failed leg does
+          # not run this job again and reads the archive of the run's first
+          # attempt, and a rerun of this job replaces it.
+          name: nextest-meta-unit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/nextest-meta-unit.tar.zst
+            ${{ runner.temp }}/nextest-meta-unit.workspace
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # The lib tests, a quarter per leg (nextest --partition count:i/4), run
+  # from rust-unit-build's archive: a leg compiles nothing, so it sets up
+  # no compiler cache, linker or registry and holds no identity. It reads
+  # the archive of its own run only (the artifact's name alone: no token,
+  # run or repository), the way the console jobs read the backends.
+  rust-unit:
+    name: rust-unit (${{ matrix.partition }}/4)
+    needs: [changes, rust-unit-build]
+    if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    # The legs' limit from when each compiled the harness itself, kept.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Install nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
+      - name: Fetch the lib test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: nextest-meta-unit-${{ github.run_id }}
+          path: ${{ runner.temp }}/nextest-archive
+      # Some of the lib's tests return early when a fixture they read by the
+      # build's absolute path is absent, which would pass at another path.
+      - name: Check the workspace path the archive was built at
+        shell: bash
+        run: |
+          built="$(cat "${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.workspace")"
+          if [[ "${built}" != "${GITHUB_WORKSPACE}" ]]; then
+            echo "::error::the lib test archive was built at ${built}; this leg runs at ${GITHUB_WORKSPACE}"
+            exit 1
+          fi
       # Meta's tests run on the 16 MiB thread stack its product line sets
       # (ci/products.json test_stack); the root's Cargo configuration gives 8.
+      # The archive's binary runs against this checkout, with nextest's
+      # default profile, as before. (A block: the lane doctor reads a
+      # one-line `run:` that starts with cargo as a wrapper bypass.)
       - name: Lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
           PARTITION: ${{ matrix.partition }}
-        run: ./scripts/repo-cargo nextest run -p meerkat-meta --lib --partition "count:${PARTITION}/4" --no-fail-fast
+        run: |
+          cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.tar.zst" --workspace-remap "${GITHUB_WORKSPACE}" --partition "count:${PARTITION}/4" --no-fail-fast
 
   # Every example built and linked (Cargo's default test selection builds
   # them; the root CI only type-checks them), on every run that reaches the
@@ -1350,7 +1457,7 @@ jobs:
   gate:
     name: Meta gate
     if: always()
-    needs: [changes, meta-checks, test-typescript, test-python, rust-unit, rust-examples, rust-conformance, rust-integration, rust-features-check, rust-extension-state, rust-extension-state-lib, rust-voice, rust-voice-lib, console-backends, console, console-browser, console-fixtures, console-acceptance, console-perf, flow-editor-contracts, flow-editor]
+    needs: [changes, meta-checks, test-typescript, test-python, rust-unit-build, rust-unit, rust-examples, rust-conformance, rust-integration, rust-features-check, rust-extension-state, rust-extension-state-lib, rust-voice, rust-voice-lib, console-backends, console, console-browser, console-fixtures, console-acceptance, console-perf, flow-editor-contracts, flow-editor]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1406,6 +1513,7 @@ jobs:
           check meta-checks "${{ needs.meta-checks.result }}" meta
           check test-typescript "${{ needs.test-typescript.result }}" meta
           check test-python "${{ needs.test-python.result }}" python
+          check rust-unit-build "${{ needs.rust-unit-build.result }}" rust pull_request
           check rust-unit "${{ needs.rust-unit.result }}" rust pull_request
           check rust-examples "${{ needs.rust-examples.result }}" rust
           check rust-conformance "${{ needs.rust-conformance.result }}" rust pull_request
@@ -1448,7 +1556,7 @@ jobs:
           GUARD_LANE_REASONS: "{}"
           GUARD_LANE_JOBS: ""
           # The jobs that wait for another job besides the classification.
-          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends
+          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends;rust-unit*=rust-unit-build
           # Seconds to wait before each retry of a GitHub API request that
           # answered with a server error (5xx).
           API_RETRY_DELAYS: 5 10 20

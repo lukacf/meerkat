@@ -365,6 +365,18 @@ fn attention_continuation_constructor_carries_its_keys_overlay_and_notice() {
     );
     assert_eq!(continuation.header.source, InputOrigin::System);
     assert_eq!(
+        continuation.header.durability,
+        InputDurability::Durable,
+        "nothing makes the continuation again once it is handed over"
+    );
+    assert!(
+        !continuation.header.visibility.transcript_eligible
+            && !continuation.header.visibility.operator_eligible,
+        "the continuation is no transcript row and no operator row: {:?}",
+        continuation.header.visibility
+    );
+    assert_eq!(continuation.reason, "workgraph_attention");
+    assert_eq!(
         continuation.handling_mode,
         meerkat_core::types::HandlingMode::Queue
     );

@@ -261,13 +261,26 @@ pub async fn validate_workgraph_attention_turn_overlay(
 /// The continuation that gives the session a binding targets a turn of its
 /// own under `projection`.
 ///
-/// Not filled in yet: it answers an ordinary continuation that carries
-/// nothing of the projection.
+/// It is built from the projection alone: the key that names this
+/// projection (so the same projection handed over twice is one input), the
+/// key of its binding, the turn's overlay, which carries the projection and
+/// the tools of a turn under it, and the notice the turn starts from. The
+/// executor that applies it refuses it when the store no longer holds the
+/// projection as current ([`validate_workgraph_attention_turn_overlay`]).
+/// Building it starts nothing: the caller hands it to the session's runtime.
 pub fn workgraph_attention_continuation(
     projection: &crate::AttentionContextProjection,
 ) -> Result<meerkat_runtime::ContinuationInput, crate::WorkGraphError> {
-    let _ = projection;
-    Ok(meerkat_runtime::ContinuationInput::detached_background_op_completed())
+    Ok(meerkat_runtime::ContinuationInput::workgraph_attention(
+        meerkat_runtime::IdempotencyKey::new(crate::workgraph_attention_continuation_key(
+            projection,
+        )?),
+        meerkat_runtime::SupersessionKey::new(crate::workgraph_attention_supersession_key(
+            projection,
+        )),
+        crate::WorkGraphToolSurface::turn_overlay_for_attention_projection(projection)?,
+        crate::workgraph_attention_turn_append(projection),
+    ))
 }
 
 pub async fn inject_workgraph_attention_turn_overlay(

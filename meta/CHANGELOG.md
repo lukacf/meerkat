@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Console: answering or dismissing a question set no longer leaves its full
+  card below every later turn in the asking agent's chat. Only unanswered sets
+  stay below the newest turn. The page uses the decision time to place a
+  one-line summary in the conversation; expand it to review the questions and
+  any answers, without submitting them again. The page keeps the 20 most
+  recently answered or dismissed sets across all agents. These summaries are
+  cleared when the page reloads. Cards in the Pending tab of Approvals are
+  unchanged.
+
 ## [0.9.16] - 2026-11-16
 
 ### Breaking

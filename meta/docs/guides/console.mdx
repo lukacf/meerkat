@@ -578,7 +578,20 @@ and that nothing was sent; when the set left after a send the Console could
 not confirm, it says that too. If the focus was inside a card that left, it
 moves to the line; when several cards leave at once the list shows one line,
 and the focus moves there whichever card held it. Only a set you answered or
-dismissed here keeps its card, as **Answered** or **Dismissed**.
+dismissed here is kept. On the Pending tab it keeps its card, as **Answered**
+or **Dismissed**. In the asking agent's chat its card leaves the place below
+the newest turn, which holds only what still needs you, and one line stays
+after the turn it was answered after ("Answered" or "Dismissed", the set's
+title and its number of questions), so later turns come below it; the line
+opens to the questions with the answers you gave. The line is placed by the
+time the gateway decided. A message you type is first shown with your
+browser's time: where the browser's clock and the gateway's differ, a message
+sent right after an answer can stand on the other side of the line. The line
+is drawn with its turn: a long chat draws its newest turns and brings older
+ones in as you go back, and while the line's turn is not drawn the line is
+not drawn either. The page keeps these lines
+for the 20 sets you answered or dismissed most recently, over all agents, and
+only until it is reloaded: after a reload the answered set is not shown again.
 
 The console reads the open sets every 15 seconds while the page is visible,
 like the approvals, and again after each of its own replies. If the first

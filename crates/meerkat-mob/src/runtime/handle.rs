@@ -25889,14 +25889,59 @@ mod tests {
             exact_adapter.contains(&answer),
             "the superseded terminal is made from the typed wait answer"
         );
-        let tests_start = provisioner_source
-            .find("\nmod tests {")
-            .expect("the provisioner's test module");
-        let product = &provisioner_source[..tests_start];
+        // Product code names the terminal by its path from this module; the
+        // provisioner's own rows name it through an import. The file has
+        // product code after its first test module, so the whole file is
+        // read.
+        let made_by_path = ["super::handle::ExactTurnTerminal::", "Superseded {"].concat();
         assert_eq!(
-            product.matches(&made).count(),
+            provisioner_source.matches(&made_by_path).count(),
             1,
-            "nothing else in the provisioner makes a superseded terminal"
+            "the provisioner makes a superseded terminal at one place"
+        );
+        assert!(
+            exact_adapter.contains(&made_by_path),
+            "that place is the completion adapter"
+        );
+    }
+
+    /// A member's governed input is admitted through the exact-prompt replay
+    /// contract and through no other: every governed admission of the
+    /// provisioner that reaches the runtime's admission names that contract.
+    /// The runtime refuses every input that is no prompt under it, so a
+    /// governed-input door hands no continuation to a member.
+    #[test]
+    fn a_governed_input_is_admitted_through_the_exact_prompt_contract_only() {
+        // The whole file is read: its product code continues after its
+        // first test module. The needles are built from parts so this
+        // row's own text is not what it finds.
+        let provisioner_source = include_str!("provisioner.rs");
+        let governed = ["async fn admit_", "governed_input("].concat();
+        let admits = ["admit_runtime_input_with_", "replay_policy("].concat();
+        let exact_prompt = ["InputReplayPolicy::", "ExactPrompt"].concat();
+        let key_only = ["InputReplayPolicy::", "KeyOnly"].concat();
+        let mut admitting = 0;
+        for (start, _) in provisioner_source.match_indices(&governed) {
+            // One method: to the first closing brace at a method's depth.
+            let rest = &provisioner_source[start + governed.len()..];
+            let end = rest.find("\n    }\n").unwrap_or(rest.len());
+            let body = &rest[..end];
+            if !body.contains(&admits) {
+                continue;
+            }
+            admitting += 1;
+            assert!(
+                body.contains(&exact_prompt),
+                "a governed admission that reaches the runtime names the exact-prompt contract"
+            );
+            assert!(
+                !body.contains(&key_only),
+                "a governed admission never names the key-only contract"
+            );
+        }
+        assert_eq!(
+            admitting, 1,
+            "one governed admission of the provisioner reaches the runtime's admission"
         );
     }
 

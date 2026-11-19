@@ -7585,6 +7585,71 @@ async fn restarted_on(store: Arc<dyn RuntimeStore>, sid: SessionId) -> HeldFirst
     }
 }
 
+/// The exact-prompt admission takes prompts only: an attention continuation
+/// offered to it is refused and nothing is admitted, while the same
+/// continuation offered to the same session's attachment under the key-only
+/// replay contract is taken. A door that admits through the exact-prompt
+/// contract therefore hands no continuation to a session, so no turn it
+/// hands out can end superseded.
+#[tokio::test]
+async fn the_exact_prompt_admission_refuses_an_attention_continuation() {
+    use meerkat_runtime::accept::InputReplayPolicy;
+
+    let session = HeldFirstTurnSession::new().await;
+    let witness = session
+        .adapter
+        .current_executor_attachment_witness(&session.sid)
+        .await
+        .expect("the session's committed attachment");
+    let continuation = built_attention_continuation("projection-1", "binding-1");
+    let continuation_id = continuation.id().clone();
+
+    let refused = session
+        .adapter
+        .accept_input_with_completion_for_attachment_and_replay_policy(
+            &witness,
+            continuation.clone(),
+            InputReplayPolicy::ExactPrompt,
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(RuntimeDriverError::ValidationFailed { reason })
+                if reason.contains("requires a prompt")
+        ),
+        "the exact-prompt admission refuses an input that is no prompt: {:?}",
+        refused.as_ref().map(|(outcome, _)| outcome)
+    );
+    assert!(
+        session
+            .adapter
+            .input_state(&session.sid, &continuation_id)
+            .await
+            .expect("read the refused continuation")
+            .is_none(),
+        "the refused continuation is not admitted"
+    );
+
+    // The witness reading: the same input reaches this admission and is
+    // taken when the contract does not ask for a prompt.
+    let (taken, _) = session
+        .adapter
+        .accept_input_with_completion_for_attachment_and_replay_policy(
+            &witness,
+            continuation,
+            InputReplayPolicy::KeyOnly,
+        )
+        .await
+        .expect("the key-only admission answers the continuation");
+    assert!(
+        taken.is_accepted(),
+        "the same continuation is taken under the key-only contract"
+    );
+    // Nothing holds the turn the taken continuation starts.
+    session.first_turn_may_end.notify_one();
+}
+
 /// The queue mode a stored input's policy carries.
 async fn stored_queue_mode(
     session: &HeldFirstTurnSession,

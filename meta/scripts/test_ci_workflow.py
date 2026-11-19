@@ -1125,9 +1125,11 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(run_at, len(steps_of(job)) - 1)
         self.assertEqual(step["working-directory"], ".")
         self.assertEqual(step["env"], {"RUST_MIN_STACK": stack, "PARTITION": "${{ matrix.partition }}"})
+        # A partition that selects no test is a failure, said in the command
+        # and not left to nextest's default.
         self.assertEqual(step["run"].strip(),
                          f'cargo-nextest nextest run --archive-file "${{RUNNER_TEMP}}/nextest-archive/{archive}" '
-                         '--workspace-remap "${GITHUB_WORKSPACE}" '
+                         '--workspace-remap "${GITHUB_WORKSPACE}" --no-tests=fail '
                          f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
         # A leg compiles nothing and holds no identity: no wrapper, compiler
         # cache, linker or registry step, no permissions of its own.

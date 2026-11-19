@@ -510,15 +510,16 @@ jobs:
       # Meta's tests run on the 16 MiB thread stack its product line sets
       # (ci/products.json test_stack); the root's Cargo configuration gives 8.
       # The archive's binary runs against this checkout, with nextest's
-      # default profile, as before. (A block: the lane doctor reads a
-      # one-line `run:` that starts with cargo as a wrapper bypass.)
+      # default profile, as before; a partition that selects no test fails
+      # (nextest's documented default, stated). (A block: the lane doctor
+      # reads a one-line `run:` that starts with cargo as a wrapper bypass.)
       - name: Lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
           PARTITION: ${{ matrix.partition }}
         run: |
-          cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.tar.zst" --workspace-remap "${GITHUB_WORKSPACE}" --partition "count:${PARTITION}/4" --no-fail-fast
+          cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.tar.zst" --workspace-remap "${GITHUB_WORKSPACE}" --no-tests=fail --partition "count:${PARTITION}/4" --no-fail-fast
 
   # Every example built and linked (Cargo's default test selection builds
   # them; the root CI only type-checks them), on every run that reaches the

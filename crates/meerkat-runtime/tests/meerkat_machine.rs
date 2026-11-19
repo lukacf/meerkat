@@ -7501,15 +7501,16 @@ async fn turns_taken_after_a_restart(
 
 /// A session on `store`, with no executor, that accepted `inputs` in order
 /// and was dropped with its machine. Answers the session, the inputs' ids
-/// and, in their order, the terminal each input had when the machine was
-/// dropped: what the first machine left in the store before any restart.
+/// and, in their order, the terminal the STORE holds for each input once the
+/// machine is gone: what the first machine left behind before any restart.
 async fn a_session_that_accepted(
     store: Arc<dyn RuntimeStore>,
     inputs: Vec<Input>,
 ) -> (SessionId, Vec<InputId>, Vec<Option<InputTerminalOutcome>>) {
     let sid = SessionId::new();
     let before = Arc::new(
-        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
+        MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+            .expect("persistent machine"),
     );
     before
         .register_session(sid.clone())
@@ -7525,20 +7526,32 @@ async fn a_session_that_accepted(
                 .is_accepted()
         );
     }
-    let mut left = Vec::new();
-    for id in &ids {
-        left.push(
-            before
-                .input_state(&sid, id)
+    drop(before);
+    let left = stored_terminals(&store, &sid, &ids).await;
+    (sid, ids, left)
+}
+
+/// The terminal `store` itself holds for each of `ids`, in their order: read
+/// from the session's stored rows, through no machine.
+async fn stored_terminals(
+    store: &Arc<dyn RuntimeStore>,
+    sid: &SessionId,
+    ids: &[InputId],
+) -> Vec<Option<InputTerminalOutcome>> {
+    let runtime_id = LogicalRuntimeId::for_session(sid);
+    let mut terminals = Vec::new();
+    for id in ids {
+        terminals.push(
+            store
+                .load_input_state(&runtime_id, id)
                 .await
-                .expect("read the accepted input")
-                .expect("the accepted input is recorded")
+                .expect("read the stored row")
+                .expect("the accepted input has a stored row")
                 .seed
                 .terminal_outcome,
         );
     }
-    drop(before);
-    (sid, ids, left)
+    terminals
 }
 
 /// A new machine on `store` that registers `sid` with an executor that
@@ -7629,9 +7642,10 @@ async fn assert_a_restart_keeps_the_supersession(
 }
 
 /// What the first machine left in the store for two attention continuations
-/// of one binding, read before it was dropped: the earlier one already ended
-/// superseded by the later one, and the later one still waits. A restart row
-/// that then finds the earlier one superseded shows that it STAYED so.
+/// of one binding, read from the stored rows once that machine is gone: the
+/// earlier one already ended superseded by the later one, and the later one
+/// still waits. A restart row that then finds the earlier one superseded
+/// shows that it STAYED so.
 fn assert_the_first_machine_left_the_earlier_superseded(
     left: &[Option<InputTerminalOutcome>],
     later_id: &InputId,
@@ -7690,6 +7704,12 @@ async fn a_superseded_attention_continuation_stays_ended_after_a_store_file_is_r
     let reopened: Arc<dyn RuntimeStore> = Arc::new(
         meerkat_runtime::store::SqliteRuntimeStore::new(path).expect("the store file is reopened"),
     );
+    // The file itself, read through the second store before any machine
+    // registers the session.
+    assert_the_first_machine_left_the_earlier_superseded(
+        &stored_terminals(&reopened, &sid, &[earlier_id.clone(), later_id.clone()]).await,
+        &later_id,
+    );
     assert_a_restart_keeps_the_supersession(
         restarted_on(reopened, sid).await,
         earlier_id,
@@ -7744,6 +7764,11 @@ async fn a_restart_after_the_superseded_waiter_was_answered_runs_the_later_conti
             "the waiter is answered before the restart: {answered:?}"
         );
     }
+    // The store, read once the first machine is gone.
+    assert_the_first_machine_left_the_earlier_superseded(
+        &stored_terminals(&store, &sid, &[earlier_id.clone(), later_id.clone()]).await,
+        &later_id,
+    );
     assert_a_restart_keeps_the_supersession(restarted_on(store, sid).await, earlier_id, later_id)
         .await;
 }

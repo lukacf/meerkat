@@ -1,0 +1,1 @@
+- Stopping a monitor or a background shell job does not guarantee that a process it started and that detached from it has also stopped.

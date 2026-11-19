@@ -1,0 +1,1 @@
+- Cancellation on a custom Rust host using the runtime store interface: in the tested case, a cancelled run could make another model request after the host reopened the session. The fix prevents that request in this case. The test does not establish that a tool ran or that stored data was lost.

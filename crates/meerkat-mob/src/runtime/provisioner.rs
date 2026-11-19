@@ -12577,6 +12577,30 @@ mod tests {
         }
     }
 
+    /// A wait that was answered "a later input superseded this one while it
+    /// waited" reaches the exact-turn carrier as a value of its own: never
+    /// an internal error made from the wait answer's text.
+    #[test]
+    fn a_superseded_wait_reaches_the_exact_turn_carrier_as_a_value() {
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let later = meerkat_core::lifecycle::InputId::new();
+        let superseded = runtime_completion_to_exact_turn(
+            &session_id,
+            &input_id,
+            Err(
+                meerkat_runtime::completion::CompletionWaitError::Superseded {
+                    superseded_by: later,
+                },
+            ),
+            None,
+        );
+        assert!(
+            superseded.is_ok(),
+            "a superseded wait is carried typed, not as an internal error: {superseded:?}"
+        );
+    }
+
     #[test]
     fn committed_parent_projection_requires_fresh_successful_runtime_completion() {
         let success = Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult);

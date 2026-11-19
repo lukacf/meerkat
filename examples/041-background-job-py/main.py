@@ -30,8 +30,8 @@ def receipt_id(messages):
 
 async def run(root, config):
     user = root / 'config'
-    user.mkdir()
-    shutil.copyfile(config, user / 'config.toml')
+    (user / '.rkat').mkdir(parents=True)
+    shutil.copyfile(config, user / '.rkat' / 'config.toml')
     client = MeerkatClient(os.environ['RKAT_RPC'])
     await client.connect(realm_id='global', context_root=str(root), state_root=str(root / 'state'),
                          user_config_root=str(user))

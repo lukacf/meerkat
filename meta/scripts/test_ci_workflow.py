@@ -53,6 +53,9 @@ SETUP_MOLD = "./.github/actions/setup-mold-ci"
 # The step of a rust-unit leg that checks the archive it fetched before any
 # test runs.
 UNIT_LEG_GUARD = "Check the fetched archive and the workspace path it was built at"
+# The text no run line of a Meta workflow may hold (see
+# test_cargo_runs_one_package_from_the_root_wrapper).
+NAMES_THE_WORKSPACE = re.compile(r"--workspace(?!-remap(\s|$))")
 
 
 def load(path: Path) -> dict:
@@ -410,10 +413,11 @@ class CiWorkflowTests(unittest.TestCase):
             default = ((workflow.get("defaults") or {}).get("run") or {}).get("working-directory")
             self.assertEqual(default, "meta", path.name)
             for _, step, line in run_lines(workflow):
-                # Cargo's `--workspace`, as a whole flag: nextest's
-                # `--workspace-remap`, which only tells an archived test
-                # binary where this checkout is, selects no package.
-                self.assertIsNone(re.search(r"(^|\s)--workspace(\s|=|$)", line), f"{path.name}: {line}")
+                # No step may hold the text `--workspace`, Cargo's flag in
+                # any spelling, except as nextest's `--workspace-remap`,
+                # which only tells an archived test binary where this
+                # checkout is and selects no package.
+                self.assertIsNone(NAMES_THE_WORKSPACE.search(line), f"{path.name}: {line}")
                 self.assertIsNone(re.search(r"(^|[\s;&|(])cargo\s", line), f"{path.name}: raw cargo in {line}")
                 if "repo-cargo" not in line:
                     continue
@@ -428,6 +432,35 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
         self.assertEqual(len(commands), 25, commands)
         self.assertNotIn("repo-cargo", INSTALLER_WORKFLOW.read_text())
+
+    def test_the_no_workspace_rule_passes_only_the_archive_remap_flag(self):
+        """The rule of the test above refuses the text `--workspace` in a run
+        line however it is written (a bare flag, with a value, inside an
+        array, in quotes, as the head of another word), and passes it only as
+        nextest's `--workspace-remap` followed by a space or the line's end."""
+        refused = (
+            "./scripts/repo-cargo nextest run --workspace --no-fail-fast",
+            "./scripts/repo-cargo test --workspace",
+            "./scripts/repo-cargo check --workspace=all",
+            "args=(--workspace)",
+            'args+=("--workspace")',
+            "./scripts/repo-cargo test '--workspace'",
+            "./scripts/repo-cargo test --workspace-remapped",
+            "cargo-nextest nextest run --archive-file a.tar.zst --workspace-remap=/somewhere",
+            'cargo-nextest nextest run --archive-file a.tar.zst --workspace-remap "${GITHUB_WORKSPACE}" --workspace',
+        )
+        passed = (
+            'cargo-nextest nextest run --archive-file a.tar.zst --workspace-remap "${GITHUB_WORKSPACE}" --no-fail-fast',
+            'cargo-nextest nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \\',
+            "cargo-nextest nextest list --archive-file a.tar.zst --workspace-remap",
+            "./scripts/repo-cargo nextest run -p meerkat-meta --lib --no-fail-fast",
+        )
+        for line in refused:
+            with self.subTest(refused=line):
+                self.assertIsNotNone(NAMES_THE_WORKSPACE.search(line))
+        for line in passed:
+            with self.subTest(passed=line):
+                self.assertIsNone(NAMES_THE_WORKSPACE.search(line))
 
     def test_every_external_action_is_pinned_and_takes_the_root_pins(self):
         """The repository's Actions policy refuses an action that is not

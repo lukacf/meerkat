@@ -30,6 +30,9 @@ pip install meerkat-meta
 
 ## Quick start
 
+For a complete application that tracks its own turns and keeps its agents across
+restarts, see the [supervised Python example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app).
+
 In a fresh project directory, create `config/mob.toml`:
 
 ```toml
@@ -1321,6 +1324,17 @@ finally:
     await rt.shutdown()
 ```
 
+The [recovery example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app)
+shows two different failures. A respawn rebuilds the agent: on Meta 0.9.16,
+respawning its OpenAI-backed agent without the provider credential raised
+`RpcError` with `MemberRestoreFailed` and `missing_secret`.
+
+If the gateway child dies, a status call can raise `TransportReaderFailedError`
+or its subclass `GatewayChildEndedError`, depending on when the SDK observes
+the exit. Still call `shutdown()` to release local resources. On 0.9.16 it
+raised `RuntimeError` after bounded cleanup in this case. The example lets
+that error pass only if `last_gateway_termination.state` is `"exited"`.
+
 ### Startup: no built-in total deadline
 
 `connect()` (and `build()`) runs `meta/init` as accepted-then-settled. The
@@ -1354,7 +1368,8 @@ The wait ends only when one of these happens:
 `meta/init_progress` phase seen, such as `"roster"` or `"restore"`) and
 `reason`. That makes a stuck or interrupted init diagnosable. The gateway may
 already have changed native state, so the SDK never retries it automatically
-and asks the gateway to shut down.
+and asks the gateway to shut down. See [step 6 of the supervised example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app)
+for how to distinguish an unknown startup outcome from a refused start.
 
 Provider callbacks that run during startup (roster, topology, session
 builder, customizer) must not call ordinary runtime RPCs on the same

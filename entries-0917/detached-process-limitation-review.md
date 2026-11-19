@@ -1,1 +1,1 @@
-- Stopping a monitor or a background shell job does not guarantee that a process it started and that detached from it has also stopped.
+- On Unix, cancelling a monitor or a background shell job checks the process group that Meerkat manages. A child still in that group is covered even if its parent has exited. A successful cancellation does not establish that a child outside that group has stopped. This limit is read from the source; survival after cancellation was not demonstrated.

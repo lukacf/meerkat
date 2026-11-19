@@ -6679,19 +6679,22 @@ async fn a_peer_message_and_a_continuation_that_wait_together_are_one_turn() {
 }
 
 /// What the member of a pursued binding does with a peer's message that
-/// waits beside TWO continuations while its turn runs: the two
-/// continuations cannot be one turn, and the peer's message is taken up
-/// with them. The row asserts the facts of one run as one value: how many
-/// model calls follow the held turn, and whether the peer's message reached
-/// the member's transcript within the row's wait.
+/// waits beside TWO continuations while its turn runs. The two are two
+/// revisions of one binding, so the later one supersedes the earlier one
+/// while it waits, and the peer's message is taken up with the later one:
+/// one turn for both, with the continuation's tools only. The row asserts
+/// the facts of one run as one value: how many model calls follow the
+/// held turn, whether one call holds both the peer's message and the
+/// continuation's notice, which tools other than WorkGraph's that call
+/// has, and how often the peer's message reached the member's transcript.
 ///
-/// This row pins what happens today, and what it pins is a loss: the
-/// peer's message is never delivered to the member. It is not the
-/// behaviour that is wanted. The rule that gives a continuation a turn of
-/// its own turns it: the peer's message then takes a turn of its own and
-/// is not ended with the continuations.
+/// The message is not lost. That it shares the continuation's turn, and
+/// so is answered without the member's ordinary tools, is what happens
+/// today and is not the behaviour that is wanted. The rule that gives a
+/// continuation a turn of its own turns that: the peer's message then
+/// takes a turn of its own, with the member's ordinary tools.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_peer_message_that_waits_beside_two_continuations_is_ended_with_them() {
+async fn a_peer_message_that_waits_beside_two_continuations_is_answered_in_the_newer_ones_turn() {
     let pursuit = crate::WorkGraphPursuit::new(
         attention_rows_host_workgraph(),
         Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
@@ -6723,22 +6726,28 @@ async fn a_peer_message_that_waits_beside_two_continuations_is_ended_with_them()
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     fixture.client.release();
-    let session = fixture.session(&recipient).await;
-    let reached_the_transcript = tokio::time::timeout(STEP, async {
-        loop {
-            if fixture.transcript(&session).await.contains(&body) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .is_ok();
+    let delivered = fixture.delivered_count(&recipient, &body).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let calls_after_the_held_turn = fixture.client.started_count() - started_before - 1;
+    let one_call_holds_both = fixture
+        .client
+        .requests_mentioning_all(&[&body, ATTENTION_NOTICE]);
+    let tools = fixture.client.tools_of_request_mentioning(&body);
+    let other_than_workgraph_tools = tools
+        .iter()
+        .filter(|tool| !tool.starts_with("workgraph_"))
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
-        (calls_after_the_held_turn, reached_the_transcript),
-        (0, false),
-        "the peer's message is ended with the two continuations it waited beside"
+        (
+            calls_after_the_held_turn,
+            one_call_holds_both,
+            other_than_workgraph_tools,
+            delivered,
+        ),
+        (1, 1, Vec::<String>::new(), 1),
+        "the earlier continuation is superseded; the peer's message and the newer \
+         continuation are one turn, with the continuation's tool set: {tools:?}"
     );
     fixture.finish().await;
 }

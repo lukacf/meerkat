@@ -323,12 +323,12 @@ fn written_by(
 /// turn for it runs under. The rule is the projection's own: the binding
 /// is eligible and its item is not terminal. A binding that is not
 /// eligible, or whose item is terminal, has no projection, and the store
-/// says so with its invalid-transition error, which is taken quietly. The
-/// same error is also what the store answers when a machine refuses to
-/// recover or to classify a stored state: that case is taken quietly too
-/// and is not logged yet. A projection that could not be read for any
-/// other error is logged. No turn is started in any of these cases, and
-/// the next write is weighed anew.
+/// says so with its invalid-transition error. The same error is also what
+/// the store answers when a machine refuses to recover or to classify a
+/// stored state. The two are not told apart here: both are logged at
+/// debug with the error. A projection that could not be read for any
+/// other error is logged at warn. No turn is started in any of these
+/// cases, and the next write is weighed anew.
 async fn pursuable_projection(
     mob: &MobHandle,
     service: &meerkat::WorkGraphService,
@@ -343,7 +343,15 @@ async fn pursuable_projection(
         .await
     {
         Ok(result) => Some(result.projection),
-        Err(meerkat::WorkGraphError::InvalidTransition(_)) => None,
+        Err(error @ meerkat::WorkGraphError::InvalidTransition(_)) => {
+            tracing::debug!(
+                mob_id = %mob.mob_id(),
+                binding_id = %binding.binding_id,
+                %error,
+                "a binding has no projection after a WorkGraph write; no turn is started for it"
+            );
+            None
+        }
         Err(error) => {
             tracing::warn!(
                 mob_id = %mob.mob_id(),

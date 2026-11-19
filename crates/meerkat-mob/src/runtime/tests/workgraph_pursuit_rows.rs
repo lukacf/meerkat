@@ -421,19 +421,14 @@ async fn a_host_write_starts_one_turn_of_the_bound_idle_member_under_the_current
     pursued.mob.handle.shutdown().await.expect("shutdown");
 }
 
-/// Two revisions while the member's turn runs make two continuations and
-/// both wait. When the turn ends they are taken up as one turn's inputs,
-/// their two projections cannot both be the turn's, and neither runs: the
-/// member takes no turn for either revision. It is not stuck: the next
-/// write of the item starts one turn under the projection the store holds
-/// then.
-///
-/// This row pins what happens today; it is not the behaviour that is
-/// wanted. The change that makes a newer waiting continuation replace the
-/// older one of the same binding turns it: the member then takes one turn,
-/// for the newer.
+/// Two revisions while the member's turn runs make two continuations of
+/// one binding. The later one supersedes the earlier one while it still
+/// waits: when the turn ends the member takes one turn, for the newer,
+/// under the projection of the item as last revised, and the earlier
+/// continuation never runs. The next write of the item starts one more
+/// turn.
 #[tokio::test]
-async fn two_revisions_while_the_member_runs_start_no_turn_and_the_next_write_starts_one() {
+async fn two_revisions_while_the_member_runs_start_one_turn_for_the_newer() {
     let pursued = Pursued::new("pursuit-while-running", true).await;
     let (member, session) = pursued.mob.spawn("owner").await;
     let base = pursued.mob.calls(&session);
@@ -459,21 +454,27 @@ async fn two_revisions_while_the_member_runs_start_no_turn_and_the_next_write_st
     );
 
     pursued.mob.gate.release.notify_one();
-    pursued.mob.wait_calls(&session, base + 1).await;
-    pursued.settled().await;
-    pursued.settled().await;
-    assert_eq!(
-        pursued.mob.calls(&session),
-        base + 1,
-        "only the held turn calls the model: neither waiting continuation runs"
-    );
-
-    pursued.mob.revise(&goal.item.id, "third revision").await;
     pursued.mob.wait_calls(&session, base + 2).await;
+    pursued.settled().await;
     pursued.settled().await;
     assert_eq!(
         pursued.mob.calls(&session),
         base + 2,
+        "after the held turn the member takes one turn, for the newer continuation; the \
+         earlier one was superseded and never runs"
+    );
+    assert_eq!(
+        pursued.mob.last_projection(&session),
+        Some(pursued.mob.projection(&goal).await),
+        "that turn runs under the projection of the item as last revised"
+    );
+
+    pursued.mob.revise(&goal.item.id, "third revision").await;
+    pursued.mob.wait_calls(&session, base + 3).await;
+    pursued.settled().await;
+    assert_eq!(
+        pursued.mob.calls(&session),
+        base + 3,
         "the next write of the item starts one turn"
     );
     assert_eq!(

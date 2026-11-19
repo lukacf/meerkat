@@ -56,7 +56,7 @@ On Linux x86_64, set `BIN` to the absolute directory containing `rkat` and
 `rkat-rpc` extracted from the **same release**, after verifying both archives
 against its `checksums.sha256`. Set `SRC` to an absolute path to a checkout of
 the matching tag. For example, use both `v0.9.16` binaries and the `v0.9.16`
-source. This check needs Bash, Python 3, `readelf` and local loopback access;
+source. This check needs Bash, Python 3 and local loopback access;
 it does not need a provider key. The subshell uses a fresh project and home.
 
 ```bash
@@ -84,7 +84,7 @@ proves that the CLI preloaded that body into a prompt.
 **Member prompt.** The separate `rkat-rpc` check spawns a member with comms
 enabled. Look for `the mob member it spawned carries the` in the successful
 `RUN` result. The check finds the first Markdown heading from the registered
-`mob-communication` skill body in that member’s stored prompt. This does not
+`mob-communication` skill body in that member's stored prompt. This does not
 compare the whole body, test the CLI skill above, or show that a model used
 the instructions.
 

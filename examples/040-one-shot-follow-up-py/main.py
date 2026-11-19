@@ -35,16 +35,25 @@ async def run(root):
             'After creation reply only Scheduled. Do not do the scheduled task now.',
             model='claude-haiku-5-5', enable_schedule=True, enable_shell=False,
             enable_builtins=False, keep_alive=True, comms_name='reminder')
-        first = (await session.history()).messages
-        schedules = (await client.list_schedules())['schedules']
-        if len(schedules) != 1 or expected in session.text:
-            raise ValueError(f'Expected one agent-created schedule and no early answer; schedules={len(schedules)}')
-        schedule = schedules[0]
-        sid = schedule['schedule_id']
-        calls = {b.id for row in first for b in row.blocks if b.name == 'meerkat_schedule_create'}
-        ok = [r for row in first for r in row.results if r.tool_use_id in calls and not r.is_error and sid in text(r.content)]
-        if len(calls) != 1 or len(ok) != 1:
-            raise ValueError('No unique successful agent create result matching the schedule ID')
+        # keep_alive creation answers when the session is built, not when the
+        # initial turn has finished. Observe both the list and the tool result.
+        for _ in range(40):
+            schedules = (await client.list_schedules())['schedules']
+            first = (await session.history()).messages
+            calls = {b.id for row in first for b in row.blocks if b.name == 'meerkat_schedule_create'}
+            results = [r for row in first for r in row.results if r.tool_use_id in calls]
+            if len(schedules) > 1 or len(calls) > 1 or any(r.is_error for r in results):
+                raise ValueError('Duplicate schedule/create call or failed tool result')
+            if schedules and results:
+                schedule = schedules[0]
+                sid = schedule['schedule_id']
+                if len(results) != 1 or sid not in text(results[0].content):
+                    raise ValueError('Agent create result does not match the stored schedule')
+                break
+            await asyncio.sleep(1)
+        else:
+            raise TimeoutError(f'No observed successful create: {len(schedules)} schedules, '
+                               f'{len(calls)} create calls, {len(results)} results')
         print('Agent create result:', sid, 'session:', session.id, flush=True)
         for _ in range(90):
             rows = (await client.list_schedule_occurrences(sid, include_terminal=True))['occurrences']
@@ -58,12 +67,14 @@ async def run(root):
                 page = await session.history()
                 delivered = [i for i, m in enumerate(page.messages) if m.role == 'user' and text(m.content) == follow]
                 if len(delivered) != 1 or page.has_more:
-                    raise ValueError(f'Cannot correlate prompt: {len(delivered)} matches, has_more={page.has_more}, ' 
+                    raise ValueError(f'Cannot correlate prompt: {len(delivered)} matches, has_more={page.has_more}, '
                                      f'roles={[m.role for m in page.messages]}')
+                if any(expected in assistant_text(m) for m in page.messages[:delivered[0]]):
+                    raise ValueError('Unexpected answer before follow-up delivery')
                 turn = page.messages[delivered[0]+1:]
                 if any(m.role == 'user' for m in turn):
                     raise ValueError('Another user turn intervened')
-                answers = [m for m in turn if assistant_text(m).strip() == expected]
+                answers = [m for m in turn if m.role == 'block_assistant' and assistant_text(m).strip() == expected]
                 if len(answers) != 1 or not answers[0].assistant_message_id:
                     raise ValueError('No unique committed assistant answer for the scheduled turn')
                 print('Occurrence:', occ['occurrence_id'], 'assistant message:', answers[0].assistant_message_id,

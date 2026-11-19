@@ -13,9 +13,14 @@
 //! 3. lock the named scopes in order, refuse poisoned ones, and load a body
 //!    that is not resident yet; a mutation checks the self-fence again,
 //!    since the lock waits may have outlasted the window;
-//! 4. run the in-memory method, recording every map entry it touches; from
-//!    here until the hand-off, a dropped call poisons the locked scopes
-//!    ([`ArmedScopes`]);
+//! 4. run the in-memory method, recording every map entry it touches. A
+//!    mutation hands itself, with the scopes and the gate, to a task of its
+//!    own before this step, and steps 4 to 6 run there whether or not the
+//!    caller still waits: a caller dropped before the hand-off changed
+//!    nothing, and one dropped after it never leaves memory holding a
+//!    change the host did not get. A read that changes memory stays on its
+//!    caller: from its change until the hand-off of step 6, a dropped call
+//!    poisons the locked scopes ([`ArmedScopes`]);
 //! 5. refuse and poison when it touched a scope it did not lock;
 //! 6. export the touched entries and hand them, with the scopes and the
 //!    gate, to a task that commits them to the host as one batch
@@ -330,15 +335,13 @@ fn changes_of(state: &ScopeState, export: &ScopeExport) -> Vec<(String, Option<A
     changes.into_iter().collect()
 }
 
-/// How a call treats its scopes.
+/// How a reading call treats its scopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     /// Reads the scope's body: loads it first when it is not resident.
     Read,
     /// Reads only pinned entries (always resident): no body load.
     ReadPinned,
-    /// Changes the scope: self-fence first, body loaded, changes committed.
-    Mutate,
 }
 
 #[derive(Debug, Default)]
@@ -386,8 +389,8 @@ pub struct SpiRuntimeStore {
     /// obligation scan lists them as holding work until their body loads or
     /// their next commit pins the folded form.
     unfolded_heads: Arc<StdMutex<HashSet<String>>>,
-    /// Test support: the scopes of the mutating calls whose caller is inside
-    /// the call from its arm on ([`Self::armed_callers_for_test`]).
+    /// Test support: the scopes of the mutating calls whose caller waits for
+    /// the call's task ([`Self::armed_callers_for_test`]).
     #[cfg(any(test, feature = "test-support"))]
     armed_callers: Arc<StdMutex<Vec<String>>>,
     /// Test support: while a row holds this for writing, a mutating call
@@ -691,9 +694,10 @@ impl SpiRuntimeStore {
         Arc::clone(&self.armed_park).write_owned().await
     }
 
-    /// Test support: the scopes of the mutating calls whose caller is
-    /// inside the call from its arm on, one entry per call and scope. A
-    /// caller leaves when its call answers or its future is dropped.
+    /// Test support: the scopes of the mutating calls whose caller waits
+    /// for the call's task, which arms the scopes first thing, one entry
+    /// per call and scope. A caller leaves when its call answers or its
+    /// future is dropped; the task goes on either way.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn armed_callers_for_test(&self) -> Vec<String> {
@@ -722,56 +726,138 @@ impl SpiRuntimeStore {
         &self.realm
     }
 
-    /// Run one in-memory method under its scopes and commit what it changed
-    /// before answering. See the module documentation.
+    /// This store's handles for a task of its own: the same realm, memory,
+    /// gate and records.
+    fn handles(&self) -> Self {
+        Self {
+            realm: Arc::clone(&self.realm),
+            memory: self.memory.clone(),
+            gate: Arc::clone(&self.gate),
+            mob_host: Arc::clone(&self.mob_host),
+            tool_grants: Arc::clone(&self.tool_grants),
+            unfolded_heads: Arc::clone(&self.unfolded_heads),
+            #[cfg(any(test, feature = "test-support"))]
+            armed_callers: Arc::clone(&self.armed_callers),
+            #[cfg(any(test, feature = "test-support"))]
+            armed_park: Arc::clone(&self.armed_park),
+            #[cfg(any(test, feature = "test-support"))]
+            armed_parked: Arc::clone(&self.armed_parked),
+        }
+    }
+
+    /// Lock `ids` for one call: the gate shared, the self-fence (for a
+    /// change, again after the lock waits), the locks, the poison checks,
+    /// and each scope's body loaded when `bodies` asks. The gate travels
+    /// with the scopes. Nothing is armed yet: dropping this future, or its
+    /// answer, changes nothing.
+    async fn locked(
+        &self,
+        ids: &[ScopeId],
+        mutate: bool,
+        bodies: bool,
+    ) -> Result<ArmedScopes, RuntimeStoreError> {
+        let refuse = |error: SpiError| {
+            if mutate {
+                error.into_write()
+            } else {
+                error.into_read()
+            }
+        };
+        let gate = Arc::clone(&self.gate).read_owned().await;
+        if mutate {
+            self.realm.ensure_lease().await.map_err(refuse)?;
+        } else {
+            self.realm.check_realm().map_err(refuse)?;
+        }
+        let guards = self.realm.lock_scopes(ids).await;
+        let mut scopes = ArmedScopes::new(Arc::clone(&self.realm), guards).hold(gate);
+        for guard in scopes.guards_mut() {
+            self.realm.check_scope(guard).map_err(refuse)?;
+            if bodies {
+                self.ensure_loaded(guard).await.map_err(refuse)?;
+            }
+        }
+        if mutate {
+            // The lock waits may have outlasted the window: check it again
+            // before memory changes, so a lapse refuses cleanly.
+            self.realm.ensure_lease().await.map_err(refuse)?;
+        }
+        Ok(scopes)
+    }
+
+    /// Run one reading in-memory method under its scopes. See the module
+    /// documentation.
     ///
-    /// Cancel safety: from the start of a mutation until its commit
-    /// is handed to a task that owns the scopes, dropping this future
-    /// poisons them ([`ArmedScopes`]); after the hand-off the task lands the
-    /// batch and adopts it (or poisons) whether or not anyone still waits.
+    /// Cancel safety: a read is not expected to change memory, and
+    /// dropping this future then changes nothing. One that did change
+    /// memory is committed like a mutation: from that change until its
+    /// commit is handed to a task that owns the scopes, dropping this future
+    /// poisons them ([`ArmedScopes`]).
     async fn call<T, F>(&self, mode: Mode, ids: Vec<ScopeId>, op: F) -> Result<T, RuntimeStoreError>
     where
         F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
         T: Send,
     {
-        let refuse = |error: SpiError| match mode {
-            Mode::Mutate => error.into_write(),
-            Mode::Read | Mode::ReadPinned => error.into_read(),
-        };
-        let gate = Arc::clone(&self.gate).read_owned().await;
-        match mode {
-            Mode::Mutate => self.realm.ensure_lease().await.map_err(refuse)?,
-            Mode::Read | Mode::ReadPinned => self.realm.check_realm().map_err(refuse)?,
-        }
-        let guards = self.realm.lock_scopes(&ids).await;
-        let mut scopes = ArmedScopes::new(Arc::clone(&self.realm), guards).hold(gate);
-        for guard in scopes.guards_mut() {
-            self.realm.check_scope(guard).map_err(refuse)?;
-            if mode != Mode::ReadPinned {
-                self.ensure_loaded(guard).await.map_err(refuse)?;
+        let scopes = self.locked(&ids, false, mode == Mode::Read).await?;
+        self.settle(scopes, op).await
+    }
+
+    /// Run one in-memory method that changes memory under its scopes and
+    /// commit what it changed before answering. See the module
+    /// documentation.
+    ///
+    /// Cancel safety: the method and its commit run on a task that owns the
+    /// scopes from the arm on. Dropping this future before the hand-off
+    /// changes nothing; after it the task runs the method, lands the batch
+    /// and adopts it (or poisons) whether or not anyone still waits. The
+    /// method therefore owns what it works on.
+    async fn mutate<T, F>(&self, ids: Vec<ScopeId>, op: F) -> Result<T, RuntimeStoreError>
+    where
+        F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let scopes = self.locked(&ids, true, true).await?;
+        #[cfg(any(test, feature = "test-support"))]
+        let _armed_caller = ListedScopesForTest::enter(
+            &self.armed_callers,
+            ids.iter().map(ToString::to_string).collect(),
+        );
+        let store = self.handles();
+        let task = tokio::spawn(async move {
+            let mut scopes = scopes;
+            // A task dropped from here on (a runtime shutdown) poisons:
+            // memory may hold a change the host never got.
+            scopes.arm();
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                let _parked = ListedScopesForTest::enter(
+                    &store.armed_parked,
+                    ids.iter().map(ToString::to_string).collect(),
+                );
+                drop(store.armed_park.read().await);
+            }
+            store.settle(scopes, op).await
+        });
+        match task.await {
+            Ok(outcome) => outcome,
+            // The task dropped its armed scopes, which poisoned them. A
+            // panic of the method goes on through its caller, as it did
+            // when the method ran on the caller's own future.
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            // The task's runtime shut down.
+            Err(error) => {
+                Err(SpiError::Misuse(format!("the store call's task failed: {error}")).into_write())
             }
         }
-        if mode == Mode::Mutate {
-            // The lock waits may have outlasted the window: check it again
-            // before memory changes, so a lapse refuses cleanly.
-            self.realm.ensure_lease().await.map_err(refuse)?;
-            scopes.arm();
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        let _armed_caller = (mode == Mode::Mutate).then(|| {
-            ListedScopesForTest::enter(
-                &self.armed_callers,
-                ids.iter().map(ToString::to_string).collect(),
-            )
-        });
-        #[cfg(any(test, feature = "test-support"))]
-        if mode == Mode::Mutate {
-            let _parked = ListedScopesForTest::enter(
-                &self.armed_parked,
-                ids.iter().map(ToString::to_string).collect(),
-            );
-            drop(self.armed_park.read().await);
-        }
+    }
+
+    /// The second half of a call: run `op` over its locked `scopes` and
+    /// commit what it changed before answering.
+    async fn settle<T, F>(&self, mut scopes: ArmedScopes, op: F) -> Result<T, RuntimeStoreError>
+    where
+        F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
+        T: Send,
+    {
         let (result, touches) = journal::capture(op).await;
         if touches.whole.is_empty() && touches.entries.is_empty() {
             scopes.disarm();
@@ -1303,7 +1389,14 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         &self,
         authority: meerkat_core::VerifiedHeadCanonicalAuthority,
     ) -> Result<crate::store::HeadCanonicalRuntimeAuthorityActivation, RuntimeStoreError> {
-        self.call(Mode::Mutate, Vec::new(), <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::activate_head_canonical_runtime_authority(&self.memory, authority)).await
+        let ids = Vec::new();
+        let step = {
+            let memory = self.memory.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::activate_head_canonical_runtime_authority(&memory, authority).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn write_prepared_head_canonical_provisional_tail(
@@ -1311,7 +1404,15 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         prepared: crate::store::PreparedHeadCanonicalProvisionalTail,
     ) -> Result<meerkat_core::HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::write_prepared_head_canonical_provisional_tail(&self.memory, runtime_id, prepared)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::write_prepared_head_canonical_provisional_tail(&memory, &runtime_id, prepared).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_head_canonical_provisional_tail(
@@ -1327,7 +1428,16 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         expected: &meerkat_core::HeadCanonicalProvisionalTailAuthority,
     ) -> Result<bool, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::discard_head_canonical_provisional_tail(&self.memory, runtime_id, expected)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::discard_head_canonical_provisional_tail(&memory, &runtime_id, &expected).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_durable_tail_recovery_source(
@@ -1350,7 +1460,15 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         execution: crate::store::PreparedRuntimeSessionCommitExecution,
     ) -> Result<crate::store::PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::commit_prepared_session_boundary_execution(&self.memory, runtime_id, execution)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::commit_prepared_session_boundary_execution(&memory, &runtime_id, execution).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_durable_tail_recovery_receipts(
@@ -1427,7 +1545,15 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::delete_runtime_session_catalog_entry(&self.memory, runtime_id)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::delete_runtime_session_catalog_entry(&memory, &runtime_id).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_runtime_session_catalog_entry(
@@ -1476,7 +1602,15 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         prepared: PreparedWholeBlobSnapshotCas,
     ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::commit_prepared_whole_blob_snapshot_cas(&self.memory, runtime_id, prepared)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::commit_prepared_whole_blob_snapshot_cas(&memory, &runtime_id, prepared).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn write_prepared_whole_blob_provisional_tail(
@@ -1484,7 +1618,15 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         prepared: PreparedWholeBlobProvisionalTail,
     ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::write_prepared_whole_blob_provisional_tail(&self.memory, runtime_id, prepared)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::write_prepared_whole_blob_provisional_tail(&memory, &runtime_id, prepared).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_whole_blob_provisional_tail(
@@ -1507,7 +1649,16 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         expected: &WholeBlobProvisionalTailAuthority,
     ) -> Result<bool, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::discard_whole_blob_provisional_tail(&self.memory, runtime_id, expected)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::discard_whole_blob_provisional_tail(&memory, &runtime_id, &expected).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 }
 
@@ -1568,17 +1719,21 @@ impl RuntimeStore for SpiRuntimeStore {
         request: crate::store::PreparedRuntimeSessionCommit,
         write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
     ) -> Result<crate::store::FencedPreparedRuntimeSessionCommitOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::commit_prepared_session_boundary_with_fence(
-                &self.memory,
-                runtime_id,
-                request,
-                write_fence,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::commit_prepared_session_boundary_with_fence(
+                    &memory,
+                    &runtime_id,
+                    request,
+                    write_fence,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     fn supports_compaction_projection_outbox(&self) -> bool {
@@ -1632,18 +1787,22 @@ impl RuntimeStore for SpiRuntimeStore {
         replacement: RuntimeDeliveryAuthorityRecord,
         inserted_delivery: Option<RuntimeDeliveryStoreRecord>,
     ) -> Result<RuntimeDeliveryAuthorityCasOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_runtime_delivery_authority(
-                &self.memory,
-                runtime_id,
-                expected_revision,
-                replacement,
-                inserted_delivery,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_runtime_delivery_authority(
+                    &memory,
+                    &runtime_id,
+                    expected_revision,
+                    replacement,
+                    inserted_delivery,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_continuation_key_binding(
@@ -1686,17 +1845,22 @@ impl RuntimeStore for SpiRuntimeStore {
         delivery_id: &str,
         transition: ContinuationAdmissionTransition,
     ) -> Result<ContinuationAdmissionOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(address)],
-            <InMemoryRuntimeStore as RuntimeStore>::transition_continuation_admission(
-                &self.memory,
-                address,
-                delivery_id,
-                transition,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(address)];
+        let step = {
+            let memory = self.memory.clone();
+            let address = address.clone();
+            let delivery_id = delivery_id.to_string();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::transition_continuation_admission(
+                    &memory,
+                    &address,
+                    &delivery_id,
+                    transition,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn compare_and_swap_runtime_delivery_authority_with_key_binding(
@@ -1707,7 +1871,18 @@ impl RuntimeStore for SpiRuntimeStore {
         inserted_delivery: RuntimeDeliveryStoreRecord,
         binding: ContinuationKeyBinding,
     ) -> Result<KeyedRuntimeDeliveryCasOutcome, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id), key_binding_scope(&binding.owner, &binding.key)], <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_runtime_delivery_authority_with_key_binding(&self.memory, runtime_id, expected_revision, replacement, inserted_delivery, binding)).await
+        let ids = vec![
+            runtime_id_scope(runtime_id),
+            key_binding_scope(&binding.owner, &binding.key),
+        ];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_runtime_delivery_authority_with_key_binding(&memory, &runtime_id, expected_revision, replacement, inserted_delivery, binding).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     /// Answered from memory as a cross-scope read of the runtimes: refused
@@ -1852,16 +2027,20 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: SerializedSessionSnapshot,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::commit_session_snapshot(
-                &self.memory,
-                runtime_id,
-                session_delta,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::commit_session_snapshot(
+                    &memory,
+                    &runtime_id,
+                    session_delta,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     /// An import is one in-memory call, so it lands as one host batch
@@ -1874,16 +2053,20 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         snapshot: SerializedSessionSnapshot,
     ) -> Result<crate::store::WholeBlobSessionImport, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::import_whole_blob_session(
-                &self.memory,
-                runtime_id,
-                snapshot,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::import_whole_blob_session(
+                    &memory,
+                    &runtime_id,
+                    snapshot,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn commit_prepared_whole_blob_rewrite_boundary(
@@ -1891,16 +2074,20 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         boundary: PreparedWholeBlobRewriteStoreParts,
     ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::commit_prepared_whole_blob_rewrite_boundary(
-                &self.memory,
-                runtime_id,
-                boundary,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::commit_prepared_whole_blob_rewrite_boundary(
+                    &memory,
+                    &runtime_id,
+                    boundary,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     /// Forwarded with the re-base itself: the in-memory store implements it,
@@ -1918,16 +2105,20 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         rebase: crate::store::PreparedWholeBlobRunRebaseStoreParts,
     ) -> Result<crate::store::WholeBlobRunRebaseOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::commit_prepared_whole_blob_run_rebase(
-                &self.memory,
-                runtime_id,
-                rebase,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::commit_prepared_whole_blob_run_rebase(
+                    &memory,
+                    &runtime_id,
+                    rebase,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn atomic_apply(
@@ -1938,19 +2129,23 @@ impl RuntimeStore for SpiRuntimeStore {
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::atomic_apply(
-                &self.memory,
-                runtime_id,
-                session_delta,
-                receipt,
-                input_updates,
-                session_store_key,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::atomic_apply(
+                    &memory,
+                    &runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_pending_compaction_projections(
@@ -1973,16 +2168,21 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         projection: &meerkat_core::CompactionProjectionId,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::mark_compaction_projection_finalized(
-                &self.memory,
-                runtime_id,
-                projection,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let projection = projection.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::mark_compaction_projection_finalized(
+                    &memory,
+                    &runtime_id,
+                    &projection,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn atomic_apply_with_machine_lifecycle(
@@ -1994,20 +2194,24 @@ impl RuntimeStore for SpiRuntimeStore {
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: meerkat_core::types::SessionId,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::atomic_apply_with_machine_lifecycle(
-                &self.memory,
-                runtime_id,
-                session_delta,
-                receipt,
-                machine_lifecycle,
-                input_updates,
-                session_store_key,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::atomic_apply_with_machine_lifecycle(
+                    &memory,
+                    &runtime_id,
+                    session_delta,
+                    receipt,
+                    machine_lifecycle,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_input_states(
@@ -2089,15 +2293,16 @@ impl RuntimeStore for SpiRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::clear_session_snapshot(
-                &self.memory,
-                runtime_id,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::clear_session_snapshot(&memory, &runtime_id)
+                    .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn replace_session_snapshot_if_current(
@@ -2106,17 +2311,22 @@ impl RuntimeStore for SpiRuntimeStore {
         expected_current: &[u8],
         replacement: Vec<u8>,
     ) -> Result<bool, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::replace_session_snapshot_if_current(
-                &self.memory,
-                runtime_id,
-                expected_current,
-                replacement,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let expected_current = expected_current.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::replace_session_snapshot_if_current(
+                    &memory,
+                    &runtime_id,
+                    &expected_current,
+                    replacement,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn clear_session_snapshot_if_current(
@@ -2124,16 +2334,21 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         expected_current: &[u8],
     ) -> Result<bool, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::clear_session_snapshot_if_current(
-                &self.memory,
-                runtime_id,
-                expected_current,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let expected_current = expected_current.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::clear_session_snapshot_if_current(
+                    &memory,
+                    &runtime_id,
+                    &expected_current,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn is_runtime_projection_quarantined(
@@ -2156,16 +2371,21 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         state: &InputStatePersistenceRecord,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::persist_input_state(
-                &self.memory,
-                runtime_id,
-                state,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let state = state.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::persist_input_state(
+                    &memory,
+                    &runtime_id,
+                    &state,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn persist_input_states_atomically(
@@ -2173,16 +2393,21 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         records: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::persist_input_states_atomically(
-                &self.memory,
-                runtime_id,
-                records,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let records = records.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::persist_input_states_atomically(
+                    &memory,
+                    &runtime_id,
+                    &records,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn compare_and_swap_input_states_atomically(
@@ -2191,17 +2416,23 @@ impl RuntimeStore for SpiRuntimeStore {
         expected: &[StoredInputState],
         replacements: &[InputStatePersistenceRecord],
     ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_input_states_atomically(
-                &self.memory,
-                runtime_id,
-                expected,
-                replacements,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.to_vec();
+            let replacements = replacements.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_input_states_atomically(
+                    &memory,
+                    &runtime_id,
+                    &expected,
+                    &replacements,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn compare_and_swap_input_states_atomically_with_fence(
@@ -2211,7 +2442,17 @@ impl RuntimeStore for SpiRuntimeStore {
         replacements: &[InputStatePersistenceRecord],
         write_fence: Arc<dyn RuntimeStoreWriteFence>,
     ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_input_states_atomically_with_fence(&self.memory, runtime_id, expected, replacements, write_fence)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.to_vec();
+            let replacements = replacements.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_input_states_atomically_with_fence(&memory, &runtime_id, &expected, &replacements, write_fence).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn compare_and_swap_recovery_input_states_atomically(
@@ -2220,7 +2461,16 @@ impl RuntimeStore for SpiRuntimeStore {
         expected_revision: RecoveryInputSetRevision,
         mutations: &[RecoveryInputStateMutation],
     ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_recovery_input_states_atomically(&self.memory, runtime_id, expected_revision, mutations)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let mutations = mutations.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_recovery_input_states_atomically(&memory, &runtime_id, expected_revision, &mutations).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn compare_and_swap_recovery_input_states_atomically_with_fence(
@@ -2230,7 +2480,16 @@ impl RuntimeStore for SpiRuntimeStore {
         mutations: &[RecoveryInputStateMutation],
         write_fence: Arc<dyn RuntimeStoreWriteFence>,
     ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
-        self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_recovery_input_states_atomically_with_fence(&self.memory, runtime_id, expected_revision, mutations, write_fence)).await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let mutations = mutations.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_recovery_input_states_atomically_with_fence(&memory, &runtime_id, expected_revision, &mutations, write_fence).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_input_state(
@@ -2324,17 +2583,21 @@ impl RuntimeStore for SpiRuntimeStore {
         expected: MachineLifecycleExpectedVersion,
         replacement: MachineLifecycleCommit,
     ) -> Result<MachineLifecycleCasOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_machine_lifecycle(
-                &self.memory,
-                runtime_id,
-                expected,
-                replacement,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_machine_lifecycle(
+                    &memory,
+                    &runtime_id,
+                    expected,
+                    replacement,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn compare_and_swap_machine_lifecycle_with_fence(
@@ -2344,18 +2607,15 @@ impl RuntimeStore for SpiRuntimeStore {
         replacement: MachineLifecycleCommit,
         write_fence: Arc<dyn RuntimeStoreWriteFence>,
     ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_machine_lifecycle_with_fence(
-                &self.memory,
-                runtime_id,
-                expected,
-                replacement,
-                write_fence,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_machine_lifecycle_with_fence(&memory, &runtime_id, expected, replacement, write_fence).await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_machine_lifecycle_record(
@@ -2379,17 +2639,22 @@ impl RuntimeStore for SpiRuntimeStore {
         commit: MachineLifecycleCommit,
         input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::commit_machine_lifecycle(
-                &self.memory,
-                runtime_id,
-                commit,
-                input_states,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let input_states = input_states.to_vec();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::commit_machine_lifecycle(
+                    &memory,
+                    &runtime_id,
+                    commit,
+                    &input_states,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn commit_unregister_finalization(
@@ -2397,16 +2662,20 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         finalization: crate::store::UnregisterFinalizationCommit,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::commit_unregister_finalization(
-                &self.memory,
-                runtime_id,
-                finalization,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::commit_unregister_finalization(
+                    &memory,
+                    &runtime_id,
+                    finalization,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn persist_ops_lifecycle(
@@ -2414,16 +2683,21 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         snapshot: &PersistedOpsSnapshot,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::persist_ops_lifecycle(
-                &self.memory,
-                runtime_id,
-                snapshot,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let snapshot = snapshot.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::persist_ops_lifecycle(
+                    &memory,
+                    &runtime_id,
+                    &snapshot,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn initialize_ops_lifecycle_if_absent(
@@ -2431,16 +2705,21 @@ impl RuntimeStore for SpiRuntimeStore {
         runtime_id: &LogicalRuntimeId,
         candidate: &PersistedOpsSnapshot,
     ) -> Result<PersistedOpsSnapshot, RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::initialize_ops_lifecycle_if_absent(
-                &self.memory,
-                runtime_id,
-                candidate,
-            ),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            let candidate = candidate.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::initialize_ops_lifecycle_if_absent(
+                    &memory,
+                    &runtime_id,
+                    &candidate,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn load_ops_lifecycle(
@@ -2459,12 +2738,16 @@ impl RuntimeStore for SpiRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<(), RuntimeStoreError> {
-        self.call(
-            Mode::Mutate,
-            vec![runtime_id_scope(runtime_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::delete_ops_lifecycle(&self.memory, runtime_id),
-        )
-        .await
+        let ids = vec![runtime_id_scope(runtime_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let runtime_id = runtime_id.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::delete_ops_lifecycle(&memory, &runtime_id)
+                    .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     async fn admit_direct_member_incarnation_high_water(
@@ -2475,16 +2758,21 @@ impl RuntimeStore for SpiRuntimeStore {
         meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberIncarnation,
         RuntimeStoreError,
     > {
-        self.call(
-            Mode::Mutate,
-            vec![member_high_water_scope(member_session_id)],
-            <InMemoryRuntimeStore as RuntimeStore>::admit_direct_member_incarnation_high_water(
-                &self.memory,
-                member_session_id,
-                candidate,
-            ),
-        )
-        .await
+        let ids = vec![member_high_water_scope(member_session_id)];
+        let step = {
+            let memory = self.memory.clone();
+            let member_session_id = member_session_id.to_string();
+            let candidate = candidate.clone();
+            async move {
+                <InMemoryRuntimeStore as RuntimeStore>::admit_direct_member_incarnation_high_water(
+                    &memory,
+                    &member_session_id,
+                    &candidate,
+                )
+                .await
+            }
+        };
+        self.mutate(ids, step).await
     }
 
     // Mob host bindings and revocations: the adapter's own record

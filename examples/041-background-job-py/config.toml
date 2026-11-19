@@ -25,3 +25,8 @@ source = { kind = "platform_default" }
 [realm.global.binding.local]
 backend_profile = "local"
 auth_profile = "local-auth"
+
+[shell]
+security_mode = "allow_list"
+security_patterns = ["expr 17 + 25"]
+timeout_secs = 10

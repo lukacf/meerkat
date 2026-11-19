@@ -39,7 +39,7 @@ async def run(root, config):
         session = await client.create_session(
             f'Use the shell tool once with command {COMMAND!r}, background true and timeout_secs 10. '
             'Do not run any other command, inspect the environment, poll or retry. After the receipt, answer Submitted.',
-            model='job-demo', provider='self_hosted', enable_shell=True, enable_builtins=True)
+            model='job-demo', provider='self_hosted', enable_shell=True, enable_builtins=False)
         history = await session.history()
         if history.has_more:
             raise ValueError('Incomplete origin session history')

@@ -1324,10 +1324,12 @@ finally:
     await rt.shutdown()
 ```
 
-The [recovery example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app)
-shows two different failures. A respawn rebuilds the agent: on Meta 0.9.16,
-respawning its OpenAI-backed agent without the provider credential raised
-`RpcError` with `MemberRestoreFailed` and `missing_secret`.
+The [supervised example](https://github.com/lukacf/meerkat/tree/main/meta/examples/007-supervised-python-app)
+shows how to recover after the gateway child dies. It skips respawn when the
+provider key is absent. In a separate check with the released Meta 0.9.16
+Python SDK and gateway, respawning the OpenAI-backed agent without its
+provider credential raised `RpcError` with `MemberRestoreFailed` and
+`missing_secret`.
 
 If the gateway child dies, a status call can raise `TransportReaderFailedError`
 or its subclass `GatewayChildEndedError`, depending on when the SDK observes

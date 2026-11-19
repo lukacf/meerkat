@@ -3690,7 +3690,33 @@ pub(crate) enum ExactTurnTerminal {
     RequeueExpired {
         input_id: meerkat_core::lifecycle::InputId,
     },
+    /// A later input of the admitted input's supersession key replaced it
+    /// while it still waited: it ended superseded and does not run
+    /// ([`meerkat_runtime::completion::CompletionWaitError::Superseded`]).
+    /// Only a WorkGraph attention continuation ends this way, and the mob
+    /// admits one only through its crate-private hand-over. A governed-input
+    /// door admits through the exact-prompt replay contract, under which the
+    /// runtime refuses every input that is no prompt, so no turn a public
+    /// door hands out carries this terminal.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "nothing in this crate waits on a continuation it handed over yet"
+        )
+    )]
+    Superseded {
+        input_id: meerkat_core::lifecycle::InputId,
+        superseded_by: meerkat_core::lifecycle::InputId,
+    },
 }
+
+/// What the two public readers of an exact-turn completion answer for a
+/// superseded terminal: an internal error, because no typed public answer is
+/// defined for a superseded member turn. It is not a result of the turn and
+/// not a failure of its work. The text names no input.
+const SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER: &str =
+    "the member turn's input was superseded by a later input while it waited; it does not run";
 
 pub(crate) type ExactTurnCompletionSender =
     tokio::sync::oneshot::Sender<Result<ExactTurnCompletion, MobError>>;
@@ -5311,6 +5337,12 @@ fn bounded_exact_turn_result(
             session_id,
             input_id,
         }),
+        // A later input superseded this turn's input (see the terminal's
+        // doc). No typed public answer is defined for it.
+        ExactTurnTerminal::Superseded { .. } => Err(BoundedTurnFailure::CompletionPlumbing {
+            admitted_session_id: admitted_session_id.clone(),
+            error: MobError::Internal(SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string()),
+        }),
         ExactTurnTerminal::PlacedBounded(result) => {
             let result_session_id = SessionId::parse(&result.session_id).map_err(|_| {
                 BoundedTurnFailure::ResultAttributionMismatch {
@@ -5541,6 +5573,13 @@ pub(crate) fn legacy_exact_turn_result(
                 session_id,
                 input_id,
             });
+        }
+        // A later input superseded this turn's input (see the terminal's
+        // doc). No typed public answer is defined for it.
+        ExactTurnTerminal::Superseded { .. } => {
+            return Err(MobError::Internal(
+                SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string(),
+            ));
         }
     };
     match outcome {
@@ -25773,6 +25812,133 @@ mod tests {
                 }) if expired_session == &session_id && expired_input == &input_id
             ),
             "{expired:?}"
+        );
+    }
+
+    /// A superseded terminal is an internal error at the two public readers
+    /// of an exact-turn completion: no typed public answer is defined for it.
+    /// Each answers the same text, which names no input, the bounded one
+    /// inside its plumbing failure with the admitted session.
+    #[test]
+    fn a_superseded_terminal_is_an_internal_error_at_the_public_readers() {
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let later = meerkat_core::lifecycle::InputId::new();
+        let superseded = || ExactTurnCompletion {
+            session_id: session_id.clone(),
+            terminal: ExactTurnTerminal::Superseded {
+                input_id: input_id.clone(),
+                superseded_by: later.clone(),
+            },
+        };
+        let names_no_input = |text: &str| {
+            !text.contains(&input_id.to_string()) && !text.contains(&later.to_string())
+        };
+
+        match legacy_exact_turn_result(superseded()) {
+            Err(MobError::Internal(text)) => {
+                assert_eq!(text, SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER);
+                assert!(names_no_input(&text), "{text}");
+            }
+            other => panic!("expected an internal error, got {other:?}"),
+        }
+
+        let spec = BoundedResultSpec::new("superseded", 64).expect("bounded spec");
+        match bounded_exact_turn_result(superseded(), &session_id, &spec) {
+            Err(BoundedTurnFailure::CompletionPlumbing {
+                admitted_session_id,
+                error: MobError::Internal(text),
+            }) => {
+                assert_eq!(admitted_session_id, session_id);
+                assert_eq!(text, SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER);
+                assert!(names_no_input(&text), "{text}");
+            }
+            other => panic!("expected a plumbing failure, got {other:?}"),
+        }
+    }
+
+    /// The superseded terminal is made in one place, the completion adapter,
+    /// from the typed wait answer; nothing else in the provisioner makes
+    /// one. Which doors can hand out a turn that ends this way is another
+    /// row's: only the mob's own hand-over of a continuation can, since a
+    /// governed input is admitted through the exact-prompt contract.
+    #[test]
+    fn the_superseded_terminal_is_made_in_one_place_from_the_typed_wait_answer() {
+        // The needles are built from parts so this row's own text is not
+        // what it finds.
+        let provisioner_source = include_str!("provisioner.rs");
+        let start = provisioner_source
+            .find("fn runtime_completion_to_exact_turn")
+            .expect("exact runtime completion adapter");
+        let end = provisioner_source[start..]
+            .find("fn runtime_completion_to_mob_result")
+            .map(|offset| start + offset)
+            .expect("next adapter boundary");
+        let exact_adapter = &provisioner_source[start..end];
+        let made = ["ExactTurnTerminal::", "Superseded {"].concat();
+        let answer = ["CompletionWaitError::", "Superseded {"].concat();
+        assert_eq!(
+            exact_adapter.matches(&made).count(),
+            1,
+            "the adapter makes the superseded terminal once"
+        );
+        assert!(
+            exact_adapter.contains(&answer),
+            "the superseded terminal is made from the typed wait answer"
+        );
+        // Product code names the terminal by its path from this module; the
+        // provisioner's own rows name it through an import. The file has
+        // product code after its first test module, so the whole file is
+        // read.
+        let made_by_path = ["super::handle::ExactTurnTerminal::", "Superseded {"].concat();
+        assert_eq!(
+            provisioner_source.matches(&made_by_path).count(),
+            1,
+            "the provisioner makes a superseded terminal at one place"
+        );
+        assert!(
+            exact_adapter.contains(&made_by_path),
+            "that place is the completion adapter"
+        );
+    }
+
+    /// A member's governed input is admitted through the exact-prompt replay
+    /// contract and through no other: every governed admission of the
+    /// provisioner that reaches the runtime's admission names that contract.
+    /// The runtime refuses every input that is no prompt under it, so a
+    /// governed-input door hands no continuation to a member.
+    #[test]
+    fn a_governed_input_is_admitted_through_the_exact_prompt_contract_only() {
+        // The whole file is read: its product code continues after its
+        // first test module. The needles are built from parts so this
+        // row's own text is not what it finds.
+        let provisioner_source = include_str!("provisioner.rs");
+        let governed = ["async fn admit_", "governed_input("].concat();
+        let admits = ["admit_runtime_input_with_", "replay_policy("].concat();
+        let exact_prompt = ["InputReplayPolicy::", "ExactPrompt"].concat();
+        let key_only = ["InputReplayPolicy::", "KeyOnly"].concat();
+        let mut admitting = 0;
+        for (start, _) in provisioner_source.match_indices(&governed) {
+            // One method: to the first closing brace at a method's depth.
+            let rest = &provisioner_source[start + governed.len()..];
+            let end = rest.find("\n    }\n").unwrap_or(rest.len());
+            let body = &rest[..end];
+            if !body.contains(&admits) {
+                continue;
+            }
+            admitting += 1;
+            assert!(
+                body.contains(&exact_prompt),
+                "a governed admission that reaches the runtime names the exact-prompt contract"
+            );
+            assert!(
+                !body.contains(&key_only),
+                "a governed admission never names the key-only contract"
+            );
+        }
+        assert_eq!(
+            admitting, 1,
+            "one governed admission of the provisioner reaches the runtime's admission"
         );
     }
 

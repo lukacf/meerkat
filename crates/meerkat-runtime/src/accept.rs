@@ -68,6 +68,24 @@ pub enum ExistingQueuedAdmissionAction {
     Supersede { existing_id: InputId },
 }
 
+/// The queued input an admission's plan displaces when it commits, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DisplacedQueuedInput {
+    /// Coalesced into the admitted input.
+    Coalesced(InputId),
+    /// Superseded by the admitted input.
+    Superseded(InputId),
+}
+
+impl DisplacedQueuedInput {
+    /// The displaced input.
+    pub(crate) fn input_id(&self) -> &InputId {
+        match self {
+            Self::Coalesced(input_id) | Self::Superseded(input_id) => input_id,
+        }
+    }
+}
+
 /// Machine-owned admission plan for an accepted input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionPlan {
@@ -331,7 +349,9 @@ impl ResolvedAdmission {
 
     /// The queued input the generated plan terminalizes by coalescing or
     /// superseding it when this admission commits. Neither transition stages
-    /// a terminal-completion receipt or resolves a completion waiter.
+    /// a terminal-completion receipt; a superseded input's completion
+    /// waiters are answered with the typed supersession, a coalesced
+    /// input's are not resolved.
     pub(crate) fn displaced_queued_input_id(&self) -> Option<&InputId> {
         match &self.admission_plan {
             AdmissionPlan::Queued {
@@ -342,6 +362,22 @@ impl ResolvedAdmission {
                     ),
                 ..
             } => Some(existing_id),
+            AdmissionPlan::ConsumedOnAccept | AdmissionPlan::Queued { .. } => None,
+        }
+    }
+
+    /// The queued input this admission's plan displaces when it commits,
+    /// and how.
+    pub(crate) fn displaced_queued_input(&self) -> Option<DisplacedQueuedInput> {
+        match &self.admission_plan {
+            AdmissionPlan::Queued {
+                existing_action: Some(ExistingQueuedAdmissionAction::Coalesce { existing_id }),
+                ..
+            } => Some(DisplacedQueuedInput::Coalesced(existing_id.clone())),
+            AdmissionPlan::Queued {
+                existing_action: Some(ExistingQueuedAdmissionAction::Supersede { existing_id }),
+                ..
+            } => Some(DisplacedQueuedInput::Superseded(existing_id.clone())),
             AdmissionPlan::ConsumedOnAccept | AdmissionPlan::Queued { .. } => None,
         }
     }

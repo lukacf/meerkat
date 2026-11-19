@@ -1030,7 +1030,7 @@ impl MeerkatMachine {
 
                         let result = {
                             let mut drv = driver.lock().await;
-                            let displaced_input_id = resolved.displaced_queued_input_id().cloned();
+                            let displaced_input = resolved.displaced_queued_input();
                             let result = drv
                                 .accept_resolved_input_with_credential(
                                     input,
@@ -1041,7 +1041,7 @@ impl MeerkatMachine {
                                 .map_err(Self::control_plane_error_from_driver_error)?;
                             Self::wake_displaced_input_observers(
                                 &completions,
-                                displaced_input_id,
+                                displaced_input,
                                 &result,
                                 &mut runless_terminal,
                             )

@@ -43870,9 +43870,13 @@ async fn supersede_is_refused_for_an_input_that_no_longer_waits() {
     let entry = driver.lock().await;
     let refusal =
         supersede(&entry).expect_err("the machine refuses to supersede an input that was staged");
+    // A generated refusal names the transition's input, never the guard that
+    // refused. The guard this row pins is `superseded_input_is_queued`:
+    // without it the supersede is taken here, since every other guard of the
+    // transition still holds for the staged input.
     assert!(
-        refusal.contains("guard rejected"),
-        "a generated guard refuses the supersede: {refusal}"
+        refusal.contains("guard rejected transition") && refusal.contains("input::SupersedeInput"),
+        "a guard of the supersede transition refuses it: {refusal}"
     );
 }
 

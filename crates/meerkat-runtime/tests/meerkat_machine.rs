@@ -7490,14 +7490,24 @@ async fn two_peer_messages_that_wait_behind_a_running_turn_share_one_turn() {
 async fn turns_taken_after_a_restart(
     inputs: Vec<Input>,
 ) -> (Vec<Option<InputTerminalOutcome>>, Vec<RecordedTurn>) {
-    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> =
+        Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let (sid, ids) = a_session_that_accepted(Arc::clone(&store), inputs).await;
+    restarted_on(store, sid)
+        .await
+        .release_and_settle(&ids)
+        .await
+}
+
+/// A session on `store`, with no executor, that accepted `inputs` in order
+/// and was dropped with its machine. Answers the session and the inputs' ids.
+async fn a_session_that_accepted(
+    store: Arc<dyn RuntimeStore>,
+    inputs: Vec<Input>,
+) -> (SessionId, Vec<InputId>) {
     let sid = SessionId::new();
     let before = Arc::new(
-        MeerkatMachine::persistent(
-            Arc::clone(&store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        )
-        .expect("persistent machine"),
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
     );
     before
         .register_session(sid.clone())
@@ -7514,18 +7524,19 @@ async fn turns_taken_after_a_restart(
         );
     }
     drop(before);
+    (sid, ids)
+}
 
+/// A new machine on `store` that registers `sid` with an executor that
+/// records its turns and holds none: the restart of a session.
+async fn restarted_on(store: Arc<dyn RuntimeStore>, sid: SessionId) -> HeldFirstTurnSession {
     let turns = Arc::new(std::sync::Mutex::new(Vec::new()));
     let first_turn_started = Arc::new(tokio::sync::Notify::new());
     let first_turn_may_end = Arc::new(tokio::sync::Notify::new());
     // Nothing holds the first turn after the restart.
     first_turn_may_end.notify_one();
     let adapter = Arc::new(
-        MeerkatMachine::persistent(
-            Arc::clone(&store) as Arc<dyn RuntimeStore>,
-            memory_blob_store(),
-        )
-        .expect("persistent machine"),
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine"),
     );
     adapter
         .register_session_with_executor(
@@ -7538,14 +7549,214 @@ async fn turns_taken_after_a_restart(
         )
         .await
         .expect("the restart recovers the inputs that waited");
-    let session = HeldFirstTurnSession {
+    HeldFirstTurnSession {
         adapter,
         sid,
         turns,
         first_turn_started,
         first_turn_may_end,
+    }
+}
+
+/// The queue mode a stored input's policy carries.
+async fn stored_queue_mode(
+    session: &HeldFirstTurnSession,
+    input_id: &InputId,
+) -> Option<meerkat_runtime::QueueMode> {
+    session
+        .adapter
+        .input_state(&session.sid, input_id)
+        .await
+        .expect("read the stored input")
+        .expect("the input is recorded")
+        .state
+        .policy
+        .map(|policy| policy.decision.queue_mode)
+}
+
+/// What a restart finds after a later attention continuation superseded an
+/// earlier one of its binding that waited: the earlier one stays ended
+/// superseded by the later one and takes no turn, the later one takes one
+/// turn under its own projection, and both stored policies read the queue
+/// mode they were admitted with.
+async fn assert_a_restart_keeps_the_supersession(
+    session: HeldFirstTurnSession,
+    earlier_id: InputId,
+    later_id: InputId,
+) {
+    let (terminals, turns) = session
+        .release_and_settle(&[earlier_id.clone(), later_id.clone()])
+        .await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Superseded {
+                superseded_by: later_id.clone()
+            }),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "the earlier continuation stays superseded and the later one runs: {turns:#?}"
+    );
+    assert_eq!(
+        turns,
+        vec![RecordedTurn {
+            inputs: vec![later_id.clone()],
+            projection: Some("projection-2".to_string()),
+        }],
+        "one turn after the restart: the later continuation's, under its projection"
+    );
+    for input_id in [&earlier_id, &later_id] {
+        assert_eq!(
+            stored_queue_mode(&session, input_id).await,
+            Some(meerkat_runtime::QueueMode::Supersede),
+            "the stored policy reads the queue mode the continuation was admitted with"
+        );
+    }
+}
+
+/// A session restarted after a later attention continuation superseded an
+/// earlier one that waited runs the later one alone; the superseded one
+/// stays ended and takes no turn.
+#[tokio::test]
+async fn a_superseded_attention_continuation_stays_ended_after_a_restart() {
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let earlier_id = earlier.id().clone();
+    let later_id = later.id().clone();
+
+    let store: Arc<dyn RuntimeStore> =
+        Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let (sid, _) = a_session_that_accepted(Arc::clone(&store), vec![earlier, later]).await;
+    assert_a_restart_keeps_the_supersession(restarted_on(store, sid).await, earlier_id, later_id)
+        .await;
+}
+
+/// The same over a store file that is closed and opened again: the second
+/// machine reads the superseded row and the waiting row from the file.
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn a_superseded_attention_continuation_stays_ended_after_a_store_file_is_reopened() {
+    let dir = tempfile::tempdir().expect("a directory for the store file");
+    let path = dir.path().join("runtime.sqlite3");
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let earlier_id = earlier.id().clone();
+    let later_id = later.id().clone();
+
+    let sid = {
+        let store: Arc<dyn RuntimeStore> = Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new(path.clone())
+                .expect("the store file is created"),
+        );
+        a_session_that_accepted(store, vec![earlier, later]).await.0
     };
-    session.release_and_settle(&ids).await
+    let reopened: Arc<dyn RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new(path).expect("the store file is reopened"),
+    );
+    assert_a_restart_keeps_the_supersession(
+        restarted_on(reopened, sid).await,
+        earlier_id,
+        later_id,
+    )
+    .await;
+}
+
+/// A restart after the waiter of the superseded continuation was answered
+/// changes nothing for the session: the later continuation runs alone and
+/// the earlier one stays ended as its waiter was told.
+#[tokio::test]
+async fn a_restart_after_the_superseded_waiter_was_answered_runs_the_later_continuation() {
+    let store: Arc<dyn RuntimeStore> =
+        Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let sid = SessionId::new();
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let earlier_id = earlier.id().clone();
+    let later_id = later.id().clone();
+    {
+        let before = Arc::new(
+            MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+                .expect("persistent machine"),
+        );
+        before
+            .register_session(sid.clone())
+            .await
+            .expect("register session");
+        let (outcome, handle) = before
+            .accept_input_with_completion(&sid, earlier)
+            .await
+            .expect("the first hand-over is answered");
+        assert!(outcome.is_accepted());
+        let handle = handle.expect("an accepted continuation carries its completion");
+        assert!(
+            before
+                .accept_input(&sid, later)
+                .await
+                .expect("the second hand-over is answered")
+                .is_accepted()
+        );
+        let answered = tokio::time::timeout(Duration::from_secs(5), handle.wait())
+            .await
+            .expect("the superseded continuation's waiter is answered");
+        assert!(
+            matches!(
+                &answered,
+                Err(meerkat_runtime::completion::CompletionWaitError::Superseded { superseded_by })
+                    if superseded_by == &later_id
+            ),
+            "the waiter is answered before the restart: {answered:?}"
+        );
+    }
+    assert_a_restart_keeps_the_supersession(restarted_on(store, sid).await, earlier_id, later_id)
+        .await;
+}
+
+/// A peer message that waited beside the two continuations is taken up
+/// after the restart with the later one: both run once, and the superseded
+/// continuation is in no turn.
+#[tokio::test]
+async fn a_restart_runs_a_peer_message_and_the_later_continuation_once_each() {
+    let message = waiting_peer_message("recovered beside a superseded continuation");
+    let earlier = built_attention_continuation("projection-1", "binding-1");
+    let later = built_attention_continuation("projection-2", "binding-1");
+    let message_id = message.id().clone();
+    let earlier_id = earlier.id().clone();
+    let later_id = later.id().clone();
+
+    let (terminals, turns) = turns_taken_after_a_restart(vec![message, earlier, later]).await;
+    assert_eq!(
+        terminals,
+        vec![
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Superseded {
+                superseded_by: later_id.clone()
+            }),
+            Some(InputTerminalOutcome::Consumed)
+        ],
+        "the message and the later continuation run; the earlier one stays superseded: \
+         {turns:#?}"
+    );
+    let turns_with = |input_id: &InputId| {
+        turns
+            .iter()
+            .filter(|turn| turn.inputs.contains(input_id))
+            .count()
+    };
+    assert_eq!(
+        turns_with(&message_id),
+        1,
+        "the message runs once: {turns:#?}"
+    );
+    assert_eq!(
+        turns_with(&later_id),
+        1,
+        "the later continuation runs once: {turns:#?}"
+    );
+    assert_eq!(
+        turns_with(&earlier_id),
+        0,
+        "the superseded continuation is in no turn: {turns:#?}"
+    );
 }
 
 /// After a restart an attention continuation that still waited takes a

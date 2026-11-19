@@ -1080,8 +1080,8 @@ Both `createSession()` and `session.turn()` accept structured skill parameters.
 
 <Note>
 The Linux x86_64 archives restored the built-in skills and capability list
-in 0.9.15. On affected older versions, the `rkat-rpc` started by the SDK
-reported no skills capability, so `session.invokeSkill()` threw
+in 0.9.15. When the SDK started `rkat-rpc` from an affected older Linux
+x86_64 release archive, the binary reported no skills capability, so `session.invokeSkill()` threw
 `CapabilityUnavailableError` even for a project skill. For affected versions
 and the session workaround, see the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).

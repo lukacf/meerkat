@@ -34,7 +34,7 @@ async def run(root):
             'Use skip_if_running, skip on misfire, and mark_misfired if the target is missing. '
             'After creation reply only Scheduled. Do not do the scheduled task now.',
             model='claude-haiku-5-5', enable_schedule=True, enable_shell=False,
-            enable_builtins=False, keep_alive=True)
+            enable_builtins=False, keep_alive=True, comms_name='reminder')
         first = (await session.history()).messages
         schedules = (await client.list_schedules())['schedules']
         if len(schedules) != 1 or expected in session.text:

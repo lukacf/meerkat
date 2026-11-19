@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.9.17
+
+- A request or callback reply written to a gateway whose input is gone (it
+  exited, or closed its input) no longer ends the Node program with an
+  unhandled `write EPIPE` error: the waiting requests and every later
+  request on that gateway process reject with `TransportReaderFailedError`;
+  for the waiting requests its `reason` names the failed write. A failed
+  read of the gateway's output rejects the same way. So when a gateway
+  refuses the start after it has accepted the init request, and exits,
+  `MetaBuilder.build()` rejects with the refusal (its own typed
+  error: see the next entry). No new error type.
+- A gateway start refused after the init request was accepted raises the
+  refusal's own typed error (`CompositionProvenanceError`,
+  `StorageResolutionError` or the typed RPC error) instead of
+  `GatewayStartupCleanupError`; see Breaking in Meta's changelog.
+  For this the exported `PersistentTransport` gains the public method
+  `initSettledFailed()`, which the runtime calls when the init settles
+  `failed`, so that the stop that follows makes no shutdown request. A
+  subclass inherits it; a subclass must not define a method of that name
+  for another purpose.
+- `GatewayStartupCleanupError`'s message names the startup failure it wraps
+  by the error's `name` ("gateway startup failed (CompositionProvenanceError)
+  and the stop of its gateway transport ..."), or by its `typeof` when it is
+  no Error; it still formats nothing of the failure itself.
+
 ## 0.9.16
 
 No SDK API changes; released with Meta 0.9.16.

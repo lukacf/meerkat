@@ -394,17 +394,22 @@ async def test_close_releases_the_stderr_drain_task(tmp_path: Path) -> None:
 TWO_STDERR_LINES = "fixture: first stderr line\nfixture: last stderr line"
 LATE_STDERR_LINE = "late stderr line"
 
-# A descendant's script: 200 ms after the process that started it has exited
-# and been reaped, it writes one more line to the stderr it inherited and
-# exits, closing the stdout and stderr it held.
+# A descendant's script. Its arguments are the pid of the process that
+# started it and a path: it creates that file first, to say that it runs.
+# 50 ms after the process that started it has exited and been reaped, it
+# writes one more line to the stderr it inherited and exits, closing the
+# stdout and stderr it held. It never lives longer than 10 s.
 _LATE_STDERR = (
-    "const parent = process.ppid;"
+    'require("node:fs").writeFileSync(process.argv[2], "");'
+    " setTimeout(() => process.exit(1), 10000).unref();"
+    " const parent = Number(process.argv[1]);"
     " const poll = setInterval(() => {"
     " try { process.kill(parent, 0); } catch {"
     " clearInterval(poll);"
-    f" setTimeout(() => process.stderr.write({json.dumps(LATE_STDERR_LINE + chr(10))}), 200);"
+    f" setTimeout(() => process.stderr.write({json.dumps(LATE_STDERR_LINE + chr(10))}), 50);"
     " } }, 10);"
 )
+DESCENDANT_NEVER_RAN_LINE = "fixture: the descendant never ran"
 
 
 def _write_node_rpc(
@@ -415,15 +420,25 @@ def _write_node_rpc(
     without a reply, on the next request. With ``holder`` it first starts a
     descendant that inherits its stdout and stderr, and records that
     descendant's pid in ``holder.pid``. With ``late_stderr`` it starts a
-    descendant that holds them until 200 ms after the exit and writes one
-    more stderr line before it lets go."""
+    descendant that holds them until 50 ms after the exit and writes one
+    more stderr line before it lets go; the exit then waits until that
+    descendant runs, and after 3 s says on stderr that it never did."""
     script = tmp_path / "fake-rkat-rpc.cjs"
     lines = ["#!/usr/bin/env node"]
+    exit_now = "() => process.exit(7)"
     if late_stderr:
+        ready = json.dumps(str(tmp_path / "descendant.ready"))
         lines += [
             'require("node:child_process").spawn(process.execPath,'
-            f' ["-e", {json.dumps(_LATE_STDERR)}], {{ stdio: ["ignore", "inherit", "inherit"] }}).unref();',
+            f' ["-e", {json.dumps(_LATE_STDERR)}, String(process.pid), {ready}],'
+            ' { stdio: ["ignore", "inherit", "inherit"] }).unref();',
+            "const exitOnceDescendantRuns = (deadline) => {",
+            f'  if (require("node:fs").existsSync({ready})) process.exit(7);',
+            "  else if (Date.now() < deadline) setTimeout(exitOnceDescendantRuns, 5, deadline);",
+            f"  else process.stderr.write({json.dumps(DESCENDANT_NEVER_RAN_LINE + chr(10))}, {exit_now});",
+            "};",
         ]
+        exit_now = "() => exitOnceDescendantRuns(Date.now() + 3000)"
     if holder:
         lines += [
             'const holder = require("node:child_process").spawn(process.execPath,'
@@ -439,7 +454,7 @@ def _write_node_rpc(
     if exit_on_request:
         lines += [
             '  if (msg.method !== "initialize" && msg.method !== "capabilities/get") {',
-            f"    process.stderr.write({json.dumps(TWO_STDERR_LINES + chr(10))}, () => process.exit(7));",
+            f"    process.stderr.write({json.dumps(TWO_STDERR_LINES + chr(10))}, {exit_now});",
             "    return;",
             "  }",
         ]

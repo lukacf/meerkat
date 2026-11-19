@@ -189,9 +189,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use meerkat::{
-    AttentionBindingRequest, AttentionListRequest, GoalAttentionTarget, WorkAttentionBinding,
-    WorkAttentionBindingId, WorkAttentionStatus, WorkAttentionTarget, WorkGraphError,
-    WorkGraphService, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
+    AttentionBindingRequest, AttentionListRequest, AttentionPauseRequest, GoalAttentionTarget,
+    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionStatus, WorkAttentionTarget,
+    WorkGraphError, WorkGraphService, WorkNamespace, WorkOwnerKey, WorkOwnerKind,
 };
 
 /// File name of the cross-process admission lock database, created in the
@@ -589,6 +589,38 @@ impl WorkGraphAdmission {
         Ok(())
     }
 
+    /// Whether a lowered target or supervisor key
+    /// ([`Self::lower_member_session_target`]) is of this mob's member form
+    /// and names no member WorkGraph work may be bound to: a name no member
+    /// of the mob holds, or a member private to a person. A key of any other
+    /// shape answers false.
+    ///
+    /// The agent tool plane asks this, and answers both cases with one
+    /// refusal: a caller that may not see a private member must not learn
+    /// from a tool's answer whether a name is hidden or free. The host's
+    /// methods keep [`Self::refuse_private_member_target`]: they may bind a
+    /// name before its member exists, and name a private member in their
+    /// refusal.
+    pub(crate) async fn names_no_bindable_member(
+        &self,
+        target: &GoalAttentionTarget,
+    ) -> Result<bool, WorkGraphAdmissionError> {
+        let Some(member) =
+            crate::rpc::workgraph_methods::target_member(&self.mob_handle.definition().id, target)
+        else {
+            return Ok(false);
+        };
+        let entry = self
+            .mob_handle
+            .get_member(&meerkat_mob::AgentIdentity::from(member.as_str()))
+            .await
+            .map_err(|error| WorkGraphAdmissionError::MemberUnreadable {
+                member: member.clone(),
+                detail: error.to_string(),
+            })?;
+        Ok(entry.is_none_or(|entry| crate::access::private_owner(&entry.labels).is_some()))
+    }
+
     /// Take the admission for one check-then-mutate window. The in-process
     /// gate is taken first so at most one task per process waits on the
     /// sidecar; the sidecar (when configured) then serializes against other
@@ -736,6 +768,210 @@ impl WorkGraphAdmission {
                 ),
             },
         })
+    }
+
+    /// Refuse the resume of a binding whose target names a member of this
+    /// mob private to a person, in either form of the target: no binding may
+    /// serve such a member ([`Self::refuse_private_member_target`]), and
+    /// `goal/create` and `attention/reassign` make none, so one that names
+    /// it all the same stays paused. A pause with a deadline asks this too:
+    /// it makes the binding active again when the deadline passes. An
+    /// unknown `binding_id` falls through
+    /// so the service reports its canonical not-found error.
+    pub(crate) async fn refuse_private_member_resume(
+        &self,
+        service: &WorkGraphService,
+        namespace: Option<WorkNamespace>,
+        binding_id: &WorkAttentionBindingId,
+    ) -> Result<(), WorkGraphAdmissionError> {
+        let resumed = match service
+            .attention_binding(AttentionBindingRequest {
+                binding_id: binding_id.clone(),
+                realm_id: None,
+                namespace,
+            })
+            .await
+        {
+            Ok(result) => result.attention,
+            Err(WorkGraphError::AttentionNotFound { .. }) => return Ok(()),
+            Err(error) => return Err(WorkGraphAdmissionError::Service(error)),
+        };
+        self.refuse_private_member_binding_target(&resumed.target)
+            .await
+    }
+
+    /// [`Self::refuse_private_member_target`] for the target a stored
+    /// binding carries: a session target is resolved to its member first.
+    pub(crate) async fn refuse_private_member_binding_target(
+        &self,
+        target: &WorkAttentionTarget,
+    ) -> Result<(), WorkGraphAdmissionError> {
+        let lowered = self.lowered_binding_target(target).await?;
+        self.refuse_private_member_target(&lowered).await
+    }
+
+    /// The target a stored binding carries, lowered as a target a caller
+    /// names is ([`Self::lower_member_session_target`]): a session target a
+    /// member holds becomes that member's owner form.
+    async fn lowered_binding_target(
+        &self,
+        target: &WorkAttentionTarget,
+    ) -> Result<GoalAttentionTarget, WorkGraphAdmissionError> {
+        let named = match target {
+            WorkAttentionTarget::Session { session_id } => GoalAttentionTarget::Session {
+                session_id: session_id.clone(),
+            },
+            WorkAttentionTarget::LoweredOwner { owner_key } => GoalAttentionTarget::Owner {
+                owner_key: owner_key.clone(),
+            },
+        };
+        self.lower_member_session_target(named).await
+    }
+
+    /// Hold every attention binding of `service`'s scope whose target is a
+    /// member of this mob private to a person: an active one, and one paused
+    /// with a deadline, is paused with no deadline, and the id of each one
+    /// found is returned.
+    ///
+    /// No method of the host and no tool of a member makes such a binding,
+    /// but a store may hold one from a release whose member tools did not
+    /// refuse it. While it is active every turn of the private member takes
+    /// the binding's tools, which the member was built without, and fails. A
+    /// start therefore pauses it before any member takes a turn; the host's
+    /// resume refuses it ([`Self::refuse_private_member_resume`]), so it
+    /// stays paused until it is reassigned to another member or its goal is
+    /// closed. The pause is the one `meta/workgraph/attention/pause` writes.
+    /// A binding that is paused with a deadline is paused again with none:
+    /// when the deadline passed it would be active again, by the attention
+    /// machine's own rule, which no method of the host stands in front of.
+    ///
+    /// A binding whose target cannot be judged, or whose pause the store
+    /// refuses, is logged and left as it is: the start goes on.
+    pub(crate) async fn hold_bindings_onto_private_members(
+        &self,
+        service: &WorkGraphService,
+    ) -> Result<Vec<WorkAttentionBindingId>, WorkGraphAdmissionError> {
+        self.hold_bindings(service, None).await
+    }
+
+    /// [`Self::hold_bindings_onto_private_members`] for one member of this
+    /// mob that is being built private to a person, named by its build: the
+    /// roster may not hold it yet, so the bindings are matched by the
+    /// member's name alone.
+    ///
+    /// The host may bind a goal to a name before its member exists. When
+    /// the member then created under that name is private to a person, the
+    /// binding would be active on it from its first turn; its build
+    /// therefore holds every binding that names it, as a start does. A
+    /// member of another mob holds nothing here.
+    pub(crate) async fn hold_bindings_onto_private_member_build(
+        &self,
+        service: &WorkGraphService,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<Vec<WorkAttentionBindingId>, WorkGraphAdmissionError> {
+        if mob_id != self.mob_handle.definition().id.as_str() {
+            return Ok(Vec::new());
+        }
+        self.hold_bindings(service, Some(member)).await
+    }
+
+    /// The member of this mob the target of a stored binding names, in
+    /// either form of the target: a session target is resolved to its
+    /// member first.
+    async fn binding_target_member(
+        &self,
+        target: &WorkAttentionTarget,
+    ) -> Result<Option<String>, WorkGraphAdmissionError> {
+        let lowered = self.lowered_binding_target(target).await?;
+        Ok(crate::rpc::workgraph_methods::target_member(
+            &self.mob_handle.definition().id,
+            &lowered,
+        ))
+    }
+
+    /// The hold of [`Self::hold_bindings_onto_private_members`]: over every
+    /// member of the roster private to a person, or, with `built`, over
+    /// that one member by its name.
+    async fn hold_bindings(
+        &self,
+        service: &WorkGraphService,
+        built: Option<&str>,
+    ) -> Result<Vec<WorkAttentionBindingId>, WorkGraphAdmissionError> {
+        let _permit = self.acquire().await?;
+        let occupying = list_occupying_attention(service, None)
+            .await
+            .map_err(WorkGraphAdmissionError::Service)?;
+        let mut held = Vec::new();
+        for binding in occupying {
+            let judged = match built {
+                None => match self
+                    .refuse_private_member_binding_target(&binding.target)
+                    .await
+                {
+                    Ok(()) => Ok(None),
+                    Err(WorkGraphAdmissionError::PrivateMember { member }) => Ok(Some(member)),
+                    Err(error) => Err(error),
+                },
+                Some(built) => self
+                    .binding_target_member(&binding.target)
+                    .await
+                    .map(|member| member.filter(|member| member == built)),
+            };
+            let member = match judged {
+                Ok(Some(member)) => member,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        binding_id = %binding.binding_id,
+                        error = ?error,
+                        "could not judge whether an attention binding's target is private to a \
+                         person; the binding is left as it is"
+                    );
+                    continue;
+                }
+            };
+            // An active binding is paused. A pause with a deadline is paused
+            // again with none: at its deadline the binding would be active
+            // again, by the attention machine's own rule, which asks no
+            // method of the host.
+            let found = match &binding.status {
+                WorkAttentionStatus::Active => Some("active"),
+                WorkAttentionStatus::Paused { until: Some(_) } => Some("paused with a deadline"),
+                _ => None,
+            };
+            if let Some(found) = found
+                && let Err(error) = service
+                    .pause_attention(AttentionPauseRequest {
+                        binding_id: binding.binding_id.clone(),
+                        realm_id: None,
+                        namespace: None,
+                        expected_revision: binding.machine_state.revision,
+                        until: None,
+                    })
+                    .await
+            {
+                tracing::error!(
+                    binding_id = %binding.binding_id,
+                    member = %member,
+                    found,
+                    %error,
+                    "an attention binding names a member private to a person and could not be \
+                     paused without a deadline; while it is active that member's turns fail, \
+                     until the binding is paused, reassigned or its goal is closed"
+                );
+                continue;
+            }
+            tracing::warn!(
+                binding_id = %binding.binding_id,
+                member = %member,
+                found = found.unwrap_or("paused"),
+                "an attention binding names a member private to a person and is held paused; \
+                 reassign it to another member or close its goal"
+            );
+            held.push(binding.binding_id);
+        }
+        Ok(held)
     }
 
     /// Every canonical owner-key spelling that addresses the same member as

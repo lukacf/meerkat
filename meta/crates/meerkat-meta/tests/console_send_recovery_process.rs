@@ -157,6 +157,8 @@ fn token(subject: &str, email: &str) -> String {
 #[derive(Default)]
 struct ModelLog {
     requests: Vec<Value>,
+    /// Whether the one request that asks to be held ([`HOLD_ONCE`]) was.
+    held: bool,
 }
 
 fn message_text(message: &Value) -> String {
@@ -193,17 +195,71 @@ fn messages_with(request: &Value, marker: &str) -> usize {
         .unwrap_or_default()
 }
 
+/// A user message that holds this marker asks the model for one tool call:
+/// `CALL-TOOL <tool name> <JSON arguments>`.
+const CALL_TOOL: &str = "CALL-TOOL ";
+
+/// The tool call the last message of `request` asks for, if it is a user
+/// message that holds [`CALL_TOOL`]: the tool's name and its arguments.
+fn scripted_call(request: &Value) -> Option<(String, Value)> {
+    let last = request["messages"].as_array()?.last()?;
+    if last["role"] != "user" {
+        return None;
+    }
+    let text = message_text(last);
+    let rest = &text[text.find(CALL_TOOL)? + CALL_TOOL.len()..];
+    let (name, arguments) = rest.split_once(' ')?;
+    let arguments = serde_json::Deserializer::from_str(arguments)
+        .into_iter::<Value>()
+        .next()?
+        .ok()?;
+    Some((name.to_string(), arguments))
+}
+
+/// The first request whose last message holds this marker is not answered
+/// while its gateway lives: its run is in flight when the gateway dies.
+/// Every later request with the marker is answered at once.
+const HOLD_ONCE: &str = "HOLD-ONCE";
+
 async fn chat_completions(
     axum::extract::State(log): axum::extract::State<Arc<Mutex<ModelLog>>>,
     axum::Json(request): axum::Json<Value>,
 ) -> impl axum::response::IntoResponse {
-    log.lock().unwrap().requests.push(request);
-    let payload = concat!(
-        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
-        "data: {\"choices\":[{\"finish_reason\":\"stop\"}],",
-        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
-        "data: [DONE]\n\n"
-    );
+    let call = scripted_call(&request);
+    let asks_hold = last_message_text(&request).contains(HOLD_ONCE);
+    let (number, hold) = {
+        let mut log = log.lock().unwrap();
+        let hold = asks_hold && !log.held;
+        log.held |= hold;
+        log.requests.push(request);
+        (log.requests.len(), hold)
+    };
+    if hold {
+        tokio::time::sleep(Duration::from_mins(10)).await;
+    }
+    let payload = match call {
+        Some((name, arguments)) => {
+            let delta = json!({ "choices": [{ "delta": { "tool_calls": [{
+                "index": 0,
+                "id": format!("call_scripted_{number}"),
+                "type": "function",
+                "function": { "name": name, "arguments": arguments.to_string() },
+            }] } }] });
+            format!(
+                "data: {delta}\n\n\
+                 data: {{\"choices\":[{{\"finish_reason\":\"tool_calls\"}}],\
+                 \"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1}}}}\n\n\
+                 data: [DONE]\n\n"
+            )
+        }
+        None => concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string(),
+    };
     ([("content-type", "text/event-stream")], payload)
 }
 
@@ -985,4 +1041,366 @@ fn two_principals_one_key_and_two_crashes_deliver_each_send_exactly_once() {
     assert_eq!(session_after, session, "one session lineage: {evidence}");
 
     boot_c.shutdown_and_reap();
+}
+
+// ---------------------------------------------------------------------------
+// A side chat that is built while its mob starts
+// ---------------------------------------------------------------------------
+
+const SIDE: &str = "side-kept";
+const SIDE_NOTE: &str = "SIDE-START-NOTE";
+
+fn mob_config_with_agent_memory() -> String {
+    format!("{}memory = true\n", mob_config())
+}
+
+/// [`boot`] with agent memory on and no agent loaded at the start.
+fn boot_with_agent_memory(
+    label: &str,
+    state: &Path,
+    host_config: &Path,
+    fault: Option<&str>,
+    personal_accounts: bool,
+) -> Gateway {
+    let mut gateway = Gateway::start(label, fault);
+    let mut auth_config = json!({
+        "provider": "jwt",
+        "shared_secret": SECRET,
+        "email_allowlist": [U1_EMAIL, U2_EMAIL]
+    });
+    if personal_accounts {
+        // Each token names one person: a side chat that person forks on
+        // the Console is private to them.
+        auth_config["accounts"] = json!("personal");
+    }
+    let response = gateway.request(
+        "meta/init",
+        json!({
+            "persistent_state": state,
+            "mob_config": mob_config_with_agent_memory(),
+            "has_roster_provider": true,
+            "runtime_options": {
+                "meerkat_config_path": host_config,
+                "identity_bootstrap_mode": { "mode": "lazy_materialize" },
+                "agent_memory": true,
+                "http_listen": "127.0.0.1:0",
+                "auth_config": auth_config
+            }
+        }),
+        INIT_TIMEOUT,
+    );
+    assert!(
+        response.get("error").is_none(),
+        "[{label}] init failed: {response}\n{}",
+        gateway.stderr_tail()
+    );
+    gateway.http_base_url = response["result"]["http_base_url"]
+        .as_str()
+        .expect("HTTP base URL")
+        .trim_end_matches('/')
+        .to_string();
+    gateway
+}
+
+fn send_to(member: &str, text: &str, key: &str) -> Value {
+    json!({
+        "identity": member,
+        "content": text,
+        "origin": "console",
+        "idempotency_key": key,
+        "handling_mode": "queue"
+    })
+}
+
+/// Whether the model was sent a request that carries `marker`.
+fn model_saw(log: &Arc<Mutex<ModelLog>>, marker: &str) -> bool {
+    log.lock()
+        .unwrap()
+        .requests
+        .iter()
+        .any(|request| messages_with(request, marker) > 0)
+}
+
+/// One Console send of `text` to `member` as `bearer`, until the model was
+/// sent it and answered: `marker` names the send in the model's log.
+fn console_turn(
+    gateway: &mut Gateway,
+    log: &Arc<Mutex<ModelLog>>,
+    bearer: &str,
+    member: &str,
+    text: &str,
+    marker: &str,
+) {
+    let sent = gateway
+        .console_rpc(bearer, "meta/console/send", send_to(member, text, marker))
+        .unwrap_or_else(|| panic!("[{}] the send {marker} answered", gateway.label));
+    assert!(
+        sent.get("error").is_none_or(Value::is_null),
+        "[{}] the send {marker} is accepted: {sent}\n{}",
+        gateway.label,
+        gateway.stderr_tail()
+    );
+    let delivered = eventually(SETTLE_TIMEOUT, || {
+        gateway.pump();
+        model_saw(log, marker)
+            && gateway
+                .console_rpc(
+                    bearer,
+                    "meta/console/recover_send",
+                    json!({ "identity": member, "origin": "console", "idempotency_key": marker }),
+                )
+                .is_some_and(|response| response["result"]["status"] == "delivered")
+    });
+    assert!(
+        delivered,
+        "[{}] the send {marker} reaches the model and is delivered\n{}",
+        gateway.label,
+        gateway.stderr_tail()
+    );
+}
+
+/// The scope keys of the agent memory records titled `title` that the
+/// store under `state` holds, read once the gateway exited.
+fn note_scope_keys(state: &Path, title: &str) -> Vec<String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        state.join("agent-memory").join("default.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open the agent memory store read-only");
+    let mut statement = connection
+        .prepare("SELECT scope_key FROM records WHERE title = ?1 ORDER BY created_at_ms")
+        .expect("prepare the note query");
+    statement
+        .query_map([title], |row| row.get(0))
+        .expect("query the notes")
+        .collect::<Result<Vec<String>, _>>()
+        .expect("read the notes")
+}
+
+/// A side chat that owes work when its gateway starts is built while the
+/// mob starts, before its source agent. Once the agent has run, a note the
+/// side chat stores with its `memory` tool is kept under the side chat's
+/// own key.
+///
+/// - boot A: the agent runs, and a side chat of it is forked on the
+///   Console;
+/// - boot B dies after a send to the side chat was admitted natively, so
+///   the side chat owes that work at the next start;
+/// - boot C starts with the side chat's work owed; the agent runs after it;
+///   then the side chat is asked to store a note.
+#[test]
+fn a_side_chat_built_while_its_mob_starts_keeps_its_notes_under_its_own_key() {
+    side_chat_built_while_its_mob_starts(false, false);
+}
+
+/// The same, with the side chat's source agent owing work at that start
+/// too (a run of the agent is in flight when boot B dies): both are built
+/// while the mob starts, the agent before its side chat.
+#[test]
+fn a_side_chat_built_with_its_source_while_their_mob_starts_keeps_its_notes_under_its_own_key() {
+    side_chat_built_while_its_mob_starts(true, false);
+}
+
+/// The same again, on a Console whose sign-in names one person per token:
+/// the side chat is private to the person who forked it, and its note is
+/// kept under that person and the side chat's name.
+#[test]
+fn a_side_chat_built_with_its_source_while_their_mob_starts_keeps_a_private_note_under_its_owner() {
+    side_chat_built_while_its_mob_starts(true, true);
+}
+
+fn side_chat_built_while_its_mob_starts(agent_owes_work: bool, private: bool) {
+    let state = tempfile::tempdir().expect("state dir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let log = Arc::new(Mutex::new(ModelLog::default()));
+    let base_url = start_model(Arc::clone(&log));
+    let host_config = config_dir.path().join("config.toml");
+    std::fs::write(&host_config, host_config_text(&base_url)).expect("write host config");
+    let u1 = token("user-one-subject", U1_EMAIL);
+
+    // Boot A: the agent runs; a side chat of it is forked on the Console.
+    let mut boot_a = boot_with_agent_memory("start-a", state.path(), &host_config, None, private);
+    console_turn(
+        &mut boot_a,
+        &log,
+        &u1,
+        IDENTITY,
+        "AGENT-FIRST say hello",
+        "AGENT-FIRST",
+    );
+    let mut forked = None;
+    for _ in 0..100 {
+        forked = boot_a.console_rpc(
+            &u1,
+            "meta/fork_member",
+            json!({ "source_member_id": IDENTITY, "agent_identity": SIDE }),
+        );
+        let unavailable = forked.as_ref().is_some_and(|answer| {
+            answer["error"]["data"]["kind"] == json!("fork_source_unavailable")
+        });
+        if !unavailable {
+            break;
+        }
+        boot_a.pump();
+        thread::sleep(Duration::from_millis(100));
+    }
+    let forked = forked.expect("the fork answered");
+    assert!(
+        forked.get("error").is_none_or(Value::is_null),
+        "the side chat is forked on the Console: {forked}\n{}",
+        boot_a.stderr_tail()
+    );
+    boot_a.shutdown_and_reap();
+    drop(boot_a);
+
+    // Boot B: a send to the side chat is admitted natively, then the
+    // process dies: the side chat owes that work.
+    let mut boot_b = boot_with_agent_memory(
+        "start-b",
+        state.path(),
+        &host_config,
+        Some("after_console_admission"),
+        private,
+    );
+    if agent_owes_work {
+        // A run of the agent that the model does not answer while this
+        // gateway lives: it is in flight when the gateway dies.
+        boot_b.call(
+            "meta/send",
+            json!({ "identity": IDENTITY, "content": format!("AGENT-HELD {HOLD_ONCE} wait") }),
+        );
+        let held = eventually(SETTLE_TIMEOUT, || {
+            boot_b.pump();
+            model_saw(&log, "AGENT-HELD")
+        });
+        assert!(
+            held,
+            "the agent's run reaches the model before the gateway dies\n{}",
+            boot_b.stderr_tail()
+        );
+    }
+    let owed = boot_b.console_rpc(
+        &u1,
+        "meta/console/send",
+        send_to(SIDE, "SIDE-OWED carry on", "SIDE-OWED"),
+    );
+    if let Some(answer) = &owed {
+        assert!(
+            answer.get("error").is_none_or(Value::is_null),
+            "the send to the side chat is its own send: {answer}"
+        );
+    }
+    assert_died_at(&mut boot_b, "after_console_admission");
+    drop(boot_b);
+
+    // Boot C: the side chat's work is owed at the start. Then the agent
+    // runs, then the side chat is asked to store a note.
+    let mut boot_c = boot_with_agent_memory("start-c", state.path(), &host_config, None, private);
+    let owed_ran = eventually(SETTLE_TIMEOUT, || {
+        boot_c.pump();
+        model_saw(&log, "SIDE-OWED")
+    });
+    assert!(
+        owed_ran,
+        "the side chat runs the work it owed at the start\n{}",
+        boot_c.stderr_tail()
+    );
+    console_turn(
+        &mut boot_c,
+        &log,
+        &u1,
+        IDENTITY,
+        "AGENT-SECOND say hello again",
+        "AGENT-SECOND",
+    );
+    console_turn(
+        &mut boot_c,
+        &log,
+        &u1,
+        SIDE,
+        "SIDE-AFTER-AGENT carry on",
+        "SIDE-AFTER-AGENT",
+    );
+    let remember = json!({
+        "action": "remember",
+        "kind": "fact",
+        "title": SIDE_NOTE,
+        "description": "a note made in a side chat",
+        "body": "The side chat stored this note after its mob's start.",
+        "tags": [],
+    });
+    console_turn(
+        &mut boot_c,
+        &log,
+        &u1,
+        SIDE,
+        &format!("SIDE-REMEMBER {CALL_TOOL}memory {remember}"),
+        "SIDE-REMEMBER",
+    );
+    // The turn that called the tool ends with the request that carries the
+    // tool's answer.
+    let answered = eventually(SETTLE_TIMEOUT, || {
+        boot_c.pump();
+        log.lock().unwrap().requests.iter().any(|request| {
+            messages_with(request, "SIDE-REMEMBER") > 0
+                && request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .is_some_and(|last| last["role"] == "tool")
+        })
+    });
+    assert!(
+        answered,
+        "the side chat's `memory` call is answered\n{}",
+        boot_c.stderr_tail()
+    );
+    // The tools the model was offered in the newest request that carries
+    // each step's marker, in the order of the steps.
+    let offered_at = |marker: &str| -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .requests
+            .iter()
+            .rev()
+            .find(|request| messages_with(request, marker) > 0)
+            .and_then(|request| request["tools"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    };
+    let steps: Vec<(&str, Vec<String>)> = [
+        "SIDE-OWED",
+        "AGENT-SECOND",
+        "SIDE-AFTER-AGENT",
+        "SIDE-REMEMBER",
+    ]
+    .into_iter()
+    .map(|marker| (marker, offered_at(marker)))
+    .collect();
+    let offered = offered_at("SIDE-REMEMBER");
+    boot_c.shutdown_and_reap();
+
+    let keys = note_scope_keys(state.path(), SIDE_NOTE);
+    eprintln!(
+        "side chat start evidence: agent_owes_work={agent_owes_work} private={private} \
+         note_scope_keys={keys:?} offered_by_step={steps:?}"
+    );
+    assert!(
+        keys.len() == 1 && keys[0] != IDENTITY && keys[0].contains(SIDE),
+        "the side chat's note is kept under the side chat's own key: scope keys {keys:?}, \
+         offered {offered:?}"
+    );
+    if private {
+        // A private member's key: `private/<its owner>/<its name>`.
+        assert!(
+            keys[0].starts_with("private/") && keys[0].ends_with(&format!("/{SIDE}")),
+            "a private side chat's note is kept under its owner and its name: {keys:?}"
+        );
+    } else {
+        assert_eq!(
+            keys[0], SIDE,
+            "a shared side chat's note is kept under its name"
+        );
+    }
 }

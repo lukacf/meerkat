@@ -160,7 +160,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "monitors/start",
-            "Start a high-trust durable script monitor",
+            "Start a durable script monitor",
             "MonitorsStartParams",
             "MonitorsStartResult",
         ),

@@ -57,6 +57,10 @@ system_suite!(
     "cli-realm-mcp-missing-tool-call-local"
 );
 system_suite!(
+    e2e_system_cli_realm_mcp_review_rule,
+    "cli-realm-mcp-review-rule"
+);
+system_suite!(
     e2e_system_rpc_mcp_sign_out_unpublishes,
     "rpc-mcp-sign-out-unpublishes"
 );

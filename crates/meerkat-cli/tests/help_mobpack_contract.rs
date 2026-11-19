@@ -462,6 +462,501 @@ fn mob_pack_leaves_key_and_output_out_however_their_paths_are_written()
     Ok(())
 }
 
+// What `rkat mob pack` and `rkat mob web build` say about a pack's files.
+// Standard output, the exit status and the pack itself stay as they were; the
+// count and the warnings go to standard error and name paths only.
+
+type RowResult = Result<(), Box<dyn std::error::Error>>;
+
+/// The digest of the pack of [`write_report_fixture`]'s flagged directory.
+/// It is a function of the packed files alone, so it is the same before and
+/// after the pack command reports on them.
+const FLAGGED_FIXTURE_DIGEST: &str =
+    "d3f791527f9deb8ff18faeca123601fbce8d9fde85c99d2805dec70cfbbfa683";
+
+/// Bytes no row may find in anything the commands print.
+const FILE_CONTENT_MARKER: &str = "content-that-is-never-printed";
+
+/// The files of the flagged directory, as `rkat mob inspect` lists them.
+const FLAGGED_FIXTURE_FILES: [&str; 11] = [
+    ".editorconfig",
+    ".env",
+    ".git/HEAD",
+    ".git/config",
+    ".rkat/sessions/chat.jsonl",
+    "definition.json",
+    "earlier.mobpack",
+    "id_rsa",
+    "manifest.toml",
+    "release.key",
+    "skills/notes.md",
+];
+
+/// The warning lines both commands print for the flagged directory's pack.
+const FLAGGED_FIXTURE_WARNINGS: &str = "\
+warning\t.editorconfig is in the pack: a hidden file
+warning\t.env is in the pack: an environment file, which usually holds secrets
+warning\t.git/ (2 files) is in the pack: repository metadata
+warning\t.rkat/ (1 file) is in the pack: local Meerkat state and configuration
+warning\tearlier.mobpack is in the pack: looks like an earlier pack
+warning\tid_rsa is in the pack: looks like a private key
+warning\trelease.key is in the pack: looks like a private key
+";
+
+/// Writes `<root>/mob`: the pack sources and, when `flagged`, an env file,
+/// key-like files, repository metadata, local state, an earlier pack and a
+/// hidden file.
+fn write_report_fixture(root: &std::path::Path, flagged: bool) -> std::io::Result<()> {
+    let mob = root.join("mob");
+    std::fs::create_dir_all(mob.join("skills"))?;
+    std::fs::write(
+        mob.join("manifest.toml"),
+        "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
+    )?;
+    std::fs::write(mob.join("definition.json"), br#"{"id":"fixture"}"#)?;
+    std::fs::write(mob.join("skills").join("notes.md"), "# Notes skill\n")?;
+    if !flagged {
+        return Ok(());
+    }
+    let content = format!("{FILE_CONTENT_MARKER}\n");
+    std::fs::create_dir_all(mob.join(".git"))?;
+    std::fs::create_dir_all(mob.join(".rkat").join("sessions"))?;
+    for name in [
+        ".editorconfig",
+        ".env",
+        ".git/HEAD",
+        ".git/config",
+        ".rkat/sessions/chat.jsonl",
+        "earlier.mobpack",
+        "id_rsa",
+        "release.key",
+    ] {
+        std::fs::write(mob.join(name), &content)?;
+    }
+    Ok(())
+}
+
+fn run_rkat(root: &std::path::Path, args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    Ok(Command::new(rkat)
+        .current_dir(root)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .args(args)
+        .output()?)
+}
+
+/// A wasm-pack output directory with the two artifacts a web build copies.
+fn write_wasm_pkg(root: &std::path::Path) -> std::io::Result<()> {
+    let pkg = root.join("wasm-pkg");
+    std::fs::create_dir_all(&pkg)?;
+    std::fs::write(pkg.join("real_bg.wasm"), b"\0asm\x01\0\0\0")?;
+    std::fs::write(pkg.join("real.js"), "export default function init() {}\n")
+}
+
+/// The command line of a web build of `out.mobpack` into `web`.
+const WEB_BUILD_ARGS: [&str; 10] = [
+    "mob",
+    "web",
+    "build",
+    "out.mobpack",
+    "-o",
+    "web",
+    "--wasm",
+    "wasm-pkg",
+    "--trust-policy",
+    "permissive",
+];
+
+fn web_build(root: &std::path::Path) -> Result<Output, Box<dyn std::error::Error>> {
+    write_wasm_pkg(root)?;
+    run_rkat(root, &WEB_BUILD_ARGS)
+}
+
+/// The closing line of `rkat mob pack`'s report when it warned.
+fn pack_note(pack: &str) -> String {
+    format!(
+        "note\tthe warnings come from a short list of names and from one content form (a file \
+         whose text, trimmed, is exactly 64 hex digits), not from a reading of the files; list \
+         every file in the pack with: rkat mob inspect {pack}\n"
+    )
+}
+
+/// 64 hex digits made up here from `seed`: the form of a signing key.
+fn throwaway_key_hex(seed: u8) -> String {
+    (0u8..32)
+        .map(|index| index.wrapping_mul(7).wrapping_add(seed))
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect()
+}
+
+/// Runs `rkat` with standard error a pipe that nobody reads: every write to
+/// it fails.
+#[cfg(unix)]
+fn run_rkat_with_broken_standard_error(
+    root: &std::path::Path,
+    args: &[&str],
+) -> Result<Output, Box<dyn std::error::Error>> {
+    let rkat = std::env::var_os("CARGO_BIN_EXE_rkat")
+        .ok_or("Cargo or Nextest must provide the runtime rkat binary path")?;
+    let (reader, writer) = std::io::pipe()?;
+    drop(reader);
+    Ok(Command::new(rkat)
+        .current_dir(root)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env_remove("RKAT_TRUST_POLICY")
+        .args(args)
+        .stderr(writer)
+        .output()?)
+}
+
+#[test]
+fn mob_pack_standard_output_and_the_pack_are_unchanged_by_its_report() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    assert_eq!(
+        String::from_utf8_lossy(&packed.stdout),
+        format!("{FLAGGED_FIXTURE_DIGEST}\n"),
+        "standard output is the digest and a newline, nothing else"
+    );
+
+    let inspected = run_rkat(temp.path(), &["mob", "inspect", "out.mobpack"])?;
+    assert!(inspected.status.success(), "{}", output_text(&inspected));
+    let stdout = String::from_utf8_lossy(&inspected.stdout);
+    let files: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("file\t"))
+        .collect();
+    assert_eq!(files, FLAGGED_FIXTURE_FILES, "the pack holds what it held");
+    assert!(
+        stdout.contains(&format!("digest\t{FLAGGED_FIXTURE_DIGEST}\n")),
+        "the pack's digest is what it was: {stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_pack_reports_the_count_and_warns_by_name_on_standard_error() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t11 files\n{FLAGGED_FIXTURE_WARNINGS}{}",
+        pack_note("out.mobpack")
+    );
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), expected);
+    assert!(
+        !output_text(&packed).contains(FILE_CONTENT_MARKER),
+        "a warning names a path and never prints a file's content"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_pack_of_a_directory_without_flagged_names_reports_only_the_count() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), "packed\t3 files\n");
+    Ok(())
+}
+
+#[test]
+fn mob_web_build_standard_output_and_bundle_are_unchanged_by_its_warnings() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+
+    let built = web_build(temp.path())?;
+    assert!(built.status.success(), "{}", output_text(&built));
+    assert_eq!(
+        String::from_utf8_lossy(&built.stdout),
+        "web\tweb\nwarning\tunsigned pack accepted in permissive mode\n",
+        "standard output is the bundle line and the trust warning, nothing else"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("web").join("mobpack.bin"))?,
+        std::fs::read(temp.path().join("out.mobpack"))?,
+        "the bundle carries the pack unchanged"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_web_build_repeats_the_warnings_on_standard_error() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+
+    let built = web_build(temp.path())?;
+    assert!(built.status.success(), "{}", output_text(&built));
+    let expected = format!(
+        "{FLAGGED_FIXTURE_WARNINGS}note\tthe bundle serves the whole pack, these files \
+         included, to everyone who can load the page; list every file in the pack with: rkat \
+         mob inspect out.mobpack\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&built.stderr), expected);
+    assert!(
+        !output_text(&built).contains(FILE_CONTENT_MARKER),
+        "a warning names a path and never prints a file's content"
+    );
+    Ok(())
+}
+
+#[test]
+fn mob_web_build_of_a_pack_without_flagged_names_prints_nothing_on_standard_error() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+
+    let built = web_build(temp.path())?;
+    assert!(built.status.success(), "{}", output_text(&built));
+    assert_eq!(String::from_utf8_lossy(&built.stderr), "");
+    Ok(())
+}
+
+/// The report is a courtesy. A standard error that cannot be written to
+/// changes nothing else: the pack is written, the digest is on standard
+/// output, the exit status is 0.
+#[cfg(unix)]
+#[test]
+fn mob_pack_with_standard_error_a_broken_pipe_writes_the_pack_and_prints_the_digest() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+
+    let packed = run_rkat_with_broken_standard_error(
+        temp.path(),
+        &["mob", "pack", "mob", "-o", "out.mobpack"],
+    )?;
+    assert_eq!(
+        (
+            packed.status.code(),
+            String::from_utf8_lossy(&packed.stdout).as_ref()
+        ),
+        (Some(0), format!("{FLAGGED_FIXTURE_DIGEST}\n").as_str()),
+        "exit status and standard output are as with a readable standard error"
+    );
+    assert!(temp.path().join("out.mobpack").is_file());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn mob_web_build_with_standard_error_a_broken_pipe_builds_the_bundle() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), true)?;
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    write_wasm_pkg(temp.path())?;
+
+    let built = run_rkat_with_broken_standard_error(temp.path(), &WEB_BUILD_ARGS)?;
+    assert_eq!(
+        (
+            built.status.code(),
+            String::from_utf8_lossy(&built.stdout).as_ref()
+        ),
+        (
+            Some(0),
+            "web\tweb\nwarning\tunsigned pack accepted in permissive mode\n"
+        ),
+        "exit status and standard output are as with a readable standard error"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("web").join("mobpack.bin"))?,
+        std::fs::read(temp.path().join("out.mobpack"))?
+    );
+    Ok(())
+}
+
+/// A hidden directory's count is the number of packed files under it, also
+/// when one of them has a line of its own.
+#[test]
+fn mob_pack_counts_every_file_of_a_hidden_directory() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let config = temp.path().join("mob").join(".config");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("a.txt"), "a\n")?;
+    std::fs::write(config.join("token.key"), "t\n")?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t5 files\n\
+         warning\t.config/ (2 files) is in the pack: a hidden directory\n\
+         warning\t.config/token.key is in the pack: looks like a private key\n{}",
+        pack_note("out.mobpack")
+    );
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), expected);
+    Ok(())
+}
+
+/// An env file is flagged by the `.env` suffix too, and a file whose whole
+/// content is exactly 64 hex digits (white space around them aside) has the
+/// form of a signing key whatever it is called. The line names the path; no
+/// digit of the content is printed.
+#[test]
+fn mob_pack_warns_about_env_files_by_suffix_and_about_the_form_of_a_signing_key() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let mob = temp.path().join("mob");
+    std::fs::create_dir_all(mob.join("keys"))?;
+    std::fs::create_dir_all(mob.join("settings"))?;
+    std::fs::write(mob.join("prod.env"), "A=1\n")?;
+    std::fs::write(mob.join("settings").join("production.env"), "B=2\n")?;
+    let (first, second, third) = (
+        throwaway_key_hex(3),
+        throwaway_key_hex(5),
+        throwaway_key_hex(9),
+    );
+    std::fs::write(mob.join("release.hex"), &first)?;
+    std::fs::write(mob.join("signer.txt"), format!("{second}\n"))?;
+    std::fs::write(
+        mob.join("keys").join("prod.hex"),
+        format!("{}\r\n", third.to_ascii_uppercase()),
+    )?;
+    // Not that form: 63 digits, and two keys in one file.
+    std::fs::write(mob.join("short.hex"), &first[1..])?;
+    std::fs::write(mob.join("two-keys.hex"), format!("{second}\n{second}\n"))?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t10 files\n\
+         warning\tkeys/prod.hex is in the pack: has the form of a signing key\n\
+         warning\tprod.env is in the pack: an environment file, which usually holds secrets\n\
+         warning\trelease.hex is in the pack: has the form of a signing key\n\
+         warning\tsettings/production.env is in the pack: an environment file, which usually \
+         holds secrets\n\
+         warning\tsigner.txt is in the pack: has the form of a signing key\n{}",
+        pack_note("out.mobpack")
+    );
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), expected);
+    let printed = output_text(&packed).to_ascii_lowercase();
+    for key in [&first, &second, &third] {
+        assert!(
+            !printed.contains(&key[..16]),
+            "no digit run of a flagged file's content is printed"
+        );
+    }
+    Ok(())
+}
+
+/// The form is what `--sign` accepts as a key file: the text, trimmed of the
+/// white space around it, is exactly 64 hex digits. Every such file is
+/// flagged, a key or not: the digest this very command prints, saved to a
+/// file, has the form too.
+#[test]
+fn mob_pack_flags_every_file_the_sign_option_would_accept_as_a_key() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let mob = temp.path().join("mob");
+    let key = throwaway_key_hex(17);
+    for (name, content) in [
+        ("a-two-line-ends.txt", format!("{key}\n\n")),
+        ("b-space-then-line-end.txt", format!("{key} \n")),
+        ("c-carriage-return.txt", format!("{key}\r")),
+        ("d-space-before.txt", format!(" {key}")),
+        ("e-tab-before.txt", format!("\t{key}")),
+        ("f-line-end-before.txt", format!("\n{key}")),
+    ] {
+        std::fs::write(mob.join(name), content)?;
+    }
+    // The digest of an earlier pack of this directory, as a shell saves it.
+    let earlier = run_rkat(
+        temp.path(),
+        &["mob", "pack", "mob", "-o", "earlier.mobpack"],
+    )?;
+    assert!(earlier.status.success(), "{}", output_text(&earlier));
+    let digest = String::from_utf8_lossy(&earlier.stdout).into_owned();
+    std::fs::write(mob.join("digest.txt"), &digest)?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t10 files\n\
+         warning\ta-two-line-ends.txt is in the pack: has the form of a signing key\n\
+         warning\tb-space-then-line-end.txt is in the pack: has the form of a signing key\n\
+         warning\tc-carriage-return.txt is in the pack: has the form of a signing key\n\
+         warning\td-space-before.txt is in the pack: has the form of a signing key\n\
+         warning\tdigest.txt is in the pack: has the form of a signing key\n\
+         warning\te-tab-before.txt is in the pack: has the form of a signing key\n\
+         warning\tf-line-end-before.txt is in the pack: has the form of a signing key\n{}",
+        pack_note("out.mobpack")
+    );
+    let stderr = String::from_utf8_lossy(&packed.stderr);
+    assert_eq!(stderr, expected);
+    assert!(
+        !stderr.contains(&key[..16]) && !stderr.contains(&digest.trim()[..16]),
+        "no digit run of a flagged file's content is printed"
+    );
+    Ok(())
+}
+
+/// The key the pack is signed with is left out of the pack, so there is
+/// nothing to warn about, whatever it is called and whatever its form.
+#[test]
+fn mob_pack_does_not_warn_about_the_key_it_is_signed_with() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    let keys = temp.path().join("mob").join("keys");
+    std::fs::create_dir_all(&keys)?;
+    std::fs::write(keys.join("sign.hex"), throwaway_key_hex(13))?;
+
+    let packed = run_rkat(
+        temp.path(),
+        &[
+            "mob",
+            "pack",
+            "mob",
+            "-o",
+            "out.mobpack",
+            "--sign",
+            "mob/keys/sign.hex",
+            "--signer-id",
+            "team@example.com",
+        ],
+    )?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), "packed\t4 files\n");
+    Ok(())
+}
+
+/// A character that changes how a line is laid out on screen (here the
+/// right-to-left override) is printed as its code point, like a control
+/// character.
+#[cfg(unix)]
+#[test]
+fn mob_pack_prints_format_characters_of_a_path_as_code_points() -> RowResult {
+    let temp = tempfile::tempdir()?;
+    write_report_fixture(temp.path(), false)?;
+    std::fs::write(temp.path().join("mob").join("report\u{202e}txt.key"), "k\n")?;
+
+    let packed = run_rkat(temp.path(), &["mob", "pack", "mob", "-o", "out.mobpack"])?;
+    assert!(packed.status.success(), "{}", output_text(&packed));
+    let expected = format!(
+        "packed\t4 files\n\
+         warning\treport\\u{{202e}}txt.key is in the pack: looks like a private key\n{}",
+        pack_note("out.mobpack")
+    );
+    assert_eq!(String::from_utf8_lossy(&packed.stderr), expected);
+    Ok(())
+}
+
 /// A path to leave out whose real path cannot be resolved, for another reason
 /// than that it names no file, refuses the pack: no pack is written, and the
 /// error names the path. The command is typed inside the mob directory, whose

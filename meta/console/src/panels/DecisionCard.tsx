@@ -9,9 +9,11 @@ import {
 } from "../../../packages/console-components/src/panel-kit";
 import type { Tone } from "../../../packages/console-components/src/panel-kit";
 import {
+  QUESTION_SET_DECISION_KIND,
   decisionKindWords,
   isIdentityChangeDecision,
   phaseWords,
+  questionSetStandInHint,
   type DecisionCardView,
   type OwnDecisionWithdrawal,
   type WithdrawalRefused,
@@ -36,7 +38,9 @@ function phaseTone(phase: string): Tone {
 
 /** One durable decision. A whole card shows who approves it, who asked, its
  *  rendering and where it was presented; the decision is decided there,
- *  never here, so no card holds a control for approving. A status card
+ *  never here, so no card holds a control for approving. The card of a
+ *  question set (shown where the list of questions does not hold the set)
+ *  says instead why it has no answer form and where the set is answered. A status card
  *  shows the phase and the times only, none of what the decision holds. A
  *  decision on a change of a long-term agent says that a person cannot
  *  approve their own request, and the card of a request this page made
@@ -117,9 +121,11 @@ export function DecisionCard({ card, now, own }: {
           ) : null}
           {open ? (
             <p className="cc-approval__hint cc-decision__hint">
-              {identityChange
-                ? "Decide where it was presented. A person cannot approve their own request."
-                : "Decide where it was presented."}
+              {card.kind === QUESTION_SET_DECISION_KIND
+                ? questionSetStandInHint(card.unanswerable ?? "not_read", card.requesterName)
+                : identityChange
+                  ? "Decide where it was presented. A person cannot approve their own request."
+                  : "Decide where it was presented."}
             </p>
           ) : null}
         </>

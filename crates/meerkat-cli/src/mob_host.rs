@@ -40,8 +40,10 @@ use meerkat_mob::runtime::host_actor::{
 use meerkat_mob::runtime::host_materialize::{
     HostMemberSubstrate, MaterializeLlmPreflightOutcome, MaterializePreflightProbe,
 };
-use meerkat_mob::runtime::host_observation::HostMemberObservation;
-use meerkat_mob::runtime::{HostObservationScheduleMobHost, MobSessionService};
+use meerkat_mob::runtime::host_observation::{HostMemberObservation, HostObservationProjection};
+use meerkat_mob::runtime::{
+    HostObservationScheduleMobHost, HostResidentScheduleWriteJudge, MobSessionService,
+};
 use meerkat_rpc::secure_rpc::{TcpBindPolicy, validate_tcp_bind_policy};
 use meerkat_store::{RealmBackend, RealmOrigin};
 
@@ -689,6 +691,41 @@ fn ensure_durable_realm(origin_hint: RealmOrigin) -> Result<(), MobHostStartupEr
     Ok(())
 }
 
+/// The schedule tools the member host hands its resident members, over the
+/// realm's schedule service, with the host's judge of their writes attached
+/// to that service: a resident member schedules for itself only
+/// ([`HostResidentScheduleWriteJudge`]).
+struct MemberHostScheduleTools {
+    tools: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    judge: Arc<HostResidentScheduleWriteJudge>,
+}
+
+impl MemberHostScheduleTools {
+    /// The tools over `schedule_service`, composed before the host actor
+    /// exists: the session service that hands them to members is built
+    /// first. The judge is attached here, unbound, so no session's write is
+    /// taken before the residents are known.
+    fn over(schedule_service: &meerkat::ScheduleService) -> Self {
+        let judge = Arc::new(HostResidentScheduleWriteJudge::unbound());
+        schedule_service.attach_write_judge(judge.clone());
+        Self {
+            tools: Arc::new(ScheduleToolDispatcher::new(schedule_service.clone())),
+            judge,
+        }
+    }
+
+    /// The tools, for the session service's default.
+    fn tools(&self) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+        Arc::clone(&self.tools)
+    }
+
+    /// The host actor's projection of who is resident, published once the
+    /// actor exists: the judge reads it from then on.
+    fn residents_published(&self, residents: watch::Receiver<HostObservationProjection>) {
+        self.judge.bind_residents(residents);
+    }
+}
+
 pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> anyhow::Result<()> {
     ensure_durable_realm(scope.origin_hint)?;
 
@@ -857,9 +894,11 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         None
     };
 
-    let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
-        schedule_service.clone(),
-    )) as Arc<dyn meerkat_core::AgentToolDispatcher>);
+    // Whether this host's agents may write a schedule that creates a
+    // session, from the host's own configuration.
+    schedule_service.allow_agent_session_creation(config.tools.agent_schedules_may_create_sessions);
+    let member_schedule_tools = MemberHostScheduleTools::over(&schedule_service);
+    let default_schedule_tools = Some(member_schedule_tools.tools());
     // Workgraph is a CONTROLLING-host surface: remote members are
     // admission-denied for workgraph tools (plan A3; the phase-3 placement
     // gate), so the member-host daemon mounts no workgraph service and no
@@ -1081,6 +1120,9 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         forked_participant_sweep_interval: None,
     })
     .await?;
+    // Who is resident, for the members' schedule tools, before any member
+    // the actor revives takes a turn's input.
+    member_schedule_tools.residents_published(actor.observation_watch());
     // The constructor transfers revival into the actor's owned task before
     // returning. Do not start the schedule driver until that task has finished
     // its host-owned A20 revival walk and initial observation publish: an
@@ -1707,5 +1749,459 @@ mod tests {
             .await
             .expect("probe runs");
         assert!(resolved.is_empty());
+    }
+
+    // ---- the resident members' schedule tools ----
+
+    use meerkat_core::types::SessionId;
+    use serde_json::{Value, json};
+
+    /// The host actor's row for the resident member `member` of mob `mob_id`
+    /// on `session_id`.
+    fn resident_row(
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> meerkat_mob::runtime::host_observation::SessionObservationFacts {
+        meerkat_mob::runtime::host_observation::SessionObservationFacts {
+            incarnation: meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation {
+                mob_id: mob_id.to_string(),
+                agent_identity: member.to_string(),
+                host_id: "host-1".to_string(),
+                binding_generation: 1,
+                member_session_id: session_id.to_string(),
+                generation: 1,
+                fence_token: 1,
+            },
+            mob_id: mob_id.to_string(),
+            agent_identity: member.to_string(),
+            generation: 1,
+            fence_token: 1,
+            generation_start_seq: 1,
+            pending_turns: Vec::new(),
+            turn_outcomes: Vec::new(),
+        }
+    }
+
+    /// The member host's schedule tools as the daemon composes them, over a
+    /// schedule service of their own, with the residents `rows` published
+    /// when `rows` is given. The sender keeps the projection alive.
+    fn member_host_tools(
+        rows: Option<&[(&SessionId, &str, &str)]>,
+    ) -> (
+        meerkat::ScheduleService,
+        Arc<dyn meerkat_core::AgentToolDispatcher>,
+        Option<watch::Sender<HostObservationProjection>>,
+    ) {
+        let service =
+            meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default()));
+        let composed = MemberHostScheduleTools::over(&service);
+        let published = rows.map(|rows| {
+            let (sender, receiver) = watch::channel(HostObservationProjection {
+                sessions: rows
+                    .iter()
+                    .map(|(session_id, mob_id, member)| {
+                        (
+                            session_id.to_string(),
+                            resident_row(session_id, mob_id, member),
+                        )
+                    })
+                    .collect(),
+            });
+            composed.residents_published(receiver);
+            sender
+        });
+        (service, composed.tools(), published)
+    }
+
+    /// The dispatch context of a tool call the turn of `session` makes.
+    fn turn_of(session: &SessionId) -> meerkat_core::ToolDispatchContext {
+        meerkat_core::ToolDispatchContext::default().with_runtime_identity(session.clone(), None)
+    }
+
+    async fn schedule_call(
+        tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+        context: &meerkat_core::ToolDispatchContext,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, meerkat_core::ToolError> {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("arguments");
+        let outcome = tools
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "a-schedule-call",
+                    name,
+                    args: &raw,
+                },
+                context,
+            )
+            .await?;
+        Ok(serde_json::from_str(&outcome.result.text_content()).expect("a JSON answer"))
+    }
+
+    fn schedule_of(name: &str, target: Value) -> Value {
+        json!({
+            "name": name,
+            "trigger": {
+                "type": "once",
+                "due_at_utc": (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+            },
+            "target": target,
+        })
+    }
+
+    /// A target that names the member `member` of mob `mob_id` by its stable
+    /// schedule identity.
+    fn member_identity_target(mob_id: &str, member: &str) -> Value {
+        let identity =
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: mob_id.to_string(),
+                role: "worker".to_string(),
+                member: member.to_string(),
+            });
+        json!({
+            "target_kind": "identity",
+            "type": "resumable_identity",
+            "identity": identity,
+            "action": { "type": "prompt", "prompt": "A scheduled note." },
+        })
+    }
+
+    fn session_target(session: &SessionId) -> Value {
+        json!({
+            "target_kind": "session",
+            "type": "resumable_session",
+            "session_id": session,
+            "action": { "type": "prompt", "prompt": "A scheduled note." },
+        })
+    }
+
+    fn is_not_a_peer(answer: &Result<Value, meerkat_core::ToolError>) -> bool {
+        matches!(
+            answer,
+            Err(meerkat_core::ToolError::PolicyDenied { denial })
+                if denial.code == meerkat::SCHEDULE_TARGET_NOT_A_PEER
+        )
+    }
+
+    /// A resident member's schedule for itself is taken, by its stable
+    /// identity and by its session. Its schedule for another resident
+    /// member, of its mob or of another, is refused with the very answer a
+    /// name no member holds gets, by a create and by an update that
+    /// retargets its own schedule, and nothing is written for it.
+    #[tokio::test]
+    async fn a_resident_members_schedule_is_taken_for_itself_and_refused_for_another_resident() {
+        let (anna, boris, carl) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let (service, tools, _published) = member_host_tools(Some(&[
+            (&anna, "desk", "anna"),
+            (&boris, "desk", "boris"),
+            (&carl, "yard", "carl"),
+        ]));
+        let as_anna = turn_of(&anna);
+
+        let own = schedule_call(
+            &tools,
+            &as_anna,
+            "meerkat_schedule_create",
+            schedule_of("own", member_identity_target("desk", "anna")),
+        )
+        .await
+        .expect("a resident member schedules for itself by its identity");
+        schedule_call(
+            &tools,
+            &as_anna,
+            "meerkat_schedule_create",
+            schedule_of("own session", session_target(&anna)),
+        )
+        .await
+        .expect("a resident member schedules for itself by its session");
+        let before = service.list().await.expect("the schedules are read");
+        assert_eq!(before.len(), 2);
+
+        let mut by_identity = Vec::new();
+        for (mob_id, member) in [("desk", "boris"), ("yard", "carl"), ("desk", "nobody")] {
+            for (verb, args) in [
+                (
+                    "meerkat_schedule_create",
+                    schedule_of("late", member_identity_target(mob_id, member)),
+                ),
+                (
+                    "meerkat_schedule_update",
+                    json!({
+                        "schedule_id": own["schedule_id"],
+                        "target": member_identity_target(mob_id, member),
+                    }),
+                ),
+            ] {
+                let answer = schedule_call(&tools, &as_anna, verb, args).await;
+                assert!(
+                    is_not_a_peer(&answer),
+                    "{verb} for {mob_id}/{member} is refused as a target that is not a peer: \
+                     {answer:?}"
+                );
+                by_identity.push(format!("{verb}: {:?}", answer.err()));
+            }
+        }
+        assert_eq!(
+            by_identity[..2],
+            by_identity[2..4],
+            "a resident of another mob answers as a resident of the writer's mob does"
+        );
+        assert_eq!(
+            by_identity[..2],
+            by_identity[4..],
+            "a name no member holds answers as a resident member does"
+        );
+
+        let mut by_session = Vec::new();
+        for session in [&boris, &carl, &SessionId::new()] {
+            let answer = schedule_call(
+                &tools,
+                &as_anna,
+                "meerkat_schedule_create",
+                schedule_of("late", session_target(session)),
+            )
+            .await;
+            assert!(
+                is_not_a_peer(&answer),
+                "a schedule for another session is refused: {answer:?}"
+            );
+            by_session.push(format!("{:?}", answer.err()));
+        }
+        assert_eq!(by_session[0], by_session[1]);
+        assert_eq!(
+            by_session[0], by_session[2],
+            "a session no resident holds answers as a resident's does"
+        );
+        assert_eq!(
+            service.list().await.expect("the schedules are read"),
+            before,
+            "nothing is written for another member"
+        );
+    }
+
+    /// A session's turn that is no resident member's names no resident
+    /// member either: refused as for a name no member holds. The host's own
+    /// call, of no session's turn, is not judged.
+    #[tokio::test]
+    async fn only_a_resident_member_itself_schedules_for_a_resident_member() {
+        let (anna, visitor) = (SessionId::new(), SessionId::new());
+        let (service, tools, _published) = member_host_tools(Some(&[(&anna, "desk", "anna")]));
+        let as_visitor = turn_of(&visitor);
+
+        let mut refused = Vec::new();
+        for target in [
+            member_identity_target("desk", "anna"),
+            member_identity_target("desk", "nobody"),
+        ] {
+            let answer = schedule_call(
+                &tools,
+                &as_visitor,
+                "meerkat_schedule_create",
+                schedule_of("late", target),
+            )
+            .await;
+            assert!(is_not_a_peer(&answer), "{answer:?}");
+            refused.push(format!("{:?}", answer.err()));
+        }
+        assert_eq!(refused[0], refused[1]);
+        let by_session = schedule_call(
+            &tools,
+            &as_visitor,
+            "meerkat_schedule_create",
+            schedule_of("late", session_target(&anna)),
+        )
+        .await;
+        assert!(is_not_a_peer(&by_session), "{by_session:?}");
+        assert!(
+            service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is written"
+        );
+
+        schedule_call(
+            &tools,
+            &as_visitor,
+            "meerkat_schedule_create",
+            schedule_of("own", session_target(&visitor)),
+        )
+        .await
+        .expect("a session schedules for itself");
+        schedule_call(
+            &tools,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            schedule_of("the host's", member_identity_target("desk", "anna")),
+        )
+        .await
+        .expect("the host's own write is not judged");
+    }
+
+    /// Until the host actor's residents are published, a session's schedule
+    /// write is answered as temporarily unavailable, never taken; the host's
+    /// own call is taken.
+    #[tokio::test]
+    async fn a_schedule_write_before_the_residents_are_published_is_not_taken() {
+        let writer = SessionId::new();
+        let (service, tools, _published) = member_host_tools(None);
+        let early = schedule_call(
+            &tools,
+            &turn_of(&writer),
+            "meerkat_schedule_create",
+            schedule_of("early", member_identity_target("desk", "anna")),
+        )
+        .await;
+        assert!(
+            matches!(&early, Err(meerkat_core::ToolError::Unavailable { .. })),
+            "who is resident cannot be read yet: {early:?}"
+        );
+        assert!(
+            service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is written"
+        );
+        schedule_call(
+            &tools,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            schedule_of("the host's", member_identity_target("desk", "anna")),
+        )
+        .await
+        .expect("the host's own write is not judged");
+    }
+
+    /// A target that is a session created on demand.
+    fn fresh_session_target() -> Value {
+        json!({
+            "target_kind": "session",
+            "type": "materialize_on_demand_session",
+            "create": { "model": "gpt-5.4" },
+            "action": { "type": "prompt", "prompt": "Run the report." },
+        })
+    }
+
+    fn refused_session_creation(answer: &Result<Value, meerkat_core::ToolError>) -> bool {
+        matches!(
+            answer,
+            Err(meerkat_core::ToolError::PolicyDenied { denial })
+                if denial.code == "schedule_session_creation_not_allowed"
+        )
+    }
+
+    /// A schedule whose target is a session created on demand is the member
+    /// host's own to write: a resident member's is refused, by a create and
+    /// by an update of one the host wrote, and so is one a session that is
+    /// no resident member writes. Nothing is written for either. The host's
+    /// own call writes one as before.
+    #[tokio::test]
+    async fn a_schedule_that_creates_a_session_is_the_member_hosts_to_write() {
+        let (anna, visitor) = (SessionId::new(), SessionId::new());
+        let (service, tools, _published) = member_host_tools(Some(&[(&anna, "desk", "anna")]));
+        for (writer, session) in [("a resident member", &anna), ("another session", &visitor)] {
+            let created = schedule_call(
+                &tools,
+                &turn_of(session),
+                "meerkat_schedule_create",
+                schedule_of("fresh", fresh_session_target()),
+            )
+            .await;
+            assert!(
+                refused_session_creation(&created),
+                "{writer}'s schedule that creates a session is refused: {created:?}"
+            );
+        }
+        assert!(
+            service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is written"
+        );
+
+        let hosts = schedule_call(
+            &tools,
+            &meerkat_core::ToolDispatchContext::default(),
+            "meerkat_schedule_create",
+            schedule_of("the host's", fresh_session_target()),
+        )
+        .await
+        .expect("the host's own call writes one");
+        let stored = service.list().await.expect("the schedules are read");
+        assert_eq!(stored.len(), 1);
+        let updated = schedule_call(
+            &tools,
+            &turn_of(&anna),
+            "meerkat_schedule_update",
+            json!({ "schedule_id": hosts["schedule_id"], "name": "renamed" }),
+        )
+        .await;
+        assert!(
+            refused_session_creation(&updated),
+            "a resident member's update of a schedule that creates a session is refused: \
+             {updated:?}"
+        );
+        assert_eq!(
+            service.list().await.expect("the schedules are read"),
+            stored,
+            "the schedule is as it was"
+        );
+    }
+
+    /// A resident member's schedule for a member of a mob nobody holds is
+    /// refused with the answer a name no member of its own mob holds gets,
+    /// by its identity and by a member target.
+    #[tokio::test]
+    async fn a_resident_members_schedule_for_a_mob_nobody_holds_is_refused_as_any_other() {
+        let anna = SessionId::new();
+        let (service, tools, _published) = member_host_tools(Some(&[(&anna, "desk", "anna")]));
+        let member_target = |mob_id: &str, member: &str| {
+            json!({
+                "target_kind": "mob",
+                "type": "member",
+                "mob_id": mob_id,
+                "member_id": member,
+                "action": { "type": "send", "content": "A scheduled note." },
+            })
+        };
+        let mut answers = Vec::new();
+        for (mob_id, member) in [("desk", "nobody"), ("no-such-mob", "anna")] {
+            for target in [
+                member_identity_target(mob_id, member),
+                member_target(mob_id, member),
+            ] {
+                let answer = schedule_call(
+                    &tools,
+                    &turn_of(&anna),
+                    "meerkat_schedule_create",
+                    schedule_of("late", target),
+                )
+                .await;
+                assert!(
+                    is_not_a_peer(&answer),
+                    "a schedule for {mob_id}/{member} is refused: {answer:?}"
+                );
+                answers.push(format!("{:?}", answer.err()));
+            }
+        }
+        assert_eq!(
+            answers[..2],
+            answers[2..],
+            "a mob nobody holds answers as a name no member holds does"
+        );
+        assert!(
+            service
+                .list()
+                .await
+                .expect("the schedules are read")
+                .is_empty(),
+            "nothing is written"
+        );
     }
 }

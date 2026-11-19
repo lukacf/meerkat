@@ -1531,6 +1531,9 @@ impl MobActor {
             return;
         };
         let key = Self::external_peer_key_for_edge(&edge);
+        // The retirement ends this edge: the external peer's reciprocal row
+        // for the retiring member goes first, while the machine holds both.
+        Box::pin(self.remove_external_peer_reciprocal_trust_before_edge_end(&key)).await;
         if let Err(error) = meerkat_core::comms::PeerName::new(edge.endpoint.name.0.clone()) {
             self.finish_retirement(continuation, Err(MobError::WiringError(error.to_string())))
                 .await;
@@ -5897,6 +5900,13 @@ impl MobActor {
                 )
             {
                 self.release_identity_reconcile_parks_for_ended_seat();
+                // The seat ended with its session archived: a delegation
+                // helper's session key pair goes with it. A respawn and a
+                // rotation keep the seat, and a kept session keeps its key.
+                if continuation.archive_disposal == Some(mob_dsl::MemberSessionDisposal::Archived) {
+                    Box::pin(self.delete_ended_delegation_helper_key_pair(&continuation.entry))
+                        .await;
+                }
             }
             // An identity reconciliation that failed before its durable start
             // keeps its own failure handling: its disposition reads the stage

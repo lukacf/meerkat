@@ -5120,6 +5120,7 @@ async fn host_store_spec(
         None,
         None,
         None,
+        Vec::new(),
     )
     .await;
     match composed {

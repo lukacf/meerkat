@@ -169,6 +169,8 @@ fn build_state(
         max_tokens: max_tokens.unwrap_or(config.agent.resolved_max_tokens_per_turn()),
         rest_host: config.rest.host.clone().into(),
         rest_port: config.rest.port,
+        rest_allowed_origins: Default::default(),
+        rest_served_hosts: Default::default(),
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root.to_path_buf()),

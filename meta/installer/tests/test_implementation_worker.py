@@ -332,7 +332,11 @@ async def test_both_native_agents_receive_selected_recurrence_guidance_and_insta
         content = "\n".join(lines)
         assert selected_recurrence_guidance() in content
         assert "Pinned native input schemas:" not in content
-        for contract in (MetaRuntime.on_schedule_fire, MetaBuilder.host_runnables):
+        for contract in (
+            MetaRuntime.on_schedule_fire,
+            MetaBuilder.host_runnables,
+            MetaBuilder.on_schedule_fire,
+        ):
             assert inspect.getsource(contract).rstrip() in content
         assert len(content.encode()) < 64 * 1024
         results.append(content)

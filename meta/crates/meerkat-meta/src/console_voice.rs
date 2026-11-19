@@ -753,9 +753,9 @@ impl ConsoleVoiceController {
         Ok(())
     }
 
-    /// Authentication readiness is independent of whether a voice request
-    /// already owns the target; it is not permission to open a second channel.
-    /// The caller owns the agents private to `private_owner_key`.
+    /// [`Self::ready_resolved`] for a member named as its caller spelled it,
+    /// after the rules for a member's name.
+    #[cfg(test)]
     pub(crate) async fn ready(
         &self,
         principal: &str,
@@ -763,6 +763,22 @@ impl ConsoleVoiceController {
         identity: &str,
     ) -> Result<bool, VoiceError> {
         validate_identity(identity)?;
+        self.ready_resolved(principal, private_owner_key, identity)
+            .await
+    }
+
+    /// Authentication readiness is independent of whether a voice request
+    /// already owns the target; it is not permission to open a second channel.
+    /// The caller owns the agents private to `private_owner_key`. The host
+    /// is asked under `identity`, the name the console resolved a member to
+    /// for its caller; the rules for a member's name were read on the
+    /// caller's own spelling, where the request came in.
+    async fn ready_resolved(
+        &self,
+        principal: &str,
+        private_owner_key: Option<&str>,
+        identity: &str,
+    ) -> Result<bool, VoiceError> {
         if principal.trim().is_empty() {
             return Err(VoiceError::Unauthorized);
         }
@@ -787,7 +803,8 @@ impl ConsoleVoiceController {
 
     /// Readiness with the typed reason and holder when the external live
     /// channel holds the gateway's voice path. Never opens a provider. The
-    /// HTTP route holds the flight itself (see [`Self::readiness_flight`]).
+    /// HTTP route holds the flight itself (see
+    /// [`Self::readiness_flight_resolved`]).
     #[cfg(test)]
     pub(crate) async fn readiness(
         &self,
@@ -799,14 +816,32 @@ impl ConsoleVoiceController {
             .await
     }
 
-    /// Start, or join, the readiness check for `(principal,
-    /// private_owner_key, identity)`. The check runs while at least one
-    /// returned flight is held; it is cancelled when the last one is dropped.
+    /// [`Self::readiness_flight_resolved`] for a member the console resolved
+    /// under the name its caller spelled.
+    #[cfg(test)]
     pub(crate) fn readiness_flight(
         &self,
         principal: &str,
         private_owner_key: Option<&str>,
         identity: &str,
+    ) -> Result<ReadinessFlight, VoiceError> {
+        self.readiness_flight_resolved(principal, private_owner_key, identity, None)
+    }
+
+    /// Start, or join, the readiness check for `(principal,
+    /// private_owner_key, member)`. The check runs while at least one
+    /// returned flight is held; it is cancelled when the last one is dropped.
+    /// `identity` is the member as its caller spelled it, which the rules
+    /// for a member's name read; `resolved` is the name the console resolved
+    /// the member to for that caller where it is another (a member hidden
+    /// from the caller is asked for under a name no member holds): the check
+    /// asks the voice host under it.
+    pub(crate) fn readiness_flight_resolved(
+        &self,
+        principal: &str,
+        private_owner_key: Option<&str>,
+        identity: &str,
+        resolved: Option<&str>,
     ) -> Result<ReadinessFlight, VoiceError> {
         validate_identity(identity)?;
         if principal.trim().is_empty() {
@@ -815,7 +850,7 @@ impl ConsoleVoiceController {
         let key: ReadinessFlightKey = (
             principal.to_string(),
             private_owner_key.map(str::to_string),
-            identity.to_string(),
+            resolved.unwrap_or(identity).to_string(),
         );
         let mut flights = self
             .readiness_flights
@@ -896,7 +931,9 @@ impl ConsoleVoiceController {
             });
         }
         Ok(VoiceReadinessReport {
-            available: self.ready(principal, private_owner_key, identity).await?,
+            available: self
+                .ready_resolved(principal, private_owner_key, identity)
+                .await?,
             reason: None,
             holder: None,
         })
@@ -1031,8 +1068,9 @@ impl ConsoleVoiceController {
 }
 
 impl ConsoleVoiceController {
-    /// [`Self::open_while_authenticated`] for a session no authentication
-    /// ends.
+    /// [`Self::open_resolved_while_authenticated`] for a member the console
+    /// resolved under the name its caller spelled, and a session no
+    /// authentication ends.
     #[cfg(test)]
     pub(crate) async fn open(
         &self,
@@ -1043,17 +1081,43 @@ impl ConsoleVoiceController {
             .await
     }
 
-    /// [`Self::open`] for a caller a token identified: the session it opens
-    /// ends once `authentication` lapses (the Console's verifier no longer
-    /// accepts the token, on its expiry or on a session fence), as an open
-    /// stream does. A retried open of the same request keeps the first
-    /// open's watch. The caller owns the agents private to
-    /// `private_owner_key`.
+    /// [`Self::open_resolved_while_authenticated`] for a member the console
+    /// resolved under the name its caller spelled.
+    #[cfg(test)]
     pub(crate) async fn open_while_authenticated(
         &self,
         principal: &str,
         private_owner_key: Option<&str>,
         request: VoiceRequest,
+        authentication: Option<crate::http_sse::StreamAuthentication>,
+    ) -> Result<PendingLiveChannelHandle, VoiceError> {
+        self.open_resolved_while_authenticated(
+            principal,
+            private_owner_key,
+            request,
+            None,
+            authentication,
+        )
+        .await
+    }
+
+    /// Open a call for a caller a token identified: the session it opens
+    /// ends once `authentication` lapses (the Console's verifier no longer
+    /// accepts the token, on its expiry or on a session fence), as an open
+    /// stream does. A retried open of the same request keeps the first
+    /// open's watch. The caller owns the agents private to
+    /// `private_owner_key`. The request is kept under the member's name as
+    /// its caller spelled it, which every later request of the call
+    /// carries, its close included; `resolved` is the name the console
+    /// resolved the member to for that caller where it is another (a member
+    /// hidden from the caller is asked for under a name no member holds):
+    /// the voice host and the live voice path are asked under it.
+    pub(crate) async fn open_resolved_while_authenticated(
+        &self,
+        principal: &str,
+        private_owner_key: Option<&str>,
+        request: VoiceRequest,
+        resolved: Option<String>,
         authentication: Option<crate::http_sse::StreamAuthentication>,
     ) -> Result<PendingLiveChannelHandle, VoiceError> {
         request.validate()?;
@@ -1103,6 +1167,7 @@ impl ConsoleVoiceController {
             let owner = principal.to_string();
             let owner_key = private_owner_key.map(str::to_string);
             let pending = Arc::clone(&slot);
+            let target = resolved.unwrap_or_else(|| request.identity.clone());
             tokio::spawn(async move {
                 let arbiter_started = tokio::time::Instant::now();
                 // Take the gateway's live voice path first ("latest engaged
@@ -1114,7 +1179,7 @@ impl ConsoleVoiceController {
                         .engage(
                             LiveOwner::ConsoleVoice {
                                 principal: owner.clone(),
-                                identity: request.identity.clone(),
+                                identity: target.clone(),
                                 channel_id: None,
                             },
                             pending.owner_closer(),
@@ -1124,7 +1189,7 @@ impl ConsoleVoiceController {
                         Ok((lease, preempted)) => {
                             if let Some(previous) = preempted {
                                 tracing::info!(
-                                    identity = %request.identity,
+                                    identity = %target,
                                     superseded = ?previous,
                                     "console voice took the live voice path"
                                 );
@@ -1146,12 +1211,10 @@ impl ConsoleVoiceController {
                 };
                 let arbiter_ms = elapsed_ms(arbiter_started);
                 let host_open_started = tokio::time::Instant::now();
-                let result = host
-                    .open(&owner, owner_key.as_deref(), &request.identity)
-                    .await;
+                let result = host.open(&owner, owner_key.as_deref(), &target).await;
                 tracing::info!(
                     target: "meerkat_meta::console_voice::timing",
-                    identity = %request.identity,
+                    identity = %target,
                     arbiter_ms,
                     host_open_ms = elapsed_ms(host_open_started),
                     ok = result.is_ok(),

@@ -29,7 +29,7 @@ Rust-embedder-only APIs. MCP servers and the deferred tool catalog are in
 | Family | Tools | Enabled by |
 |---|---|---|
 | Builtins | `task_list`, `task_create`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `blob_save_file`, `blob_load_file`, `blob_inspect` (blob tools need a blob store) | CLI `--tools safe` and up; `enable_builtins`; `tools.builtins_enabled` |
-| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` (`monitor_start` only by explicit host policy) | CLI `--tools workspace` or `full`; `enable_shell`; `tools.shell_enabled` |
+| Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`, `monitor_start` (where the session has a durable job store; a mob profile keeps it off with `deny = ["monitor_start"]`) | CLI `--tools workspace` or `full`; `enable_shell`; `tools.shell_enabled` |
 | Image generation | `generate_image` | Visible when the runtime wires it (default CLI, RPC, REST) |
 | Web search | Provider-native search, or the `web_search` fallback | Native is on where the model supports it, unless `--no-web-search` or a restricting tool policy turns it off; fallback only with `enable_web_search: true` |
 | Memory | `memory_search` | `--tools full`; `enable_memory` |
@@ -90,7 +90,8 @@ Shell:
 Others: `apply_patch {patch}` takes `*** Begin Patch` ... `*** End Patch` with
 `*** Add File:`, `*** Update File:` (optionally `*** Move to:`) and `*** Delete
 File:` sections, paths relative to the project root. `view_image {path}` reads
-PNG, JPEG, GIF, WebP or SVG up to 5 MB inside the project root, and is hidden
+PNG, JPEG, GIF or WebP up to 5 MB inside the project root (a file whose
+content is none of these is refused), and is hidden
 when the model cannot take image tool results. `blob_save_file {blob_id, path,
 overwrite?}`, `blob_load_file {path, media_type?}` and `blob_inspect {blob_id}`
 move blobs to and from project files. `apply_patch` and `blob_save_file` run
@@ -104,8 +105,9 @@ store), nor through a symbolic link whose target does not exist: the call is
 applies none of its operations. A Rust host declares its paths with
 `AgentFactory::with_protected_host_inputs`. `rkat-rpc` and `rkat-mcp` without
 `--context-root` root these tools in the realm directory: the realm's
-documents are refused there, its stores are not, so give such a server a
-context root. `web_search {query, provider?,
+documents and its stores are refused there, each listed file with its side
+files, so give such a server a context root to keep the whole realm out of
+these tools' reach. `web_search {query, provider?,
 context?}` is the fallback: offered only on an explicit enable when native
 search is not active (the model lacks it, or provider-native tools are off).
 

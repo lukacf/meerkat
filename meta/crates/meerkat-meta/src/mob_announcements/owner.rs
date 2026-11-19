@@ -37,13 +37,13 @@ use super::sources::{
 };
 use super::store::{AnnouncementStore, SubmissionCheck};
 use super::types::{
-    AnnounceOutcome, AnnounceRequest, Announcement, AnnouncementStoreError, Batch, BatchEvent,
-    BatchGap, BatchId, BatchPosition, BatchQuery, BatchState, BatchStateTag, ChildMemberLimits,
-    GapReason, LateOutcome, MAX_PAGE, Member, MemberRouteRecord, MobId, MobIncarnation, MobLineage,
-    NativeReceipt, OperationId, PutSubscription, SealingPolicy, SourceId, SourceKey, Subscription,
-    SubscriptionChange, SubscriptionChangeOutcome, SubscriptionEnd, SubscriptionId,
-    SubscriptionState, SuccessorBatch, merge_gaps, render_item, successor_batch_with_notice,
-    wire_budget,
+    AnnounceOutcome, AnnounceRequest, Announcement, AnnouncementStoreError, Announcer, Batch,
+    BatchEvent, BatchGap, BatchId, BatchPosition, BatchQuery, BatchState, BatchStateTag,
+    ChildMemberLimits, GapReason, LateOutcome, MAX_PAGE, Member, MemberRouteRecord, MobId,
+    MobIncarnation, MobLineage, NativeReceipt, OperationId, PutSubscription, SealingPolicy,
+    SourceId, SourceKey, Subscription, SubscriptionChange, SubscriptionChangeOutcome,
+    SubscriptionEnd, SubscriptionId, SubscriptionState, SuccessorBatch, Topic, merge_gaps,
+    render_item, successor_batch_with_notice, wire_budget,
 };
 
 #[path = "owner_declarations.rs"]
@@ -1289,7 +1289,41 @@ impl AnnouncementService {
         templates.retain(|found| !found.template.topics.is_disjoint(&request.topics));
         let (roles, admitted) = self.expand_roles(&templates).await;
         subscribers.extend(admitted);
-        let facts = self.roster_facts(subscribers).await;
+        // What a member announces is captured as its roster facts say: its
+        // own facts go to the store, and for a member private to a person
+        // the facts of every member whose subscription takes its topics, so
+        // the store can tell the members private to the same person. A
+        // roster that cannot be read now decides nothing: the announce is
+        // refused for now and nothing is recorded. Only a store that keeps
+        // the rule is given what a member announces that is private to a
+        // person, or that the roster does not name.
+        let mut announcer = None;
+        if let Announcer::Member { identity } = &request.announced_by {
+            let member = Member::new(request.mob_id.clone(), identity.clone());
+            let found = self.announcer_facts(&member).await?;
+            let shared = found
+                .as_ref()
+                .is_some_and(|found| crate::access::private_owner(&found.labels).is_none());
+            if !shared {
+                self.store_judges_readers(
+                    "an announcement of a member that is private to a person, or that its \
+                     mob's roster does not name,",
+                )?;
+            }
+            if let Some(found) = found {
+                if !shared {
+                    subscribers.extend(
+                        self.topic_subscribers(&request.mob_id, &request.topics)
+                            .await?,
+                    );
+                }
+                announcer = Some((member, found));
+            }
+        }
+        let mut facts = self.roster_facts(subscribers).await;
+        if let Some((member, found)) = announcer {
+            facts.insert(member, found);
+        }
         let outcome = self
             .inner
             .store
@@ -1601,6 +1635,70 @@ impl AnnouncementService {
         facts
     }
 
+    /// The roster facts of a member whose announcement is judged, none
+    /// when its mob's roster names no such member, or the refusal for now
+    /// while the roster cannot be read: an unreadable roster never stands
+    /// for a member private to no one.
+    async fn announcer_facts(
+        &self,
+        announcer: &Member,
+    ) -> Result<Option<MemberFacts>, AnnouncementError> {
+        let (native, asked) = (Arc::clone(&self.inner.native), announcer.clone());
+        bounded_native(
+            "member_facts",
+            async move { native.member_facts(&asked).await },
+        )
+        .await
+        .map_err(|error| AnnouncementError::NativeUnavailable(error.0))
+    }
+
+    /// Refuse `what` on a store that does not say it keeps the rule of who
+    /// receives a member's announcement
+    /// ([`AnnouncementStore::judges_readers`]), with the reason.
+    fn store_judges_readers(&self, what: &str) -> Result<(), AnnouncementError> {
+        if self.inner.store.judges_readers() {
+            return Ok(());
+        }
+        Err(AnnouncementError::Configuration(
+            super::AnnouncementOptionsError::Invalid(format!(
+                "{what} is not taken: this host's announcement store does not judge who \
+                 receives a member's announcement (AnnouncementStore::judges_readers answers \
+                 false)"
+            )),
+        ))
+    }
+
+    /// The members whose live subscriptions take an announcement on
+    /// `topics` in `mob_id`.
+    async fn topic_subscribers(
+        &self,
+        mob_id: &MobId,
+        topics: &BTreeSet<Topic>,
+    ) -> Result<BTreeSet<Member>, AnnouncementError> {
+        let mut members = BTreeSet::new();
+        let mut after: Option<SubscriptionId> = None;
+        loop {
+            let page = self
+                .inner
+                .store
+                .subscriptions(None, after.as_ref(), MAX_PAGE)
+                .await?;
+            let ended = page.len() < MAX_PAGE;
+            after = page.last().map(|subscription| subscription.id.clone());
+            members.extend(
+                page.into_iter()
+                    .filter(|subscription| {
+                        subscription.state.is_live()
+                            && subscription.selector.matches(mob_id, topics)
+                    })
+                    .map(|subscription| subscription.member),
+            );
+            if ended || after.is_none() {
+                return Ok(members);
+            }
+        }
+    }
+
     /// The streams a source's current generation onboarded.
     pub async fn source_streams(
         &self,
@@ -1651,12 +1749,27 @@ impl AnnouncementService {
         let member_mob = request.member.mob_id.clone();
         // A topic a source owns takes the member only if its audience
         // covers it, as the member's roster facts say.
-        let facts = self.member_facts(&request.member).await;
+        let mut facts = RosterFacts::default();
+        if let Some(found) = self.member_facts(&request.member).await {
+            facts.insert(request.member.clone(), found);
+        }
+        // An earlier start replays what a member announced as the
+        // announcer's roster facts say, read now; while one cannot be read
+        // the put is refused for now. Only a store that keeps the rule
+        // replays.
+        if matches!(request.start, super::types::StartFrontier::After { .. }) {
+            self.store_judges_readers("a subscription that starts at an earlier frontier")?;
+        }
+        for announcer in self.inner.store.replay_announcers(&request).await? {
+            if let Some(found) = self.announcer_facts(&announcer).await? {
+                facts.insert(announcer, found);
+            }
+        }
         let (operation, now) = (operation.clone(), self.now());
         let subscription = self
-            .stored("put_subscription_with_facts", move |store| async move {
+            .stored("put_subscription_with_roster", move |store| async move {
                 store
-                    .put_subscription_with_facts(&operation, request, facts, now)
+                    .put_subscription_with_roster(&operation, request, &facts, now)
                     .await
             })
             .await
@@ -2678,10 +2791,30 @@ impl AnnouncementService {
                 return Ok(None);
             }
         };
+        let mut roster = RosterFacts::default();
+        if let Some(found) = facts {
+            roster.insert(member.clone(), found);
+        }
+        // The store judges each owed item by its announcer's roster facts
+        // as they read now. One that cannot be read decides nothing either.
+        for announcer in self.inner.store.owed_announcers(member).await? {
+            match self.announcer_facts(&announcer).await {
+                Ok(Some(found)) => roster.insert(announcer, found),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %member,
+                        %error,
+                        "the roster of a member that announced could not be read; the seal waits"
+                    );
+                    return Ok(None);
+                }
+            }
+        }
         Ok(self
             .inner
             .store
-            .seal_batch_with_facts(member, id, policy, facts, now)
+            .seal_batch_with_roster(member, id, policy, &roster, now)
             .await?)
     }
 

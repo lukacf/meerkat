@@ -961,6 +961,158 @@ async fn a_stock_prompt_loads_reads_and_has_its_write_refused() {
 /// owner denied it before the tool ran, which the payload says.
 const DELETE_REFUSAL: &str = r#"{"data":{"kind":"denied","tool_invoked":false},"error":"operation_refused","message":"operation unavailable under current authorization"}"#;
 
+// ---------------------------------------------------------------------------
+// The realm owner's review rules on a composition that installs no review
+// ---------------------------------------------------------------------------
+
+/// The review rule for the records read as the realm's trusted host writes
+/// it into the realm's own document, with `tier_lines`: the tier and, for
+/// R3, the consent assurance an R3 rule must state.
+fn records_read_rule(tier_lines: &str) -> String {
+    format!(
+        "\n[[governance.review.rules]]\n\
+         target = {{ kind = \"mcp_operation\", server = \"{RECORDS}\", operation = \"{READ}\" }}\n\
+         {tier_lines}\n"
+    )
+}
+
+/// A reviewer the realm's document names. The composition of these rows
+/// builds none: like stock `rkat`, it installs no operation review.
+const NAMED_REVIEWER: &str = "\n[governance.review.reviewer]\n\
+    identity = { model = \"claude-sonnet-4-5\", provider = \"anthropic\" }\n\
+    max_output_tokens = 64\n";
+
+/// The exact typed feedback for an R2 operation where no reviewer is
+/// installed: the review is unavailable, and the operation did not enter.
+const REVIEWER_MISSING: &str = r#"{"data":{"kind":"reviewer_missing"},"error":"review_unavailable","message":"operation reviewer is not installed"}"#;
+
+/// The exact typed feedback for an R3 operation where no human route is
+/// installed: the review is unsatisfied, and no approval was issued (the
+/// payload carries no approval id).
+const HUMAN_CONSENT_REQUIRED: &str = r#"{"data":{"kind":"human_consent_required"},"error":"review_unsatisfied","message":"this action requires human consent"}"#;
+
+/// The realm's own document puts the records read above R1 (`tier_lines`,
+/// with `reviewer` when the document also names one), and the realm opens on
+/// a composition that installs no operation review and no human route, as
+/// stock `rkat` opens it. The agent loads the read its grant allows and
+/// calls it: the call's result is exactly `refusal`, the server is connected
+/// and never called, the read is prepared under the stock policy and never
+/// reaches its native entry, and the run goes on to its final answer.
+async fn ruled_read_is_refused(
+    account: &'static str,
+    tier_lines: &str,
+    reviewer: Option<&str>,
+    refusal: &str,
+) {
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    let paths = provision(root.path(), &log, account).await;
+    // The trusted host administers the review section in the realm's own
+    // document (an ordinary config write could not); the open reads it.
+    let mut document = std::fs::read_to_string(&paths.config_path).expect("the realm's document");
+    document.push_str(&records_read_rule(tier_lines));
+    document.push_str(reviewer.unwrap_or_default());
+    std::fs::write(&paths.config_path, document).expect("the realm's review section");
+    let model = ScriptedModel::new(
+        account,
+        vec![
+            Step::Call {
+                id: "load",
+                name: TOOL_CATALOG_LOAD_NAME,
+                args: json!({"names": [READ]}),
+            },
+            Step::Call {
+                id: "read",
+                name: READ,
+                args: json!({"record": "record-7"}),
+            },
+            Step::Finish(FINAL),
+        ],
+    );
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm.session(installed(&paths).await).await;
+    wait_listed(&log).await;
+
+    let (input_id, text) = realm
+        .prompt(&session, "Load the records read, then read record-7")
+        .await
+        .expect("the operator's prompt is bound");
+    assert_eq!(text, FINAL, "the run goes on to its final answer");
+
+    // The rule raises only the operation it names: the catalog load is R1.
+    let load = model.feedback(1, "load");
+    assert!(!load.is_error, "{}", load.text_content());
+    let loaded: Value = serde_json::from_str(&load.text_content()).expect("load response");
+    assert_eq!(loaded["accepted_names"], json!([READ]), "{loaded}");
+    let read = model.feedback(2, "read");
+    assert!(
+        read.is_error,
+        "the ruled read is refused, not answered: {}",
+        read.text_content()
+    );
+    assert_eq!(read.text_content(), refusal);
+    assert_eq!(
+        server_calls(&log),
+        Vec::<String>::new(),
+        "the ruled read never reaches the server"
+    );
+
+    let audit = realm.audit(&session, &input_id).await;
+    let observed = tool_audit(&audit, "read");
+    assert!(
+        matches!(observed.first(), Some(AuditObservation::Prepared { .. })),
+        "the read was prepared under the stock policy: its grant allows it"
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|observation| matches!(observation, AuditObservation::Entry { .. })),
+        "the ruled read never reached its native entry"
+    );
+    realm.close(vec![session]).await;
+}
+
+/// An R2 rule and no reviewer in the document: the read is refused with the
+/// typed unavailable review, because no reviewer is installed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stock_r2_rule_without_a_reviewer_refuses_the_ruled_read() {
+    ruled_read_is_refused(
+        "controller-review-rule-r2",
+        "tier = \"r2\"",
+        None,
+        REVIEWER_MISSING,
+    )
+    .await;
+}
+
+/// An R2 rule and a reviewer the document names: a composition that
+/// installs no operation review builds no reviewer from the document, so
+/// the refusal is the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stock_r2_rule_with_a_reviewer_named_still_refuses_the_ruled_read() {
+    ruled_read_is_refused(
+        "controller-review-rule-r2-named",
+        "tier = \"r2\"",
+        Some(NAMED_REVIEWER),
+        REVIEWER_MISSING,
+    )
+    .await;
+}
+
+/// An R3 rule: with no human route the read is refused at once with the
+/// typed unsatisfied review, and no approval is issued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stock_r3_rule_refuses_the_ruled_read_without_an_approval() {
+    ruled_read_is_refused(
+        "controller-review-rule-r3",
+        "tier = \"r3\"\nconsent_assurance = \"device_trusted\"",
+        None,
+        HUMAN_CONSENT_REQUIRED,
+    )
+    .await;
+}
+
 /// Another agent with its own valid controller and worker grants, whose
 /// worker grant does not cover the records installation, is refused that
 /// installation: its session is never offered the records operations,

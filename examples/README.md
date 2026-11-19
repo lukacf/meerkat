@@ -162,6 +162,7 @@ browser examples run in headless Chromium with every agent on
 What it does not cover: examples 034 and 035 (their flows are long), 028 to
 030 (they make no provider call), microphone and real-browser use of 036 and
 037, and anything beyond the first round, prompt or scenario of 031 to 033.
+Example 041 calls a model server and is not run by this target.
 
 Standalone Rust examples own separate lockfiles. `make verify-lock-consistency`
 checks these as well as the root lock; release preparation refreshes and stages
@@ -230,7 +231,7 @@ resulting example locks, and commit them together with the relevant changes.
 | 035 | [mdm-tux-rs](035-mdm-tux-rs/) | Rust + TUI + Docker | Meerkat Device Manager: TUX terminal controller, kennel rendezvous, remote targets, hive coordination, peer comms, and scheduler wakeups |
 | 036 | [realtime-audio-py](036-realtime-audio-py/) | Python | Command-line OpenAI realtime audio app with live transcript, callback tools, inline mob skills, and helper sub-agents |
 | 037 | [live-webrtc-web](037-live-webrtc-web/) | Web + TypeScript | Browser WebRTC smoke-test cockpit with AEC microphone capture, live controls, note and text-pane callbacks, and real mob-mcp tools |
-| 041 | [Verify a background job](041-background-job-py/) | Python | Match an agent’s shell receipt to its session and check the terminal calculation output |
+| 041 | [Verify a background job](041-background-job-py/) | Python | Match an agent's shell receipt to its session and check the terminal calculation output |
 
 ## Examples by Feature
 
@@ -257,7 +258,7 @@ resulting example locks, and commit them together with the relevant changes.
 | **MCP Server** | 034 |
 | **Flow Engine** | 019, 031, 034 |
 | **Remote Computer Control** | 035 |
-| **Durable jobs** | 041 |
+| **Background jobs** | 041 |
 | **Scheduling** | 035 |
 | **Realtime Audio** | 036, 037 |
 | **REST API** | 022 |

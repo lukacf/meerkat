@@ -12594,9 +12594,9 @@ mod tests {
     /// A wait that was answered "a later input superseded this one while it
     /// waited" reaches the exact-turn carrier as a terminal of its own that
     /// names both inputs: never an internal error made from the wait
-    /// answer's text. The adapter of a plain mob result, which no superseded
-    /// turn reaches through a public door, answers an internal error that
-    /// names neither input.
+    /// answer's text. The adapter of a plain mob result answers an internal
+    /// error that names neither input: no typed public answer is defined for
+    /// a superseded member turn.
     #[test]
     fn a_superseded_wait_reaches_the_exact_turn_carrier_as_a_value() {
         use super::super::handle::ExactTurnTerminal;

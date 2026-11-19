@@ -3693,9 +3693,10 @@ pub(crate) enum ExactTurnTerminal {
     /// A later input of the admitted input's supersession key replaced it
     /// while it still waited: it ended superseded and does not run
     /// ([`meerkat_runtime::completion::CompletionWaitError::Superseded`]).
-    /// Only a WorkGraph attention continuation ends this way, and the mob
-    /// admits one only through its crate-private hand-over, so no turn a
-    /// public door hands out carries this terminal.
+    /// Only a WorkGraph attention continuation ends this way. The mob hands
+    /// one over itself through its crate-private hand-over, and a host can
+    /// hand one to a member through a governed-input door, so a turn such a
+    /// door hands out can carry this terminal.
     #[cfg_attr(
         not(test),
         expect(
@@ -3710,11 +3711,11 @@ pub(crate) enum ExactTurnTerminal {
 }
 
 /// What the two public readers of an exact-turn completion answer for a
-/// superseded terminal. Neither can be handed one: only a WorkGraph attention
-/// continuation ends superseded, and its hand-over is private to this crate.
-/// The text names no input.
-const SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER: &str = "a member turn ended superseded, which only \
-     a continuation handed over inside the mob runtime can; it has no answer here";
+/// superseded terminal: an internal error, because no typed public answer is
+/// defined for a superseded member turn. It is not a result of the turn and
+/// not a failure of its work. The text names no input.
+const SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER: &str =
+    "the member turn's input was superseded by a later input while it waited; it does not run";
 
 pub(crate) type ExactTurnCompletionSender =
     tokio::sync::oneshot::Sender<Result<ExactTurnCompletion, MobError>>;
@@ -5335,8 +5336,8 @@ fn bounded_exact_turn_result(
             session_id,
             input_id,
         }),
-        // Not reachable through a public door: only a continuation handed
-        // over inside this crate ends superseded (see the terminal's doc).
+        // A later input superseded this turn's input (see the terminal's
+        // doc). No typed public answer is defined for it.
         ExactTurnTerminal::Superseded { .. } => Err(BoundedTurnFailure::CompletionPlumbing {
             admitted_session_id: admitted_session_id.clone(),
             error: MobError::Internal(SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string()),
@@ -5572,8 +5573,8 @@ pub(crate) fn legacy_exact_turn_result(
                 input_id,
             });
         }
-        // Not reachable through a public door: only a continuation handed
-        // over inside this crate ends superseded (see the terminal's doc).
+        // A later input superseded this turn's input (see the terminal's
+        // doc). No typed public answer is defined for it.
         ExactTurnTerminal::Superseded { .. } => {
             return Err(MobError::Internal(
                 SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string(),
@@ -25817,12 +25818,12 @@ mod tests {
         );
     }
 
-    /// A superseded terminal has no answer at the two public readers of an
-    /// exact-turn completion: each answers an internal error that names no
-    /// input, the bounded one inside its plumbing failure with the admitted
-    /// session.
+    /// A superseded terminal is an internal error at the two public readers
+    /// of an exact-turn completion: no typed public answer is defined for it.
+    /// Each answers the same text, which names no input, the bounded one
+    /// inside its plumbing failure with the admitted session.
     #[test]
-    fn a_superseded_terminal_has_no_answer_at_the_public_readers() {
+    fn a_superseded_terminal_is_an_internal_error_at_the_public_readers() {
         let session_id = SessionId::new();
         let input_id = meerkat_core::lifecycle::InputId::new();
         let later = meerkat_core::lifecycle::InputId::new();
@@ -25859,32 +25860,15 @@ mod tests {
         }
     }
 
-    /// No public door hands out a turn that can end superseded: the one door
-    /// that hands a continuation to a member is private to this crate, and
-    /// the superseded terminal is made in one place, from the typed wait
-    /// answer.
+    /// The superseded terminal is made in one place, the completion adapter,
+    /// from the typed wait answer; nothing else in the provisioner makes
+    /// one. Which doors can hand out a turn that ends this way is not this
+    /// row's: the mob's own hand-over of a continuation and the
+    /// governed-input doors both can.
     #[test]
-    fn no_public_door_hands_out_a_turn_that_can_end_superseded() {
-        let handle_source = include_str!("handle.rs");
-        // Built from parts so this row's own text is not what it finds.
-        let door = ["async fn start_", "attention_continuation("].concat();
-        let private_door = ["pub(crate) ", door.as_str()].concat();
-        let public_door = ["pub ", door.as_str()].concat();
-        assert_eq!(
-            handle_source.matches(&private_door).count(),
-            1,
-            "the continuation's hand-over is declared once, private to the crate"
-        );
-        assert_eq!(
-            handle_source.matches(&door).count(),
-            1,
-            "the continuation's hand-over has one declaration"
-        );
-        assert!(
-            !handle_source.contains(&public_door),
-            "the continuation's hand-over is not a public door"
-        );
-
+    fn the_superseded_terminal_is_made_in_one_place_from_the_typed_wait_answer() {
+        // The needles are built from parts so this row's own text is not
+        // what it finds.
         let provisioner_source = include_str!("provisioner.rs");
         let start = provisioner_source
             .find("fn runtime_completion_to_exact_turn")

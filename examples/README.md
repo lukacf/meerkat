@@ -162,6 +162,7 @@ browser examples run in headless Chromium with every agent on
 What it does not cover: examples 034 and 035 (their flows are long), 028 to
 030 (they make no provider call), microphone and real-browser use of 036 and
 037, and anything beyond the first round, prompt or scenario of 031 to 033.
+It also skips 040, which waits about a minute for its scheduled follow-up.
 
 Standalone Rust examples own separate lockfiles. `make verify-lock-consistency`
 checks these as well as the root lock; release preparation refreshes and stages

@@ -1,4 +1,4 @@
-# 040 — Let an agent schedule one follow-up (Python)
+# 040 - Let an agent schedule one follow-up (Python)
 
 Start one session. Its first task is to call `meerkat_schedule_create` for itself. The Python host waits for the matching tool result and stored schedule, then reads the occurrence and the target session history. It never sends the second prompt. Keep the process running: the local `rkat-rpc` owns delivery.
 

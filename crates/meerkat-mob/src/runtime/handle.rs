@@ -3693,10 +3693,11 @@ pub(crate) enum ExactTurnTerminal {
     /// A later input of the admitted input's supersession key replaced it
     /// while it still waited: it ended superseded and does not run
     /// ([`meerkat_runtime::completion::CompletionWaitError::Superseded`]).
-    /// Only a WorkGraph attention continuation ends this way. The mob hands
-    /// one over itself through its crate-private hand-over, and a host can
-    /// hand one to a member through a governed-input door, so a turn such a
-    /// door hands out can carry this terminal.
+    /// Only a WorkGraph attention continuation ends this way, and the mob
+    /// admits one only through its crate-private hand-over. A governed-input
+    /// door admits through the exact-prompt replay contract, under which the
+    /// runtime refuses every input that is no prompt, so no turn a public
+    /// door hands out carries this terminal.
     #[cfg_attr(
         not(test),
         expect(
@@ -25862,9 +25863,9 @@ mod tests {
 
     /// The superseded terminal is made in one place, the completion adapter,
     /// from the typed wait answer; nothing else in the provisioner makes
-    /// one. Which doors can hand out a turn that ends this way is not this
-    /// row's: the mob's own hand-over of a continuation and the
-    /// governed-input doors both can.
+    /// one. Which doors can hand out a turn that ends this way is another
+    /// row's: only the mob's own hand-over of a continuation can, since a
+    /// governed input is admitted through the exact-prompt contract.
     #[test]
     fn the_superseded_terminal_is_made_in_one_place_from_the_typed_wait_answer() {
         // The needles are built from parts so this row's own text is not

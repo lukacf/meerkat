@@ -6684,9 +6684,13 @@ async fn a_peer_message_and_a_continuation_that_wait_together_are_one_turn() {
 /// while it waits, and the peer's message is taken up with the later one:
 /// one turn for both, with the continuation's tools only. The row asserts
 /// the facts of one run as one value: how many model calls follow the
-/// held turn, whether one call holds both the peer's message and the
-/// continuation's notice, which tools other than WorkGraph's that call
-/// has, and how often the peer's message reached the member's transcript.
+/// held turn, whether one call holds the peer's message, the
+/// continuation's notice and the LATER revision's text, how many calls
+/// hold the earlier revision's text, which tools other than WorkGraph's
+/// that one call has, and how often the peer's message reached the
+/// member's transcript. The two revisions' texts are tokens of this row,
+/// and a notice carries its projection's text with the item's
+/// description, so the one call is read as the later continuation's.
 ///
 /// The message is not lost. That it shares the continuation's turn, and
 /// so is answered without the member's ordinary tools, is what happens
@@ -6716,22 +6720,25 @@ async fn a_peer_message_that_waits_beside_two_continuations_is_answered_in_the_n
     fixture.client.wait_started(started_before + 1).await;
 
     let body = token("pursuit-peer-two");
+    let earlier = token("pursuit-peer-two-earlier-revision");
+    let later = token("pursuit-peer-two-later-revision");
     fixture
         .raw_peer_send(&sender, &recipient, &body)
         .await
         .expect("the peer's message is accepted");
-    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, "first").await;
+    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, &earlier).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, "second").await;
+    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, &later).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     fixture.client.release();
     let delivered = fixture.delivered_count(&recipient, &body).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let calls_after_the_held_turn = fixture.client.started_count() - started_before - 1;
-    let one_call_holds_both = fixture
+    let one_call_holds_the_message_and_the_later_notice = fixture
         .client
-        .requests_mentioning_all(&[&body, ATTENTION_NOTICE]);
+        .requests_mentioning_all(&[&body, ATTENTION_NOTICE, &later]);
+    let calls_holding_the_earlier_revision = fixture.client.requests_mentioning(&earlier);
     let tools = fixture.client.tools_of_request_mentioning(&body);
     let other_than_workgraph_tools = tools
         .iter()
@@ -6741,13 +6748,15 @@ async fn a_peer_message_that_waits_beside_two_continuations_is_answered_in_the_n
     assert_eq!(
         (
             calls_after_the_held_turn,
-            one_call_holds_both,
+            one_call_holds_the_message_and_the_later_notice,
+            calls_holding_the_earlier_revision,
             other_than_workgraph_tools,
             delivered,
         ),
-        (1, 1, Vec::<String>::new(), 1),
-        "the earlier continuation is superseded; the peer's message and the newer \
-         continuation are one turn, with the continuation's tool set: {tools:?}"
+        (1, 1, 0, Vec::<String>::new(), 1),
+        "the earlier continuation is superseded and never reaches the model; the peer's \
+         message and the later continuation are one turn, with the continuation's tool \
+         set: {tools:?}"
     );
     fixture.finish().await;
 }

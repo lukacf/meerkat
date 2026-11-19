@@ -1,0 +1,27 @@
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+
+[self_hosted.models.job-demo]
+server = "local"
+remote_model = "job-demo"
+display_name = "Local tool-calling model"
+family = "local"
+tier = "supported"
+context_window = 32000
+max_output_tokens = 1024
+
+[realm.global]
+default_binding = "local"
+[realm.global.backend.local]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "local"
+[realm.global.auth.local-auth]
+provider = "self_hosted"
+auth_method = "none"
+source = { kind = "platform_default" }
+[realm.global.binding.local]
+backend_profile = "local"
+auth_profile = "local-auth"

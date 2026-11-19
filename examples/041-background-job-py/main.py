@@ -21,8 +21,12 @@ def receipt_id(messages):
     if len(results) != 1 or results[0].is_error:
         raise ValueError('Missing successful shell submission receipt')
     content = results[0].content
-    body = content if isinstance(content, str) else ''.join(b['text'] for b in content if b.get('type') == 'text')
-    jid = json.loads(body)['job_id']
+    if not isinstance(content, list) or len(content) != 1 or content[0].get('type') != 'structured':
+        raise ValueError('Expected one structured shell receipt in session history')
+    receipt = content[0].get('data')
+    if not isinstance(receipt, dict) or receipt.get('restart_class') != 'non_resumable':
+        raise ValueError('Unexpected shell job receipt')
+    jid = receipt.get('job_id')
     if not isinstance(jid, str) or not jid:
         raise ValueError('Missing job ID')
     return jid

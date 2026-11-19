@@ -1,0 +1,1 @@
+- Meta Python SDK: `DispatchInput.connector()` accepts `correlation_id` and `idempotency_key` together, or neither. Supplying only one is rejected by the helper. This lets callers construct a keyed connector dispatch without using the full `DispatchInput` constructor; the gateway rule is unchanged.

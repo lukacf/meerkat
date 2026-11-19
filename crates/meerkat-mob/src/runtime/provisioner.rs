@@ -7708,6 +7708,20 @@ fn runtime_completion_to_exact_turn(
             terminal,
         });
     }
+    // A wait answered "a later input superseded this one" is a terminal of
+    // its own, typed from the answer; no error text is made from it.
+    let completion = match completion {
+        Err(meerkat_runtime::completion::CompletionWaitError::Superseded { superseded_by }) => {
+            return Ok(super::handle::ExactTurnCompletion {
+                session_id: session_id.clone(),
+                terminal: super::handle::ExactTurnTerminal::Superseded {
+                    input_id: input_id.clone(),
+                    superseded_by,
+                },
+            });
+        }
+        other => other,
+    };
     let outcome = completion.map_err(|error| {
         MobError::Internal(format!("runtime completion waiter failed: {error}"))
     })?;
@@ -12578,27 +12592,50 @@ mod tests {
     }
 
     /// A wait that was answered "a later input superseded this one while it
-    /// waited" reaches the exact-turn carrier as a value of its own: never
-    /// an internal error made from the wait answer's text.
+    /// waited" reaches the exact-turn carrier as a terminal of its own that
+    /// names both inputs: never an internal error made from the wait
+    /// answer's text. The adapter of a plain mob result, which no superseded
+    /// turn reaches through a public door, answers an internal error that
+    /// names neither input.
     #[test]
     fn a_superseded_wait_reaches_the_exact_turn_carrier_as_a_value() {
+        use super::super::handle::ExactTurnTerminal;
         let session_id = SessionId::new();
         let input_id = meerkat_core::lifecycle::InputId::new();
         let later = meerkat_core::lifecycle::InputId::new();
-        let superseded = runtime_completion_to_exact_turn(
-            &session_id,
-            &input_id,
+        let superseded_wait = || {
             Err(
                 meerkat_runtime::completion::CompletionWaitError::Superseded {
-                    superseded_by: later,
+                    superseded_by: later.clone(),
                 },
-            ),
-            None,
-        );
+            )
+        };
+        let superseded =
+            runtime_completion_to_exact_turn(&session_id, &input_id, superseded_wait(), None)
+                .expect("a superseded wait is carried typed, not as an internal error");
+        assert_eq!(superseded.session_id, session_id);
         assert!(
-            superseded.is_ok(),
-            "a superseded wait is carried typed, not as an internal error: {superseded:?}"
+            matches!(
+                &superseded.terminal,
+                ExactTurnTerminal::Superseded { input_id: carried, superseded_by }
+                    if carried == &input_id && superseded_by == &later
+            ),
+            "the carrier names the superseded input and the one that replaced it: {superseded:?}"
         );
+
+        match runtime_completion_to_mob_result(&session_id, &input_id, superseded_wait(), None) {
+            Err(MobError::Internal(text)) => {
+                assert!(
+                    !text.contains(&input_id.to_string()) && !text.contains(&later.to_string()),
+                    "the internal error names no input: {text}"
+                );
+                assert!(
+                    !text.contains("runtime completion waiter failed"),
+                    "the internal error is not made from the wait answer's text: {text}"
+                );
+            }
+            other => panic!("expected an internal error that names no input, got {other:?}"),
+        }
     }
 
     #[test]

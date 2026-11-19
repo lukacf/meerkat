@@ -3690,7 +3690,31 @@ pub(crate) enum ExactTurnTerminal {
     RequeueExpired {
         input_id: meerkat_core::lifecycle::InputId,
     },
+    /// A later input of the admitted input's supersession key replaced it
+    /// while it still waited: it ended superseded and does not run
+    /// ([`meerkat_runtime::completion::CompletionWaitError::Superseded`]).
+    /// Only a WorkGraph attention continuation ends this way, and the mob
+    /// admits one only through its crate-private hand-over, so no turn a
+    /// public door hands out carries this terminal.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "nothing in this crate waits on a continuation it handed over yet"
+        )
+    )]
+    Superseded {
+        input_id: meerkat_core::lifecycle::InputId,
+        superseded_by: meerkat_core::lifecycle::InputId,
+    },
 }
+
+/// What the two public readers of an exact-turn completion answer for a
+/// superseded terminal. Neither can be handed one: only a WorkGraph attention
+/// continuation ends superseded, and its hand-over is private to this crate.
+/// The text names no input.
+const SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER: &str = "a member turn ended superseded, which only \
+     a continuation handed over inside the mob runtime can; it has no answer here";
 
 pub(crate) type ExactTurnCompletionSender =
     tokio::sync::oneshot::Sender<Result<ExactTurnCompletion, MobError>>;
@@ -5311,6 +5335,12 @@ fn bounded_exact_turn_result(
             session_id,
             input_id,
         }),
+        // Not reachable through a public door: only a continuation handed
+        // over inside this crate ends superseded (see the terminal's doc).
+        ExactTurnTerminal::Superseded { .. } => Err(BoundedTurnFailure::CompletionPlumbing {
+            admitted_session_id: admitted_session_id.clone(),
+            error: MobError::Internal(SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string()),
+        }),
         ExactTurnTerminal::PlacedBounded(result) => {
             let result_session_id = SessionId::parse(&result.session_id).map_err(|_| {
                 BoundedTurnFailure::ResultAttributionMismatch {
@@ -5541,6 +5571,13 @@ pub(crate) fn legacy_exact_turn_result(
                 session_id,
                 input_id,
             });
+        }
+        // Not reachable through a public door: only a continuation handed
+        // over inside this crate ends superseded (see the terminal's doc).
+        ExactTurnTerminal::Superseded { .. } => {
+            return Err(MobError::Internal(
+                SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER.to_string(),
+            ));
         }
     };
     match outcome {
@@ -25777,6 +25814,105 @@ mod tests {
                 }) if expired_session == &session_id && expired_input == &input_id
             ),
             "{expired:?}"
+        );
+    }
+
+    /// A superseded terminal has no answer at the two public readers of an
+    /// exact-turn completion: each answers an internal error that names no
+    /// input, the bounded one inside its plumbing failure with the admitted
+    /// session.
+    #[test]
+    fn a_superseded_terminal_has_no_answer_at_the_public_readers() {
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let later = meerkat_core::lifecycle::InputId::new();
+        let superseded = || ExactTurnCompletion {
+            session_id: session_id.clone(),
+            terminal: ExactTurnTerminal::Superseded {
+                input_id: input_id.clone(),
+                superseded_by: later.clone(),
+            },
+        };
+        let names_no_input = |text: &str| {
+            !text.contains(&input_id.to_string()) && !text.contains(&later.to_string())
+        };
+
+        match legacy_exact_turn_result(superseded()) {
+            Err(MobError::Internal(text)) => {
+                assert_eq!(text, SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER);
+                assert!(names_no_input(&text), "{text}");
+            }
+            other => panic!("expected an internal error, got {other:?}"),
+        }
+
+        let spec = BoundedResultSpec::new("superseded", 64).expect("bounded spec");
+        match bounded_exact_turn_result(superseded(), &session_id, &spec) {
+            Err(BoundedTurnFailure::CompletionPlumbing {
+                admitted_session_id,
+                error: MobError::Internal(text),
+            }) => {
+                assert_eq!(admitted_session_id, session_id);
+                assert_eq!(text, SUPERSEDED_TURN_HAS_NO_PUBLIC_ANSWER);
+                assert!(names_no_input(&text), "{text}");
+            }
+            other => panic!("expected a plumbing failure, got {other:?}"),
+        }
+    }
+
+    /// No public door hands out a turn that can end superseded: the one door
+    /// that hands a continuation to a member is private to this crate, and
+    /// the superseded terminal is made in one place, from the typed wait
+    /// answer.
+    #[test]
+    fn no_public_door_hands_out_a_turn_that_can_end_superseded() {
+        let handle_source = include_str!("handle.rs");
+        // Built from parts so this row's own text is not what it finds.
+        let door = ["async fn start_", "attention_continuation("].concat();
+        let private_door = ["pub(crate) ", door.as_str()].concat();
+        let public_door = ["pub ", door.as_str()].concat();
+        assert_eq!(
+            handle_source.matches(&private_door).count(),
+            1,
+            "the continuation's hand-over is declared once, private to the crate"
+        );
+        assert_eq!(
+            handle_source.matches(&door).count(),
+            1,
+            "the continuation's hand-over has one declaration"
+        );
+        assert!(
+            !handle_source.contains(&public_door),
+            "the continuation's hand-over is not a public door"
+        );
+
+        let provisioner_source = include_str!("provisioner.rs");
+        let start = provisioner_source
+            .find("fn runtime_completion_to_exact_turn")
+            .expect("exact runtime completion adapter");
+        let end = provisioner_source[start..]
+            .find("fn runtime_completion_to_mob_result")
+            .map(|offset| start + offset)
+            .expect("next adapter boundary");
+        let exact_adapter = &provisioner_source[start..end];
+        let made = ["ExactTurnTerminal::", "Superseded {"].concat();
+        let answer = ["CompletionWaitError::", "Superseded {"].concat();
+        assert_eq!(
+            exact_adapter.matches(&made).count(),
+            1,
+            "the adapter makes the superseded terminal once"
+        );
+        assert!(
+            exact_adapter.contains(&answer),
+            "the superseded terminal is made from the typed wait answer"
+        );
+        let tests_start = provisioner_source
+            .find("\nmod tests {")
+            .expect("the provisioner's test module");
+        let product = &provisioner_source[..tests_start];
+        assert_eq!(
+            product.matches(&made).count(),
+            1,
+            "nothing else in the provisioner makes a superseded terminal"
         );
     }
 

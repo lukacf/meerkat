@@ -58,7 +58,8 @@ async def run(root):
                 page = await session.history()
                 delivered = [i for i, m in enumerate(page.messages) if m.role == 'user' and text(m.content) == follow]
                 if len(delivered) != 1 or page.has_more:
-                    raise ValueError('No unique delivered user prompt in the complete target session history')
+                    raise ValueError(f'Cannot correlate prompt: {len(delivered)} matches, has_more={page.has_more}, ' 
+                                     f'roles={[m.role for m in page.messages]}')
                 turn = page.messages[delivered[0]+1:]
                 if any(m.role == 'user' for m in turn):
                     raise ValueError('Another user turn intervened')

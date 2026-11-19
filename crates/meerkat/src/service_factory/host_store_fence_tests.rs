@@ -228,6 +228,11 @@ struct FenceControl {
     /// The row's word to a model call that waits for it
     /// ([`ModelStep::HeldTools`], [`ModelStep::HeldText`]).
     model_release: tokio::sync::Notify,
+    /// While set, the next call of `probe` waits for the row's word
+    /// ([`Self::tool_release`]) before it answers.
+    tool_hold: AtomicBool,
+    /// The row's word to a call of `probe` that waits for it.
+    tool_release: tokio::sync::Notify,
 }
 
 impl FenceControl {
@@ -934,6 +939,9 @@ impl AgentToolDispatcher for FenceTools {
             | ClosesDuring::OnlyCall
             | ClosesDuring::TextModelCall
             | ClosesDuring::Never => {}
+        }
+        if self.control.tool_hold.swap(false, Ordering::SeqCst) {
+            self.control.tool_release.notified().await;
         }
         Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
             call.id.into(),

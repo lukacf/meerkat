@@ -321,6 +321,9 @@ enum Meets {
     /// Inside its second round's first commit, waiting where a commit waits
     /// for another writer of the store.
     ARoundCommit,
+    /// Inside its second round's second commit, of the call's results,
+    /// waiting where a commit waits for another writer of the store.
+    ARoundsSecondCommit,
     /// Inside its closing save, after the model's last answer, waiting
     /// where a commit waits for another writer of the store.
     ItsClosingSave,
@@ -329,17 +332,29 @@ enum Meets {
 }
 
 impl Meets {
-    /// The run's first write after its second model call is where the
+    /// One of the run's writes after its second model call is where the
     /// interrupt lands.
     fn a_write(self) -> bool {
-        matches!(self, Self::ARoundCommit | Self::ItsClosingSave)
+        matches!(
+            self,
+            Self::ARoundCommit | Self::ARoundsSecondCommit | Self::ItsClosingSave
+        )
+    }
+
+    /// How many calls of `probe` the first process has begun when the
+    /// interrupt lands.
+    fn calls_begun(self) -> usize {
+        match self {
+            Self::ARoundsSecondCommit => 2,
+            Self::ARoundCommit | Self::ItsClosingSave | Self::AModelCall => 1,
+        }
     }
 
     /// What the model answers, request by request: one call of `probe`,
     /// then, on the row's word, one more call or its last answer.
     fn script(self) -> Vec<ModelStep> {
         match self {
-            Self::ARoundCommit | Self::AModelCall => {
+            Self::ARoundCommit | Self::ARoundsSecondCommit | Self::AModelCall => {
                 vec![ModelStep::Tools, ModelStep::HeldTools(SECOND_ROUND)]
             }
             Self::ItsClosingSave => vec![ModelStep::Tools, ModelStep::HeldText],
@@ -427,6 +442,8 @@ impl NextPrompt {
 #[derive(Debug)]
 struct FirstProcess {
     session_id: meerkat_core::SessionId,
+    /// Where the run was when the interrupt that ended it landed.
+    meets: Meets,
     /// The run of the store's tail after the first round.
     run: Option<RunId>,
     /// Every interrupt the run's handle was asked for, by kind, in order.
@@ -615,14 +632,29 @@ async fn first_process(
         interrupt_asked = tokio::time::timeout(ANSWER_DEADLINE, gate.asked.notified())
             .await
             .is_ok();
-        // The run's next commit waits where a commit waits for another
+        // The run's next write waits where a commit waits for another
         // writer of the store, and the interrupt lands there. No writing
-        // call is under way when the hold begins, so the call that comes
-        // to stand held is the run's next commit and no earlier one.
+        // call is under way when the run goes on under the hold, so the
+        // call that comes to stand held is the run's next write and no
+        // earlier one.
         let store = &process.runtime_store;
+        if meets == Meets::ARoundsSecondCommit {
+            // The round's first commit lands unheld, and its call waits
+            // for the row's word: the hold begins between the two commits.
+            durable.control.tool_hold.store(true, Ordering::SeqCst);
+            durable.control.model_release.notify_one();
+            until(|| process.tools.dispatched.load(Ordering::SeqCst) >= 2).await;
+        }
         let parked = store.park_armed_calls_for_test().await;
+        // A writing call that passed the hold's point before the hold began
+        // finishes first.
+        until(|| store.armed_callers_for_test().is_empty()).await;
         writing_before_the_run_went_on = store.armed_callers_for_test();
-        durable.control.model_release.notify_one();
+        if meets == Meets::ARoundsSecondCommit {
+            durable.control.tool_release.notify_one();
+        } else {
+            durable.control.model_release.notify_one();
+        }
         until(|| {
             !store.armed_callers_for_test().is_empty()
                 && !store.parked_armed_calls_for_test().is_empty()
@@ -636,7 +668,7 @@ async fn first_process(
         // only: no interrupt reaches its caller.
         let watch = match meets {
             Meets::ItsClosingSave => CLOSING_SAVE_WATCH,
-            Meets::ARoundCommit | Meets::AModelCall => ANSWER_DEADLINE,
+            Meets::ARoundCommit | Meets::ARoundsSecondCommit | Meets::AModelCall => ANSWER_DEADLINE,
         };
         caller_gone = within(watch, || store.armed_callers_for_test().is_empty()).await;
         held_without_a_caller = store.parked_armed_calls_for_test();
@@ -657,6 +689,7 @@ async fn first_process(
     };
     let _ = report.send(FirstProcess {
         session_id,
+        meets,
         run,
         interrupts: gate
             .interrupts
@@ -874,27 +907,47 @@ fn assert_met_in_a_write(first: &FirstProcess, interrupt: &'static str) -> Vec<S
     );
     assert_eq!(
         (first.dispatched, first.model_requests >= 2),
-        (1, true),
-        "the first round ran and the second was asked for: {first:#?}"
+        (first.meets.calls_begun(), true),
+        "the first round ran, the second was asked for, and its call was begun only where the \
+         row says: {first:#?}"
     );
     scope
 }
 
-/// The transcript keeps the prompt and the first round, each once, ahead of
-/// whatever the ending left after them.
-fn assert_keeps_the_first_round(rows: &[String]) {
-    eprintln!("the transcript: {rows:#?}");
+/// The transcript of a run that was ended after the interrupt met it in its
+/// second round's first commit, followed by `then`: the prompt, the first
+/// round, the second round's response (the write the run was dropped in,
+/// kept) with results for its call, which never ran, and one notice.
+fn assert_ended_with_its_second_response_kept(rows: &[String], then: &[&str]) {
+    let mut expected = vec![
+        "user probe once",
+        "assistant tool use",
+        "tool results",
+        "assistant tool use",
+        "tool results",
+        "notice Generic",
+    ];
+    expected.extend_from_slice(then);
+    assert_eq!(
+        rows, expected,
+        "the ended run's transcript keeps the prompt, the first round and the second round's \
+         response with results for its call, and holds one notice"
+    );
+}
+
+/// An ended run leaves no tail in the restarted process's store.
+async fn assert_no_tail_is_left(restarted: &Restarted) {
+    let tail = restarted
+        .second
+        .runtime_store
+        .load_whole_blob_provisional_tail(&LogicalRuntimeId::for_session(
+            &restarted.first.session_id,
+        ))
+        .await
+        .map(|tail| tail.map(|tail| tail.authority().run_id().clone()));
     assert!(
-        rows.starts_with(&[
-            "user probe once".to_string(),
-            "assistant tool use".to_string(),
-            "tool results".to_string(),
-        ]) && rows
-            .iter()
-            .filter(|row| row.as_str() == "user probe once")
-            .count()
-            == 1,
-        "the transcript keeps the prompt and the committed first round, each once: {rows:#?}"
+        matches!(tail, Ok(None)),
+        "the ended run leaves no tail in the store: {tail:?}"
     );
 }
 
@@ -1050,7 +1103,8 @@ async fn a_run_stopped_in_good_order_during_a_round_commit_does_not_go_on_past_t
         "work kept past its max age is ended as expired when the session opens, and not run: \
          {inputs:?}"
     );
-    assert_keeps_the_first_round(&restarted.rows().await);
+    assert_ended_with_its_second_response_kept(&restarted.rows().await, &[]);
+    assert_no_tail_is_left(&restarted).await;
     let next = next_prompt(&restarted.second, &first.session_id).await;
     assert!(next.ran(), "the session's next prompt runs: {next:#?}");
 }
@@ -1076,20 +1130,18 @@ async fn a_run_stopped_without_keeping_its_work_during_a_round_commit_is_ended()
     );
     assert_eq!(
         (
-            restarted
-                .inputs_at_the_restart
-                .as_deref()
-                .map(|inputs| inputs
-                    .iter()
-                    .map(|input| input.as_ref().map(|input| input.phase))
-                    .collect::<Vec<_>>()),
+            ended_as(
+                restarted.inputs_at_the_restart.as_ref(),
+                &InputAbandonReason::Cancelled
+            ),
             restarted.asked_and_ran()
         ),
-        (Some(vec![Some(InputLifecycleState::Abandoned)]), (0, 0)),
-        "the stopped run's input is ended and a restart runs nothing of it: {:?}",
+        (Some(true), (0, 0)),
+        "the stopped run's input is ended as cancelled and a restart runs nothing of it: {:?}",
         restarted.inputs_at_the_restart
     );
-    assert_keeps_the_first_round(&restarted.rows().await);
+    assert_ended_with_its_second_response_kept(&restarted.rows().await, &[]);
+    assert_no_tail_is_left(&restarted).await;
     let next = next_prompt(&restarted.second, &first.session_id).await;
     assert!(next.ran(), "the session's next prompt runs: {next:#?}");
 }
@@ -1112,23 +1164,92 @@ async fn a_run_cancelled_during_a_round_commit_is_ended_and_the_next_prompt_runs
         first.next_turn.as_ref().is_some_and(NextPrompt::ran),
         "the session's next prompt runs after the cancel: {first:#?}"
     );
+    let cancelled = Some(InputTerminalOutcome::Abandoned {
+        reason: InputAbandonReason::Cancelled,
+    });
     assert_eq!(
         restarted.inputs_at_the_restart.as_ref().map(|inputs| {
-            inputs
-                .iter()
-                .flatten()
-                .filter(|input| input.phase == InputLifecycleState::Abandoned)
-                .count()
+            (
+                inputs.len(),
+                inputs
+                    .iter()
+                    .flatten()
+                    .filter(|input| {
+                        input.phase == InputLifecycleState::Abandoned && input.ended == cancelled
+                    })
+                    .count(),
+                consumed_among(Some(inputs)),
+            )
         }),
-        Some(1),
-        "the cancelled run's input is ended: {:?}",
+        Some((2, 1, 1)),
+        "the store holds the cancelled run's input ended as cancelled, and the next prompt's \
+         consumed: {:?}",
         restarted.inputs_at_the_restart
     );
-    assert_keeps_the_first_round(&restarted.rows().await);
+    assert_ended_with_its_second_response_kept(
+        &restarted.rows().await,
+        &["user probe again", "assistant probed"],
+    );
+    assert_no_tail_is_left(&restarted).await;
     assert_eq!(
         restarted.asked_and_ran(),
         (0, 0),
         "a restart runs nothing of the cancelled run"
+    );
+}
+
+/// The run continues after an orderly stop also when the suspension lands
+/// in a round's second commit, of its call's results. The second round's
+/// response is committed and its call has run when the stop's suspension
+/// meets the run in the commit of that call's results. The stop completes
+/// and leaves no scope refusing. A restart inside the max age finds the
+/// tail of the same run and its input not ended, and the run goes on: the
+/// round's response and its results are in the transcript once, the call
+/// is not run again, and the model is asked once more, for the answer.
+#[tokio::test]
+async fn a_run_stopped_in_good_order_during_a_rounds_second_commit_does_not_run_its_call_again() {
+    let restarted = ended_then_restarted(
+        Ending::OrderlyStop { max_age: MAX_AGE },
+        Meets::ARoundsSecondCommit,
+        Duration::ZERO,
+    )
+    .await;
+    let first = &restarted.first;
+    assert_dropped_in_its_commit_without_a_refusing_scope(first, SUSPENSION);
+    assert_eq!(
+        first.ended.as_deref(),
+        Some("Ok(true)"),
+        "the stop completes: {first:#?}"
+    );
+    assert_the_waiter_is_told_its_input_stays_queued(first);
+    assert_kept_at_the_restart(&restarted);
+    let inputs = restarted.input_becomes(InputLifecycleState::Consumed).await;
+    assert_eq!(
+        inputs,
+        Some(vec![Some(StoredInput {
+            phase: InputLifecycleState::Consumed,
+            last_run: first.run.clone(),
+            ended: Some(InputTerminalOutcome::Consumed),
+        })]),
+        "the same run goes on after the restart and completes: its input is consumed once, in \
+         the run it began in (at the restart: {:?})",
+        restarted.inputs_at_the_restart
+    );
+    assert_eq!(
+        (restarted.rows().await, restarted.asked_and_ran()),
+        (
+            vec![
+                "user probe once".to_string(),
+                "assistant tool use".to_string(),
+                "tool results".to_string(),
+                "assistant tool use".to_string(),
+                "tool results".to_string(),
+                "assistant probed".to_string(),
+            ],
+            (1, 0)
+        ),
+        "the round's response and its results are kept, each once: the call does not run \
+         again, and the model is asked once more, for the answer"
     );
 }
 

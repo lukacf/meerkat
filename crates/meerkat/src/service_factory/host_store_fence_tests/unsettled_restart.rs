@@ -25,16 +25,16 @@ const SECOND_ROUND: &str = "probe-round-2";
 
 /// What outlives a process: the host store, its control, and the stores
 /// beside it.
-struct Durable {
-    host: Arc<dyn HostStore>,
-    control: Arc<FenceControl>,
-    store: Arc<MemoryStore>,
-    blobs: Arc<MemoryBlobStore>,
-    temp: TempDir,
+pub(super) struct Durable {
+    pub(super) host: Arc<dyn HostStore>,
+    pub(super) control: Arc<FenceControl>,
+    pub(super) store: Arc<MemoryStore>,
+    pub(super) blobs: Arc<MemoryBlobStore>,
+    pub(super) temp: TempDir,
 }
 
 impl Durable {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         let control = Arc::new(FenceControl::default());
         Arc::new(Self {
             host: Arc::new(FenceHost::new(Arc::clone(&control))),
@@ -48,17 +48,21 @@ impl Durable {
 
 /// One process over the row's host store: its realm, runtime store, runtime,
 /// session service, and its own model and tools.
-struct Process {
-    realm: Arc<SpiRealm>,
-    runtime_store: Arc<SpiRuntimeStore>,
-    machine: Arc<MeerkatMachine>,
-    service: Arc<PersistentSessionService<FenceBuilder>>,
-    client: Arc<FenceModel>,
-    tools: Arc<FenceTools>,
+pub(super) struct Process {
+    pub(super) realm: Arc<SpiRealm>,
+    pub(super) runtime_store: Arc<SpiRuntimeStore>,
+    pub(super) machine: Arc<MeerkatMachine>,
+    pub(super) service: Arc<PersistentSessionService<FenceBuilder>>,
+    pub(super) client: Arc<FenceModel>,
+    pub(super) tools: Arc<FenceTools>,
 }
 
 impl Process {
-    async fn open(durable: &Durable, acquire: AcquireMode, script: Vec<ModelStep>) -> Self {
+    pub(super) async fn open(
+        durable: &Durable,
+        acquire: AcquireMode,
+        script: Vec<ModelStep>,
+    ) -> Self {
         let realm = SpiRealm::open(
             Arc::clone(&durable.host),
             SpiRealmConfig {
@@ -118,7 +122,10 @@ impl Process {
 
     /// Materialize `session` with its executor, as a surface does: a new
     /// session, or the one a restart loaded from the store.
-    async fn materialize(&self, session: meerkat_core::Session) -> meerkat_core::SessionId {
+    pub(super) async fn materialize(
+        &self,
+        session: meerkat_core::Session,
+    ) -> meerkat_core::SessionId {
         let (request, _) =
             crate::surface::split_runtime_backed_eager_create_request(CreateSessionRequest {
                 model: "claude-sonnet-4-5".into(),

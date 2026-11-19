@@ -386,6 +386,55 @@ pub struct SpiRuntimeStore {
     /// obligation scan lists them as holding work until their body loads or
     /// their next commit pins the folded form.
     unfolded_heads: Arc<StdMutex<HashSet<String>>>,
+    /// Test support: the scopes of the mutating calls whose caller is inside
+    /// the call from its arm on ([`Self::armed_callers_for_test`]).
+    #[cfg(any(test, feature = "test-support"))]
+    armed_callers: Arc<StdMutex<Vec<String>>>,
+    /// Test support: while a row holds this for writing, a mutating call
+    /// waits right after its arm ([`Self::park_armed_calls_for_test`]).
+    #[cfg(any(test, feature = "test-support"))]
+    armed_park: Arc<RwLock<()>>,
+    /// Test support: the scopes of the mutating calls that stand at that
+    /// wait ([`Self::parked_armed_calls_for_test`]).
+    #[cfg(any(test, feature = "test-support"))]
+    armed_parked: Arc<StdMutex<Vec<String>>>,
+}
+
+/// Test support: one entry of a list of scopes, per scope of a mutating
+/// call; it leaves the list when it is dropped (its holder ended, or was
+/// dropped).
+#[cfg(any(test, feature = "test-support"))]
+struct ListedScopesForTest {
+    list: Arc<StdMutex<Vec<String>>>,
+    scopes: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ListedScopesForTest {
+    fn enter(list: &Arc<StdMutex<Vec<String>>>, scopes: Vec<String>) -> Self {
+        list.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(scopes.iter().cloned());
+        Self {
+            list: Arc::clone(list),
+            scopes,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ListedScopesForTest {
+    fn drop(&mut self) {
+        let mut list = self
+            .list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for scope in &self.scopes {
+            if let Some(index) = list.iter().position(|held| held == scope) {
+                list.remove(index);
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for SpiRuntimeStore {
@@ -624,7 +673,47 @@ impl SpiRuntimeStore {
             mob_host: Arc::new(StdMutex::new(records)),
             tool_grants: Arc::new(StdMutex::new(tool_grants)),
             unfolded_heads: Arc::new(StdMutex::new(unfolded_heads)),
+            #[cfg(any(test, feature = "test-support"))]
+            armed_callers: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            armed_park: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            armed_parked: Arc::default(),
         })
+    }
+
+    /// Test support: until the answer is dropped, a mutating call of this
+    /// store waits right after its arm, before its in-memory step: where
+    /// it would wait for the in-memory image's lock behind another
+    /// writer. Reads pass.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn park_armed_calls_for_test(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.armed_park).write_owned().await
+    }
+
+    /// Test support: the scopes of the mutating calls whose caller is
+    /// inside the call from its arm on, one entry per call and scope. A
+    /// caller leaves when its call answers or its future is dropped.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn armed_callers_for_test(&self) -> Vec<String> {
+        self.armed_callers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Test support: the scopes of the mutating calls that stand at the
+    /// wait of [`Self::park_armed_calls_for_test`], after their arm, one
+    /// entry per call and scope. A call leaves when its wait ends or the
+    /// call is dropped there.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn parked_armed_calls_for_test(&self) -> Vec<String> {
+        self.armed_parked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The realm this store commits through.
@@ -667,6 +756,21 @@ impl SpiRuntimeStore {
             // before memory changes, so a lapse refuses cleanly.
             self.realm.ensure_lease().await.map_err(refuse)?;
             scopes.arm();
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        let _armed_caller = (mode == Mode::Mutate).then(|| {
+            ListedScopesForTest::enter(
+                &self.armed_callers,
+                ids.iter().map(ToString::to_string).collect(),
+            )
+        });
+        #[cfg(any(test, feature = "test-support"))]
+        if mode == Mode::Mutate {
+            let _parked = ListedScopesForTest::enter(
+                &self.armed_parked,
+                ids.iter().map(ToString::to_string).collect(),
+            );
+            drop(self.armed_park.read().await);
         }
         let (result, touches) = journal::capture(op).await;
         if touches.whole.is_empty() && touches.entries.is_empty() {

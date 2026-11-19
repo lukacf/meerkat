@@ -1160,6 +1160,8 @@ class CiWorkflowTests(unittest.TestCase):
         # step (test_the_four_compile_paths_are_measured_in_steps_of_their_own).
         upload_at, upload = named(build, "Retain the lib test archive")
         self.assertEqual(uses_of(upload), "actions/upload-artifact")
+        self.assertEqual([step.get("name") for step in steps_of(build) if uses_of(step) == "actions/upload-artifact"],
+                         ["Retain the lib test archive", MEASURE_UPLOAD])
         # Keyed by the run, not the attempt: a rerun of one failed leg finds
         # the archive the first attempt built, and a rerun of the build
         # replaces it.
@@ -1300,11 +1302,13 @@ class CiWorkflowTests(unittest.TestCase):
                 self.assertNotIn("if", before)
                 self.assertNotIn("env", before)
                 self.assertEqual(after["if"], "${{ !cancelled() }}")
-                self.assertEqual(after["env"], {
-                    "INSTR_SELECTION": selection,
-                    "INSTR_PACKAGE": "meerkat-meta",
-                    "INSTR_WITHHOLD": "${{ env.SCCACHE_GCS_BUCKET_NAME }}",
-                })
+                # No key of the step's own carries the cache's name: the
+                # runner writes a run step's `env:` into the log. The script
+                # reads the name from the workflow's environment.
+                self.assertEqual(after["env"], {"INSTR_SELECTION": selection, "INSTR_PACKAGE": "meerkat-meta"})
+                # The report line names the job by its key; the run's job
+                # listing names it by `name`: the two are the same word.
+                self.assertEqual(workflow["jobs"][name]["name"], name)
                 before_runs.add(before["run"])
                 after_runs.add(after["run"])
                 upload = steps[-1]
@@ -1335,6 +1339,12 @@ class CiWorkflowTests(unittest.TestCase):
             self.assertNotIn("show-adv-stats", text)
         for word in ("cache_location", "Cache location", "basedirs"):
             self.assertNotIn(word, after_run)
+        # The cache's bucket name is the workflow's own variable and an input
+        # of the cache's setup action; no step's `env:` repeats it.
+        self.assertIn('os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")', after_run)
+        for name, job in workflow["jobs"].items():
+            for step in steps_of(job):
+                self.assertNotIn("SCCACHE_GCS_BUCKET_NAME", json.dumps(step.get("env") or {}), name)
         self.assertEqual(workflow["env"]["CARGO_TARGET_DIR"], "${{ github.workspace }}/target")
 
     def run_step(self, script: str, env: dict[str, str], path_dir: Path) -> subprocess.CompletedProcess:
@@ -1427,7 +1437,7 @@ class CiWorkflowTests(unittest.TestCase):
             "GITHUB_RUN_ID": "4242", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_NAME": "fixture-runner",
             "ImageOS": "ubuntu24", "ImageVersion": "20261116.133.1",
             "INSTR_SELECTION": COMPILE_PATHS["rust-unit-build"][2], "INSTR_PACKAGE": "meerkat-meta",
-            "INSTR_WITHHOLD": FIXTURE_LOCATION_NAME,
+            "SCCACHE_GCS_BUCKET_NAME": FIXTURE_LOCATION_NAME,
         }
         return env, tools_dir
 
@@ -1475,8 +1485,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertTrue(lines and all(line.startswith("meta-ci-instr: ") for line in lines), result.stdout)
         said = [line.removeprefix("meta-ci-instr: ") for line in lines]
         self.assertEqual(said, [
-            'job=rust-unit-build job_id=unknown (not visible inside a job; joined from the run\'s job listing '
-            'by name) run=4242 attempt=1 runner=fixture-runner image=ubuntu24/20261116.133.1 '
+            "job=rust-unit-build job_id=unknown (not read by this step; join the run's job listing by name) "
+            'run=4242 attempt=1 runner=fixture-runner image=ubuntu24/20261116.133.1 '
             'selection="meerkat-meta lib test, default features"',
             'versions rustc="rustc 1.97.0 (fixture)" cargo="cargo 1.97.0 (fixture)" sccache="sccache 0.18.0" '
             "(nextest: its install step's own line, in the jobs that install it)",
@@ -1536,6 +1546,24 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn(" cache_hits=392 cache_misses=unknown ", result.stdout)
         self.assertIn(" compiling=unknown (2 compilations sccache ran) ", result.stdout)
         self.assertIn("meta-ci-instr: Cargo timing reports: unknown (no report directory)\n", result.stdout)
+
+        # A second reading lower than the first (another server answered) is
+        # no measurement: those figures are unknown, never a negative number.
+        with tempfile.TemporaryDirectory() as root:
+            env, tools_dir = self.measured_scene(
+                Path(root), after=self.sccache_reading(4, 2, 1, 5.0, 0.5, {}, 0))
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(re.search(r"=-\d", result.stdout), result.stdout)
+        self.assertIn("sccache delta compile_requests=unknown requests_executed=unknown cache_hits=unknown "
+                      "cache_misses=unknown cache_errors=0 ", result.stdout)
+        self.assertIn("sccache delta non-cacheable reasons: crate-type=unknown\n", result.stdout)
+        self.assertIn(" compiling=unknown (unknown compilations sccache ran) cache_read_hits=unknown "
+                      "(unknown hits) cache_writes=0.0 (0 writes)\n", result.stdout)
+        self.assertIn("meta-ci-instr: sccache delta: unknown where the second reading was lower than the "
+                      "first or not a count (cache_hits, cache_misses, cache_read_hit_duration, compilations, "
+                      "compile_requests, compiler_write_duration, not_cached, requests_executed, "
+                      "requests_not_cacheable, requests_not_compile)\n", result.stdout)
 
         # No sccache, rustc or Cargo on PATH.
         with tempfile.TemporaryDirectory() as root:

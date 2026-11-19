@@ -425,7 +425,6 @@ jobs:
         env:
           INSTR_SELECTION: "meerkat-meta lib test, default features"
           INSTR_PACKAGE: meerkat-meta
-          INSTR_WITHHOLD: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
           python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
@@ -435,7 +434,9 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          WITHHOLD = os.environ.get("INSTR_WITHHOLD", "")
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
 
 
           def say(text):
@@ -504,9 +505,18 @@ jobs:
                   say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
                   return
 
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
               def delta(key, read=count):
                   first, last = read(before, key), read(after, key)
-                  return None if first is None or last is None else last - first
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
 
               counters = (
                   "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
@@ -525,7 +535,10 @@ jobs:
                   moved = []
                   for reason in sorted(set(first) | set(last)):
                       was, now = first.get(reason, 0), last.get(reason, 0)
-                      if type(was) is int and type(now) is int and now != was:
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
                           moved.append(f"{plain(reason)}={now - was}")
                   say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
               else:
@@ -539,6 +552,11 @@ jobs:
                   f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
                   f" ({shown(delta('cache_writes'))} writes)"
               )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
 
 
           def timing_reports():
@@ -612,8 +630,8 @@ jobs:
 
           def identity():
               say(
-                  f"job={env('GITHUB_JOB')} job_id=unknown (not visible inside a job; joined from the run's"
-                  f" job listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
                   f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
                   f' selection="{env("INSTR_SELECTION")}"'
               )
@@ -1123,7 +1141,6 @@ jobs:
         env:
           INSTR_SELECTION: "meerkat-meta lib test, features extension-state,announcement-test-faults,console-test-faults, filter extension_ document_mcp_child_supply"
           INSTR_PACKAGE: meerkat-meta
-          INSTR_WITHHOLD: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
           python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
@@ -1133,7 +1150,9 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          WITHHOLD = os.environ.get("INSTR_WITHHOLD", "")
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
 
 
           def say(text):
@@ -1202,9 +1221,18 @@ jobs:
                   say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
                   return
 
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
               def delta(key, read=count):
                   first, last = read(before, key), read(after, key)
-                  return None if first is None or last is None else last - first
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
 
               counters = (
                   "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
@@ -1223,7 +1251,10 @@ jobs:
                   moved = []
                   for reason in sorted(set(first) | set(last)):
                       was, now = first.get(reason, 0), last.get(reason, 0)
-                      if type(was) is int and type(now) is int and now != was:
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
                           moved.append(f"{plain(reason)}={now - was}")
                   say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
               else:
@@ -1237,6 +1268,11 @@ jobs:
                   f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
                   f" ({shown(delta('cache_writes'))} writes)"
               )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
 
 
           def timing_reports():
@@ -1310,8 +1346,8 @@ jobs:
 
           def identity():
               say(
-                  f"job={env('GITHUB_JOB')} job_id=unknown (not visible inside a job; joined from the run's"
-                  f" job listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
                   f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
                   f' selection="{env("INSTR_SELECTION")}"'
               )
@@ -1479,7 +1515,6 @@ jobs:
         env:
           INSTR_SELECTION: "meerkat-meta lib test, features openai-live, filters console_voice and gateway_openai_live_registration"
           INSTR_PACKAGE: meerkat-meta
-          INSTR_WITHHOLD: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
           python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
@@ -1489,7 +1524,9 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          WITHHOLD = os.environ.get("INSTR_WITHHOLD", "")
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
 
 
           def say(text):
@@ -1558,9 +1595,18 @@ jobs:
                   say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
                   return
 
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
               def delta(key, read=count):
                   first, last = read(before, key), read(after, key)
-                  return None if first is None or last is None else last - first
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
 
               counters = (
                   "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
@@ -1579,7 +1625,10 @@ jobs:
                   moved = []
                   for reason in sorted(set(first) | set(last)):
                       was, now = first.get(reason, 0), last.get(reason, 0)
-                      if type(was) is int and type(now) is int and now != was:
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
                           moved.append(f"{plain(reason)}={now - was}")
                   say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
               else:
@@ -1593,6 +1642,11 @@ jobs:
                   f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
                   f" ({shown(delta('cache_writes'))} writes)"
               )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
 
 
           def timing_reports():
@@ -1666,8 +1720,8 @@ jobs:
 
           def identity():
               say(
-                  f"job={env('GITHUB_JOB')} job_id=unknown (not visible inside a job; joined from the run's"
-                  f" job listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
                   f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
                   f' selection="{env("INSTR_SELECTION")}"'
               )
@@ -1772,7 +1826,6 @@ jobs:
         env:
           INSTR_SELECTION: "meerkat-meta examples library_mode_reference, console_acceptance_fixture, memory_console_reference, workgraph_console_reference, mcp_apps_gateway_fixture, default features"
           INSTR_PACKAGE: meerkat-meta
-          INSTR_WITHHOLD: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
         run: |
           sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
           python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
@@ -1782,7 +1835,9 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          WITHHOLD = os.environ.get("INSTR_WITHHOLD", "")
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
 
 
           def say(text):
@@ -1851,9 +1906,18 @@ jobs:
                   say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
                   return
 
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
               def delta(key, read=count):
                   first, last = read(before, key), read(after, key)
-                  return None if first is None or last is None else last - first
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
 
               counters = (
                   "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
@@ -1872,7 +1936,10 @@ jobs:
                   moved = []
                   for reason in sorted(set(first) | set(last)):
                       was, now = first.get(reason, 0), last.get(reason, 0)
-                      if type(was) is int and type(now) is int and now != was:
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
                           moved.append(f"{plain(reason)}={now - was}")
                   say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
               else:
@@ -1886,6 +1953,11 @@ jobs:
                   f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
                   f" ({shown(delta('cache_writes'))} writes)"
               )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
 
 
           def timing_reports():
@@ -1959,8 +2031,8 @@ jobs:
 
           def identity():
               say(
-                  f"job={env('GITHUB_JOB')} job_id=unknown (not visible inside a job; joined from the run's"
-                  f" job listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
                   f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
                   f' selection="{env("INSTR_SELECTION")}"'
               )

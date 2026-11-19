@@ -50,6 +50,9 @@ PULL_REQUEST_ONLY = " && github.event_name == 'pull_request'"
 META_PACKAGES = ("meerkat-meta", "meta-extension-state", "meta-store-conformance")
 SETUP_SCCACHE = "./.github/actions/setup-sccache-ci"
 SETUP_MOLD = "./.github/actions/setup-mold-ci"
+# The step of a rust-unit leg that checks the archive it fetched before any
+# test runs.
+UNIT_LEG_GUARD = "Check the fetched archive and the workspace path it was built at"
 
 
 def load(path: Path) -> dict:
@@ -1105,11 +1108,18 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(fetch["with"], {"name": artifact, "path": "${{ runner.temp }}/nextest-archive"})
         # The lib's tests read fixtures by the build's absolute path
         # (env!("CARGO_MANIFEST_DIR")), and some return early when a file
-        # is absent: a leg at another path fails before it runs any.
-        guard_at, guard = named(job, "Check the workspace path the archive was built at")
-        self.assertIn(f'built="$(cat "${{RUNNER_TEMP}}/nextest-archive/{built_at}")"\n', guard["run"])
-        self.assertIn('if [[ "${built}" != "${GITHUB_WORKSPACE}" ]]; then\n', guard["run"])
-        self.assertIn("exit 1\n", guard["run"])
+        # is absent: a leg at another path fails before it runs any. The
+        # same step refuses a fetched archive or path record that is not a
+        # non-empty file (test_a_unit_leg_refuses_an_archive_it_cannot_trust
+        # runs it).
+        guard_at, guard = named(job, UNIT_LEG_GUARD)
+        self.assertEqual(guard["shell"], "bash")
+        self.assertIn(f'archive="${{RUNNER_TEMP}}/nextest-archive/{archive}"\n', guard["run"])
+        self.assertIn(f'record="${{RUNNER_TEMP}}/nextest-archive/{built_at}"\n', guard["run"])
+        self.assertIn('if [[ ! -s "${archive}" ]]; then\n', guard["run"])
+        self.assertIn('if [[ ! -s "${record}" ]]; then\n', guard["run"])
+        self.assertIn('if [[ -z "${built}" || "${built}" != "${GITHUB_WORKSPACE}" ]]; then\n', guard["run"])
+        self.assertEqual(guard["run"].count("exit 1\n"), 3)
         run_at, step = named(job, "Lib tests")
         self.assertEqual([fetch_at, guard_at, run_at], sorted([fetch_at, guard_at, run_at]))
         self.assertEqual(run_at, len(steps_of(job)) - 1)
@@ -1126,6 +1136,48 @@ class CiWorkflowTests(unittest.TestCase):
         code = "\n".join(line for line in job_block("rust-unit").splitlines() if not line.strip().startswith("#"))
         for absent in ("repo-cargo", SETUP_SCCACHE, SETUP_MOLD, "Swatinem/rust-cache", "id-token", "RUSTC_WRAPPER"):
             self.assertNotIn(absent, code)
+
+    def test_a_unit_leg_refuses_an_archive_it_cannot_trust(self):
+        """Before it runs a test, a rust-unit leg checks what it fetched: the
+        archive and the record of the workspace path it was built at are
+        non-empty files, and that path is the leg's own. The step's own
+        script, run as the runner runs a `shell: bash` step, goes on only for
+        the build's path; another path, a missing, empty or blank record and
+        a missing or empty archive each stop the leg with their own error
+        line."""
+        steps = steps_of(load(CI_WORKFLOW)["jobs"]["rust-unit"])
+        (guard,) = [step for step in steps if step.get("name") == UNIT_LEG_GUARD]
+        self.assertEqual(guard["shell"], "bash")
+        self.assertLess(steps.index(guard), len(steps) - 1)
+        self.assertEqual(steps[-1]["name"], "Lib tests")
+        here = "/work/meerkat"
+        cases = (
+            ("the build's path", b"archive", f"{here}\n", 0, ""),
+            ("another path", b"archive", "/elsewhere/meerkat\n", 1, "was built at '/elsewhere/meerkat'"),
+            ("no record", b"archive", None, 1, "path the archive was built at is missing or empty"),
+            ("an empty record", b"archive", "", 1, "path the archive was built at is missing or empty"),
+            ("a blank line for a record", b"archive", "\n", 1, "was built at ''"),
+            ("no archive", None, f"{here}\n", 1, "the lib test archive is missing or empty"),
+            ("an empty archive", b"", f"{here}\n", 1, "the lib test archive is missing or empty"),
+        )
+        for name, archive, record, status, said in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temp:
+                fetched = Path(temp) / "nextest-archive"
+                fetched.mkdir()
+                if archive is not None:
+                    (fetched / "nextest-meta-unit.tar.zst").write_bytes(archive)
+                if record is not None:
+                    (fetched / "nextest-meta-unit.workspace").write_text(record)
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", guard["run"]],
+                    env={"PATH": os.environ["PATH"], "RUNNER_TEMP": temp, "GITHUB_WORKSPACE": here},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                errors = [line for line in result.stdout.splitlines() if line.startswith("::error::")]
+                self.assertEqual(len(errors), status, result.stdout)
+                if said:
+                    self.assertIn(said, errors[0])
 
     def test_gate_requires_every_job_it_lists(self):
         """A job absent from `gate` can fail without failing the check suite.

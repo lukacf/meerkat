@@ -484,14 +484,27 @@ jobs:
         with:
           name: nextest-meta-unit-${{ github.run_id }}
           path: ${{ runner.temp }}/nextest-archive
-      # Some of the lib's tests return early when a fixture they read by the
-      # build's absolute path is absent, which would pass at another path.
-      - name: Check the workspace path the archive was built at
+      # Before any test: what was fetched is a non-empty archive and a
+      # non-empty record of the path it was built at, and that path is this
+      # leg's own. Some of the lib's tests return early when a fixture they
+      # read by the build's absolute path is absent, which would pass at
+      # another path.
+      - name: Check the fetched archive and the workspace path it was built at
         shell: bash
         run: |
-          built="$(cat "${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.workspace")"
-          if [[ "${built}" != "${GITHUB_WORKSPACE}" ]]; then
-            echo "::error::the lib test archive was built at ${built}; this leg runs at ${GITHUB_WORKSPACE}"
+          archive="${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.tar.zst"
+          record="${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.workspace"
+          if [[ ! -s "${archive}" ]]; then
+            echo "::error::the lib test archive is missing or empty at ${archive}"
+            exit 1
+          fi
+          if [[ ! -s "${record}" ]]; then
+            echo "::error::the record of the workspace path the archive was built at is missing or empty at ${record}"
+            exit 1
+          fi
+          built="$(cat "${record}")"
+          if [[ -z "${built}" || "${built}" != "${GITHUB_WORKSPACE}" ]]; then
+            echo "::error::the lib test archive was built at '${built}'; this leg runs at ${GITHUB_WORKSPACE}"
             exit 1
           fi
       # Meta's tests run on the 16 MiB thread stack its product line sets

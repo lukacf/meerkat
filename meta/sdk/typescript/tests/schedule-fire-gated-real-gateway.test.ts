@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { gatewayEnvironment } from "./gateway-test-support.js";
+
 const gateway = process.env.META_RPC_GATEWAY_BIN;
 const seedHost = fileURLToPath(new URL("./fixtures/schedule-fire-restart-host.ts", import.meta.url));
 const gatedHost = fileURLToPath(new URL("./fixtures/schedule-fire-gated-host.ts", import.meta.url));
@@ -45,7 +47,9 @@ external_addressable = true
 `);
       const runHost = async (host: string, leg: string) => {
         try {
-          const result = await run(process.execPath, ["--import", "tsx", host, leg, directory], { timeout: 110_000 });
+          const result = await run(process.execPath, ["--import", "tsx", host, leg, directory], {
+            timeout: 110_000, env: { ...process.env, ...gatewayEnvironment(directory) },
+          });
           writeFileSync(join(directory, `${leg}.log`), result.stdout + result.stderr);
           return JSON.parse(readFileSync(join(directory, `${leg}.json`), "utf8"));
         } catch (error) {

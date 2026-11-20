@@ -12,6 +12,8 @@ import time
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta import InitInProgressError
 from meerkat_meta.builder import Meta
 from meerkat_meta.runtime import MetaRuntime
@@ -51,10 +53,15 @@ class _ReentrantRoster:
     reason="META_GATEWAY_BIN not set to a built rpc_gateway",
 )
 @pytest.mark.asyncio
-async def test_reentrant_rpc_from_a_startup_callback_is_refused_at_once():
+async def test_reentrant_rpc_from_a_startup_callback_is_refused_at_once(tmp_path):
     roster = _ReentrantRoster()
     runtime = MetaRuntime(
-        Meta.builder().gateway(_GATEWAY_BIN).mob_inline(_MOB_TOML).roster(roster)._config
+        Meta.builder()
+        .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, tmp_path))
+        .mob_inline(_MOB_TOML)
+        .roster(roster)
+        ._config
     )
     roster.runtime = runtime
     try:

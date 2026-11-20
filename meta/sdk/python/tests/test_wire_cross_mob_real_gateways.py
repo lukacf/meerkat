@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta import MEMBER_STATE_ACTIVE, MEMBER_STATE_BROKEN, Meta
 from meerkat_meta.errors import RpcError
 
@@ -255,6 +257,7 @@ async def _gateway(
     builder = (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, root))
         .mob(str(root / "mob.toml"))
         .meerkat_config(root / "config.toml")
     )

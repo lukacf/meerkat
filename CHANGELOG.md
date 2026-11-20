@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Gemini 4 Neon (`gemini-4-neon`) is available explicitly through the existing
+  Gemini generateContent adapter on paid Gemini API tiers: a shared 1,048,576-token
+  context, 65,536-token synchronous output cap, and `low`/`medium`/`high` thinking
+  levels. An unset level preserves Google's `high` default. Google's additional
+  `xhigh` level is not expressible by Meerkat's Gemini tag and is refused by
+  `reasoning_effort`; long decode is not added. The Gemini default remains
+  `gemini-4-argon`. Remove an existing custom `[models.gemini-4-neon]` entry
+  before upgrading because model IDs must be unique (see the upgrade guide).
+
 ## [0.9.17] - 2026-11-18
 
 ### Breaking

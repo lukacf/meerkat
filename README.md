@@ -129,7 +129,9 @@ or fallback Azure key/endpoint pair the OpenAI environment default.
 The catalog defaults are `gpt-6-astra` (OpenAI, and the global default),
 `claude-opus-5-5` (Anthropic) and `gemini-4-argon` (Gemini, on paid Gemini API
 tiers; on the free tier select `gemini-3.8-flash` or, from 0.9.15,
-`gemini-4-hydrogen`). Catalog support does not
+`gemini-4-hydrogen`). Gemini 4 Neon is opt-in with `--model gemini-4-neon`
+on paid Gemini API tiers (`low`/`medium`/`high`; Meerkat does not yet send
+Google's `xhigh`). Catalog support does not
 guarantee access for an API organization or through Azure, Copilot or custom
 backends, so select an available model explicitly when needed:
 

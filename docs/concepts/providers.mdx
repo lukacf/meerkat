@@ -149,6 +149,7 @@ Use `rkat models` for every supported ID and its current limits.
     |-------|---------|------------|-------------|
     | `gemini-4-carbon` | 1M (shared by input, thinking, and output) | 64K | Google's strongest Gemini 4 reasoning model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
     | `gemini-4-argon` | 1M (shared by input, thinking, and output) | 64K | Default Gemini model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
+    | `gemini-4-neon` | 1M (shared by input, thinking, and output) | 64K | Stable; paid Gemini API tiers; opt in with `--model gemini-4-neon`; Meerkat thinking levels `low`/`medium`/`high` (Google defaults to `high`; `xhigh` is not yet supported by Meerkat) |
     | `gemini-4-hydrogen` | 1M (shared by input, thinking, and output) | 64K | Google's fast Gemini 4 model, in the catalog from 0.9.15; on the free tier and the paid Gemini API tiers; thinking levels `low`/`medium`/`high` (Google's default for it is `high`) |
     | `gemini-3.8-flash` | 1M | 64K | Recommended Flash model; also available on the free tier |
     | `gemini-3.7-flash` | 1M | 64K | Deprecated upstream; Google serves it with `gemini-3.8-flash` |
@@ -768,16 +769,17 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     Consult `rkat models` for the selected model's effective parameter schema.
     The catalog records the thinking levels each model accepts. A level the
     selected model's catalog row does not list, such as `minimal` on
-    `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-3.8-flash` or
+    `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-4-neon`, `gemini-3.8-flash` or
     `gemini-3.1-pro-preview`, is refused with a typed error before any
     request is sent (when the agent is built, for build parameters). A
     request that names no level carries none, so the model thinks at
     Google's default for it: `medium` on `gemini-4-carbon` and
-    `gemini-4-argon`, `high` on `gemini-4-hydrogen`.
+    `gemini-4-argon`, `high` on `gemini-4-hydrogen` and `gemini-4-neon`.
 
-    Google also documents a fourth level, `xhigh`, for `gemini-4-hydrogen`.
-    Meerkat does not send it in 0.9.15: a `reasoning_effort` of `xhigh` on
-    that model is [refused](#reasoning-effort) as `unsupported_level` with
+    Google also documents a fourth level, `xhigh`, for `gemini-4-hydrogen`
+    and [Gemini 4 Neon](https://aistudio.google.com/docs/whats-new-gemini-4-neon).
+    Meerkat does not send it: a `reasoning_effort` of `xhigh` on
+    either model is [refused](#reasoning-effort) as `unsupported_level` with
     `supported` `low`, `medium` and `high`, wherever a level is checked
     (when the session is created or resumed, on a turn that changes the
     level or the model, and before a provider request), and the Gemini

@@ -1433,6 +1433,8 @@ interrupts a run.
   no attempt was counted, which is not proof that no run ever saw the input:
   a steer that joined a running turn and went back to the queue because the
   turn discarded what it had appended counts no attempt.
+  A durable steer recalled while it waits for its model boundary gives that
+  boundary back: the next durable steer in the steer lane joins it.
 - `QueuedInputRecall::NotQueued { phase, run_id }`: a run holds the input
   (`Staged`, `Applied` or `AppliedPendingConsumption`). Nothing changes.
   `run_id` is the run that holds it, when the runtime has one.

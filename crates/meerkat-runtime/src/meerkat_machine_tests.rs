@@ -61971,20 +61971,32 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
     // a lock miss alone is never published as a failed read: the census
     // answers with its last completed reading, the per-session read with
     // nothing.
+    //
+    // The driver is held through a handle of its own, and no guard on the
+    // session registry is kept while the census is probed. The registry is
+    // the one lock whose miss the census does publish as a failed read
+    // (`None`), and a writer that waits behind a reader's guard keeps it
+    // unreadable for as long as that guard is held. The poll admits that
+    // failed read and probes again.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
-        assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
-            Some(1),
-            "a lock miss with nothing read keeps the last completed reading"
-        );
+        let driver = {
+            let sessions = machine.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&held.session_id)
+                    .expect("registered session entry")
+                    .driver,
+            )
+        };
+        let driver_held = driver.lock().await;
+        run_settlement_census_settles_at(
+            machine,
+            past_run_settlement_notice,
+            1,
+            None,
+            "a lock miss with nothing read keeps the last completed reading",
+        )
+        .await;
         assert_eq!(
             machine.unsettled_run_at(
                 &held.session_id,
@@ -62013,21 +62025,26 @@ async fn unsettled_run_session_count_sees_a_committed_run_whose_loop_stands() {
     .await;
     // The same miss on a healthy session: the last completed reading is
     // zero, and that is what a busy healthy host publishes, not a failed
-    // read.
+    // read. Held and probed as above.
     {
-        let sessions = machine.sessions.read().await;
-        let entry = sessions
-            .get(&held.session_id)
-            .expect("registered session entry");
-        let driver_held = entry.driver.lock().await;
-        assert_eq!(
-            machine.unsettled_run_session_count_at(
-                crate::run_progress::RUN_SETTLEMENT_NOTICE,
-                past_run_settlement_notice(),
-            ),
-            Some(0),
-            "a lock miss on a healthy session is not a failed read"
-        );
+        let driver = {
+            let sessions = machine.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&held.session_id)
+                    .expect("registered session entry")
+                    .driver,
+            )
+        };
+        let driver_held = driver.lock().await;
+        run_settlement_census_settles_at(
+            machine,
+            past_run_settlement_notice,
+            0,
+            None,
+            "a lock miss on a healthy session is not a failed read",
+        )
+        .await;
         drop(driver_held);
     }
     assert_eq!(

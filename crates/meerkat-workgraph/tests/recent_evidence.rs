@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use meerkat_core::{AgentToolDispatcher, types::ToolCallView};
+use meerkat_core::{AgentToolDispatcher, ToolError, types::ToolCallView};
 use meerkat_workgraph::{
     AttentionProjectionRequest, GoalCreateRequest, MemoryWorkGraphStore, WorkGraphService,
     WorkGraphToolErrorCode, WorkGraphToolSurface, WorkNamespace,
@@ -67,6 +67,36 @@ fn cursor(page: &Value) -> &str {
         .expect("a truncated evidence page supplies an opaque continuation")
 }
 
+// Deliberately construct wire input without using the private production codec.
+// A cursor is validated, not authenticated; these rows pin its validation limits.
+fn forge_cursor(key: Value) -> String {
+    let bytes =
+        serde_json::to_vec(&json!({"op": "evidence", "k": key, "a": null})).expect("cursor body");
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut encoded = String::from("wg1.");
+    for chunk in bytes.chunks(3) {
+        let word = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for offset in 0..(chunk.len() * 8).div_ceil(6) {
+            encoded.push(char::from(
+                alphabet[((word >> (18 - offset * 6)) & 63) as usize],
+            ));
+        }
+    }
+    encoded
+}
+
+fn evidence_cursor_key(item: &Value, before: usize) -> Value {
+    json!({
+        "realm_id": item["realm_id"],
+        "namespace": item["namespace"],
+        "item_id": item["id"],
+        "revision": item["revision"],
+        "before": before,
+    })
+}
+
 #[test]
 fn get_recent_evidence_schema_requires_explicit_opt_in() {
     let tools = workgraph_tools_list();
@@ -83,7 +113,8 @@ fn get_recent_evidence_schema_requires_explicit_opt_in() {
             .get("default")
             .is_none()
     );
-    assert_eq!(schema["properties"]["cursor"]["type"], "string");
+    assert_eq!(schema["properties"]["evidence_cursor"]["type"], "string");
+    assert!(schema["properties"].get("cursor").is_none());
     assert!(
         tools
             .iter()
@@ -137,7 +168,7 @@ async fn get_recent_evidence_is_explicit_bounded_and_newest_first() {
         json!([
             {"kind": "note", "id": "z-first"},
             {"kind": "note", "id": "a-second"},
-            {"kind": "note", "id": "m-third", "summary": "🦦".repeat(800)},
+            {"kind": "note", "id": "m-third", "summary": "\u{1f9a6}".repeat(800)},
             {"kind": "note", "id": "b-last"},
         ]),
     )
@@ -196,7 +227,7 @@ async fn get_recent_evidence_cursor_walk_keeps_positions_and_withdrawals() {
     let first = get(&service, json!({"id": item["id"], "evidence_limit": 2})).await;
     let second = get(
         &service,
-        json!({"id": item["id"], "evidence_limit": 2, "cursor": cursor(&first)}),
+        json!({"id": item["id"], "evidence_limit": 2, "evidence_cursor": cursor(&first)}),
     )
     .await;
     let mut seen = Vec::new();
@@ -237,7 +268,7 @@ async fn get_recent_evidence_cursor_rejects_another_item_or_changed_revision() {
     let wrong_item = handle_unscoped_workgraph_tools_call(
         &service,
         "workgraph_get",
-        &json!({"id": other["id"], "evidence_limit": 1, "cursor": continuation}),
+        &json!({"id": other["id"], "evidence_limit": 1, "evidence_cursor": continuation}),
     )
     .await
     .expect_err("an evidence cursor cannot be transplanted to another item");
@@ -247,7 +278,7 @@ async fn get_recent_evidence_cursor_rejects_another_item_or_changed_revision() {
     let stale = handle_unscoped_workgraph_tools_call(
         &service,
         "workgraph_get",
-        &json!({"id": item["id"], "evidence_limit": 1, "cursor": continuation}),
+        &json!({"id": item["id"], "evidence_limit": 1, "evidence_cursor": continuation}),
     )
     .await
     .expect_err("a changed revision cannot silently continue the earlier evidence observation");
@@ -275,10 +306,10 @@ async fn get_recent_evidence_rejects_invalid_bounds_and_cursors_without_writing(
     .map(|limit| json!({"id": item["id"], "evidence_limit": limit}))
     .collect::<Vec<_>>();
     invalid.extend([
-        json!({"id": item["id"], "cursor": "not-a-cursor"}),
-        json!({"id": item["id"], "evidence_limit": 1, "cursor": "not-a-cursor"}),
-        json!({"id": item["id"], "evidence_limit": 1, "cursor": null}),
-        json!({"id": item["id"], "evidence_limit": 1, "cursor": 1}),
+        json!({"id": item["id"], "evidence_cursor": "not-a-cursor"}),
+        json!({"id": item["id"], "evidence_limit": 1, "evidence_cursor": "not-a-cursor"}),
+        json!({"id": item["id"], "evidence_limit": 1, "evidence_cursor": null}),
+        json!({"id": item["id"], "evidence_limit": 1, "evidence_cursor": 1}),
     ]);
     for args in invalid {
         let error = handle_unscoped_workgraph_tools_call(&service, "workgraph_get", &args)
@@ -336,7 +367,7 @@ async fn get_recent_evidence_options_do_not_change_namespace_refusal() {
         .expect_err("namespace is outside the read grant");
     let mut paged_args = plain_args;
     paged_args["evidence_limit"] = json!(1);
-    paged_args["cursor"] = json!("invalid-cursor-must-not-change-access-refusal");
+    paged_args["evidence_cursor"] = json!("invalid-cursor-must-not-change-access-refusal");
     let paged = handle_unscoped_workgraph_tools_call(&allowed, "workgraph_get", &paged_args)
         .await
         .expect_err("a bound or cursor cannot grant access or reveal page facts");
@@ -372,11 +403,16 @@ async fn get_recent_evidence_cursor_continuation_rechecks_attention_scope() {
         .expect("attention projection")
         .projection;
     let page = get(&service, json!({"id": item["id"], "evidence_limit": 1})).await;
+    let expected_refusal = format!(
+        "workgraph_get is scoped to attention work item {}, got {}",
+        goal.item.id,
+        item["id"].as_str().expect("item id")
+    );
     let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
     let mut refusals = Vec::new();
     for args in [
         json!({"id": item["id"]}),
-        json!({"id": item["id"], "evidence_limit": 1, "cursor": cursor(&page)}),
+        json!({"id": item["id"], "evidence_limit": 1, "evidence_cursor": cursor(&page)}),
     ] {
         let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("arguments");
         let error = surface
@@ -387,7 +423,150 @@ async fn get_recent_evidence_cursor_continuation_rechecks_attention_scope() {
             })
             .await
             .expect_err("the prior cursor grants no access through a different attention scope");
+        assert!(
+            matches!(&error, ToolError::ExecutionFailed { message } if message == &expected_refusal),
+            "expected the attention item-scope refusal, got {error:?}"
+        );
         refusals.push(error.to_string());
     }
     assert_eq!(refusals[0], refusals[1]);
+}
+
+#[tokio::test]
+async fn get_recent_evidence_scoped_surface_reads_and_continues_its_item() {
+    let service = service();
+    let goal = service
+        .create_goal(
+            serde_json::from_value::<GoalCreateRequest>(json!({
+                "title": "Allowed evidence history",
+                "target": {"kind": "session", "session_id": "019e63c2-0000-7000-8000-000000000045"},
+                "evidence_refs": [{"kind": "note", "id": "one"}, {"kind": "note", "id": "two"}],
+            }))
+            .expect("goal request"),
+        )
+        .await
+        .expect("create scoped evidence fixture");
+    let projection = service
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("attention projection")
+        .projection;
+    let item = serde_json::to_value(goal.item).expect("goal item");
+    let surface = WorkGraphToolSurface::with_attention_projection(service, projection);
+    let mut args = json!({"id": item["id"], "evidence_limit": 1});
+    for position in [1_usize, 0] {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("arguments");
+        let outcome = surface
+            .dispatch(ToolCallView {
+                id: "scoped-read",
+                name: "workgraph_get",
+                args: &raw,
+            })
+            .await
+            .expect("scoped surface can read its own item and continue");
+        let page: Value = serde_json::from_str(&outcome.result.text_content()).expect("page");
+        assert_eq!(page["item"]["id"], item["id"]);
+        assert_eq!(page["evidence_page"]["returned"], 1);
+        assert_eq!(page["evidence_page"]["entries"][0]["position"], position);
+        assert_eq!(
+            page["evidence_page"]["entries"][0]["evidence"],
+            item["evidence_refs"][position]
+        );
+        if position == 1 {
+            args["evidence_cursor"] = json!(cursor(&page));
+        } else {
+            assert!(page["evidence_page"]["next_cursor"].is_null());
+        }
+    }
+}
+
+#[tokio::test]
+async fn get_recent_evidence_forged_cursor_rejects_bad_position_scope_read_and_extra_key() {
+    let service = service();
+    let item = create(
+        &service,
+        json!([{"kind": "note", "id": "one"}, {"kind": "note", "id": "two"}]),
+    )
+    .await;
+    let _other = create(&service, json!([])).await;
+    let list_page =
+        handle_unscoped_workgraph_tools_call(&service, "workgraph_list", &json!({"limit": 1}))
+            .await
+            .expect("list page supplies another read's real cursor");
+    let mut invalid = vec![(
+        list_page["next_cursor"]
+            .as_str()
+            .expect("list cursor")
+            .to_owned(),
+        "cursor is not a WorkGraph evidence cursor",
+    )];
+    for (field, value, message) in [
+        (
+            "before",
+            json!(3),
+            "evidence cursor position is outside this item's history",
+        ),
+        (
+            "namespace",
+            json!("other-namespace"),
+            "evidence cursor does not belong to this item and scope",
+        ),
+        (
+            "realm_id",
+            json!("other-realm"),
+            "evidence cursor does not belong to this item and scope",
+        ),
+        (
+            "extra",
+            json!(true),
+            "cursor is not a WorkGraph evidence cursor",
+        ),
+    ] {
+        let mut key = evidence_cursor_key(&item, 1);
+        key[field] = value;
+        invalid.push((forge_cursor(key), message));
+    }
+    for (forged, message) in invalid {
+        let error = handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_get",
+            &json!({"id": item["id"], "evidence_limit": 1, "evidence_cursor": forged}),
+        )
+        .await
+        .expect_err("forged input outside this item's valid evidence window is refused");
+        assert_eq!(error.code, WorkGraphToolErrorCode::InvalidArguments);
+        assert!(error.message.starts_with(message), "{error:?}");
+    }
+    assert_eq!(
+        get(&service, json!({"id": item["id"]})).await,
+        json!({"item": item})
+    );
+}
+
+#[tokio::test]
+async fn get_recent_evidence_forged_zero_position_returns_empty_page_without_writing() {
+    let service = service();
+    let item = create(&service, json!([{"kind": "note", "id": "one"}])).await;
+    let page = get(
+        &service,
+        json!({
+            "id": item["id"],
+            "evidence_limit": 1,
+            "evidence_cursor": forge_cursor(evidence_cursor_key(&item, 0)),
+        }),
+    )
+    .await;
+    assert_eq!(page["evidence_page"]["entries"], json!([]));
+    assert_eq!(page["evidence_page"]["total"], 1);
+    assert_eq!(page["evidence_page"]["returned"], 0);
+    assert_eq!(page["evidence_page"]["truncated"], false);
+    assert!(page["evidence_page"]["next_cursor"].is_null());
+    assert_eq!(
+        get(&service, json!({"id": item["id"]})).await,
+        json!({"item": item})
+    );
 }

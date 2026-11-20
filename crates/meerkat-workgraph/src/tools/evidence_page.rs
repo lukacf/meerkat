@@ -51,7 +51,7 @@ fn invalid(message: &str) -> WorkGraphToolError {
 /// No domain request or stored object gains presentation options.
 pub(super) fn project(item: WorkItem, arguments: &Value) -> Result<Value, WorkGraphToolError> {
     let Some(limit) = arguments.get("evidence_limit") else {
-        if arguments.get("cursor").is_some() {
+        if arguments.get("evidence_cursor").is_some() {
             return Err(invalid("an evidence cursor requires evidence_limit"));
         }
         return Ok(json!({ "item": item }));
@@ -63,7 +63,7 @@ pub(super) fn project(item: WorkItem, arguments: &Value) -> Result<Value, WorkGr
         .ok_or_else(|| invalid("evidence_limit must be an integer from 1 through 20"))?;
 
     let total = item.evidence_refs.len();
-    let before = match arguments.get("cursor") {
+    let before = match arguments.get("evidence_cursor") {
         None => total,
         Some(raw) => {
             let raw = raw

@@ -122,7 +122,7 @@ impl WorkGraphToolContract {
         match self {
             Self::Create => "Create a durable WorkGraph item.",
             Self::Get => {
-                "Read one WorkGraph item in full. An explicit evidence_limit instead returns a page of its newest evidence; pass evidence_page.next_cursor as cursor with evidence_limit to continue to older entries."
+                "Read one WorkGraph item in full. An explicit evidence_limit instead returns a page of its newest evidence; pass evidence_page.next_cursor as evidence_cursor with evidence_limit to continue to older entries."
             }
             Self::List => {
                 "List WorkGraph items, most recently updated first. A result that ends early has `truncated: true` and a `next_cursor` to pass back as `cursor`."
@@ -648,11 +648,11 @@ fn get_schema() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": evidence_page::MAX_EVIDENCE_LIMIT,
-                "description": "Opt in to a page of the newest evidence by append position. Omit this and cursor for the unchanged full item. The bounded reply omits item.evidence_refs and supplies evidence_page with original positions, withdrawn flags, full evidence refs, truncation and an opaque next_cursor. Only entry count is bounded, not text or bytes."
+                "description": "Opt in to a page of the newest evidence by append position. Omit this and evidence_cursor for the unchanged full item. The bounded reply omits item.evidence_refs and supplies evidence_page with original positions, withdrawn flags, full evidence refs, truncation and an opaque next_cursor. Only entry count is bounded, not text or bytes."
             }),
         ),
         (
-            "cursor".to_string(),
+            "evidence_cursor".to_string(),
             json!({
                 "type": "string",
                 "description": "Pass back evidence_page.next_cursor with evidence_limit to read older evidence. Access is checked on every page. The cursor belongs to one item, scope and revision; if the item changes, restart without the cursor."

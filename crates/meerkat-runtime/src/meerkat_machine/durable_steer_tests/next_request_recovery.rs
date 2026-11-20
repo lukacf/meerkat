@@ -395,4 +395,124 @@ mod refused_join {
             assert_eq!(order, ids, "turn starts deliver them in arrival order");
         }
     }
+
+    /// ONE steer whose join write the store refuses: the rule every refused
+    /// join write follows, whatever the number of steers at the boundary.
+    ///
+    /// The boundary publishes nothing and the store keeps the steer
+    /// `Queued`. The running runtime is then fenced: it refuses a new
+    /// admission, naming the join write as the reason it needs a reload from
+    /// the store. A fresh runtime that reloads the session from the store
+    /// delivers the steer exactly once.
+    #[tokio::test]
+    async fn sqlite_one_steer_whose_join_the_store_refuses_fences_the_runtime_until_a_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::store::SqliteRuntimeStore::new(directory.path().join("runtime.sqlite")).unwrap(),
+        );
+        let rig = DurableSteerRig::persistent(store.clone()).await;
+        let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+        let session_id = rig.session_id.clone();
+        let batch = rig.start_busy_turn().await;
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        let steer = peer_steer("fenced join payload");
+        let steer_id = steer.id().clone();
+        rig.admit(steer).await;
+        rig.wait_for_waiting_delivery().await;
+        let connection = rusqlite::Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_join BEFORE UPDATE ON runtime_input_states
+             WHEN NEW.runtime_id = '{runtime_id}' AND NEW.input_id = '{steer_id}'
+             BEGIN SELECT RAISE(ABORT, 'join persist failure'); END;"
+            ))
+            .unwrap();
+
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert!(
+            last_take_ids(&rig).is_empty(),
+            "a join that is not durable is not published"
+        );
+        let row = store
+            .load_input_state(&runtime_id, &steer_id)
+            .await
+            .expect("load the steer's row")
+            .expect("the steer's row is stored");
+        assert_eq!(
+            row.seed.phase,
+            InputLifecycleState::Queued,
+            "the store keeps the steer queued"
+        );
+
+        // The running runtime is fenced, also once the store takes writes
+        // again: a new admission is refused, and the refusal names the join
+        // write.
+        connection
+            .execute_batch("DROP TRIGGER refuse_join;")
+            .unwrap();
+        let refused = tokio::time::timeout(
+            Duration::from_secs(5),
+            rig.adapter
+                .accept_input_with_completion(&rig.session_id, peer_steer("after the refusal")),
+        )
+        .await
+        .expect("the fenced runtime answers an admission at once");
+        match refused {
+            Err(RuntimeDriverError::RecoveryRepairBlocked { reason, .. }) => assert!(
+                reason.contains("live_boundary_join_commit"),
+                "the refusal names the join write: {reason}"
+            ),
+            Err(other) => panic!("the fenced runtime refused with another error: {other:?}"),
+            Ok(_) => panic!("the fenced runtime admitted a new input"),
+        }
+
+        // A fresh runtime reloads the session from the store. The first
+        // runtime is never driven again.
+        std::mem::forget(rig);
+        let reloaded = DurableSteerRig::with_adapter_for_session(
+            Arc::new(
+                MeerkatMachine::persistent_without_blobs(store.clone())
+                    .expect("persistent machine"),
+            ),
+            session_id,
+        )
+        .await;
+        let everything = [batch, steer_id.clone()];
+        let mut finished = 0;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let mut consumed = true;
+                for input_id in &everything {
+                    consumed &=
+                        reloaded.phase(input_id).await == Some(InputLifecycleState::Consumed);
+                }
+                if consumed {
+                    return;
+                }
+                if *reloaded.script.applies_observable.borrow() > finished {
+                    reloaded.script.step(RunnerStep::Finish);
+                    finished += 1;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the reloaded runtime consumes the batch and the steer");
+        let at_turn_start = contributions(&reloaded.script.primitives(), &steer_id);
+        let at_a_boundary = reloaded
+            .script
+            .applied_durable()
+            .iter()
+            .filter(|applied_id| **applied_id == steer_id)
+            .count();
+        assert_eq!(
+            at_turn_start + at_a_boundary,
+            1,
+            "the steer is delivered exactly once after the reload"
+        );
+    }
 }

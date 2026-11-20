@@ -6,6 +6,7 @@
 // (crates/meerkat-core/src/service/mod.rs); the runtime carries it under the
 // rejection envelope's `data`.
 
+import { existsSync, readFileSync } from "node:fs";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -190,4 +191,50 @@ test('the run report and a resolution keep unknown advisory values', () => {
     })?.route?.backend,
     'copilot',
   );
+});
+
+
+// Load inside the diagnostic tests so an absent full checkout cannot block other tests.
+function readDiagnosticCases() {
+  const path = new URL(
+    "../../../crates/meerkat-core/src/reasoning_effort/diagnostics_cases.json", import.meta.url,
+  );
+  assert.ok(existsSync(path), "Diagnostic compatibility cases require a full Meerkat repository checkout.");
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+test("diagnostic fields and instance class preserve the wire", () => {
+  const diagnosticCases = readDiagnosticCases();
+  for (const item of [...diagnosticCases.typed_cases, ...diagnosticCases.compatibility_cases]) {
+    const error = refused(item.data);
+    const result = reasoningEffortRefusal(error);
+    assert.ok(result, item.name);
+    const wire = item.data.reasoning_effort_refusal;
+    assert.equal(result.cause, typeof wire.cause === "string" ? wire.cause : undefined, item.name);
+    assert.equal(result.notBefore, typeof wire.not_before === "string" ? wire.not_before : undefined, item.name);
+    assert.equal(result.transient, item.transient, item.name);
+    assert.equal(result.retryable, typeof item.data.retryable === "boolean" ? item.data.retryable : undefined, item.name);
+    assert.deepEqual(error.data, item.data);
+  }
+});
+
+test("diagnostic fields reject nonstrings while retaining raw errors", () => {
+  const diagnosticCases = readDiagnosticCases();
+  for (const field of ["cause", "not_before"]) {
+    for (const value of diagnosticCases.invalid_values) {
+      const data = withRefusal({ [field]: value });
+      const error = refused(data);
+      assert.equal(reasoningEffortRefusal(error), undefined, field);
+      assert.deepEqual(error.data, data);
+    }
+  }
+  const error = refused(withRefusal({ reason: "future_reason", cause: "future_cause" }));
+  assert.equal(reasoningEffortRefusal(error), undefined);
+  assert.equal(error.data.reasoning_effort_refusal.cause, "future_cause");
+});
+
+test("known diagnostic constants retain the shared open wire values", () => {
+  const diagnosticCases = readDiagnosticCases();
+  assert.equal(webSdk.REASONING_CAUSE_NEW_SIGN_IN_REQUIRED, diagnosticCases.known_causes.new_sign_in_required);
+  assert.equal(webSdk.REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE, diagnosticCases.known_causes.token_exchange_unavailable);
 });

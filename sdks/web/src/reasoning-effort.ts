@@ -25,6 +25,14 @@ export type ReasoningEffortLevel = (typeof REASONING_EFFORT_LEVELS)[number];
 export const REASONING_EFFORT_REFUSED_KIND = 'reasoning_effort_refused';
 
 /**
+ * A device sign-in is required; an operator-token lease is not this cause.
+ * No built-in provider reports a cause yet.
+ */
+export const REASONING_CAUSE_NEW_SIGN_IN_REQUIRED = 'new_sign_in_required';
+/** A held typed exchange outage leaves no usable account token. */
+export const REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE = 'token_exchange_unavailable';
+
+/**
  * Why a level is refused. A closed vocabulary: a reason this SDK does not
  * know is not parsed (see `reasoningEffortRefusal`).
  */
@@ -86,15 +94,25 @@ export interface ReasoningEffortRefusal {
   /** That setting's own level, when it is one. */
   readonly conflictingLevel?: ReasoningEffortLevel;
   /**
-   * Whether the same request can succeed later with no configuration
-   * change. True only for `supported_levels_unavailable` (the account's
-   * model list is not loaded yet); every other reason is permanent until
-   * the request or the configuration changes. Read from `reason`.
+   * Optional open account-state name. An absent cause means cause unknown,
+   * not that sign-in is required. Unknown and empty strings are retained.
+   */
+  readonly cause?: string;
+  /**
+   * Absolute eligibility-time string retained as sent, not a countdown or
+   * recovery promise. The typed server validates time; this parser keeps strings.
+   */
+  readonly notBefore?: string;
+  /**
+   * True for supported_levels_unavailable unless the known cause is
+   * new_sign_in_required. Unknown or absent causes keep the historical reason
+   * class. This does not schedule a retry.
    */
   readonly transient: boolean;
   /**
-   * The server's own mark of the transient class (`error.data.retryable`),
-   * when it sent one. It agrees with `transient`.
+   * The server's explicit mark, preserved even when it differs from transient.
+   * Older SDKs classify only by reason and may return transient true beside
+   * retryable false for a new-sign-in payload.
    */
   readonly retryable?: boolean;
 }
@@ -149,6 +167,10 @@ export function parseReasoningEffortRefusal(
     levels = [...supported];
   }
   if (facts !== null && facts !== undefined && typeof facts !== 'string') return undefined;
+  const cause = value.cause;
+  const notBefore = value.not_before;
+  if (cause !== undefined && cause !== null && typeof cause !== 'string') return undefined;
+  if (notBefore !== undefined && notBefore !== null && typeof notBefore !== 'string') return undefined;
   const conflictingParam = value.conflicting_param;
   const conflictingLevel = value.conflicting_level;
   if (conflictingParam !== undefined && conflictingParam !== null && typeof conflictingParam !== 'string') {
@@ -167,7 +189,9 @@ export function parseReasoningEffortRefusal(
     facts: typeof facts === 'string' ? facts : null,
     ...(typeof conflictingParam === 'string' ? { conflictingParam } : {}),
     ...(isLevel(conflictingLevel) ? { conflictingLevel } : {}),
-    transient: reason === 'supported_levels_unavailable',
+    ...(typeof cause === 'string' ? { cause } : {}),
+    ...(typeof notBefore === 'string' ? { notBefore } : {}),
+    transient: reason === 'supported_levels_unavailable' && cause !== REASONING_CAUSE_NEW_SIGN_IN_REQUIRED,
     ...(typeof retryable === 'boolean' ? { retryable } : {}),
   };
 }

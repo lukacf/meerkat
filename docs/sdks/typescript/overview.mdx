@@ -489,7 +489,8 @@ the model or its route does not accept rejects the call with a
 `MeerkatError` whose `code` is `"-32602"` (invalid params);
 `reasoningEffortRefusal(error)` returns the typed refusal
 (`requested`, `provider`, `model`, `route`, `reason`, `supported`, `facts`,
-`conflictingParam`, `conflictingLevel`, `transient`), or `undefined` for any
+`conflictingParam`, `conflictingLevel`, `cause`, `notBefore`, `retryable`,
+`transient`), or `undefined` for any
 other error:
 
 ```typescript
@@ -501,7 +502,7 @@ try {
   const refusal = reasoningEffortRefusal(error);
   if (!refusal) throw error;
   if (refusal.transient) {
-    // The account's model list is not loaded yet: ask again later.
+    // This instance permits a later attempt; recovery is not promised.
   } else {
     console.log(refusal.reason, refusal.supported);
   }
@@ -509,9 +510,21 @@ try {
 ```
 
 `reason` is one of the eight closed reasons
-(`REASONING_EFFORT_REFUSAL_REASONS`); `transient` is true only for
-`supported_levels_unavailable`. A refusal with a reason this SDK does not
-know is not parsed, and `error.details` keeps the data as sent. The route's
+(`REASONING_EFFORT_REFUSAL_REASONS`). `transient` classifies the instance:
+it is true only for `supported_levels_unavailable` without the known
+`new_sign_in_required` cause. Other reasons remain false. An absent `cause`
+means **cause unknown**: it says nothing about sign-in and retains the
+released reason-based answer, as an unknown cause string does. This also
+applies to refusals from compaction, which does not call the diagnostic
+hook. `cause` is an open string; `notBefore` is an optional absolute RFC3339
+UTC string, not a countdown or recovery promise.
+
+`retryable` preserves the server's outer value when present, independently
+of `transient`. Older SDKs ignore these new diagnostic fields and can report
+`transient: true` alongside `retryable: false` for a new-sign-in refusal. A
+refusal with a reason this SDK does not know is not parsed, and
+`error.details` keeps the data as sent. Malformed diagnostics do not erase
+that raw data. The route's
 names and `facts` are advisory and kept as strings. `route`, `supported` and
 `facts` are always present in the refusal data: `null` when they have no
 value, never left out. One case is not recognisable by its data kind: a

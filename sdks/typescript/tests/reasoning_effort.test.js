@@ -11,6 +11,8 @@
  * `reasoningEffortRefusal` reads back.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import * as sdk from "../dist/index.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -573,4 +575,90 @@ describe("reasoning effort reports", () => {
       assert.deepEqual(event.target, raw.target);
     });
   }
+});
+
+
+// Load inside the diagnostic tests so an absent full checkout cannot block other tests.
+function readDiagnosticCases() {
+  const path = new URL(
+    "../../../crates/meerkat-core/src/reasoning_effort/diagnostics_cases.json", import.meta.url,
+  );
+  assert.ok(existsSync(path), "Diagnostic compatibility cases require a full Meerkat repository checkout.");
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+it("diagnostic fields and instance class preserve the wire", () => {
+  const diagnosticCases = readDiagnosticCases();
+  for (const item of [...diagnosticCases.typed_cases, ...diagnosticCases.compatibility_cases]) {
+    const error = refused(item.data);
+    const result = reasoningEffortRefusal(error);
+    assert.ok(result, item.name);
+    const wire = item.data.reasoning_effort_refusal;
+    assert.equal(result.cause, typeof wire.cause === "string" ? wire.cause : undefined, item.name);
+    assert.equal(result.notBefore, typeof wire.not_before === "string" ? wire.not_before : undefined, item.name);
+    assert.equal(result.transient, item.transient, item.name);
+    assert.equal(result.retryable, typeof item.data.retryable === "boolean" ? item.data.retryable : undefined, item.name);
+    assert.deepEqual(error.details, item.data);
+  }
+});
+
+it("diagnostic fields reject nonstrings while retaining raw errors", () => {
+  const diagnosticCases = readDiagnosticCases();
+  for (const field of ["cause", "not_before"]) {
+    for (const value of diagnosticCases.invalid_values) {
+      const data = withRefusal({ [field]: value });
+      const error = refused(data);
+      assert.equal(reasoningEffortRefusal(error), undefined, field);
+      assert.deepEqual(error.details, data);
+    }
+  }
+  const error = refused(withRefusal({ reason: "future_reason", cause: "future_cause" }));
+  assert.equal(reasoningEffortRefusal(error), undefined);
+  assert.equal(error.details.reasoning_effort_refusal.cause, "future_cause");
+});
+
+it("known diagnostic constants retain the shared open wire values", () => {
+  const diagnosticCases = readDiagnosticCases();
+  assert.equal(sdk.REASONING_CAUSE_NEW_SIGN_IN_REQUIRED, diagnosticCases.known_causes.new_sign_in_required);
+  assert.equal(sdk.REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE, diagnosticCases.known_causes.token_exchange_unavailable);
+});
+
+it("RunFailed preserves optional diagnostics", () => {
+  const diagnosticCases = readDiagnosticCases();
+  for (const item of diagnosticCases.typed_cases) {
+    const event = parseCoreEvent({
+      type: "run_failed", session_id: "s1",
+      error_report: { class: "config", message: "refused", reason: item.event_reason },
+    });
+    const result = event.errorReport.reason.refusal;
+    const wire = item.data.reasoning_effort_refusal;
+    assert.equal(result.cause, wire.cause);
+    assert.equal(result.notBefore, wire.not_before);
+    assert.equal(result.transient, item.transient);
+    assert.equal(result.retryable, undefined);
+  }
+});
+
+it("RunFailed unreadable diagnostics retain raw fields", () => {
+  const diagnosticCases = readDiagnosticCases();
+  const original = diagnosticCases.typed_cases[0].data.reasoning_effort_refusal;
+  const readReason = (wire) => parseCoreEvent({
+    type: "run_failed", session_id: "s1",
+    error_report: { class: "config", message: "refused", reason: {
+      reason_type: "reasoning_effort_refused", refusal: wire,
+    } },
+  }).errorReport.reason;
+  for (const field of ["cause", "not_before"]) {
+    for (const value of diagnosticCases.invalid_values) {
+      const wire = { ...original, [field]: value };
+      const reason = readReason(wire);
+      assert.equal(reason.reasonType, "unknown");
+      assert.equal(reason.rawReasonType, "reasoning_effort_refused");
+      assert.deepEqual(reason.raw.refusal, wire);
+    }
+  }
+  const wire = { ...original, reason: "future_reason", cause: "future_cause" };
+  const reason = readReason(wire);
+  assert.equal(reason.reasonType, "unknown");
+  assert.deepEqual(reason.raw.refusal, wire);
 });

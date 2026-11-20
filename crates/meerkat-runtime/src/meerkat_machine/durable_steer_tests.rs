@@ -451,7 +451,7 @@ impl CoreExecutor for DurableSteerExecutor {
                             .push(taken.request_only.len());
                     }
                     let mut boundary_take = Vec::new();
-                    if let Some(appends) = taken.applied_durable {
+                    for appends in taken.applied_durable {
                         let lag = self.script.append_record_lag_ms.load(Ordering::SeqCst);
                         if lag > 0 {
                             tokio::time::sleep(Duration::from_millis(lag)).await;

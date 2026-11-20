@@ -2267,6 +2267,12 @@ fn fail_closed_generated_restore(authority: &'static str, err: serde_json::Error
 /// request-only steer. A durable preparation that finds the window closed (the
 /// model is streaming) or already claimed waits in a single next-boundary slot
 /// of the active run; the run ending first withdraws it.
+///
+/// The durable preparation is one claim and one publication authority, and it
+/// may carry several deliveries: once the runner has parked, the authority's
+/// holder attaches the deliveries of the other inputs that join the same
+/// boundary ([`crate::lifecycle::CoreBoundaryStageOutput::attach_durable_delivery`]),
+/// and its one commit publishes them together, in attach order.
 #[derive(Clone)]
 pub struct TransientTurnContextStateHandle {
     boundary: Arc<TransientTurnContextBoundaryCoordinator>,
@@ -2326,16 +2332,18 @@ enum BoundarySlot {
 
 enum BoundaryPayload {
     RequestOnly(Vec<TurnRequestContext>),
-    Durable {
-        appends: crate::lifecycle::DurableTurnBoundaryAppends,
-        witness: CoreBoundaryDeliveryWitness,
-    },
+    /// The durable deliveries of one claim, in the order the runner applies
+    /// them: the preparer's own first, then each one its authority attached
+    /// while the runner was parked.
+    Durable(Vec<crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends>),
 }
 
 impl BoundaryPayload {
     fn withdraw(&self) {
-        if let Self::Durable { witness, .. } = self {
-            witness.mark_withdrawn();
+        if let Self::Durable(deliveries) = self {
+            for delivery in deliveries {
+                delivery.witness.mark_withdrawn();
+            }
         }
     }
 }
@@ -2720,7 +2728,8 @@ pub struct TransientTurnContextBoundaryRunGuardForTest {
 #[derive(Debug)]
 pub struct BoundaryTakeForTest {
     pub request_only: Vec<TurnRequestContext>,
-    pub applied_durable: Option<crate::lifecycle::DurableTurnBoundaryAppends>,
+    /// The durable deliveries the boundary applied, in apply order.
+    pub applied_durable: Vec<crate::lifecycle::DurableTurnBoundaryAppends>,
 }
 
 /// Run-scoped guard closing every unresolved transient-context preparation.
@@ -2823,6 +2832,19 @@ impl PreparedTransientTurnContextBoundary {
         }
         self.armed = false;
         let mut lifecycle = self.state.boundary.lock();
+        let parked = self.own_unresolved_parked_request(&mut lifecycle)?;
+        parked.resolution = Some(resolution);
+        drop(lifecycle);
+        self.state.boundary.notify.notify_waiters();
+        Ok(())
+    }
+
+    /// This authority's own request in the exact parked generation it
+    /// prepared, while it is still unresolved.
+    fn own_unresolved_parked_request<'a>(
+        &self,
+        lifecycle: &'a mut TransientTurnContextBoundaryLifecycle,
+    ) -> Result<&'a mut ParkedBoundaryRequest, CoreBoundaryStageError> {
         if !lifecycle.actor_live {
             return Err(CoreBoundaryStageError::stale(format!(
                 "actor incarnation {} was revoked",
@@ -2843,16 +2865,82 @@ impl PreparedTransientTurnContextBoundary {
             }
             _ => None,
         };
-        let Some(parked) = parked
+        parked
             .filter(|parked| parked.request_id == self.request_id && parked.resolution.is_none())
-        else {
+            .ok_or_else(|| {
+                CoreBoundaryStageError::stale(
+                    "prepared transient boundary no longer owns the exact parked generation",
+                )
+            })
+    }
+
+    /// Attach one more durable delivery to the parked durable claim this
+    /// authority owns. The delivery is published by this authority's commit,
+    /// after every delivery attached before it, and withdrawn with them by
+    /// its abort. Returns the new delivery's witness.
+    fn attach_durable(
+        &mut self,
+        appends: crate::lifecycle::DurableTurnBoundaryAppends,
+    ) -> Result<CoreBoundaryDeliveryWitness, CoreBoundaryStageError> {
+        if !self.armed {
             return Err(CoreBoundaryStageError::stale(
-                "prepared transient boundary no longer owns the exact parked generation",
+                "prepared transient boundary authority was already resolved",
+            ));
+        }
+        let mut lifecycle = self.state.boundary.lock();
+        let lifecycle = &mut *lifecycle;
+        let witness = {
+            let parked = self.own_unresolved_parked_request(lifecycle)?;
+            let BoundaryPayload::Durable(deliveries) = &mut parked.payload else {
+                return Err(CoreBoundaryStageError::fault(
+                    "a request-only boundary preparation carries no durable delivery",
+                ));
+            };
+            let witness = CoreBoundaryDeliveryWitness::pending();
+            deliveries.push(
+                crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends {
+                    appends,
+                    witness: witness.clone(),
+                },
+            );
+            witness
+        };
+        if let Some((witness_run, witnesses)) = lifecycle.run_durable_witnesses.as_mut()
+            && witness_run == &self.expected_run_id
+        {
+            witnesses.push(witness.clone());
+        }
+        Ok(witness)
+    }
+
+    /// Take one delivery back out of the parked durable claim this authority
+    /// owns, before its commit: the delivery is withdrawn and the runner
+    /// never applies it. The other deliveries of the claim are unaffected.
+    fn withdraw_durable(
+        &mut self,
+        witness: &CoreBoundaryDeliveryWitness,
+    ) -> Result<(), CoreBoundaryStageError> {
+        if !self.armed {
+            return Err(CoreBoundaryStageError::stale(
+                "prepared transient boundary authority was already resolved",
+            ));
+        }
+        let mut lifecycle = self.state.boundary.lock();
+        let parked = self.own_unresolved_parked_request(&mut lifecycle)?;
+        let BoundaryPayload::Durable(deliveries) = &mut parked.payload else {
+            return Err(CoreBoundaryStageError::fault(
+                "a request-only boundary preparation carries no durable delivery",
             ));
         };
-        parked.resolution = Some(resolution);
-        drop(lifecycle);
-        self.state.boundary.notify.notify_waiters();
+        let Some(position) = deliveries
+            .iter()
+            .position(|delivery| delivery.witness.same_delivery(witness))
+        else {
+            return Err(CoreBoundaryStageError::stale(
+                "the durable delivery is not part of this parked boundary claim",
+            ));
+        };
+        deliveries.remove(position).witness.mark_withdrawn();
         Ok(())
     }
 }
@@ -2866,6 +2954,20 @@ impl crate::lifecycle::core_executor::CoreBoundaryStageCommitAuthority
 
     fn abort(&mut self) -> Result<(), CoreBoundaryStageError> {
         self.resolve(TransientTurnContextBoundaryResolution::Aborted)
+    }
+
+    fn attach_durable_delivery(
+        &mut self,
+        appends: crate::lifecycle::DurableTurnBoundaryAppends,
+    ) -> Result<CoreBoundaryDeliveryWitness, CoreBoundaryStageError> {
+        self.attach_durable(appends)
+    }
+
+    fn withdraw_durable_delivery(
+        &mut self,
+        witness: &CoreBoundaryDeliveryWitness,
+    ) -> Result<(), CoreBoundaryStageError> {
+        self.withdraw_durable(witness)
     }
 }
 
@@ -3125,10 +3227,12 @@ impl TransientTurnContextStateHandle {
                     let request = RegisteredBoundaryRequest {
                         request_id,
                         run_id: expected_run_id.clone(),
-                        payload: BoundaryPayload::Durable {
-                            appends,
-                            witness: witness.clone(),
-                        },
+                        payload: BoundaryPayload::Durable(vec![
+                            crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends {
+                                appends,
+                                witness: witness.clone(),
+                            },
+                        ]),
                     };
                     match &mut lifecycle.window {
                         TransientTurnContextBoundaryWindow::Open { durable, .. }
@@ -3401,15 +3505,8 @@ impl TransientTurnContextStateHandle {
                                         BoundaryPayload::RequestOnly(contexts) if committed => {
                                             taken.request_only = contexts;
                                         }
-                                        BoundaryPayload::Durable { appends, witness }
-                                            if committed =>
-                                        {
-                                            taken.durable = Some(
-                                                crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends {
-                                                    appends,
-                                                    witness,
-                                                },
-                                            );
+                                        BoundaryPayload::Durable(deliveries) if committed => {
+                                            taken.durable = deliveries;
                                         }
                                         payload => payload.withdraw(),
                                     }
@@ -3522,8 +3619,8 @@ impl TransientTurnContextStateHandle {
     }
 
     /// Test-support runner seam: consume the exact boundary like
-    /// `execute_calling_llm_request` does, applying an accepted durable
-    /// delivery (its witness becomes `Applied`). With `accept_durable ==
+    /// `execute_calling_llm_request` does, applying every accepted durable
+    /// delivery in order (its witness becomes `Applied`). With `accept_durable ==
     /// false` the boundary behaves like an extraction or noncommitting
     /// live-bridge boundary and refuses durable deliveries.
     #[cfg(any(test, feature = "test-support"))]
@@ -3541,10 +3638,14 @@ impl TransientTurnContextStateHandle {
         let taken = self
             .take_pending_at_exact_boundary(run_id, acceptance)
             .await?;
-        let applied_durable = taken.durable.and_then(|accepted| {
-            self.record_durable_apply(&accepted.witness)
-                .then_some(accepted.appends)
-        });
+        let applied_durable = taken
+            .durable
+            .into_iter()
+            .filter_map(|accepted| {
+                self.record_durable_apply(&accepted.witness)
+                    .then_some(accepted.appends)
+            })
+            .collect();
         Ok(BoundaryTakeForTest {
             request_only: taken.request_only,
             applied_durable,
@@ -11741,7 +11842,7 @@ mod tests {
             .await
             .expect("consume empty boundary");
         assert!(taken.request_only.is_empty());
-        assert!(taken.durable.is_none());
+        assert!(taken.durable.is_empty());
         let error = state
             .prepare_active_turn_boundary(&run_id, request_only(vec![transient_context("late")]))
             .await
@@ -11784,7 +11885,7 @@ mod tests {
         assert!(stage.delivery_witness().is_none());
         stage.commit().expect("publish transient context");
         let taken = runner.await.expect("runner task").expect("runner consume");
-        assert!(taken.durable.is_none());
+        assert!(taken.durable.is_empty());
         assert_eq!(
             taken
                 .request_only
@@ -11912,7 +12013,9 @@ mod tests {
         stage.commit().expect("publish durable appends");
         let taken = runner.await.expect("runner task").expect("runner consume");
         assert!(taken.request_only.is_empty());
-        let accepted = taken.durable.expect("durable appends reach the runner");
+        let [accepted] = <[_; 1]>::try_from(taken.durable).unwrap_or_else(|taken| {
+            panic!("one durable delivery reaches the runner: {}", taken.len())
+        });
         assert!(accepted.witness.same_delivery(&witness));
         assert_eq!(accepted.appends.messages().len(), 1);
         assert!(state.record_durable_apply(&accepted.witness));
@@ -11939,7 +12042,7 @@ mod tests {
             .take_pending_at_exact_boundary(&run_id, BOTH)
             .await
             .expect("consume first boundary");
-        assert!(taken.durable.is_none());
+        assert!(taken.durable.is_empty());
 
         let prepare_state = state.clone();
         let prepare_run_id = run_id.clone();
@@ -11975,7 +12078,237 @@ mod tests {
             .commit()
             .expect("publish durable appends");
         let taken = runner.await.expect("runner task").expect("runner consume");
-        assert!(taken.durable.is_some());
+        assert_eq!(taken.durable.len(), 1);
+    }
+
+    fn durable_appends(detail: &str) -> crate::lifecycle::DurableTurnBoundaryAppends {
+        match durable_notice(detail) {
+            crate::lifecycle::TurnBoundaryDelivery::DurableAppends(appends) => appends,
+            _ => unreachable!("durable_notice builds a durable delivery"),
+        }
+    }
+
+    type RunnerTake = tokio::task::JoinHandle<
+        Result<crate::lifecycle::boundary_delivery::TakenBoundaryDelivery, CoreBoundaryStageError>,
+    >;
+
+    /// A run whose runner is parked at its first boundary with one durable
+    /// delivery (`first`) registered: the claim's publication authority and
+    /// the parked runner's take.
+    async fn parked_durable_claim(
+        state: &TransientTurnContextStateHandle,
+        run_id: &RunId,
+        first: &str,
+    ) -> (crate::lifecycle::CoreBoundaryStageOutput, RunnerTake) {
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let first = durable_notice(first);
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, first)
+                .await
+        });
+        wait_for_open_durable_request(state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        let stage = prepare
+            .await
+            .expect("prepare task")
+            .expect("parked durable preparation")
+            .into_stage_output(None);
+        (stage, runner)
+    }
+
+    fn notice_bodies(
+        taken: &[crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends],
+    ) -> Vec<String> {
+        taken
+            .iter()
+            .map(|accepted| format!("{:?}", accepted.appends.messages()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn durable_claim_publishes_its_attached_deliveries_in_attach_order() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (mut stage, runner) = parked_durable_claim(&state, &run_id, "claim-first").await;
+        let first = stage.delivery_witness().cloned().expect("own witness");
+        let second = stage
+            .attach_durable_delivery(durable_appends("claim-second"))
+            .expect("attach to the parked claim");
+        let third = stage
+            .attach_durable_delivery(durable_appends("claim-third"))
+            .expect("attach to the parked claim");
+        assert!(!first.same_delivery(&second) && !second.same_delivery(&third));
+        assert!(
+            !runner.is_finished(),
+            "the runner stays parked until the one authority resolves"
+        );
+        stage.commit().expect("publish the claim");
+
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(taken.durable.len(), 3, "one delivery per input");
+        let bodies = notice_bodies(&taken.durable);
+        for (index, detail) in ["claim-first", "claim-second", "claim-third"]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                bodies[index].contains(detail),
+                "{detail} at {index}: {bodies:?}"
+            );
+        }
+        for (accepted, witness) in taken.durable.iter().zip([&first, &second, &third]) {
+            assert!(accepted.witness.same_delivery(witness));
+            assert_eq!(
+                witness.outcome(),
+                crate::lifecycle::CoreBoundaryDeliveryOutcome::Pending
+            );
+            assert!(state.record_durable_apply(&accepted.witness));
+            assert!(
+                !state.record_durable_apply(&accepted.witness),
+                "a delivery applies at most once"
+            );
+        }
+        assert_eq!(state.durable_apply_ordinal(), 3);
+        // Attached deliveries are the run's own: a discarded image loses
+        // every one of them.
+        state.discard_uncommitted_durable_deliveries(&run_id);
+        for witness in [&first, &second, &third] {
+            assert_eq!(
+                witness.outcome(),
+                crate::lifecycle::CoreBoundaryDeliveryOutcome::Discarded
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_withdrawn_from_a_parked_claim_is_never_taken_and_the_rest_are() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (mut stage, runner) = parked_durable_claim(&state, &run_id, "claim-own").await;
+        let own = stage.delivery_witness().cloned().expect("own witness");
+        let kept = stage
+            .attach_durable_delivery(durable_appends("claim-kept"))
+            .expect("attach");
+        let refused = stage
+            .attach_durable_delivery(durable_appends("claim-refused"))
+            .expect("attach");
+        let last = stage
+            .attach_durable_delivery(durable_appends("claim-last"))
+            .expect("attach");
+        // The holder's own delivery and one attached delivery leave the
+        // claim; the claim itself stays.
+        stage.withdraw_durable_delivery(&own).expect("withdraw own");
+        stage
+            .withdraw_durable_delivery(&refused)
+            .expect("withdraw attached");
+        assert!(
+            stage
+                .withdraw_durable_delivery(&refused)
+                .expect_err("a delivery leaves a claim once")
+                .to_string()
+                .contains("not part of this parked boundary claim")
+        );
+        for witness in [&own, &refused] {
+            assert_eq!(
+                witness.outcome(),
+                crate::lifecycle::CoreBoundaryDeliveryOutcome::Withdrawn
+            );
+        }
+        stage.commit().expect("publish what is left");
+
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        let bodies = notice_bodies(&taken.durable);
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert!(bodies[0].contains("claim-kept") && bodies[1].contains("claim-last"));
+        assert!(taken.durable[0].witness.same_delivery(&kept));
+        assert!(taken.durable[1].witness.same_delivery(&last));
+        assert!(
+            !state.record_durable_apply(&refused),
+            "a withdrawn delivery can never be applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_a_durable_claim_withdraws_every_attached_delivery() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (mut stage, runner) = parked_durable_claim(&state, &run_id, "claim-own").await;
+        let own = stage.delivery_witness().cloned().expect("own witness");
+        let attached = stage
+            .attach_durable_delivery(durable_appends("claim-attached"))
+            .expect("attach");
+        drop(stage);
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert!(
+            taken.durable.is_empty(),
+            "an aborted claim publishes nothing"
+        );
+        for witness in [&own, &attached] {
+            assert_eq!(
+                witness.outcome(),
+                crate::lifecycle::CoreBoundaryDeliveryOutcome::Withdrawn
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_only_preparation_takes_no_durable_delivery() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    request_only(vec![transient_context("request only")]),
+                )
+                .await
+        });
+        wait_for_transient_boundary_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        let mut stage = prepare
+            .await
+            .expect("prepare task")
+            .expect("parked request-only preparation")
+            .into_stage_output(None);
+        let error = stage
+            .attach_durable_delivery(durable_appends("misplaced"))
+            .expect_err("a request-only preparation is no durable claim");
+        assert!(
+            matches!(error, CoreBoundaryStageError::Fault { .. }),
+            "{error}"
+        );
+        stage.commit().expect("publish request-only context");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+        assert!(taken.durable.is_empty());
     }
 
     #[tokio::test]
@@ -12001,9 +12334,9 @@ mod tests {
             let lifecycle = state.boundary.lock();
             match &lifecycle.next_boundary_durable {
                 Some(RegisteredBoundaryRequest {
-                    payload: BoundaryPayload::Durable { witness, .. },
+                    payload: BoundaryPayload::Durable(deliveries),
                     ..
-                }) => witness.clone(),
+                }) if deliveries.len() == 1 => deliveries[0].witness.clone(),
                 _ => panic!("durable delivery waits for the next boundary"),
             }
         };
@@ -12098,7 +12431,7 @@ mod tests {
             .expect("publish request context");
         let taken = runner.await.expect("runner task").expect("runner consume");
         assert_eq!(taken.request_only.len(), 1);
-        assert!(taken.durable.is_none(), "never Session state");
+        assert!(taken.durable.is_empty(), "never Session state");
     }
 
     #[tokio::test]
@@ -12385,7 +12718,7 @@ mod tests {
             .take_pending_at_exact_boundary(&run_id, REQUEST_ONLY)
             .await
             .expect("extraction boundary");
-        assert!(taken.durable.is_none());
+        assert!(taken.durable.is_empty());
         let error = prepare
             .await
             .expect("prepare task")
@@ -12466,7 +12799,7 @@ mod tests {
             .expect("publish durable appends");
         let taken = runner.await.expect("runner task").expect("runner consume");
         assert_eq!(taken.request_only.len(), 1);
-        assert!(taken.durable.is_some());
+        assert_eq!(taken.durable.len(), 1);
     }
 
     #[tokio::test]
@@ -12506,6 +12839,7 @@ mod tests {
                 .expect("runner task")
                 .expect("take")
                 .durable
+                .pop()
                 .expect("durable");
             assert!(state.record_durable_apply(&accepted.witness));
             witnesses.push(accepted.witness);

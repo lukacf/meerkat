@@ -391,8 +391,10 @@ async fn recall(rig: &DurableSteerRig, input_id: &InputId) -> Option<QueuedInput
 /// Three steers wait for one boundary and one of them is recalled before the
 /// request's input is fixed. The recalled one is in no request and has no
 /// row; the other two still join the same request, in order.
-async fn recalled_steer_leaves_the_others_in_the_same_request(recalled_index: usize) {
-    let rig = DurableSteerRig::ephemeral().await;
+async fn recalled_steer_leaves_the_others_in_the_same_request(
+    rig: DurableSteerRig,
+    recalled_index: usize,
+) {
     rig.start_busy_turn().await;
     rig.script
         .step_and_wait(RunnerStep::BoundaryThenToolCalls)
@@ -452,17 +454,99 @@ async fn recalled_steer_leaves_the_others_in_the_same_request(recalled_index: us
 
 #[tokio::test]
 async fn recalled_head_steer_leaves_the_others_in_the_same_request() {
-    recalled_steer_leaves_the_others_in_the_same_request(0).await;
+    recalled_steer_leaves_the_others_in_the_same_request(DurableSteerRig::ephemeral().await, 0)
+        .await;
+}
+
+#[tokio::test]
+async fn persistent_recalled_head_steer_leaves_the_others_in_the_same_request() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    recalled_steer_leaves_the_others_in_the_same_request(
+        DurableSteerRig::persistent(store).await,
+        0,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn recalled_middle_steer_leaves_the_others_in_the_same_request() {
-    recalled_steer_leaves_the_others_in_the_same_request(1).await;
+    recalled_steer_leaves_the_others_in_the_same_request(DurableSteerRig::ephemeral().await, 1)
+        .await;
+}
+
+#[tokio::test]
+async fn persistent_recalled_middle_steer_leaves_the_others_in_the_same_request() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    recalled_steer_leaves_the_others_in_the_same_request(
+        DurableSteerRig::persistent(store).await,
+        1,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn recalled_last_steer_leaves_the_others_in_the_same_request() {
-    recalled_steer_leaves_the_others_in_the_same_request(2).await;
+    recalled_steer_leaves_the_others_in_the_same_request(DurableSteerRig::ephemeral().await, 2)
+        .await;
+}
+
+/// The claim holder is recalled after the runner parked with it, and two
+/// more steers are admitted, all before the publication: the holder's claim
+/// stays with the lane, the two join that request in order, and the recalled
+/// holder reaches no request.
+#[tokio::test]
+async fn steer_admitted_while_the_holder_was_recalled_after_the_park_joins_that_request() {
+    let rig = DurableSteerRig::ephemeral().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    rig.script.prepare_hold_armed.store(true, Ordering::SeqCst);
+    let holder = peer_steer("holder payload");
+    let holder_id = holder.id().clone();
+    rig.admit(holder).await;
+    rig.wait_for_waiting_delivery().await;
+
+    // The runner parks with the holder; then the holder is recalled and two
+    // more steers are admitted, all before anything is published.
+    let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    wait_for_prepare_hold(&rig).await;
+    assert!(
+        recall(&rig, &holder_id)
+            .await
+            .is_some_and(|answer| answer.abandoned())
+    );
+    let mut later = Vec::new();
+    for payload in ["after recall payload one", "after recall payload two"] {
+        let steer = peer_steer(payload);
+        later.push(steer.id().clone());
+        rig.admit(steer).await;
+    }
+    rig.script
+        .prepare_hold_released
+        .store(true, Ordering::SeqCst);
+    wait_for_steps_done(&rig, steps_before + 1).await;
+
+    let next_request = last_take(&rig);
+    assert_eq!(
+        take_ids(&next_request),
+        later,
+        "the two steers admitted before the cutoff join; the recalled holder does not"
+    );
+    assert!(
+        next_request
+            .iter()
+            .all(|(_, payload)| !payload.contains("holder payload"))
+    );
+    finish_without_a_follow_up(&rig, &later).await;
+    assert_eq!(contributions(&rig.script.primitives(), &holder_id), 0);
+    assert_eq!(
+        rig.phase(&holder_id).await,
+        Some(InputLifecycleState::Abandoned)
+    );
 }
 
 /// The persistent driver writes one row per joined steer, bound to the run,
@@ -563,4 +647,193 @@ async fn steers_still_waiting_when_the_run_ends_take_one_follow_up_in_arrival_or
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
+}
+
+/// A fresh runtime over `store` takes over `session_id` after the process
+/// that held it died, and its runs are finished until every one of `inputs`
+/// is consumed.
+async fn recover_and_drain(
+    store: &Arc<dyn crate::store::RuntimeStore>,
+    session_id: SessionId,
+    inputs: &[InputId],
+) -> DurableSteerRig {
+    let recovered = DurableSteerRig::with_adapter_for_session(
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(store))
+                .expect("persistent machine"),
+        ),
+        session_id,
+    )
+    .await;
+    let mut finished = 0;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let mut consumed = true;
+            for input_id in inputs {
+                consumed &= recovered.phase(input_id).await == Some(InputLifecycleState::Consumed);
+            }
+            if consumed {
+                return;
+            }
+            if *recovered.script.applies_observable.borrow() > finished {
+                recovered.script.step(RunnerStep::Finish);
+                finished += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the recovered runtime consumes every input");
+    recovered
+}
+
+async fn assert_each_delivered_exactly_once_after_recovery(
+    store: &Arc<dyn crate::store::RuntimeStore>,
+    recovered: &DurableSteerRig,
+    steers: &[InputId],
+    crashed_run: Option<&RunId>,
+) {
+    let runtime_id = MeerkatMachine::logical_runtime_id(&recovered.session_id);
+    let primitives = recovered.script.primitives();
+    let applied = recovered.script.applied_durable();
+    for input_id in steers {
+        let at_turn_start = contributions(&primitives, input_id);
+        let at_a_boundary = applied
+            .iter()
+            .filter(|applied_id| *applied_id == input_id)
+            .count();
+        assert_eq!(
+            at_turn_start + at_a_boundary,
+            1,
+            "{input_id} is delivered exactly once after the restart: {at_turn_start} turn start(s), {at_a_boundary} boundary apply(ies)"
+        );
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load consumed row")
+            .expect("consumed row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+        if let Some(crashed_run) = crashed_run {
+            assert_ne!(
+                row.seed.last_run_id.as_ref(),
+                Some(crashed_run),
+                "a run of the recovered runtime consumed {input_id}"
+            );
+        }
+    }
+    // Arrival order survives the restart: where two steers are delivered at
+    // the same place, the earlier admission comes first.
+    let order = primitives
+        .iter()
+        .flatten()
+        .chain(applied.iter())
+        .filter(|input_id| steers.contains(input_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if primitives
+        .iter()
+        .any(|contributors| steers.iter().all(|steer| contributors.contains(steer)))
+    {
+        assert_eq!(order, steers, "one turn delivers them in arrival order");
+    }
+}
+
+/// The process dies after three steers were admitted and before the boundary
+/// they wait for: no row is lost and none is delivered twice.
+#[tokio::test]
+async fn persistent_restart_between_admission_and_the_boundary_delivers_each_steer_once() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let crashed = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let session_id = crashed.session_id.clone();
+    let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+    let batch = crashed.start_busy_turn().await;
+    crashed
+        .script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let steers = admit_in_order(
+        &crashed,
+        vec![
+            peer_steer("restart payload one"),
+            peer_steer("restart payload two"),
+            peer_steer("restart payload three"),
+        ],
+    )
+    .await;
+    for input_id in &steers {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load admitted row")
+            .expect("admitted row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Queued);
+    }
+    assert!(crashed.script.applied_durable().is_empty());
+
+    // The process dies with the three admitted and the boundary not reached.
+    std::mem::forget(crashed);
+
+    let mut all = vec![batch];
+    all.extend(steers.iter().cloned());
+    let recovered = recover_and_drain(&store, session_id, &all).await;
+    assert_each_delivered_exactly_once_after_recovery(&store, &recovered, &steers, None).await;
+}
+
+/// The process dies after one boundary joined three steers and the runner
+/// applied them to its live image, which is lost: each is recovered for
+/// exactly one delivery, none is lost and none is delivered twice.
+#[tokio::test]
+async fn persistent_crash_after_three_steers_joined_one_boundary_delivers_each_once() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let crashed = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let session_id = crashed.session_id.clone();
+    let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+    let batch = crashed.start_busy_turn().await;
+    crashed
+        .script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let steers = admit_in_order(
+        &crashed,
+        vec![
+            peer_steer("crash payload one"),
+            peer_steer("crash payload two"),
+            peer_steer("crash payload three"),
+        ],
+    )
+    .await;
+    crashed
+        .script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert_eq!(crashed.script.applied_durable(), steers);
+    let mut crashed_runs = Vec::new();
+    for input_id in &steers {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load joined row")
+            .expect("joined row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Staged);
+        crashed_runs.push(row.seed.last_run_id.clone().expect("durable run binding"));
+    }
+    assert!(crashed_runs.windows(2).all(|pair| pair[0] == pair[1]));
+    let crashed_run = crashed_runs.remove(0);
+
+    // The process dies with the run in flight: nothing of the run commits
+    // and its live image (which held the three appends) is lost.
+    std::mem::forget(crashed);
+
+    let mut all = vec![batch];
+    all.extend(steers.iter().cloned());
+    let recovered = recover_and_drain(&store, session_id, &all).await;
+    assert_each_delivered_exactly_once_after_recovery(
+        &store,
+        &recovered,
+        &steers,
+        Some(&crashed_run),
+    )
+    .await;
 }

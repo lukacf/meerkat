@@ -94,6 +94,65 @@ fn the_error_data_marks_only_the_unavailable_reason_retryable() {
     }
 }
 
+/// An instance's known cause can narrow the historical reason-level class.
+/// Unknown causes and absolute eligibility times do not invent a new class.
+#[test]
+fn refusal_diagnostics_preserve_projection_and_narrow_retryability() {
+    assert_eq!(
+        crate::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED,
+        "new_sign_in_required"
+    );
+    assert_eq!(
+        crate::REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE,
+        "token_exchange_unavailable"
+    );
+    for reason in REASONS {
+        for cause in [
+            None,
+            Some(crate::REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE),
+            Some(crate::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED),
+            Some("future_unavailability_cause"),
+            Some(""),
+        ] {
+            for not_before in [None, Some("2020-01-02T03:04:05Z")] {
+                let mut document = serde_json::to_value(refusal_with_reason(reason))
+                    .expect("serialize the baseline refusal");
+                if let Some(cause) = cause {
+                    document["cause"] = json!(cause);
+                }
+                if let Some(not_before) = not_before {
+                    document["not_before"] = json!(not_before);
+                }
+                let refusal = refusal_of(&document);
+                let data = SessionError::Agent(refused(&refusal))
+                    .structured_data()
+                    .expect("a refused level has structured data");
+                let expected_retryable = reason
+                    == ReasoningEffortRefusalReason::SupportedLevelsUnavailable
+                    && cause != Some(crate::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED);
+                assert_eq!(
+                    data,
+                    json!({
+                        "kind": SessionError::REASONING_EFFORT_REFUSED_KIND,
+                        "retryable": expected_retryable,
+                        "reasoning_effort_refusal": document,
+                    }),
+                    "{reason:?}, cause={cause:?}, not_before={not_before:?}"
+                );
+                assert_eq!(
+                    SessionError::reasoning_effort_refusal_from_data(&data),
+                    Some(refusal)
+                );
+                assert_eq!(
+                    reason.is_transient(),
+                    reason == ReasoningEffortRefusalReason::SupportedLevelsUnavailable,
+                    "the closed reason's historical class remains unchanged"
+                );
+            }
+        }
+    }
+}
+
 /// The agent error's text is the refusal's own text, with no prefix.
 #[test]
 fn the_agent_error_message_is_the_refusals_text() {
@@ -238,4 +297,41 @@ fn a_refused_level_keeps_its_typed_reason_at_the_executor_boundary() {
             refusal: Box::new(refusal),
         })
     );
+}
+
+/// The shared SDK expectations are checked against actual typed producer
+/// serialization. The JSON is expected data, not a recorded execution log.
+#[test]
+fn refusal_diagnostics_match_the_shared_sdk_cases() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("diagnostics_cases.json")).expect("shared cases");
+    assert_eq!(
+        fixture["known_causes"]["new_sign_in_required"],
+        crate::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED
+    );
+    assert_eq!(
+        fixture["known_causes"]["token_exchange_unavailable"],
+        crate::REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE
+    );
+    for case in fixture["typed_cases"].as_array().expect("typed cases") {
+        let refusal = refusal_of(&case["data"]["reasoning_effort_refusal"]);
+        let data = SessionError::Agent(refused(&refusal))
+            .structured_data()
+            .expect("typed refusal data");
+        assert_eq!(data, case["data"], "{}", case["name"]);
+        let event = crate::AgentEvent::RunFailed {
+            session_id: crate::SessionId::new(),
+            identity: Default::default(),
+            error_report: AgentErrorReport::from_agent_error(&refused(&refusal)),
+            terminal_cause_kind: None,
+        };
+        let wire = serde_json::to_value(event).expect("serialize actual RunFailed");
+        assert_eq!(wire["type"], "run_failed");
+        assert_eq!(wire["error_report"]["class"], "config");
+        assert_eq!(
+            wire["error_report"]["reason"], case["event_reason"],
+            "{}",
+            case["name"]
+        );
+    }
 }

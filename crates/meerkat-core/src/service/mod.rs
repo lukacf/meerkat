@@ -804,9 +804,9 @@ impl SessionError {
     /// Structured-data `kind` of a refused `reasoning_effort` level
     /// ([`crate::error::AgentError::ReasoningEffortRefused`]) on the wire.
     /// The `reasoning_effort_refusal` member carries the typed refusal; the
-    /// advisory `retryable` member beside it is `true` only for the
-    /// transient reason
-    /// ([`crate::ReasoningEffortRefusalReason::is_transient`]).
+    /// advisory `retryable` member beside it follows the instance classifier
+    /// ([`crate::ReasoningEffortRefusal::is_retryable`]), including a known
+    /// cause that requires a new sign-in.
     pub const REASONING_EFFORT_REFUSED_KIND: &'static str = "reasoning_effort_refused";
 
     /// Return a stable error code string for wire formats.
@@ -887,7 +887,7 @@ impl SessionError {
             Self::Agent(crate::error::AgentError::ReasoningEffortRefused(refusal)) => {
                 Some(serde_json::json!({
                     "kind": Self::REASONING_EFFORT_REFUSED_KIND,
-                    "retryable": refusal.reason.is_transient(),
+                    "retryable": refusal.is_retryable(),
                     "reasoning_effort_refusal": refusal,
                 }))
             }

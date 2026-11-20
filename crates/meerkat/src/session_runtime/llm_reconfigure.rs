@@ -1453,7 +1453,14 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
                 .profile_witness_for_identity(&config, &identity)
                 .and_then(|witness| witness.catalog_capabilities()),
         )
-        .map_err(RuntimeDriverError::ReasoningEffortRefused)
+        .map_err(|mut refusal| {
+            if refusal.reason.is_transient() {
+                let diagnostics = adapter.on_reasoning_effort_unavailable();
+                refusal.cause = diagnostics.cause;
+                refusal.not_before = diagnostics.not_before;
+            }
+            RuntimeDriverError::ReasoningEffortRefused(refusal)
+        })
     }
 
     async fn switch_target_carries_session_transcript(

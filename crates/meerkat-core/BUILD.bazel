@@ -72,6 +72,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/hooks/run_override.json",
         "tests/fixtures/v0_8_50_session_persistence_version_authority.rs.txt",
@@ -125,6 +126,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/hooks/run_override.json",
         "tests/fixtures/v0_8_50_session_persistence_version_authority.rs.txt",
@@ -179,6 +181,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/hooks/run_override.json",
         "tests/fixtures/v0_8_50_session_persistence_version_authority.rs.txt",
@@ -260,6 +263,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -336,6 +340,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -418,6 +423,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -494,6 +500,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -572,6 +579,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -650,6 +658,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -726,6 +735,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -804,6 +814,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -880,6 +891,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -956,6 +968,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1032,6 +1045,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1108,6 +1122,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1184,6 +1199,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1259,6 +1275,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1335,6 +1352,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1411,6 +1429,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1487,6 +1506,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1563,6 +1583,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1639,6 +1660,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1715,6 +1737,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1791,6 +1814,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1867,6 +1891,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -1943,6 +1968,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -2019,6 +2045,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -2095,6 +2122,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -2171,6 +2199,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -2247,6 +2276,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -2323,6 +2353,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
@@ -2401,6 +2432,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/reasoning_effort/diagnostics_cases.json",
         "src/transcript_replay.rs",
         "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
         "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",

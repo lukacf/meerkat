@@ -113,6 +113,8 @@ fn test_config() -> Config {
 /// What the fake provider layer observed, and the route its clients report.
 #[derive(Default)]
 struct Script {
+    diagnostics: StdMutex<meerkat_core::ReasoningEffortUnavailable>,
+    diagnostic_calls: std::sync::atomic::AtomicUsize,
     /// Every provider call: the provider that served it and its model.
     served: StdMutex<Vec<(Provider, String)>>,
     /// Scripted route observations, newest last; a provider with none
@@ -121,6 +123,17 @@ struct Script {
 }
 
 impl Script {
+    fn enable_diagnostics(&self) {
+        let mut value = self.diagnostics.lock().unwrap();
+        value.cause = Some("fixture_unavailable".to_string());
+        value.not_before = Some("2020-01-02T03:04:05Z".parse().unwrap());
+    }
+
+    fn diagnostic_calls(&self) -> usize {
+        self.diagnostic_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn served(&self) -> Vec<(Provider, String)> {
         self.served
             .lock()
@@ -163,6 +176,13 @@ struct RouteClient {
 
 #[async_trait]
 impl LlmClient for RouteClient {
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.script
+            .diagnostic_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.script.diagnostics.lock().unwrap().clone()
+    }
+
     fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
         self.script.route(self.provider)
     }
@@ -403,12 +423,14 @@ fn copilot_responses(account: AccountLevelStatement) -> ReasoningRouteObservatio
 #[tokio::test]
 async fn build_refuses_an_unsupported_level_typed() {
     let harness = Harness::new();
+    harness.script.enable_diagnostics();
     let refusal = expect_refused(
         harness
             .build(NARROW_MODEL, Provider::Anthropic, Some(EffortLevel::Max))
             .await,
     );
     assert_eq!(refusal_json(&refusal), narrow_model_refusal_document());
+    assert_eq!(harness.script.diagnostic_calls(), 0);
     assert_eq!(
         BuildAgentError::ReasoningEffortRefused(Box::new(refusal.clone())).to_string(),
         "reasoning effort 'max' is not supported by anthropic model 'claude-opus-4-5' on \
@@ -436,6 +458,7 @@ async fn build_refuses_an_unsupported_level_typed() {
 #[tokio::test]
 async fn a_build_without_a_level_is_not_judged() {
     let harness = Harness::new();
+    harness.script.enable_diagnostics();
     harness.script.set_route(Provider::Anthropic, None);
     let mut agent = harness
         .build(NARROW_MODEL, Provider::Anthropic, None)
@@ -446,6 +469,7 @@ async fn a_build_without_a_level_is_not_judged() {
         .await
         .expect("the turn runs");
     assert_eq!(result.text, ANSWER);
+    assert_eq!(harness.script.diagnostic_calls(), 0);
 }
 
 /// The session service's builder answers the refused build as the typed
@@ -508,6 +532,7 @@ async fn a_refused_build_is_the_typed_session_error() {
 #[tokio::test]
 async fn build_refuses_unknown_and_unavailable_support_typed() {
     let harness = Harness::new();
+    harness.script.enable_diagnostics();
 
     // An uncatalogued model on the direct route.
     let mut build = harness.build_config(
@@ -554,6 +579,8 @@ async fn build_refuses_unknown_and_unavailable_support_typed() {
         })
     );
 
+    assert_eq!(harness.script.diagnostic_calls(), 0);
+
     // An account route whose model list is not loaded: the transient reason.
     harness.script.set_route(
         Provider::OpenAI,
@@ -570,9 +597,11 @@ async fn build_refuses_unknown_and_unavailable_support_typed() {
             "requested": "high", "provider": "openai", "model": OPENAI_MODEL,
             "route": {"backend": "copilot", "api": "responses"},
             "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+            "cause": "fixture_unavailable", "not_before": "2020-01-02T03:04:05Z",
         })
     );
     assert!(refusal.reason.is_transient());
+    assert_eq!(harness.script.diagnostic_calls(), 1);
 
     // An account entry that states no levels: unknown, although the model
     // has a catalog row that lists the level.
@@ -624,6 +653,11 @@ async fn build_refuses_unknown_and_unavailable_support_typed() {
         .await
         .unwrap_or_else(|error| panic!("a level the account's list states builds: {error}"));
 
+    assert_eq!(
+        harness.script.diagnostic_calls(),
+        1,
+        "other reasons and accepted levels do not call the hook"
+    );
     assert!(
         harness.script.served().is_empty(),
         "no refused or accepted build makes a provider request: {:?}",
@@ -1037,6 +1071,78 @@ mod live {
             Some(EffortLevel::High)
         );
         assert_eq!(harness.durable_identity().await, report.new_identity);
+    }
+
+    /// The selected admission judgment reports the actual client's diagnostics
+    /// once and leaves the live and durable identities intact. Publishing a
+    /// stated list makes the identical later reconfiguration acceptable.
+    #[tokio::test]
+    async fn unavailable_reconfigure_reports_selected_client_diagnostics_once() {
+        let harness = LiveHarness::new().await;
+        let before = harness.durable_identity().await;
+        harness.script.clear_served();
+        harness.script.enable_diagnostics();
+        harness.script.set_route(
+            Provider::OpenAI,
+            Some(copilot_responses(AccountLevelStatement::ListUnavailable)),
+        );
+        let request = || SessionLlmReconfigureRequest {
+            model: Some(OPENAI_MODEL.to_string()),
+            provider: Some(Provider::OpenAI.as_str().to_string()),
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(TurnMetadataOverride::Set(binding(OPENAI_BINDING))),
+            reasoning_effort: Some(TurnMetadataOverride::Set(EffortLevel::High)),
+        };
+        let error = harness
+            .adapter
+            .reconfigure_session_llm_identity(&harness.session_id, request())
+            .await
+            .expect_err("an unavailable list refuses the strict level");
+        let RuntimeDriverError::ReasoningEffortRefused(refusal) = &error else {
+            panic!("expected typed refusal, got {error:?}");
+        };
+        assert_eq!(
+            refusal.reason,
+            meerkat_core::ReasoningEffortRefusalReason::SupportedLevelsUnavailable
+        );
+        assert_eq!(refusal.cause.as_deref(), Some("fixture_unavailable"));
+        assert_eq!(
+            refusal.not_before,
+            Some("2020-01-02T03:04:05Z".parse().unwrap())
+        );
+        assert_eq!(harness.script.diagnostic_calls(), 1);
+        assert!(harness.script.served().is_empty());
+        assert_eq!(harness.durable_identity().await, before);
+        assert_eq!(
+            harness
+                .service
+                .live_session_llm_identity(&harness.session_id)
+                .await
+                .expect("live identity"),
+            before
+        );
+        harness.script.set_route(
+            Provider::OpenAI,
+            Some(copilot_responses(AccountLevelStatement::Stated(vec![
+                EffortLevel::High,
+            ]))),
+        );
+        let report = harness
+            .adapter
+            .reconfigure_session_llm_identity(&harness.session_id, request())
+            .await
+            .expect("the same requested identity is now accepted");
+        assert_eq!(report.previous_identity, before);
+        assert_eq!(report.new_identity.model, OPENAI_MODEL);
+        assert_eq!(report.new_identity.provider, Provider::OpenAI);
+        assert_eq!(harness.durable_identity().await, report.new_identity);
+        harness.run_turn("the accepted identity runs").await;
+        assert_eq!(
+            harness.script.diagnostic_calls(),
+            1,
+            "accepted build and run judgments do not invoke the hook"
+        );
     }
 
     /// A hot swap that clears the level with the model change is not judged:

@@ -185,6 +185,8 @@ fn stating_everywhere(
     )
 }
 
+// Exercise the public resolver's value-typed outcome without changing the test contract.
+#[allow(clippy::result_large_err)]
 fn resolve(
     mode: ReasoningResolveMode,
     requested: EffortLevel,
@@ -211,6 +213,8 @@ fn resolve(
 }
 
 /// Strict resolution on an observed route of the backend's own family.
+// Exercise the public resolver's value-typed outcome without changing the test contract.
+#[allow(clippy::result_large_err)]
 fn strict(
     requested: EffortLevel,
     observation: &ReasoningRouteObservation,
@@ -228,6 +232,8 @@ fn strict(
 }
 
 /// Preference resolution on an observed route of the backend's own family.
+// Exercise the public resolver's value-typed outcome without changing the test contract.
+#[allow(clippy::result_large_err)]
 fn preference(
     requested: EffortLevel,
     observation: &ReasoningRouteObservation,
@@ -615,6 +621,8 @@ fn translation_table_covers_every_route_and_level() {
                             facts: Some(facts),
                             conflicting_param: None,
                             conflicting_level: None,
+                            cause: None,
+                            not_before: None,
                         }),
                         "{context}"
                     );
@@ -803,6 +811,8 @@ fn uncatalogued_model_on_a_catalog_route_is_unknown() {
                         facts: None,
                         conflicting_param: None,
                         conflicting_level: None,
+                        cause: None,
+                        not_before: None,
                     }
                 );
                 let value = serde_json::to_value(&refusal).expect("a refusal serializes");
@@ -1011,6 +1021,8 @@ fn a_level_the_list_does_not_state_is_refused() {
             facts: Some(ReasoningFactsSource::Account),
             conflicting_param: None,
             conflicting_level: None,
+            cause: None,
+            not_before: None,
         }
     );
     assert_eq!(
@@ -1393,6 +1405,8 @@ fn copilot_messages_writes_the_adaptive_pair_or_refuses() {
                     facts: Some(ReasoningFactsSource::Account),
                     conflicting_param: Some("provider_params.provider_tag.thinking".to_owned()),
                     conflicting_level: None,
+                    cause: None,
+                    not_before: None,
                 },
                 "{config:?} at {level:?}"
             );

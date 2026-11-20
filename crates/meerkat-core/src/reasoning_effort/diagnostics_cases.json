@@ -1,0 +1,393 @@
+{
+  "known_causes": {
+    "new_sign_in_required": "new_sign_in_required",
+    "token_exchange_unavailable": "token_exchange_unavailable"
+  },
+  "typed_cases": [
+    {
+      "name": "new-sign-in",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": false,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "new_sign_in_required",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": false,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "new_sign_in_required",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      }
+    },
+    {
+      "name": "outage",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "token_exchange_unavailable",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": true,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "token_exchange_unavailable",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      }
+    },
+    {
+      "name": "unknown",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": true,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      }
+    },
+    {
+      "name": "empty",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": ""
+        }
+      },
+      "transient": true,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": ""
+        }
+      }
+    },
+    {
+      "name": "absent",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null
+        }
+      },
+      "transient": true,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null
+        }
+      }
+    },
+    {
+      "name": "permanent",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": false,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unknown",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause"
+        }
+      },
+      "transient": false,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unknown",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause"
+        }
+      }
+    }
+  ],
+  "compatibility_cases": [
+    {
+      "name": "new-sign-in-outer-mismatch",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "new_sign_in_required",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": false
+    },
+    {
+      "name": "outage-outer-mismatch",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": false,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "token_exchange_unavailable",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": true
+    },
+    {
+      "name": "unknown-outer-mismatch",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": false,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": true
+    },
+    {
+      "name": "null-diagnostics-no-mark",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": null,
+          "not_before": null
+        }
+      },
+      "transient": true
+    },
+    {
+      "name": "nonboolean-mark",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": "true",
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "token_exchange_unavailable",
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": true
+    },
+    {
+      "name": "opaque-time",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause",
+          "not_before": "not-a-timestamp"
+        }
+      },
+      "transient": true
+    },
+    {
+      "name": "empty-time",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "future_cause",
+          "not_before": ""
+        }
+      },
+      "transient": true
+    }
+  ],
+  "invalid_values": [
+    7,
+    false,
+    [],
+    {}
+  ]
+}

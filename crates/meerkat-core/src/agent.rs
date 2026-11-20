@@ -265,6 +265,16 @@ pub trait AgentLlmClient: Send + Sync {
         None
     }
 
+    /// Observe held diagnostics after a strict judgment finds the selected
+    /// route's reasoning levels unavailable. A backend reports what it holds
+    /// and must return immediately: no waiting, blocking, credential
+    /// preparation or inference request.
+    /// Passive route observations and speculative probes do not invoke this
+    /// operation. Decorators forward it to their selected serving client.
+    fn on_reasoning_effort_unavailable(&self) -> crate::ReasoningEffortUnavailable {
+        crate::ReasoningEffortUnavailable::default()
+    }
+
     /// The provider tag this client applies to a request that carries none:
     /// its own default fields, which a request's own tag replaces as a
     /// whole. The agent writes a resolved `reasoning_effort` level into

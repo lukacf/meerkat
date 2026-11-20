@@ -33,6 +33,15 @@ pub use resolve::{
     resolve_reasoning_effort, supported_reasoning_levels,
 };
 
+/// The cause a provider reports when a device sign-in lease requires a new
+/// sign-in. An operator-token lease with the same admission verdict does not
+/// establish this cause. No built-in provider reports a cause yet.
+pub const REASONING_CAUSE_NEW_SIGN_IN_REQUIRED: &str = "new_sign_in_required";
+
+/// The cause a provider reports when a held, typed token-exchange outage
+/// leaves no usable account token.
+pub const REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE: &str = "token_exchange_unavailable";
+
 /// The provider API a request is sent on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -275,14 +284,15 @@ pub enum ReasoningEffortRefusalReason {
 }
 
 impl ReasoningEffortRefusalReason {
-    /// Whether the reason is retryable in meaning: an identical later
+    /// Whether the reason alone is transient in meaning: an identical later
     /// request can succeed with no configuration change. True only for
     /// [`Self::SupportedLevelsUnavailable`] (the account's model list is not
     /// loaded). [`Self::SupportedLevelsUnknown`] is not transient: it holds
     /// until a configuration changes, like every other reason.
     ///
-    /// Meerkat itself never retries a refused level; the caller decides
-    /// when to ask again.
+    /// A known cause can narrow an individual refusal's retryability; use
+    /// [`ReasoningEffortRefusal::is_retryable`] for that decision. Meerkat
+    /// itself never retries a refused level; the caller decides when to ask again.
     pub const fn is_transient(self) -> bool {
         matches!(self, Self::SupportedLevelsUnavailable)
     }
@@ -306,13 +316,29 @@ pub enum ReasoningFactsSource {
     Operator,
 }
 
+/// Held diagnostics for an unavailable reasoning-level source.
+///
+/// Returned by [`crate::AgentLlmClient::on_reasoning_effort_unavailable`].
+/// Empty by default; missing facts are never inferred from a missing list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReasoningEffortUnavailable {
+    /// An optional cause observed from typed account state. This is an open
+    /// string vocabulary, with the same meaning as [`ReasoningEffortRefusal::cause`].
+    pub cause: Option<String>,
+    /// An optional absolute eligibility time already held by the account.
+    /// It is not a recovery promise or a newly calculated retry interval.
+    pub not_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// A refused `reasoning_effort` level: what was requested, for which model
 /// and route, and why. Raised before any provider request is sent.
 ///
 /// `route`, `supported` and `facts` are always serialized, as `null` when
 /// absent (`facts` is absent exactly when `supported` is). The two
-/// `conflicting_*` fields are serialized only when present. The `Display`
-/// text is for people and is not a contract; read the fields.
+/// `conflicting_*` fields and the optional `cause` and `not_before` diagnostics
+/// are serialized only when present. The `Display` text is for people and is
+/// not a contract; read the fields.
 ///
 /// Non-exhaustive: a later release can add a field, so code outside this
 /// crate reads the fields and does not build the value with a struct
@@ -358,6 +384,29 @@ pub struct ReasoningEffortRefusal {
     /// level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflicting_level: Option<EffortLevel>,
+    /// An optional typed account-state cause for unavailable levels.
+    /// `token_exchange_unavailable` describes a held transient exchange outage;
+    /// `new_sign_in_required` means device-mode lease admission requires a new sign-in,
+    /// without claiming that a token was refused. Absent cause means cause unknown;
+    /// unknown strings are retained. No built-in provider reports a cause yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// Absolute RFC3339 UTC eligibility time from a stored account deadline.
+    /// Absence states no deadline. This is neither a countdown nor a promise
+    /// that retrying then will recover the model list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub not_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ReasoningEffortRefusal {
+    /// Whether an identical later request may succeed without a configuration
+    /// change or a required new sign-in. Unknown or absent causes preserve the
+    /// reason's historical class. This does not schedule an automatic retry.
+    pub fn is_retryable(&self) -> bool {
+        self.reason.is_transient()
+            && self.cause.as_deref() != Some(REASONING_CAUSE_NEW_SIGN_IN_REQUIRED)
+    }
 }
 
 // A refusal's `route`, `supported` and `facts` are always serialized, as
@@ -880,6 +929,8 @@ mod tests {
             facts: Some(ReasoningFactsSource::Catalog),
             conflicting_param: None,
             conflicting_level: None,
+            cause: None,
+            not_before: None,
         }
     }
 
@@ -897,6 +948,8 @@ mod tests {
             facts: None,
             conflicting_param: None,
             conflicting_level: None,
+            cause: None,
+            not_before: None,
         }
     }
 
@@ -979,6 +1032,37 @@ mod tests {
             conflict
         );
 
+        // Optional diagnostics follow the conflict members, without moving
+        // any of the original fields or changing their literal wire shape.
+        let annotated = ReasoningEffortRefusal {
+            cause: Some("future_unavailability_cause".to_owned()),
+            not_before: Some(
+                "2020-01-02T03:04:05Z"
+                    .parse()
+                    .expect("an absolute UTC instant"),
+            ),
+            ..conflict
+        };
+        let serialized = serde_json::to_string(&annotated).expect("a refusal serializes");
+        assert_eq!(
+            serialized,
+            compact(
+                r#"{
+  "requested": "high", "provider": "openai", "model": "test-openai-default",
+  "route": {"backend": "copilot", "api": "responses"},
+  "reason": "conflicting_provider_effort", "supported": ["low", "medium", "high"],
+  "facts": "account",
+  "conflicting_param": "provider_params.provider_tag.reasoning_effort",
+  "conflicting_level": "low",
+  "cause": "future_unavailability_cause", "not_before": "2020-01-02T03:04:05Z" }"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffortRefusal>(&serialized)
+                .expect("diagnostics read back in the typed refusal"),
+            annotated
+        );
+
         // A refusal that names no route (no client observation) writes
         // `route` as an explicit `null`, in its place, and reads back. A
         // document that leaves the key out reads as the same refusal.
@@ -1025,6 +1109,90 @@ mod tests {
                 serde_json::json!(wire)
             );
         }
+    }
+
+    fn unavailable_refusal_wire() -> serde_json::Value {
+        serde_json::to_value(openai_refusal(
+            ReasoningEffortRefusalReason::SupportedLevelsUnavailable,
+            copilot(ModelApi::Responses),
+        ))
+        .expect("the existing unavailable refusal serializes")
+    }
+
+    #[test]
+    fn refusal_diagnostics_require_an_absolute_timestamp() {
+        for invalid in ["7s", "2020-01-02T03:04:05"] {
+            let mut wire = unavailable_refusal_wire();
+            wire["not_before"] = serde_json::json!(invalid);
+            assert!(
+                serde_json::from_value::<ReasoningEffortRefusal>(wire).is_err(),
+                "relative or offset-less time must not cross the typed boundary: {invalid}"
+            );
+        }
+
+        // An explicit offset identifies an absolute instant; output is UTC.
+        let mut wire = unavailable_refusal_wire();
+        wire["not_before"] = serde_json::json!("2020-01-02T04:04:05+01:00");
+        let refusal: ReasoningEffortRefusal =
+            serde_json::from_value(wire).expect("an absolute timestamp with an offset reads");
+        assert_eq!(
+            serde_json::to_value(refusal).expect("serialize the UTC timestamp")["not_before"],
+            serde_json::json!("2020-01-02T03:04:05Z")
+        );
+    }
+
+    #[test]
+    fn refusal_diagnostics_preserve_known_cause_and_absolute_time() {
+        let mut wire = unavailable_refusal_wire();
+        wire["cause"] = serde_json::json!("token_exchange_unavailable");
+        wire["not_before"] = serde_json::json!("2020-01-02T03:04:05Z");
+
+        let refusal: ReasoningEffortRefusal =
+            serde_json::from_value(wire.clone()).expect("the open refusal accepts diagnostics");
+        let returned = serde_json::to_value(refusal).expect("the typed refusal serializes");
+        assert_eq!(
+            returned, wire,
+            "the typed refusal must preserve the cause and the absolute eligibility instant"
+        );
+    }
+
+    #[test]
+    fn refusal_diagnostics_preserve_unknown_future_cause() {
+        let mut wire = unavailable_refusal_wire();
+        wire["cause"] = serde_json::json!("future_unavailability_cause");
+
+        let refusal: ReasoningEffortRefusal =
+            serde_json::from_value(wire.clone()).expect("cause is an open vocabulary");
+        assert_eq!(
+            serde_json::to_value(refusal).expect("the typed refusal serializes"),
+            wire,
+            "an unknown cause must survive the typed boundary without changing the reason"
+        );
+    }
+
+    #[test]
+    fn refusal_diagnostics_keep_legacy_wire_without_fields() {
+        let wire = unavailable_refusal_wire();
+        assert!(wire.get("cause").is_none());
+        assert!(wire.get("not_before").is_none());
+        let refusal: ReasoningEffortRefusal =
+            serde_json::from_value(wire.clone()).expect("a legacy refusal remains readable");
+        assert_eq!(
+            serde_json::to_value(refusal).expect("the legacy refusal serializes"),
+            wire,
+            "absent diagnostics must not add null members to an existing refusal"
+        );
+    }
+
+    #[test]
+    fn refusal_diagnostics_keep_closed_reason_set() {
+        let mut wire = unavailable_refusal_wire();
+        wire["reason"] = serde_json::json!("future_refusal_reason");
+        wire["cause"] = serde_json::json!("future_unavailability_cause");
+        assert!(
+            serde_json::from_value::<ReasoningEffortRefusal>(wire).is_err(),
+            "an open cause does not make the existing reason vocabulary open"
+        );
     }
 
     /// One message per reason, as documented. The messages are for people; no

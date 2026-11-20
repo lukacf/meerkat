@@ -390,6 +390,10 @@ impl AgentLlmClient for TaintObservingLlmClient {
         self.inner.reasoning_route()
     }
 
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.inner.on_reasoning_effort_unavailable()
+    }
+
     // The default tag of the wrapped client. The trait's default is no tag,
     // and a level resolved for a member whose client hides its tag would
     // replace that client's default fields instead of joining them.
@@ -880,13 +884,32 @@ mod tests {
     #[test]
     fn forwards_the_wrapped_clients_reasoning_route() {
         use super::controller_test_support::{PinnedInner, default_provider_tag, reasoning_route};
+        let inner = Arc::new(PinnedInner::default());
         let wrapped = TaintObservingLlmClient::new(
-            Arc::new(PinnedInner::default()),
+            inner.clone(),
             "identity:r".to_string(),
             DispatchTaintSlot::default(),
         );
         assert_eq!(wrapped.reasoning_route(), Some(reasoning_route()));
         assert_eq!(wrapped.default_provider_tag(), Some(default_provider_tag()));
+        assert_eq!(
+            inner
+                .diagnostic_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        for expected in 1..=2 {
+            assert_eq!(
+                wrapped.on_reasoning_effort_unavailable(),
+                super::controller_test_support::reasoning_diagnostics()
+            );
+            assert_eq!(
+                inner
+                    .diagnostic_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -1076,6 +1099,18 @@ pub(crate) mod controller_test_support {
         )
     }
 
+    /// Nonempty diagnostic fields shared by the forwarding probes.
+    pub(crate) fn reasoning_diagnostics() -> meerkat_core::ReasoningEffortUnavailable {
+        let mut facts = meerkat_core::ReasoningEffortUnavailable::default();
+        facts.cause = Some("fixture_unavailable".to_string());
+        facts.not_before = Some(
+            "2020-01-02T03:04:05Z"
+                .parse()
+                .expect("absolute fixture time"),
+        );
+        facts
+    }
+
     /// The route the forwarding probes report for the provider-neutral
     /// `reasoning_effort` option. A decorator that does not forward it
     /// answers the trait's default, no route, and a level set on a member
@@ -1142,6 +1177,7 @@ pub(crate) mod controller_test_support {
 
     #[derive(Default)]
     pub(crate) struct PinnedInner {
+        pub(crate) diagnostic_calls: AtomicUsize,
         pub(crate) authorized_calls: AtomicUsize,
         pub(crate) seen_messages: Mutex<Vec<Message>>,
     }
@@ -1174,6 +1210,11 @@ pub(crate) mod controller_test_support {
 
     #[async_trait::async_trait]
     impl AgentLlmClient for PinnedInner {
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.diagnostic_calls.fetch_add(1, Ordering::SeqCst);
+            reasoning_diagnostics()
+        }
+
         fn controller_model_selection(&self) -> Option<ControllerModelSelection> {
             Some(selection())
         }

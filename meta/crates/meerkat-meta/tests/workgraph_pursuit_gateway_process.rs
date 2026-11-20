@@ -51,7 +51,43 @@ use serde_json::{Value, json};
 
 const MOB_ID: &str = "workgraph-pursuit-process";
 const MODEL: &str = "workgraph-pursuit-test-model";
-const IDENTITY: &str = "agent:pursuer";
+/// The identity's name when the test host names none: the conventional form
+/// of an identity-first name, which Core encodes into another roster id.
+const CONVENTIONAL_IDENTITY: &str = "agent:pursuer";
+/// The test host's choice of the identity's name for one run of the rows.
+/// It names the scene: the gateway binary, the stores, the runtime
+/// configuration and the model are the same for every name.
+const IDENTITY_ENV: &str = "WORKGRAPH_PURSUIT_ROWS_IDENTITY";
+
+static IDENTITY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    std::env::var(IDENTITY_ENV).unwrap_or_else(|_| CONVENTIONAL_IDENTITY.to_string())
+});
+
+/// The name of the one identity of the rows' roster.
+fn identity() -> &'static str {
+    IDENTITY.as_str()
+}
+
+/// Print which scene this run is: the identity's name and the roster id
+/// Core encodes it into.
+fn say_scene(row: &str) {
+    let roster_id = meerkat_mob::ids::member_id_for_name(identity());
+    let same = roster_id == identity();
+    say(
+        row,
+        format!(
+            "scene: {}; identity name {:?}, roster member id by Core's encoding {:?}, spellings \
+             identical: {same}",
+            if same {
+                "a name that encodes to itself"
+            } else {
+                "a conventional name, which Core encodes into another roster id"
+            },
+            identity(),
+            roster_id,
+        ),
+    );
+}
 
 /// The environment value that makes a boot compose pursuit.
 const ENABLE_ENV: &str = "META_TEST_VEHICLE_WORKGRAPH_PURSUIT";
@@ -85,6 +121,10 @@ const CONTROL_QUIET: Duration = Duration::from_secs(15);
 
 fn say(row: &str, text: impl AsRef<str>) {
     println!("[{row}] {}", text.as_ref());
+}
+
+fn verdict(pass: bool) -> &'static str {
+    if pass { "pass" } else { "fail" }
 }
 
 fn head(text: &str, limit: usize) -> String {
@@ -160,7 +200,7 @@ family = "{MODEL}"
 
 fn roster_spec() -> Value {
     json!({
-        "identity": IDENTITY,
+        "identity": identity(),
         "profile": "specialist",
         "addressability": "addressable",
         "display_name": null,
@@ -267,9 +307,14 @@ fn digest(index: usize, request: &Value) -> String {
         .collect::<Vec<_>>()
         .join(" | ");
     let tools = tool_names(request);
+    let workgraph_tools = tools
+        .iter()
+        .filter(|tool| tool.starts_with("workgraph_"))
+        .map(|tool| tool.trim_start_matches("workgraph_"))
+        .collect::<Vec<_>>();
     format!(
         "request #{index}: messages={} notices={} original={} revised={} later={} held_prompt={} \
-         probe_prompt={} starts_from_notice={} tools={} workgraph_tools={} tail=[{tail}]",
+         probe_prompt={} starts_from_notice={} tools={} workgraph_tools={} ({}) tail=[{tail}]",
         list.len(),
         text.matches(NOTICE_PHRASE).count(),
         text.matches(ORIGINAL).count(),
@@ -279,10 +324,8 @@ fn digest(index: usize, request: &Value) -> String {
         text.matches(PROBE_PROMPT).count(),
         starts_from_notice(request),
         tools.len(),
-        tools
-            .iter()
-            .filter(|tool| tool.starts_with("workgraph_"))
-            .count(),
+        workgraph_tools.len(),
+        workgraph_tools.join(" "),
     )
 }
 
@@ -400,6 +443,7 @@ impl Gateway {
         command
             .arg("--persistent")
             .env("RUST_LOG", GATEWAY_LOG_FILTER)
+            .env_remove(IDENTITY_ENV)
             .env_remove(ENABLE_ENV)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -638,7 +682,7 @@ impl Gateway {
 
     /// The identity's status at the gateway, printed.
     fn read_status(&mut self, when: &str) -> Value {
-        let status = self.call("meta/status_identity", json!({ "identity": IDENTITY }));
+        let status = self.call("meta/status_identity", json!({ "identity": identity() }));
         self.say(format!(
             "{when}: identity state={} session_id={} generation={} agent_runtime_id={} \
              member_id={} wake_refusal={}",
@@ -679,6 +723,48 @@ impl Gateway {
         item
     }
 
+    /// Print how many claims `item` holds and whose, under `label`.
+    fn say_claim(&self, label: &str, item: &Value) {
+        let claim = &item["claim"];
+        if claim.is_null() {
+            self.say(format!("{label}: claims the item holds: 0"));
+        } else {
+            self.say(format!(
+                "{label}: claims the item holds: 1; owner={} claimed_at={} lease_expires_at={} \
+                 expiry_observed_at={}",
+                claim["owner"]["key"],
+                claim["claimed_at"],
+                claim["lease_expires_at"],
+                claim["expiry_observed_at"],
+            ));
+        }
+    }
+
+    /// Print the claim and release events of the WorkGraph ledger.
+    fn say_claim_events(&mut self) {
+        let Some(answer) = self.try_request("meta/workgraph/events", json!({}), RPC_TIMEOUT) else {
+            self.say("WorkGraph ledger: NOT READ (no answer)");
+            return;
+        };
+        let events = answer["result"]["events"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let kinds = events
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap_or("?").to_string())
+            .collect::<Vec<_>>();
+        self.say(format!(
+            "WorkGraph ledger: {} events, of which claimed {} and released {} (kinds in order: \
+             {}; truncated: {})",
+            events.len(),
+            kinds.iter().filter(|kind| *kind == "claimed").count(),
+            kinds.iter().filter(|kind| *kind == "released").count(),
+            kinds.join(" "),
+            answer["result"]["truncated"],
+        ));
+    }
+
     /// Every attention binding the WorkGraph store lists, printed.
     fn read_bindings(&mut self, when: &str) -> Vec<Value> {
         let listed = self.call("meta/workgraph/attention/list", json!({}));
@@ -706,7 +792,7 @@ impl Gateway {
         let ticket = self.send_tracked(text);
         let waited = self.request(
             "meta/wait_for_turn",
-            json!({ "identity": IDENTITY, "ticket": ticket, "timeout_ms": 90_000 }),
+            json!({ "identity": identity(), "ticket": ticket, "timeout_ms": 90_000 }),
             Duration::from_mins(2),
         );
         self.say(format!(
@@ -721,7 +807,7 @@ impl Gateway {
     fn send_tracked(&mut self, text: &str) -> String {
         let sent = self.call(
             "meta/send",
-            json!({ "identity": IDENTITY, "content": text, "track_turn": true }),
+            json!({ "identity": identity(), "content": text, "track_turn": true }),
         );
         sent["turn"]["ticket"]
             .as_str()
@@ -736,7 +822,7 @@ impl Gateway {
             json!({
                 "title": "watch the queue",
                 "description": description,
-                "target": { "kind": "identity", "identity": IDENTITY },
+                "target": { "kind": "identity", "identity": identity() },
             }),
         );
         let goal = Goal {
@@ -868,6 +954,25 @@ impl Scene {
             gateway.say(format!("stderr: {}", head(line, 160)));
         }
         gateway
+    }
+
+    /// One line: how many requests the model has seen at this stage, how
+    /// many of them start from a notice and how many from the held prompt.
+    fn say_turns(&self, label: &str, stage: &str) {
+        let requests = self.model.requests();
+        say(
+            self.row,
+            format!(
+                "[{label}] TURNS {stage}: model requests seen {}, starting from a notice {}, \
+                 starting from the held prompt {}",
+                requests.len(),
+                notice_starts(&requests, 0).len(),
+                requests
+                    .iter()
+                    .filter(|request| last_message(request).contains(HELD_PROMPT))
+                    .count()
+            ),
+        );
     }
 
     /// Print every request the model has seen from `from` on.
@@ -1045,6 +1150,19 @@ fn open_continuation_under(state: &Path, token: &str) -> bool {
     })
 }
 
+/// The ids of the store's open inputs; none when the store cannot be read.
+fn open_input_ids(state: &Path) -> Vec<String> {
+    stored_inputs(state)
+        .map(|(inputs, _)| {
+            inputs
+                .into_iter()
+                .filter(StoredInput::is_open)
+                .map(|input| input.input_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn notice_starts(requests: &[Value], from: usize) -> Vec<usize> {
     requests
         .iter()
@@ -1070,6 +1188,7 @@ fn a_host_goal_wakes_a_never_prompted_member_and_starts_no_turn_without_the_valu
         row,
         format!("gateway binary: {}", env!("CARGO_BIN_EXE_rpc_gateway")),
     );
+    say_scene(row);
 
     // The wake: pursuit composed.
     let on = Scene::new(row, "on");
@@ -1130,6 +1249,45 @@ fn a_host_goal_wakes_a_never_prompted_member_and_starts_no_turn_without_the_valu
     gateway.read_status("after the prompt");
     gateway.shutdown_best_effort();
     drop(gateway);
+
+    // The row's two readings, each by itself, printed before any assertion.
+    let never_prompted = on_status_before["state"] == json!("active")
+        && on_bindings_before.is_empty()
+        && on_requests_before == 0
+        && on_store_before.as_ref().is_none_or(Vec::is_empty);
+    let idle_wake = never_prompted
+        && on_requests.len() == 1
+        && on_requests.first().is_some_and(|wake| {
+            starts_from_notice(wake)
+                && last_message(wake).contains(ORIGINAL)
+                && tool_names(wake)
+                    .iter()
+                    .any(|tool| tool.starts_with("workgraph_"))
+        })
+        && on_bindings_after.len() == 1;
+    let off_control = off_requests_before == 0
+        && off_requests_after_goal == 0
+        && off_turn == json!("completed")
+        && off_requests
+            .first()
+            .is_some_and(|request| last_message(request).contains(PROBE_PROMPT))
+        && notice_starts(&off_requests, 0).is_empty();
+    say(
+        row,
+        format!(
+            "READING (a) idle wake (a seated, never prompted member takes exactly one turn from \
+             the notice after the host's committed goal): {}",
+            verdict(idle_wake)
+        ),
+    );
+    say(
+        row,
+        format!(
+            "READING (b) the off control (the same binary without the value starts no turn for \
+             the same goal; a later prompt's request is the model's first): {}",
+            verdict(off_control)
+        ),
+    );
 
     // Harness preconditions: the arms differ by the pursuit and nothing else.
     assert!(
@@ -1238,6 +1396,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         row,
         format!("gateway binary: {}", env!("CARGO_BIN_EXE_rpc_gateway")),
     );
+    say_scene(row);
     let scene = Scene::new(row, "boot-1");
     let mut gateway = scene.boot("boot-1", true);
     let first_vehicle_lines = gateway.vehicle_lines();
@@ -1251,6 +1410,8 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     gateway.say(format!(
         "setup: the goal's wake turn reached the model: {goal_woke}"
     ));
+    gateway.settle(Duration::from_secs(3));
+    scene.say_turns("boot-1", "after the goal's own wake turn");
     let before_claim = scene.model.seen();
     let item = gateway.read_item(&goal.item_id, "setup, before the claim");
     let claimed = gateway.call(
@@ -1263,7 +1424,8 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         }),
     );
     gateway.say(format!(
-        "host write meta/workgraph/claim in the member's own owner key {}: item revision -> {}",
+        "host write meta/workgraph/claim in the member's own owner key {} (written by the host \
+         through the gateway's method, not made by the member): item revision -> {}",
         goal.owner_key, claimed["item"]["revision"]
     ));
     let claim_woke = gateway.eventually(Duration::from_secs(30), || {
@@ -1274,6 +1436,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
          not asserted)"
     ));
     gateway.settle(Duration::from_secs(3));
+    scene.say_turns("boot-1", "after the claim's own wake turn");
 
     // The scene: a prompt turn held at the model, one revision while it runs.
     scene.model.hold_requests_carrying(HELD_PROMPT);
@@ -1287,13 +1450,18 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     gateway.say(format!(
         "the prompt turn (ticket {ticket}) reached the model and is held there: {prompt_held}"
     ));
+    scene.say_turns("boot-1", "with the prompt turn held");
+    let open_before_revision = open_input_ids(&scene.state);
     gateway.revise(&goal.item_id, REVISED);
     let continuation_waits = gateway.eventually(Duration::from_secs(45), || {
-        open_continuation_under(&scene.state, REVISED)
+        open_input_ids(&scene.state)
+            .iter()
+            .any(|id| !open_before_revision.contains(id))
     });
     gateway.say(format!(
-        "the store holds an open continuation under the revision while the prompt turn runs: \
-         {continuation_waits}"
+        "an input admitted after the revision is open in the store while the prompt turn runs: \
+         {continuation_waits}; an open input carries the notice and the revision: {}",
+        open_continuation_under(&scene.state, REVISED)
     ));
 
     // Readings before the kill.
@@ -1308,6 +1476,8 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
          {notice_turn_at_kill}"
     ));
     gateway.print_stderr("before the kill");
+    scene.say_turns("boot-1", "before the kill");
+    gateway.say_claim("ORIGINAL claim (before the kill)", &item_before);
 
     // The scene must be the one the row is about before the process is
     // killed: what the second boot does with a continuation that never
@@ -1323,7 +1493,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         ),
         (
             !continuation_waits,
-            "the store held no open continuation under the revision while the prompt turn ran",
+            "the store held no open input admitted after the revision while the prompt turn ran",
         ),
         (
             notice_turn_at_kill,
@@ -1334,6 +1504,13 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     .filter(|(fault, _)| *fault)
     .map(|(_, text)| text)
     .collect::<Vec<_>>();
+    if !scene_faults.is_empty() {
+        say(
+            row,
+            "READING (c) the same claim, binding and session after the restart with exactly one \
+             continuation turn: not reached (the scene did not come about before the kill)",
+        );
+    }
     assert!(
         scene_faults.is_empty(),
         "scene: the row's scene did not come about before the kill, so the process was not \
@@ -1350,6 +1527,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     drop(gateway);
     scene.model.release();
     read_store(row, "between", &scene.state, "after the kill, no process");
+    scene.say_turns("between", "after the kill, no process");
 
     // The second boot on the same state directory. From here the test makes
     // no write and sends no prompt until the continuation's turn is read.
@@ -1371,7 +1549,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         let before_probe = scene.model.seen();
         let probe = gateway.try_request(
             "meta/send",
-            json!({ "identity": IDENTITY, "content": PROBE_PROMPT, "track_turn": true }),
+            json!({ "identity": identity(), "content": PROBE_PROMPT, "track_turn": true }),
             RPC_TIMEOUT,
         );
         gateway.say(format!(
@@ -1388,6 +1566,16 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         gateway.read_status("after the read-on prompt");
         read_store(row, "boot-2", &scene.state, "after the read-on prompt");
         gateway.print_stderr("after the read-on prompt");
+        scene.say_turns("boot-2", "after the read-on prompt");
+        let item_after = gateway.read_item(&goal.item_id, "after the read-on prompt");
+        gateway.say_claim("RECOVERED claim (after the second boot)", &item_after);
+        gateway.read_bindings("after the read-on prompt");
+        gateway.say_claim_events();
+        say(
+            row,
+            "READING (c) the same claim, binding and session after the restart with exactly one \
+             continuation turn: fail (no continuation turn after the second boot)",
+        );
         let fact = if after_prompt {
             "the waiting input was kept and its member was not brought up at the start: the \
              continuation's turn ran only after a later prompt"
@@ -1403,6 +1591,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
 
     // Readings after the second boot.
     gateway.settle(SETTLE);
+    scene.say_turns("boot-2", "after the second boot settled");
     let after_restart = scene.print_requests("boot-2", requests_at_kill);
     let recovered_starts = notice_starts(&after_restart, requests_at_kill);
     let prompt_requests_after_restart = after_restart[requests_at_kill..]
@@ -1456,6 +1645,47 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         item_before["revision"],
         item_after["revision"]
     ));
+    gateway.say_claim("ORIGINAL claim (before the kill)", &item_before);
+    gateway.say_claim("RECOVERED claim (after the second boot)", &item_after);
+    gateway.say_claim_events();
+    let claim_same = !item_before["claim"].is_null() && item_before["claim"] == item_after["claim"];
+    let claim_valid = item_after["claim"]["expiry_observed_at"].is_null()
+        && item_after["claim"]["lease_expires_at"]
+            .as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .is_some_and(|at| at > chrono::Utc::now());
+    let binding_same = !bindings_before.is_empty()
+        && bindings_before.len() == bindings_after.len()
+        && bindings_before
+            .iter()
+            .zip(&bindings_after)
+            .all(|(before, after)| {
+                ["binding_id", "status", "target", "work_ref"]
+                    .iter()
+                    .all(|member| before[member] == after[member])
+            });
+    let session_same = !status_before["session_id"].is_null()
+        && status_before["session_id"] == status_after["session_id"];
+    let one_continuation = recovered_starts.len() == 1
+        && last_message(first_recovered).contains(REVISED)
+        && !last_message(first_recovered).contains(ORIGINAL);
+    gateway.say(format!(
+        "ORIGINAL against RECOVERED: claim the same (owner, claimed_at, lease times): \
+         {claim_same}; the recovered claim's lease is live and no expiry was observed (read at \
+         {}): {claim_valid}; bindings the same (id, status, target, item): {binding_same}; \
+         session the same: {session_same}; exactly one turn from a notice after the restart, \
+         under the revision: {one_continuation}; replays of the held prompt after the restart \
+         (not counted as a continuation): {prompt_requests_after_restart}",
+        chrono::Utc::now().to_rfc3339()
+    ));
+    say(
+        row,
+        format!(
+            "READING (c) the same claim, binding and session after the restart with exactly one \
+             continuation turn: {}",
+            verdict(claim_same && claim_valid && binding_same && session_same && one_continuation)
+        ),
+    );
 
     // The tail: one more revision starts one more turn.
     let before_tail = scene.model.seen();
@@ -1477,6 +1707,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     gateway.read_item(&goal.item_id, "after the tail");
     read_store(row, "boot-2", &scene.state, "after the tail");
     gateway.print_stderr("after the tail");
+    scene.say_turns("boot-2", "after the tail");
     gateway.shutdown_best_effort();
     drop(gateway);
 
@@ -1500,7 +1731,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     );
     assert!(
         continuation_waits,
-        "scene: the store held no open continuation under the revision before the kill; the \
+        "scene: the store held no open input admitted after the revision before the kill; the \
          printed store rows say whether it could be read: {}",
         store_before.map_or_else(
             || "store not read".to_string(),

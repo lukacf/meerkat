@@ -1458,10 +1458,13 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
             .iter()
             .any(|id| !open_before_revision.contains(id))
     });
+    let continuation_under_revision = gateway.eventually(Duration::from_secs(15), || {
+        open_continuation_under(&scene.state, REVISED)
+    });
     gateway.say(format!(
         "an input admitted after the revision is open in the store while the prompt turn runs: \
-         {continuation_waits}; an open input carries the notice and the revision: {}",
-        open_continuation_under(&scene.state, REVISED)
+         {continuation_waits}; an open input carries the notice and the revision: \
+         {continuation_under_revision}"
     ));
 
     // Readings before the kill.
@@ -1494,6 +1497,11 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         (
             !continuation_waits,
             "the store held no open input admitted after the revision while the prompt turn ran",
+        ),
+        (
+            !continuation_under_revision,
+            "no open stored input held the notice's sentence and the revision's token while the \
+             prompt turn ran",
         ),
         (
             notice_turn_at_kill,
@@ -1737,6 +1745,11 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
             || "store not read".to_string(),
             |inputs| format!("{} rows", inputs.len())
         )
+    );
+    assert!(
+        continuation_under_revision,
+        "scene: no open stored input held the notice's sentence and the revision's token before \
+         the kill"
     );
     assert!(
         !notice_turn_at_kill,

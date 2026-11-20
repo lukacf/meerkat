@@ -1562,12 +1562,23 @@ async fn an_identity_goal_on_a_name_no_member_holds_keys_the_member_id_it_will_h
     runtime.mob_handle().stop().await.expect("stop");
 }
 
-/// A name that holds a `/` has a member id like any other name
-/// (`team/helper` is `mk--team_x2f_helper`), and the identity form stores
-/// that member id: the key's last segment never holds a `/`.
+/// A name that holds a `/` is refused in the identity form, on a goal and
+/// on a reassignment, with the answer the owner key's validation of its
+/// last segment gives (`-32602`, no data), and the refused request writes
+/// nothing. The name is validated as it is written: that its member id
+/// (`mk--team_x2f_helper`) holds no `/` does not admit it.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_identity_goal_on_a_name_with_a_slash_keys_its_member_id() {
+async fn an_identity_target_on_a_name_with_a_slash_is_refused_and_writes_nothing() {
     let runtime = build_runtime().await;
+    let refused = |response: &Value| {
+        response["error"]["code"] == json!(-32602)
+            && response["error"]["data"].is_null()
+            && response["error"]["message"]
+                == json!(
+                    "Invalid params: invalid work graph input: mob attention owner key \
+                     agent_identity must be non-empty and must not contain '/'"
+                )
+    };
     let response = rpc(
         &runtime,
         "meta/workgraph/goal/create",
@@ -1577,14 +1588,55 @@ async fn an_identity_goal_on_a_name_with_a_slash_keys_its_member_id() {
         }),
     )
     .await;
-    let goal = result(&response).clone();
-    assert_eq!(
-        goal["attention"]["target"]["owner_key"]["id"],
-        json!(format!(
-            "mob/{}/agent/mk--team_x2f_helper",
-            runtime_mob_id(&runtime)
-        ))
+    assert!(refused(&response), "{response:#?}");
+    let listed = rpc(&runtime, "meta/workgraph/attention/list", json!({})).await;
+    assert!(
+        result(&listed)["attention"].as_array().unwrap().is_empty(),
+        "no binding: {listed:#?}"
     );
+    let items = rpc(&runtime, "meta/workgraph/list", json!({})).await;
+    assert!(
+        result(&items)["items"].as_array().unwrap().is_empty(),
+        "no item: {items:#?}"
+    );
+    assert_eq!(event_count(&runtime).await, 0, "no event");
+
+    // A reassignment onto such a name: refused, the binding stays.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "movable work",
+            "target": { "kind": "identity", "identity": "holder" },
+            "mode": "coordinate",
+        }),
+    )
+    .await;
+    let movable = result(&response).clone();
+    let events_before = event_count(&runtime).await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/attention/reassign",
+        json!({
+            "binding_id": movable["attention"]["binding_id"],
+            "expected_revision": movable["attention"]["machine_state"]["revision"],
+            "target": { "kind": "identity", "identity": "team/helper" },
+        }),
+    )
+    .await;
+    assert!(refused(&response), "{response:#?}");
+    let status = rpc(
+        &runtime,
+        "meta/workgraph/goal/status",
+        json!({ "binding_id": movable["attention"]["binding_id"] }),
+    )
+    .await;
+    assert_eq!(
+        result(&status)["attention"],
+        movable["attention"],
+        "the binding is as it was"
+    );
+    assert_eq!(event_count(&runtime).await, events_before, "no event");
     runtime.mob_handle().stop().await.expect("stop");
 }
 

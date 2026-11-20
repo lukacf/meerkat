@@ -2000,6 +2000,7 @@ async fn the_host_binds_no_identity_goal_onto_a_private_member_whose_name_is_not
     let runtime = member_calls_runtime(MOB, state_dir.path(), &model).await;
     // The handle seats a member under its member id.
     spawn_private_worker(&runtime, MEMBER_ID).await;
+    let session = session_of(&runtime, MEMBER_ID).await;
 
     let refused = rpc(
         &runtime,
@@ -2010,12 +2011,38 @@ async fn the_host_binds_no_identity_goal_onto_a_private_member_whose_name_is_not
         }),
     )
     .await;
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused:#?}");
     assert_eq!(
-        refused["error"]["data"]["kind"],
-        json!("private_member_workgraph_target"),
+        refused["error"]["data"],
+        json!({ "kind": "private_member_workgraph_target", "member": MEMBER_ID }),
         "{refused:#?}"
     );
+    // The session form of the same member is refused with the same data.
+    let by_session = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "work for a private member",
+            "target": { "kind": "session", "session_id": session },
+        }),
+    )
+    .await;
+    assert_eq!(
+        by_session["error"]["data"], refused["error"]["data"],
+        "{by_session:#?}"
+    );
+    // Nothing is written: no binding, no item, no event.
     assert!(bindings(&runtime).await.is_empty(), "nothing is bound");
+    for (method, field) in [
+        ("meta/workgraph/list", "items"),
+        ("meta/workgraph/events", "events"),
+    ] {
+        let page = rpc(&runtime, method, json!({})).await;
+        assert!(
+            page["result"][field].as_array().is_some_and(Vec::is_empty),
+            "{method}: {page:#?}"
+        );
+    }
 
     // A reassignment onto it, in the identity form.
     spawn_worker(&runtime, "holder").await;

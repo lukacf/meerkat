@@ -59,6 +59,11 @@ const ENABLE_ENV: &str = "META_TEST_VEHICLE_WORKGRAPH_PURSUIT";
 const VEHICLE_LINE: &str = "workgraph pursuit test vehicle:";
 /// The sentence an attention continuation's notice starts with.
 const NOTICE_PHRASE: &str = "Continue from the WorkGraph attention projection.";
+/// The log filter every boot of both arms runs under: the gateway's own
+/// default, with the pursuit's module at debug so that a write it weighs and
+/// starts no turn for says why on stderr. It changes what is logged only.
+const GATEWAY_LOG_FILTER: &str =
+    "warn,meerkat_meta=info,rpc_gateway=info,meerkat_mob::runtime::workgraph_pursuit=debug";
 
 const ORIGINAL: &str = "ORIGINAL-DESCRIPTION-7f3a91";
 const REVISED: &str = "REVISED-DESCRIPTION-c41d08";
@@ -382,6 +387,7 @@ struct Gateway {
     stdin: Option<ChildStdin>,
     lines: mpsc::Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
+    stderr_printed: usize,
     next_id: u64,
 }
 
@@ -393,7 +399,7 @@ impl Gateway {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rpc_gateway"));
         command
             .arg("--persistent")
-            .env_remove("RUST_LOG")
+            .env("RUST_LOG", GATEWAY_LOG_FILTER)
             .env_remove(ENABLE_ENV)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -452,7 +458,25 @@ impl Gateway {
             stdin: Some(stdin),
             lines: rx,
             stderr,
+            stderr_printed: 0,
             next_id: 0,
+        }
+    }
+
+    /// Print every stderr line the gateway wrote since the last call.
+    fn print_stderr(&mut self, when: &str) {
+        let lines = self
+            .stderr
+            .lock()
+            .map(|sink| sink[self.stderr_printed.min(sink.len())..].to_vec())
+            .unwrap_or_default();
+        self.stderr_printed += lines.len();
+        self.say(format!(
+            "{when}: gateway stderr lines since the last print: {}",
+            lines.len()
+        ));
+        for line in &lines {
+            self.say(format!("{when}: stderr: {}", head(line, 600)));
         }
     }
 
@@ -969,7 +993,10 @@ fn read_store(row: &str, label: &str, state: &Path, when: &str) -> Option<Vec<St
                     "[{label}] {when}: runtime store holds {} input rows ({} open), {} runtime \
                      state rows",
                     inputs.len(),
-                    inputs.iter().filter(|input| input.is_open()).count(),
+                    inputs
+                        .iter()
+                        .filter(|input| StoredInput::is_open(input))
+                        .count(),
                     runtime_states
                 ),
             );
@@ -1069,6 +1096,7 @@ fn a_host_goal_wakes_a_never_prompted_member_and_starts_no_turn_without_the_valu
     gateway.read_item(&goal.item_id, "after the wait");
     let on_bindings_after = gateway.read_bindings("after the wait");
     read_store(row, "on", &on.state, "after the wait");
+    gateway.print_stderr("after the wait");
     gateway.say(format!(
         "session before={} after={}; binding={}; the test sent no prompt in this arm",
         on_status_before["session_id"], on_status_after["session_id"], goal.binding_id
@@ -1096,6 +1124,7 @@ fn a_host_goal_wakes_a_never_prompted_member_and_starts_no_turn_without_the_valu
     gateway.read_item(&off_goal.item_id, "after the quiet wait");
     gateway.read_bindings("after the quiet wait");
     read_store(row, "off", &off.state, "after the quiet wait");
+    gateway.print_stderr("after the quiet wait");
     let off_turn = gateway.turn(PROBE_PROMPT);
     let off_requests = off.print_requests("off", 0);
     gateway.read_status("after the prompt");
@@ -1278,6 +1307,39 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         "before the kill: a turn started from a notice since the prompt was sent: \
          {notice_turn_at_kill}"
     ));
+    gateway.print_stderr("before the kill");
+
+    // The scene must be the one the row is about before the process is
+    // killed: what the second boot does with a continuation that never
+    // waited says nothing about one that does.
+    let scene_faults = [
+        (
+            !goal_woke,
+            "the goal's own wake turn never reached the model",
+        ),
+        (
+            !prompt_held,
+            "the prompt turn never reached the model, so nothing ran at the kill",
+        ),
+        (
+            !continuation_waits,
+            "the store held no open continuation under the revision while the prompt turn ran",
+        ),
+        (
+            notice_turn_at_kill,
+            "a turn started from a notice while the prompt turn was held",
+        ),
+    ]
+    .into_iter()
+    .filter(|(fault, _)| *fault)
+    .map(|(_, text)| text)
+    .collect::<Vec<_>>();
+    assert!(
+        scene_faults.is_empty(),
+        "scene: the row's scene did not come about before the kill, so the process was not \
+         killed and nothing after it was read: {scene_faults:?}\n{}",
+        gateway.stderr_tail()
+    );
 
     // The kill: no shutdown request, the process is killed and reaped.
     let exit = gateway.kill();
@@ -1325,6 +1387,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         scene.print_requests("boot-2", requests_at_kill);
         gateway.read_status("after the read-on prompt");
         read_store(row, "boot-2", &scene.state, "after the read-on prompt");
+        gateway.print_stderr("after the read-on prompt");
         let fact = if after_prompt {
             "the waiting input was kept and its member was not brought up at the start: the \
              continuation's turn ran only after a later prompt"
@@ -1368,6 +1431,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     let item_after = gateway.read_item(&goal.item_id, "after the second boot");
     let bindings_after = gateway.read_bindings("after the second boot");
     read_store(row, "boot-2", &scene.state, "after the second boot");
+    gateway.print_stderr("after the second boot");
     gateway.say(format!(
         "session before the kill={} after the second boot={} unchanged={}",
         status_before["session_id"],
@@ -1412,6 +1476,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     ));
     gateway.read_item(&goal.item_id, "after the tail");
     read_store(row, "boot-2", &scene.state, "after the tail");
+    gateway.print_stderr("after the tail");
     gateway.shutdown_best_effort();
     drop(gateway);
 

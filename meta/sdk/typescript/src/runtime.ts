@@ -2046,10 +2046,18 @@ export class MetaRuntime {
   }
 
   /**
-   * Receive each `meta/decisions/notice` the stdio gateway writes: one open
-   * durable decision, noticed once per connection when the host lists it.
-   * `event` is `held` (nothing of its content shown) or `presented` (shown to
-   * the stdio operator, with the rendering).
+   * Receive each `meta/decisions/notice` the stdio gateway writes for an open
+   * durable decision: once when the gateway's runtime opens it, or once when
+   * the connection starts for a decision already open, and once at the
+   * host's first list of it. A question set a member asked (`kind`
+   * `ask_user.questions`) arrives this way with no list call: read it with
+   * `MobHandle.gatingQuestions()`. `event` is `held` (nothing of its content
+   * shown) or `presented` (shown to the stdio operator at a list, with the
+   * rendering). A `held` notice that arrived before a handler was registered
+   * is kept (one per decision, the newest 1024 decisions) and handed to the
+   * handler when it registers; an older one comes again at the host's own
+   * list, so a host that registers late, never lists and had more than 1024
+   * decisions open before can miss the oldest.
    */
   onDecisionNotice(handler: DecisionNoticeHandler): void {
     this._dispatcher.registerDecisionNoticeHandler(handler);
@@ -4886,7 +4894,7 @@ export class MobHandle {
   /**
    * One page of durable decisions, in decision id order. Before the gateway
    * answers, it writes one `meta/decisions/notice` for each open decision of
-   * the page it has not noticed on this connection (see
+   * the page that no list on this connection has noticed yet (see
    * `MetaRuntime.onDecisionNotice`), and presents to the stdio operator those
    * the approver map lets it decide. The answer carries `decisions`,
    * `statuses`, `unreadable` and `next_after`.

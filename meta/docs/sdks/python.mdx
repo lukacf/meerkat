@@ -2055,9 +2055,15 @@ for that approver id. With none of these, the decide is refused
 [`meta/decisions/decide`](/api/rpc#meta%2Fdecisions%2Fdecide).
 
 `MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`.
-The gateway writes the notices before a list answers; the SDK runs each
-handler on its own, so a handler may still be running after `decisions_list`
-returns. Without an `attestation` the stdio
+The gateway writes a notice when a decision opens, once when the connection
+starts for a decision already open, and before a list answers; the SDK runs
+each handler on its own, so a handler may still be running after
+`decisions_list` returns. A `held` notice that arrives before a handler is
+registered is kept (one per decision, the newest 1024 decisions) and handed
+to the handler when it registers; an older one comes again at the host's own
+list. Register the handler from the runtime's running event loop: registered
+where no loop runs, it receives the kept notices only before the next notice
+that arrives. Without an `attestation` the stdio
 operator decides, eligible only for a decision presented to it on this
 connection. A decide called while the SDK serves a host tool callback raises
 `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`) and

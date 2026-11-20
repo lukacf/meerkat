@@ -18,7 +18,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use meerkat_core::approval::decision::{
     ApproverId, DecisionHoldRequest, DecisionId, DecisionKind, DecisionOperationId, DecisionPhase,
@@ -119,6 +119,22 @@ impl Gateway {
 
     fn rpc(&mut self, method: &str, params: Value) -> Value {
         self.call(method, params).0
+    }
+
+    /// The next decision notice the gateway writes with no request in
+    /// flight; `None` when none comes within `wait`.
+    fn next_notice(&mut self, wait: Duration) -> Option<Value> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            let line = self.lines.recv_timeout(left).ok()?;
+            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            if message.get("method") == Some(&json!(NOTICE_METHOD)) {
+                return Some(message["params"].clone());
+            }
+        }
     }
 
     /// `meta/init` with the test mob, `persistent_state` when given, and
@@ -515,6 +531,40 @@ fn a_held_decision_sends_one_notice_to_the_stdio_host() {
         .expect("withdrawn");
     let (_, after_end) = gateway.call("meta/decisions/list", json!({}));
     assert!(after_end.is_empty(), "{after_end:?}");
+}
+
+/// A decision that is open when the gateway starts is noticed to a host
+/// that never asks for its decisions; the host's own list then writes its
+/// notice once more, and no later list does.
+#[test]
+fn a_host_that_never_lists_is_told_of_a_decision_open_at_the_gateways_start() {
+    let state = tempfile::tempdir().expect("state dir");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let owner = decisions_of(state.path());
+    let held = hold(&owner, "build-7", "team:owners");
+    let mut gateway = Gateway::ready(scratch.path(), Some(state.path()), json!({}));
+
+    let notice = gateway
+        .next_notice(Duration::from_mins(1))
+        .expect("the gateway notices the open decision on its own");
+    assert_eq!(notice["decision_id"], json!(held.decision_id.to_string()));
+    assert_eq!(notice["event"], json!("held"));
+    assert_eq!(notice["phase"], json!("open"));
+    assert!(
+        notice.get("presentation").is_none_or(Value::is_null),
+        "a held notice shows nothing: {notice}"
+    );
+
+    let (answer, listed) = gateway.call("meta/decisions/list", json!({}));
+    assert!(answer["error"].is_null(), "{answer}");
+    assert_eq!(
+        listed.len(),
+        1,
+        "the host's list writes its own: {listed:?}"
+    );
+    assert_eq!(listed[0]["event"], json!("held"));
+    let (_, again) = gateway.call("meta/decisions/list", json!({}));
+    assert!(again.is_empty(), "and no later list: {again:?}");
 }
 
 #[test]

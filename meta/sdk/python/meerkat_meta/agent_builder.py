@@ -83,6 +83,12 @@ class SessionAgentBuilder(Protocol):
         ...
 
 
+# How many decisions' `held` notices are kept for a handler that is not
+# registered yet. Past it the oldest decision's notice goes: the host's own
+# list of decisions writes its notice again, whatever was kept or dropped.
+_EARLY_DECISION_NOTICES_MAX = 1024
+
+
 class CallbackDispatcher:
     """Routes incoming JSON-RPC callback requests from the Rust runtime
     to the registered SessionAgentBuilder and tool handlers.
@@ -124,6 +130,16 @@ class CallbackDispatcher:
         ] = {}
         # The host's handler of `meta/decisions/notice`, when it set one.
         self._decision_notice_handler: Callable[[dict[str, Any]], Any] | None = None
+        # The `held` notices that arrived while no handler was set, one per
+        # decision (a later one replaces the one kept for its decision), in
+        # order of arrival, for at most _EARLY_DECISION_NOTICES_MAX
+        # decisions. The gateway writes a `held` notice when a decision
+        # opens, which can be before the host registers its handler on the
+        # connected runtime; the handler receives the kept ones when it
+        # registers. A `presented` notice carries a whole rendering and is
+        # not kept.
+        self._early_decision_notices: dict[Any, dict[str, Any]] = {}
+        self._early_decision_notice_tasks: set[asyncio.Task[None]] = set()
 
     def register_builder(self, builder: SessionAgentBuilder) -> None:
         self._builder = builder
@@ -135,6 +151,32 @@ class CallbackDispatcher:
         self, handler: Callable[[dict[str, Any]], Any]
     ) -> None:
         self._decision_notice_handler = handler
+        if not self._early_decision_notices:
+            return
+        # Hand over what arrived before the handler: now, on the running
+        # loop; without one, before the next notice (handle_callback).
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._hand_over_early_decision_notices())
+        self._early_decision_notice_tasks.add(task)
+        task.add_done_callback(self._early_decision_notice_tasks.discard)
+
+    async def _hand_over_early_decision_notices(self) -> None:
+        """Give the handler each kept notice once, in order of arrival."""
+        while self._early_decision_notices:
+            handler = self._decision_notice_handler
+            if handler is None:
+                return
+            key = next(iter(self._early_decision_notices))
+            notice = self._early_decision_notices.pop(key)
+            try:
+                result = handler(notice)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # the host's handler: one failure hides no other notice
+                _log.warning("decision notice handler failed: %s", exc)
 
     def register_roster_provider(self, provider: Any) -> None:
         self._roster_provider = provider
@@ -205,10 +247,25 @@ class CallbackDispatcher:
 
     async def handle_callback(self, method: str, params: dict[str, Any]) -> Any:
         if method == "meta/decisions/notice":
-            # One open durable decision, noticed once per gateway
-            # connection; a host without a handler is told nothing more.
-            if self._decision_notice_handler is not None:
-                result = self._decision_notice_handler(params)
+            # One open durable decision: written when it opens, once when
+            # the connection starts, and once at the host's first list of
+            # it. A host without a handler is told nothing; a `held` notice
+            # is kept for a handler that registers later.
+            if self._decision_notice_handler is None:
+                if params.get("event") != "held":
+                    return None
+                decision_id = params.get("decision_id")
+                key: Any = decision_id if isinstance(decision_id, str) else object()
+                self._early_decision_notices.pop(key, None)
+                self._early_decision_notices[key] = params
+                while len(self._early_decision_notices) > _EARLY_DECISION_NOTICES_MAX:
+                    oldest = next(iter(self._early_decision_notices))
+                    del self._early_decision_notices[oldest]
+                return None
+            await self._hand_over_early_decision_notices()
+            handler = self._decision_notice_handler
+            if handler is not None:
+                result = handler(params)
                 if inspect.isawaitable(result):
                     await result
             return None

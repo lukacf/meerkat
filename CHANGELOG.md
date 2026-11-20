@@ -66,6 +66,10 @@ them.
   Forge's local setup preset and separately pinned installer catalog are
   unchanged; this does not establish Neon availability there.
 
+- `ask_user`: the note of an `asked` result and the tool's description say
+  that the host holds the questions for a person, no longer that a person is
+  being asked.
+
 ### Upgrade notes
 
 - For ordinary Gemini sessions, pin `--model gemini-4-argon` or

@@ -111,7 +111,19 @@ async def _gateway(tmp_path: Path, base_url: str):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)
-async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_path):
+async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_path, monkeypatch):
+    # The gateway process keeps each agent's comms key pair under its state
+    # home (on macOS, under its home). It inherits this process's
+    # environment, so give it a state home and a home inside this test's
+    # directory: a run then leaves nothing outside it and does not depend on
+    # the caller's environment.
+    state_home = tmp_path / "state-home"
+    home = tmp_path / "home"
+    state_home.mkdir()
+    home.mkdir()
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("HOME", str(home))
+
     fake = _FakeModel()
     runtime = None
     try:
@@ -178,3 +190,18 @@ async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_pat
         if runtime is not None:
             await runtime.shutdown()
         fake.close()
+
+    # The isolation held: the gateway kept the agent's session identity in a
+    # directory under this test's own state home (under its own home on macOS).
+    identity_roots = [
+        state_home / "meerkat" / "session_comms_identity",
+        home / "Library" / "Application Support" / "meerkat" / "session_comms_identity",
+    ]
+    kept = [
+        entry
+        for root in identity_roots
+        if root.is_dir()
+        for entry in root.iterdir()
+        if entry.is_dir()
+    ]
+    assert kept, f"no session identity directory under {state_home} or {home}"

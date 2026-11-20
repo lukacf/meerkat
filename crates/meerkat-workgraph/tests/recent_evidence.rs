@@ -502,7 +502,7 @@ async fn get_recent_evidence_forged_cursor_rejects_bad_position_scope_read_and_e
             .as_str()
             .expect("list cursor")
             .to_owned(),
-        "cursor is not a WorkGraph evidence cursor",
+        "invalid work graph input: cursor is not a WorkGraph evidence cursor",
     )];
     for (field, value, message) in [
         (
@@ -523,7 +523,7 @@ async fn get_recent_evidence_forged_cursor_rejects_bad_position_scope_read_and_e
         (
             "extra",
             json!(true),
-            "cursor is not a WorkGraph evidence cursor",
+            "invalid work graph input: cursor is not a WorkGraph evidence cursor",
         ),
     ] {
         let mut key = evidence_cursor_key(&item, 1);

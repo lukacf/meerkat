@@ -4378,6 +4378,129 @@ async fn a_workgraph_binding_on_a_private_member_is_refused_to_its_owner_too() -
     Ok(())
 }
 
+/// The same refusal for a private side chat whose name is not its own
+/// member id (`team:alpha-side`, seated as `mk--team_calpha-side`): named
+/// in the identity form, it is refused to its owner on a goal, on a
+/// reassignment and on a break-glass reassignment (`-32602`,
+/// `private_member_workgraph_target`). The identity form takes a name: the
+/// member's encoded id in it is refused as invalid params on all three.
+/// Nothing is bound to the side chat, and the shared member's binding
+/// stays where it was.
+#[tokio::test]
+async fn a_workgraph_binding_on_a_private_side_chat_whose_name_is_not_its_member_id_is_refused()
+-> TestResult {
+    const MOB: &str = "private-workgraph-owner-member-id";
+    const SIDE: &str = "team:alpha-side";
+    const SIDE_MEMBER_ID: &str = "mk--team_calpha-side";
+    let (_state, runtime, app) = signed_in_unified_runtime(MOB).await?;
+    let alice = bearer(alice_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", SIDE).await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    assert!(
+        runtime
+            .mob_handle()
+            .get_member(&AgentIdentity::from(SIDE_MEMBER_ID))
+            .await?
+            .is_some(),
+        "the side chat is seated under its member id"
+    );
+
+    let shared = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "Alice's goal for the shared agent",
+            "target": { "kind": "identity", "identity": "alpha" },
+        }),
+    )
+    .await;
+    assert!(
+        shared["error"].is_null(),
+        "a shared member takes a goal: {shared:#}"
+    );
+    let binding_id = shared["result"]["attention"]["binding_id"].clone();
+    let revision = shared["result"]["item"]["revision"].clone();
+
+    let private_refusal = |answer: &Value| {
+        answer["error"]["code"] == json!(-32602)
+            && answer["error"]["data"]["kind"] == json!("private_member_workgraph_target")
+    };
+    let encoded_refusal = |answer: &Value| {
+        answer["error"]["code"] == json!(-32602)
+            && answer["error"]["data"].is_null()
+            && answer["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("reserved encoded roster-id namespace"))
+    };
+    let cases: [(&str, &dyn Fn(&Value) -> bool); 2] =
+        [(SIDE, &private_refusal), (SIDE_MEMBER_ID, &encoded_refusal)];
+    for (identity, refused) in cases {
+        let target = json!({ "kind": "identity", "identity": identity });
+        let created = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/workgraph/goal/create",
+            json!({ "title": "Alice's goal for their side chat", "target": target }),
+        )
+        .await;
+        assert!(
+            refused(&created),
+            "the owner's goal aimed at their private side chat as {identity} is refused: \
+             {created:#}"
+        );
+        let reassigned = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/workgraph/attention/reassign",
+            json!({ "binding_id": binding_id, "expected_revision": revision, "target": target }),
+        )
+        .await;
+        assert!(
+            refused(&reassigned),
+            "the owner's reassignment onto their private side chat as {identity} is refused: \
+             {reassigned:#}"
+        );
+        let broken = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/workgraph/attention/break_glass_reassign",
+            json!({
+                "binding_id": binding_id,
+                "expected_revision": revision,
+                "reason": "the shared agent is wedged",
+                "target": target,
+            }),
+        )
+        .await;
+        assert!(
+            refused(&broken),
+            "the owner's break-glass reassignment onto their private side chat as {identity} \
+             is refused: {broken:#}"
+        );
+    }
+
+    let listed = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/attention/list",
+        json!({}),
+    )
+    .await;
+    let bound = listed["result"]["attention"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        bound.len(),
+        1,
+        "only the shared member is bound: {listed:#}"
+    );
+    assert_eq!(bound[0]["binding_id"], binding_id);
+    assert_eq!(bound[0]["target"], shared["result"]["attention"]["target"]);
+    Ok(())
+}
+
 /// Meerkat's member tools (`member_status`, `retire_member`,
 /// `force_cancel_member`, mounted for a member whose profile has mob tools)
 /// answer a member private to a person the calling member does not act for

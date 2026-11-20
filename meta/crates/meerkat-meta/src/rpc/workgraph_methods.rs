@@ -1542,6 +1542,142 @@ mod tests {
         assert!(error.message.contains("lowered_owner"), "{}", error.message);
     }
 
+    /// The owner key the identity form of `identity` lowers to.
+    fn identity_form_key(mob_id: &meerkat_mob::MobId, identity: &str) -> WorkOwnerKey {
+        resolve_goal_target(
+            mob_id,
+            &serde_json::json!({ "kind": "identity", "identity": identity }),
+        )
+        .expect("the identity form parses")
+        .to_attention_target()
+        .owner_key()
+        .expect("the identity form lowers to an owner key")
+    }
+
+    /// The identity form names a member by its name. The key it lowers to
+    /// holds the member id, the one every other writer of a member's key
+    /// writes: the name itself where the name is its own member id, and
+    /// its encoding where it is not. The mapping is applied once.
+    #[test]
+    fn resolve_goal_target_identity_form_keys_the_member_id() {
+        let mob_id = meerkat_mob::MobId::from("identity-form-mob");
+
+        // A name that is its own member id.
+        assert_eq!(
+            identity_form_key(&mob_id, "helper").id,
+            "mob/identity-form-mob/agent/helper"
+        );
+
+        // A name that is not: the key holds the member id.
+        let key = identity_form_key(&mob_id, "team:helper");
+        assert_eq!(key.kind, meerkat::WorkOwnerKind::Agent);
+        assert_eq!(key.id, "mob/identity-form-mob/agent/mk--team_chelper");
+        // It is the key the member's own lowering writes (a session form,
+        // a member's own commit origin).
+        assert_eq!(
+            key,
+            meerkat_mob::lower_agent_identity_owner_key(
+                &mob_id,
+                &meerkat_mob::AgentIdentity::from("mk--team_chelper"),
+            )
+            .expect("the member's own key"),
+        );
+        // The name is trimmed.
+        assert_eq!(identity_form_key(&mob_id, "  team:helper  "), key);
+    }
+
+    /// The identity form takes names. A string that begins with the marker
+    /// of an encoded member id is refused there as it is in every
+    /// top-level member field: encoded as a name it would name no member,
+    /// and decoded it would be a second spelling of one.
+    #[test]
+    fn resolve_goal_target_identity_form_refuses_the_encoded_spelling() {
+        let mob_id = meerkat_mob::MobId::from("identity-form-mob");
+        for identity in ["mk--team_chelper", "  mk--team_chelper", "mk--helper"] {
+            let error = resolve_goal_target(
+                &mob_id,
+                &serde_json::json!({ "kind": "identity", "identity": identity }),
+            )
+            .expect_err("the encoded spelling is no name");
+            assert_eq!(error.code, -32602, "{identity:?}");
+            assert!(error.data.is_none(), "{identity:?}");
+            assert_eq!(
+                error.message,
+                "Invalid params: target.identity may not use the reserved encoded roster-id \
+                 namespace",
+                "{identity:?}"
+            );
+        }
+    }
+
+    /// A generated runtime alias in the identity form is a name like any
+    /// other: it is never reduced to the identity it was generated for.
+    #[test]
+    fn resolve_goal_target_identity_form_never_reduces_a_generated_alias() {
+        let mob_id = meerkat_mob::MobId::from("identity-form-mob");
+        assert_eq!(
+            identity_form_key(&mob_id, "rt:team:helper:0").id,
+            "mob/identity-form-mob/agent/mk--rt_cteam_chelper_c0"
+        );
+    }
+
+    /// A run that executes under a goal made in the identity form is its
+    /// worker's own to the resume gate, which knows a worker by the key
+    /// its member id lowers to.
+    #[tokio::test]
+    async fn the_resume_gate_knows_the_worker_of_an_identity_form_goal() {
+        use crate::workgraph_resume_gate::{ResumeCheck, ResumingWorker, WorkGraphResumeGate};
+
+        const MOB: &str = "identity-form-resume";
+        let mob_id = meerkat_mob::MobId::from(MOB);
+        let service = WorkGraphService::with_scope(
+            std::sync::Arc::new(meerkat::MemoryWorkGraphStore::new()),
+            meerkat_core::mob_realm_id(MOB)
+                .expect("mob realm")
+                .as_str()
+                .to_string(),
+            WorkNamespace::default(),
+        );
+        let target = resolve_goal_target(
+            &mob_id,
+            &serde_json::json!({ "kind": "identity", "identity": "team:helper" }),
+        )
+        .expect("the identity form parses");
+        let request: GoalCreateRequest = serde_json::from_value(serde_json::json!({
+            "title": "durable work",
+            "target": target,
+        }))
+        .expect("goal request");
+        let created = service.create_goal(request).await.expect("create goal");
+        let projection = service
+            .attention_projection(AttentionProjectionRequest {
+                binding_id: created.attention.binding_id.clone(),
+                realm_id: None,
+                namespace: None,
+            })
+            .await
+            .expect("attention projection")
+            .projection;
+
+        // The worker as a resume request names it: by its member id.
+        let member = meerkat_mob::AgentIdentity::from("mk--team_chelper");
+        let session_id = meerkat_core::SessionId::new();
+        let run_id = meerkat_core::lifecycle::RunId::new();
+        let gate = WorkGraphResumeGate::new(service);
+        assert_eq!(
+            gate.check_worker(ResumingWorker {
+                mob_id: &mob_id,
+                agent_identity: &member,
+                session_id: &session_id,
+                run_id: &run_id,
+                attention_projection: Some(&projection),
+                attention_projection_unreadable: None,
+            })
+            .await,
+            ResumeCheck::Continue
+        );
+    }
+
     #[test]
     fn console_principal_lowering_is_tolerant() {
         assert!(console_trusted_principal(None).is_none());

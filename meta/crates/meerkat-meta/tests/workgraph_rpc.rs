@@ -1562,6 +1562,33 @@ async fn an_identity_goal_on_a_name_no_member_holds_keys_the_member_id_it_will_h
     runtime.mob_handle().stop().await.expect("stop");
 }
 
+/// A generated runtime alias in the identity form is a name like any other:
+/// it is never reduced to the identity it was generated for, so it names
+/// no member of that identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_goal_never_reduces_a_generated_alias_to_its_identity() {
+    let runtime = build_runtime().await;
+    let _session_id = spawn_encoded_member(&runtime).await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "named by a generated alias",
+            "target": { "kind": "identity", "identity": "rt:team:helper:0" },
+        }),
+    )
+    .await;
+    let goal = result(&response).clone();
+    assert_eq!(
+        goal["attention"]["target"]["owner_key"]["id"],
+        json!(format!(
+            "mob/{}/agent/mk--rt_cteam_chelper_c0",
+            runtime_mob_id(&runtime)
+        ))
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
 /// The identity form takes an identity's name. A string that begins with
 /// the marker of an encoded member id is refused there (`-32602`, no
 /// data), on a goal and on a reassignment, and the refused request writes
@@ -1590,6 +1617,18 @@ async fn an_identity_target_refuses_the_encoded_spelling_of_a_member_id_and_writ
         json!({
             "title": "named by the encoded id",
             "target": { "kind": "identity", "identity": "mk--team_chelper" },
+        }),
+    )
+    .await;
+    assert!(refused(&response), "{response:#?}");
+    // The name is trimmed before it is read, so the marker is refused
+    // behind leading whitespace too.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "named by the encoded id behind whitespace",
+            "target": { "kind": "identity", "identity": "  mk--team_chelper" },
         }),
     )
     .await;

@@ -1217,6 +1217,10 @@ fn waiting_peer_steers() -> Vec<meerkat_runtime::Input> {
         .collect()
 }
 
+// Observable cutoff in T/M/X: every admission answers before the held call
+// is released and the next request is composed. The late-steer control below
+// admits only after that request is captured. These gates do not expose the
+// interval between parking and the boundary take.
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_peer_steers_waiting_on_tools_join_next_request() {
     let outcome = run_scenario_with(Gate::Tool, waiting_peer_steers(), ORDERED_STEP_DELAY).await;

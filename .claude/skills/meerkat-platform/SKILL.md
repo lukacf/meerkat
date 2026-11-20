@@ -409,9 +409,11 @@ surface, not the old live-adapter/docs-refresh snapshot:
     EOF (with `--tcp`, connections drain first).
 - Default hosted text selections are OpenAI `gpt-6-astra` (backend availability
   remains independent; Azure, Copilot, and custom support are not implied),
-  Anthropic `claude-opus-5-5`, and Gemini `gemini-4-argon` (default; paid
+  Anthropic `claude-opus-5-5`, and Gemini `gemini-4-neon` (default; paid
   Gemini API tiers only; `gemini-4-hydrogen`, in the catalog from 0.9.15, is
   Google's fast Gemini 4 model and is also on the free tier;
+  `gemini-4-neon` has low/medium/high
+  thinking (provider default high; Meerkat does not yet send xhigh);
   `gemini-3.8-flash` is the recommended Flash model,
   the free-tier choice, and the `rkat auth login google` / Copilot Gemini route
   default).
@@ -467,7 +469,7 @@ surface, not the old live-adapter/docs-refresh snapshot:
   clients reporting a monotonic raw-event count through
   `stream_activity_count()`; `"disabled"` opts out. An explicit window applies
   to every model; omitted, each call uses the current model's own window
-  (`gemini-4-carbon`, `gemini-4-argon` and `gemini-4-hydrogen` 900s,
+  (`gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen` and `gemini-4-neon` 900s,
   `gpt-5.5-pro` 7200s, a
   self-hosted model's
   `stream_inactivity_timeout_secs`), else 300s. Stalls surface as retryable
@@ -1394,8 +1396,8 @@ stream_inactivity_timeout = "120s"       # explicit window, every model
 
 The window is resolved for each model call, so a model switch or fallback
 uses the new model's window. The catalog sets one where a provider documents
-long silent responses (`gemini-4-carbon`, `gemini-4-argon` and
-`gemini-4-hydrogen` 900s,
+long silent responses (`gemini-4-carbon`, `gemini-4-argon`,
+`gemini-4-hydrogen` and `gemini-4-neon` 900s,
 `gpt-5.5-pro` 7200s); a
 self-hosted model can set `stream_inactivity_timeout_secs` in
 `[self_hosted.models.<id>]` (at least 60, for a long prefill, for example).

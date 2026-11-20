@@ -59,6 +59,16 @@ export type DecisionNoticeHandler = (
   notice: Record<string, unknown>,
 ) => void | Promise<void>;
 
+/**
+ * A deterministic host runnable's `callback/schedule_fire` handler. Receives
+ * the raw occurrence (`schedule_id`, `occurrence_id`, `due_at`, optional
+ * `payload`). Throwing or rejecting fails the durable occurrence attempt.
+ * The gateway acknowledges completion but does not persist the return value.
+ */
+export type ScheduleFireHandler = (
+  occurrence: Record<string, unknown>,
+) => unknown | Promise<unknown>;
+
 // -- Protocol -------------------------------------------------------------
 
 /**
@@ -148,6 +158,7 @@ export class CallbackDispatcher {
    * carries a whole rendering and is not kept.
    */
   private readonly _earlyDecisionNotices = new Map<unknown, Record<string, unknown>>();
+  private readonly _scheduleFireHandlers = new Map<string, ScheduleFireHandler>();
 
   registerBuilder(builder: SessionAgentBuilder): void {
     this._builder = builder;
@@ -185,6 +196,17 @@ export class CallbackDispatcher {
         console.warn("decision notice handler failed:", error);
       }
     }
+  }
+
+  /** Register or replace the handler for a named host runnable. */
+  registerScheduleFireHandler(name: string, handler: ScheduleFireHandler): void {
+    if (typeof name !== "string" || !name.trim()) {
+      throw new TypeError("runnable name must be a non-empty string");
+    }
+    if (typeof handler !== "function") {
+      throw new TypeError("handler must be callable");
+    }
+    this._scheduleFireHandlers.set(name, handler);
   }
 
   registerRosterProvider(provider: RosterProvider): void {
@@ -253,6 +275,17 @@ export class CallbackDispatcher {
     params: Record<string, unknown>,
     callbackContext?: ProviderCallbackContext,
   ): Promise<unknown> {
+    if (method === "callback/schedule_fire") {
+      const runnable = params.runnable ?? "";
+      const handler = this._scheduleFireHandlers.get(runnable as string);
+      if (handler === undefined) {
+        throw new Error(`no schedule-fire handler registered for runnable: ${runnable}`);
+      }
+      const occurrence = "occurrence" in params ? params.occurrence : {};
+      const result = await handler(occurrence as Record<string, unknown>);
+      // A void JS handler is Python's None: keep a JSON-RPC result field.
+      return result === undefined ? null : result;
+    }
     if (method === "meta/decisions/notice") {
       // One open durable decision: written when it opens, once when the
       // connection starts, and once at the host's first list of it. A host

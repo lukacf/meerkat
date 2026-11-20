@@ -512,6 +512,8 @@ them.
   `mob/force_cancel` and a member stop that cancels at the run's boundary
   reach the same state by reading and were not run.
 
+- Cancellation on a native Rust host that supplies its own HostStore: interrupting a runtime write could leave later store calls for that session refused until a new process opened the same store. A cancelled run could then continue without a new prompt. The fix changes which task completes the write, not the batch passed to the host. In a candidate test with a custom store, the next prompt in the first process was refused before the fix; after reopen, the model double received one request before any new prompt, and the input ended consumed. With the fix, cancellation returned Ok, the input ended abandoned for cancellation, and the next prompt ran in the same process. After reopen the model double received no request before a new prompt. Neither cancellation case ran a tool. These results are from the test store, not a production database; the write form was found in the 0.9.5 through 0.9.16 sources, but the cancellation case was not run on those tags.
+
 - An environment variable that is not set fails only the `mcp.toml` server
   that names it (affected: 0.3.0 to 0.9.16, where it failed every server).
   Each server resolves alone, and that server is reported by name with the
@@ -776,6 +778,8 @@ them.
   releases. A deny, a grant gate, a read-only profile or a tool filter
   does stop the re-run. The first is read from the source; the second is
   shown by tests of this release.
+
+- On Unix, cancelling a monitor or a background shell job signals and checks the process group that Meerkat manages. A child that remains in that group is within the scope of that check even after its parent exits. The check does not establish whether a child outside the group has stopped. This limit is read from the source; the detached-child case was not run.
 
 - The new report of an unsettled run (see Added, "A session whose committed run never settles is reported by name") can stand for a session that is working. The check `session_run_settlement` and the mob's line ("member's committed run is not settled; the member starts nothing further until it is") count a run whose completion has stayed unsettled for a minute, whatever its end; the host's line, which says the same of the session, is written only for a run whose output its loop committed. The loop that ended that run starts nothing further; but the machine admits a later run while an earlier run's completion is unsettled, so `degraded`, or the mob's line, can stand for a member that is working. Read from the source; not run; what a session does after that loop has left was not traced. The lines' wording is to be corrected in a later release.
 

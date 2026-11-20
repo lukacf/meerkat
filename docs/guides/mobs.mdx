@@ -1675,8 +1675,10 @@ transitively and deepest first: `mob/retire` over JSON-RPC, `meerkat_mob_retire`
 over MCP, the browser runtime's `mob_retire`, and `MobHandle::retire` in
 embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
 Each retirement runs through the ordinary retire path and every one is
-attempted; the first failure is reported, and a retry converges. Members
-spawned by other means are not affected.
+attempted; the first failure is reported, and a retry converges. Ordinary tool-spawned
+members are not retired by this cascade. Keeping a seat does not guarantee
+that a new turn or scheduled delivery will be accepted, or that an earlier
+operation can return its result to its original recipient.
 The mobs the retired member created itself and its delegates end with its
 session, at the next start of the host.
 

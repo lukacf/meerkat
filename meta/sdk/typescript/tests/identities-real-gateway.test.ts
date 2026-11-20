@@ -23,9 +23,12 @@ import {
   INSTRUCTION_OUTCOME_KINDS,
   IdentityRefusedError,
   Meta,
+  PersistentTransport,
   parseIdentityStatus,
 } from "../src/index.js";
 import type { IdentitiesHandle } from "../src/index.js";
+
+import { gatewayEnvironment } from "./gateway-test-support.js";
 
 const gatewayBin = process.env.META_RPC_GATEWAY_BIN;
 const skip = !gatewayBin && "META_RPC_GATEWAY_BIN is not set";
@@ -146,6 +149,8 @@ async function withGateway(
   writeFileSync(mobToml, MOB_TOML);
   let builder = Meta.builder()
     .gateway(gatewayBin as string)
+    .gatewayTransport(({ gatewayBin, timeoutMs }) =>
+      new PersistentTransport(gatewayBin, { timeout: timeoutMs, env: gatewayEnvironment(dir) }))
     .mob(mobToml)
     .persistentState(join(dir, "state"))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

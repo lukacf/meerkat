@@ -17,6 +17,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Meta, PersistentTransport } from "../src/index.js";
 import type { CallbackHandler } from "../src/transport.js";
 
+import { gatewayEnvironment } from "./gateway-test-support.js";
+
 const gateway = process.env.META_RPC_GATEWAY_BIN;
 const skip = !gateway && "META_RPC_GATEWAY_BIN is not set";
 const readOutcome = fileURLToPath(new URL("./fixtures/read-schedule-outcome.py", import.meta.url));
@@ -80,7 +82,7 @@ runtime_mode = "turn_driven"
 external_addressable = true
 `);
       const runnable = declared ? "declared.no-handler" : "undeclared.local-handler";
-      const transport = new RecordingTransport(gateway as string);
+      const transport = new RecordingTransport(gateway as string, { env: gatewayEnvironment(directory) });
       const runtime = await Meta.builder()
         .gateway(gateway as string)
         .gatewayTransport(() => transport)

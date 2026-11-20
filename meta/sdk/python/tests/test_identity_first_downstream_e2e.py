@@ -14,6 +14,8 @@ import asyncio
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta.builder import Meta
 from meerkat_meta.identity_first_models import (
     DispatchInput,
@@ -231,6 +233,7 @@ async def _boot_identity_runtime(
     builder = (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, state_dir))
         .mob(mob_toml_path)
         .persistent_state(state_dir)
         .roster(roster)
@@ -318,6 +321,7 @@ async def test_lazy_gateway_init_seats_every_identity_without_building_it(
     runtime = await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, state_dir))
         .mob(turn_driven_mob_toml)
         .persistent_state(state_dir)
         .roster(roster)

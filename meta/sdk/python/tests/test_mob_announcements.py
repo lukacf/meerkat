@@ -8,6 +8,8 @@ side fails here first.
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta import ErrorEvent
 from meerkat_meta.errors import RpcError
 
@@ -615,6 +617,7 @@ async def test_announcement_sources_round_trip(tmp_path):
     runtime = await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, tmp_path))
         .mob(str(mob_toml))
         .persistent_state(str(tmp_path / "state"))
         .roster(_ReaderRoster())

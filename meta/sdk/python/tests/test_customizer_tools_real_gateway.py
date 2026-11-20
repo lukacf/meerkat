@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta.builder import Meta
 from meerkat_meta.identity_first_models import DurableAgentSpec, IdentityBootstrapMode
 
@@ -61,6 +63,7 @@ async def _build(mob_toml: Path, state_dir: Path, customizer: _ToolCustomizer):
     return await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, state_dir))
         .mob(str(mob_toml))
         .persistent_state(str(state_dir))
         .roster(_Roster())

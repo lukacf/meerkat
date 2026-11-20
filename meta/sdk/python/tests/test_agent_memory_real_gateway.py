@@ -20,8 +20,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
+
+from .gateway_test_support import gateway_transport_factory
 
 from meerkat_meta.builder import Meta
 from meerkat_meta.identity_first_models import DurableAgentSpec
@@ -141,6 +144,7 @@ async def test_python_agent_memory_imports_legacy_markdown_and_forgets(tmp_path)
     runtime = await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, tmp_path))
         .mob(str(mob_toml))
         .persistent_state(str(state_dir))
         .roster(SmokeRoster())
@@ -211,6 +215,7 @@ async def test_python_agent_memory_defaults_to_sqlite_store(tmp_path):
     runtime = await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, tmp_path))
         .mob(str(mob_toml))
         .persistent_state(str(state_dir))
         .roster(SmokeRoster())
@@ -238,6 +243,13 @@ async def test_python_agent_memory_defaults_to_sqlite_store(tmp_path):
 
         sqlite_file = state_dir / "agent-memory" / "default.sqlite3"
         assert sqlite_file.is_file(), "default store must be the per-realm sqlite database"
+        # The real gateway also writes comms identities outside its runtime
+        # store. They must land under this child's private state home.
+        if sys.platform == "linux":
+            identity_root = tmp_path / "state-home" / "meerkat" / "session_comms_identity"
+            assert list(identity_root.iterdir()), (
+                "the gateway must keep session identities in its own state home"
+            )
         markdown_file = (
             state_dir / "agent-memory" / "default" / "identity%3Amemory-smoke.md"
         )

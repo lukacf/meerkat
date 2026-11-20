@@ -28,6 +28,8 @@ from uuid import UUID
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta.builder import Meta
 from meerkat_meta.identity_first_models import (
     DispatchInput,
@@ -285,6 +287,7 @@ async def _boot(state_dir, roster, topology, customizer):
     return await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, state_dir))
         .mob_inline(_TEAM_MOB_TOML)
         .persistent_state(state_dir)
         .http_listen("127.0.0.1:0")

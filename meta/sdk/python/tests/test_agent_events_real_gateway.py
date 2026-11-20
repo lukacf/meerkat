@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from .gateway_test_support import gateway_transport_factory
+
 from meerkat_meta import Meta
 
 from .test_wire_cross_mob_real_gateways import (
@@ -54,6 +56,7 @@ async def _gateway(tmp_path: Path, mob_id: str, base_url: str):
     return await (
         Meta.builder()
         .gateway(_GATEWAY_BIN)
+        .gateway_transport(gateway_transport_factory(_GATEWAY_BIN, root))
         .mob(str(root / "mob.toml"))
         .meerkat_config(root / "config.toml")
         .console_auth_required(False)

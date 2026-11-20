@@ -19,20 +19,6 @@ async fn recall(rig: &DurableSteerRig, input_id: &InputId) -> Option<QueuedInput
     .expect("recall")
 }
 
-/// Wait until `count` durable deliveries have been prepared and one of them
-/// is registered for a boundary.
-async fn wait_for_prepared(rig: &DurableSteerRig, count: usize, context: &str) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while rig.script.prepared_request_only_context().len() < count
-            || !rig.state.has_waiting_delivery_for_test()
-        {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{context}"));
-}
-
 /// Three durable steers wait while the runner is at `window`; the oldest is
 /// recalled before its boundary. The second and the third take the very next
 /// boundary together, in order, and the recalled one is never delivered.
@@ -70,12 +56,15 @@ async fn recalled_front_steer_gives_its_boundary_to_the_next(window_open: bool) 
             attempt_count: 0,
         })
     );
-    wait_for_prepared(
-        &rig,
-        2,
-        "the second steer prepares for the boundary the recalled one waited for",
-    )
-    .await;
+    // The recalled steer's work keeps the boundary's claim for the lane: the
+    // steers behind it prepare nothing of their own for that boundary.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rig.state.has_waiting_delivery_for_test());
+    assert_eq!(
+        rig.script.prepared_request_only_context().len(),
+        1,
+        "one claim serves the lane"
+    );
 
     if !window_open {
         rig.script.step_and_wait(RunnerStep::OpenNextBoundary).await;

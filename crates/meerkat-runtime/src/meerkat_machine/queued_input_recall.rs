@@ -207,13 +207,6 @@ impl MeerkatMachine {
                         runless_terminal.owe();
                         let candidate_owner_input_id =
                             driver::DriverEntry::commit_prepared_sole_runless_termination(prepared);
-                        // A durable steer whose live-boundary work still waits
-                        // for its boundary drops its preparation, so the next
-                        // durable steer can take that boundary.
-                        driver_guard
-                            .driver_ingress()
-                            .durable_steer_order()
-                            .withdraw(input_id);
                         Step::Publish {
                             attempt_count,
                             candidate_owner_input_id,

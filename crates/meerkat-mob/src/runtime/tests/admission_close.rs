@@ -1310,6 +1310,164 @@ async fn native_accepted_but_held_work_keeps_the_mob_busy() {
     assert!(closed.is_ok(), "the mob closes once the held turn ends");
 }
 
+/// Queued input is work even when no run has begun and the member's status
+/// reads Idle with its last recorded in-flight count of 0. Unlike the
+/// held-start-turn row, this holds the existing runtime hook before queue
+/// authority and staging. The failing optional
+/// execution snapshot selects the real runtime-phase fallback for status;
+/// no idle snapshot or input lifecycle facts are fabricated by the fixture.
+#[tokio::test]
+async fn whole_mob_idle_queued_unattempted_input_outlives_idle_member_snapshot() {
+    use meerkat_runtime::{
+        InputLifecycleState, InputTerminalOutcome, SessionServiceRuntimeExt as _,
+    };
+
+    let (handle, service) = create_test_mob(with_unique_mob_id(
+        sample_definition(),
+        "whole-idle-queued-unattempted",
+    ))
+    .await;
+    let identity = AgentIdentity::from("whole-idle-queued-member");
+    service.set_return_exact_run_result(true);
+    handle
+        .spawn_spec(worker_spec(identity.as_str()))
+        .await
+        .expect("seat one turn-driven member without a kickoff");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("the member has a bridge session");
+    let adapter = MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire the existing runtime")
+        .expect("the test mob is runtime-backed");
+    service.fail_execution_snapshots_for(&session);
+
+    let (queue_entered, queue_release) =
+        adapter.arm_runtime_loop_before_queue_authority_test_hook(session.clone());
+    let prompt = "one queued input beyond an idle member snapshot";
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(prompt, None));
+    let input_id = input.id().clone();
+    let (accepted, completion) = adapter
+        .accept_input_with_completion(&session, input)
+        .await
+        .expect("accept the exact input");
+    let entered = tokio::time::timeout(STEP, queue_entered).await;
+
+    // The runtime holds its finalization boundary here, but not queue or
+    // driver authority. These ordinary observations must finish before it
+    // is released. One deadline turns a lock-order mistake into a failure.
+    let held_observation = tokio::time::timeout(STEP, async {
+        (
+            adapter.input_state(&session, &input_id).await,
+            adapter.current_run(&session).await,
+            adapter.runtime_state(&session).await,
+            handle.member_status(&identity).await,
+            handle.close_if_idle().await,
+            service.recorded_start_turn_prompts().await,
+            handle.admission_closed().borrow().is_none(),
+        )
+    })
+    .await;
+
+    // Release alone permits this input to run. No second prompt, polling
+    // loop, manufactured machine transition or second authority is used.
+    let released = queue_release.send(());
+    let completed = match completion {
+        Some(completion) => Some(tokio::time::timeout(STEP, completion.wait()).await),
+        None => None,
+    };
+    let settled = tokio::time::timeout(STEP, adapter.wait_current_run_settled(&session)).await;
+    let after_observation = tokio::time::timeout(STEP, async {
+        (
+            adapter.input_state(&session, &input_id).await,
+            adapter.session_has_active_inputs(&session).await,
+            service.recorded_start_turn_prompts().await,
+        )
+    })
+    .await;
+    // This existing API decides a close. It characterizes the final idle
+    // boundary by closing admission.
+    let closed = tokio::time::timeout(STEP, handle.close_if_idle()).await;
+    let shutdown = tokio::time::timeout(STEP, handle.shutdown()).await;
+
+    shutdown
+        .expect("shutdown answers")
+        .expect("shutdown succeeds");
+    assert!(accepted.is_accepted());
+    entered
+        .expect("the queue hook is reached")
+        .expect("queue hook signal");
+    released.expect("the queue hook receiver is alive at release");
+    let (queued, run, runtime_phase, member, busy, prompts_before, stayed_open) =
+        held_observation.expect("all observations finish while the queue hook is held");
+    let queued = queued
+        .expect("read the input")
+        .expect("the accepted input exists");
+    assert_eq!(queued.seed.phase, InputLifecycleState::Queued);
+    assert_eq!(queued.seed.attempt_count, 0);
+    assert_eq!(queued.seed.last_run_id, None);
+    assert_eq!(queued.seed.terminal_outcome, None);
+    assert_eq!(run, None);
+    assert!(matches!(
+        runtime_phase.expect("read actual runtime phase"),
+        meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
+    ));
+    let member = member.expect("the seated member status answers");
+    assert_eq!(member.current_bridge_session_id(), Some(&session));
+    let progress = member.progress.expect("runtime fallback supplies progress");
+    assert_eq!(
+        progress.run_state,
+        super::super::handle::MemberRunState::Idle
+    );
+    assert_eq!(progress.in_flight_work, 0);
+    assert_eq!(
+        progress.health,
+        super::super::handle::MemberHealthClass::Unknown
+    );
+    assert!(
+        prompts_before.is_empty(),
+        "no turn has reached the session service"
+    );
+    assert!(stayed_open);
+    match busy.expect("the busy observation answers") {
+        CloseIfIdleOutcome::Busy(busy) => {
+            assert_eq!(busy.runs, 1, "only native queued input keeps the mob busy");
+            assert_eq!(busy.roster_transitions, 0);
+            assert_eq!(busy.parked_admission, 0);
+            assert_eq!(busy.foreground_owners, 0);
+        }
+        other => panic!("queued input must prevent idle close: {other:?}"),
+    }
+    let completed = completed
+        .expect("acceptance registered a completion")
+        .expect("release alone resolves the completion")
+        .expect("completion authority answers");
+    match completed {
+        meerkat_runtime::CompletionOutcome::Completed(result) => assert_eq!(result.text, prompt),
+        other => panic!("the queued input must complete successfully: {other:?}"),
+    }
+    settled.expect("the exact run settles");
+    let (terminal, active_after, prompts_after) =
+        after_observation.expect("terminal observations finish");
+    let terminal = terminal
+        .expect("read terminal input")
+        .expect("input is retained");
+    assert_eq!(terminal.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(
+        terminal.seed.terminal_outcome,
+        Some(InputTerminalOutcome::Consumed)
+    );
+    assert_eq!(terminal.seed.attempt_count, 1);
+    assert!(!active_after);
+    assert_eq!(prompts_after, vec![(session, prompt.to_string())]);
+    assert_eq!(
+        closed
+            .expect("one final close answers")
+            .expect("close succeeds"),
+        CloseIfIdleOutcome::Closed
+    );
+}
+
 #[test]
 fn live_control_is_classified_by_verb() {
     use super::super::bridge_protocol::BridgeLiveControlVerb;

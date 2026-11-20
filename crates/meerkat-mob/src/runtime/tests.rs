@@ -66,6 +66,8 @@ mod startup_binding_release;
 mod store_owned_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod unborn_seat_wake;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod whole_idle_consumer;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,

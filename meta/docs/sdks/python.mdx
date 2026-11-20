@@ -1391,6 +1391,15 @@ gateway with the SDK's start held open; one unforced start on the published
 0.9.15 did not meet it. 0.9.17 adds the handler on the builder.
 </Warning>
 
+### Who can schedule a host runnable?
+
+Any member with the schedule tools that is not private to a person can
+schedule any runnable your application registers and choose its parameters.
+The handler receives those parameters as `occurrence["payload"]` when supplied;
+the callback does not identify the member that created the schedule. Register
+only actions that any such member may invoke. Validate the payload in the
+handler; do not trust it to identify the caller.
+
 ## Adopting a gateway child the host started
 
 By default `connect()` spawns `rpc_gateway --persistent` and owns that

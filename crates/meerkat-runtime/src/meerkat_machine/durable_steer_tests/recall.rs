@@ -227,3 +227,90 @@ async fn recall_after_the_boundary_took_the_durable_steer_reports_its_run() {
         .await;
     assert_eq!(rig.script.applied_durable(), vec![steer_id]);
 }
+
+/// The boundary is freed only while the recalled steer still waits for it.
+/// A recall that commits after the runner parked at the boundary with the
+/// steer (its preparation resolved, its ingress not yet back under the
+/// gate) cannot give that boundary away: the coordinator does not take a new
+/// durable delivery into a parked generation. That boundary delivers
+/// nothing, the next steer takes the boundary after it, the recalled one is
+/// never delivered and the recall answers `Abandoned`, as before the fix.
+async fn recall_after_the_runner_parked_with_the_steer(rig: DurableSteerRig) {
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    rig.script.prepare_hold_armed.store(true, Ordering::SeqCst);
+    let ids = admit_in_order(
+        &rig,
+        vec![
+            typed_steer("first", ConversationAppendRole::SystemNotice),
+            typed_steer("second", ConversationAppendRole::SystemNotice),
+        ],
+    )
+    .await;
+    let [first_id, second_id] = ids.as_slice() else {
+        unreachable!("two steers")
+    };
+
+    // The runner parks at the boundary with the first steer, and the
+    // first steer's preparation resolves; its ingress is held there.
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rig.script.prepare_hold_reached.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the first steer's preparation parks");
+    assert_eq!(
+        recall(&rig, first_id).await,
+        Some(QueuedInputRecall::Abandoned {
+            input_id: first_id.clone(),
+            attempt_count: 0,
+        })
+    );
+    rig.script
+        .prepare_hold_released
+        .store(true, Ordering::SeqCst);
+
+    wait_for_prepared(
+        &rig,
+        2,
+        "the second steer prepares for the following boundary",
+    )
+    .await;
+    assert!(
+        rig.script.applied_durable().is_empty(),
+        "the parked boundary delivered nothing"
+    );
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_applied_durable(1).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(second_id, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(rig.script.applied_durable(), vec![second_id.clone()]);
+    assert_eq!(contributions(&rig.script.primitives(), first_id), 0);
+    assert_eq!(
+        rig.phase(first_id).await,
+        Some(InputLifecycleState::Abandoned)
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        rig.script.apply_calls.load(Ordering::SeqCst),
+        1,
+        "the second joined the running run; no follow-up turn ran"
+    );
+}
+
+#[tokio::test]
+async fn recall_after_the_runner_parked_with_the_steer_frees_no_boundary() {
+    recall_after_the_runner_parked_with_the_steer(DurableSteerRig::ephemeral().await).await;
+}
+
+#[tokio::test]
+async fn persistent_recall_after_the_runner_parked_with_the_steer_frees_no_boundary() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    recall_after_the_runner_parked_with_the_steer(DurableSteerRig::persistent(store).await).await;
+}

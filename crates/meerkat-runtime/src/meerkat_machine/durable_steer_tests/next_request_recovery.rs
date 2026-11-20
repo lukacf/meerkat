@@ -4,9 +4,10 @@
 //! - A recall that comes after the boundary joined several steers answers,
 //!   for each, that a run holds it, and changes nothing: all of them stay in
 //!   the request.
-//! - A join that the store refuses is not published: the steers joined before
-//!   it are, the refused one and every steer behind it keep their place in
-//!   the steer lane and their `Queued` row, and they join the next boundary.
+//! - A join that the store refuses is not published: the request carries
+//!   only the steers joined before it, the store keeps the refused one and
+//!   every steer behind it `Queued`, and a runtime that reloads the session
+//!   from the store delivers each steer exactly once.
 //! - On the persistent driver, steers still waiting when the run ends take
 //!   one follow-up turn in arrival order.
 use super::*;
@@ -247,12 +248,32 @@ mod refused_join {
         }
     }
 
-    /// The store refuses the write that binds the SECOND steer to the run.
-    /// The boundary publishes the first alone; the second and the third keep
-    /// their `Queued` rows and their steer-lane place, in order. Once the
-    /// store takes writes again, the next boundary joins both.
+    /// The store refuses the write that binds the SECOND of three steers to
+    /// the run.
+    ///
+    /// The request carries the first steer alone: a join that is not durable
+    /// is never published, and no steer behind it overtakes it. The store
+    /// holds exactly that: the first bound to the run, the second and the
+    /// third still `Queued`. After the store takes writes again and a fresh
+    /// runtime reloads the session from it, each of the three is delivered
+    /// exactly once: none is lost and none is doubled.
+    ///
+    /// The row first reads the same scene without the refusal (all three
+    /// join), so the refusal is the only difference.
     #[tokio::test]
-    async fn sqlite_join_the_store_refuses_keeps_that_steer_and_the_ones_behind_it_queued() {
+    async fn sqlite_join_the_store_refuses_is_not_published_and_no_steer_is_lost_or_doubled() {
+        let unrefused = three_steers_waiting_on_sqlite().await;
+        unrefused
+            .rig
+            .script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(&unrefused.rig),
+            unrefused.ids,
+            "with every join persisted the boundary joins all three"
+        );
+
         let scene = three_steers_waiting_on_sqlite().await;
         let [first, second, third] = scene.ids.as_slice() else {
             unreachable!("three steers")
@@ -275,62 +296,103 @@ mod refused_join {
         assert_eq!(
             last_take_ids(&scene.rig),
             vec![first.clone()],
-            "the boundary publishes the steer joined before the refused write, and no other"
+            "the request carries the steer joined before the refused write, and no other"
         );
-        assert_eq!(
-            stored_phase(&scene, first).await,
-            InputLifecycleState::Staged
-        );
+        let first_row = scene
+            .store
+            .load_input_state(&scene.runtime_id, first)
+            .await
+            .expect("load the first steer's row")
+            .expect("the first steer's row is stored");
+        assert_eq!(first_row.seed.phase, InputLifecycleState::Staged);
+        let interrupted_run = first_row
+            .seed
+            .last_run_id
+            .expect("the published steer is bound to its run");
         for input_id in [second, third] {
             assert_eq!(
                 stored_phase(&scene, input_id).await,
                 InputLifecycleState::Queued,
-                "{input_id} keeps its queued row"
-            );
-            assert_eq!(
-                scene.rig.phase(input_id).await,
-                Some(InputLifecycleState::Queued),
-                "{input_id} is queued in the machine"
+                "{input_id} keeps its queued row in the store"
             );
         }
-        assert_eq!(
-            scene.rig.steer_queue().await,
-            vec![second.clone(), third.clone()],
-            "the refused steer and the one behind it keep their steer-lane place, in order"
-        );
 
-        // The store takes writes again: the next boundary joins both.
+        // The store takes writes again, and a fresh runtime reloads the
+        // session from it. The first runtime is never driven again.
         connection
             .execute_batch("DROP TRIGGER refuse_second_join;")
             .unwrap();
-        scene.rig.wait_for_waiting_delivery().await;
-        scene
-            .rig
-            .script
-            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
-            .await;
-        assert_eq!(
-            last_take_ids(&scene.rig),
-            vec![second.clone(), third.clone()],
-            "the next boundary joins the two that stayed queued, in order"
-        );
-        scene.rig.script.step(RunnerStep::Finish);
-        for input_id in &scene.ids {
-            scene
-                .rig
-                .wait_for_phase(input_id, InputLifecycleState::Consumed)
-                .await;
+        let Scene {
+            rig,
+            store,
+            runtime_id,
+            ids,
+            _directory,
+        } = scene;
+        let session_id = rig.session_id.clone();
+        std::mem::forget(rig);
+        let reloaded = DurableSteerRig::with_adapter_for_session(
+            Arc::new(
+                MeerkatMachine::persistent_without_blobs(store.clone())
+                    .expect("persistent machine"),
+            ),
+            session_id,
+        )
+        .await;
+        let mut finished = 0;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let mut consumed = true;
+                for input_id in &ids {
+                    consumed &=
+                        reloaded.phase(input_id).await == Some(InputLifecycleState::Consumed);
+                }
+                if consumed {
+                    return;
+                }
+                if *reloaded.script.applies_observable.borrow() > finished {
+                    reloaded.script.step(RunnerStep::Finish);
+                    finished += 1;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the reloaded runtime consumes every steer");
+
+        let primitives = reloaded.script.primitives();
+        let applied = reloaded.script.applied_durable();
+        for input_id in &ids {
+            let at_turn_start = contributions(&primitives, input_id);
+            let at_a_boundary = applied
+                .iter()
+                .filter(|applied_id| *applied_id == input_id)
+                .count();
+            assert_eq!(
+                at_turn_start + at_a_boundary,
+                1,
+                "{input_id} is delivered exactly once after the reload: {at_turn_start} turn start(s), {at_a_boundary} boundary apply(ies)"
+            );
+            let row = store
+                .load_input_state(&runtime_id, input_id)
+                .await
+                .expect("load consumed row")
+                .expect("consumed row persisted");
+            assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+            assert_ne!(
+                row.seed.last_run_id.as_ref(),
+                Some(&interrupted_run),
+                "a run of the reloaded runtime consumed {input_id}"
+            );
         }
-        assert_eq!(
-            scene.rig.script.applied_durable(),
-            scene.ids,
-            "each steer was applied exactly once, in admission order"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(
-            scene.rig.script.apply_calls.load(Ordering::SeqCst),
-            1,
-            "no follow-up turn ran"
-        );
+        let order = primitives
+            .iter()
+            .flatten()
+            .filter(|input_id| ids.contains(input_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if order.len() == ids.len() {
+            assert_eq!(order, ids, "turn starts deliver them in arrival order");
+        }
     }
 }

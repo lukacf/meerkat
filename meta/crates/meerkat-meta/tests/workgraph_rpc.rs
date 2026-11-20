@@ -1562,6 +1562,32 @@ async fn an_identity_goal_on_a_name_no_member_holds_keys_the_member_id_it_will_h
     runtime.mob_handle().stop().await.expect("stop");
 }
 
+/// A name that holds a `/` has a member id like any other name
+/// (`team/helper` is `mk--team_x2f_helper`), and the identity form stores
+/// that member id: the key's last segment never holds a `/`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_goal_on_a_name_with_a_slash_keys_its_member_id() {
+    let runtime = build_runtime().await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "work for a name with a slash",
+            "target": { "kind": "identity", "identity": "team/helper" },
+        }),
+    )
+    .await;
+    let goal = result(&response).clone();
+    assert_eq!(
+        goal["attention"]["target"]["owner_key"]["id"],
+        json!(format!(
+            "mob/{}/agent/mk--team_x2f_helper",
+            runtime_mob_id(&runtime)
+        ))
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
 /// A generated runtime alias in the identity form is a name like any other:
 /// it is never reduced to the identity it was generated for, so it names
 /// no member of that identity.

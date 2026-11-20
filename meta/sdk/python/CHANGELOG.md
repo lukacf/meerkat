@@ -4,7 +4,7 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
-- Meta Python SDK: `DispatchInput.connector()` accepts `correlation_id` and `idempotency_key` together, or neither. Supplying only one is rejected by the helper. This lets callers construct a keyed connector dispatch without using the full `DispatchInput` constructor; the gateway rule is unchanged.
+- `DispatchInput.connector` now accepts `correlation_id` and `idempotency_key` together, or neither. **Behavior change:** a correlation-only call previously returned an input that was refused at dispatch; it now raises `ValueError` before dispatch. Pass both keywords for keyed input, omit both for unkeyed input, and handle invalid pairs where you construct the input. `idempotency_key` is a new helper keyword; supplying it alone also raises `ValueError`. The gateway rule and wire format do not change.
 
 ## 0.9.17
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Meta Python SDK: `DispatchInput.connector(content, correlation_id=cid)` now raises `ValueError` when constructing the input. Previously the helper returned an input; dispatch with only a correlation ID was refused later. Code that handled only the dispatch refusal must now handle the error at construction. The gateway key-pair rule and wire format are unchanged.
+
 ### Added
 
 - The TypeScript SDK exposes the existing gateway host-runnable path:
@@ -41,10 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   handlers on the builder on every boot before `build()` connects;
   upgrading alone supplies neither declaration nor handler. Registering
   only after `build()` returns leaves a startup gap for stored schedules.
-
-### Changed
-
-- Meta Python SDK: `DispatchInput.connector()` accepts `correlation_id` and `idempotency_key` together, or neither. Supplying only one is rejected by the helper. This lets callers construct a keyed connector dispatch without using the full `DispatchInput` constructor; the gateway rule is unchanged.
+- For a keyed connector input, use `DispatchInput.connector(content, correlation_id=cid, idempotency_key=key)`. For an unkeyed input, use `DispatchInput.connector(content)`. Supply both values or neither. The old helper had no `idempotency_key` parameter; passing only that new parameter raises `ValueError` in the updated helper. Existing paired inputs built with the full `DispatchInput` constructor need no change.
 
 ## [0.9.17] - 2026-11-18
 

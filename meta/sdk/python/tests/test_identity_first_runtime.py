@@ -573,6 +573,30 @@ class TestDispatchMethod:
             },
         }
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("through_handle", [False, True])
+    @pytest.mark.parametrize(
+        "half", [{"correlation_id": "lab-event-1"}, {"idempotency_key": "lab:event-1"}]
+    )
+    async def test_dispatch_text_still_sends_half_pair(self, through_handle, half):
+        # dispatch_text does not check the pair: one key without the other is
+        # sent as given, and the gateway refuses it at dispatch.
+        rt, transport = _make_runtime(result={"accepted": True})
+        if through_handle:
+            await rt.agent("gate:main").dispatch_text("Lab closed.", origin="connector", **half)
+        else:
+            await rt.dispatch_text("gate:main", "Lab closed.", origin="connector", **half)
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["method"] == "meta/dispatch"
+        assert transport.calls[0]["params"] == {
+            "identity": "gate:main",
+            "dispatch_input": {
+                "content": "Lab closed.",
+                "origin": "connector",
+                **half,
+            },
+        }
+
 
 class TestLifecycleMethods:
     """respawn, retire, reset, delete_identity delegate to RPC."""

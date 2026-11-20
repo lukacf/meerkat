@@ -658,6 +658,20 @@ class TestConnectorDispatchInput:
         assert first.to_dict()["idempotency_key"] == "event-1"
         assert second.to_dict()["idempotency_key"] == "event-2"
 
+    @pytest.mark.parametrize(
+        "keys", [{"correlation_id": "source-thread-7"}, {"idempotency_key": "source-event-42"}]
+    )
+    def test_full_constructor_still_builds_half_pair(self, keys):
+        # Only the helper refuses a half pair where the input is built. The
+        # constructor builds one as before; the gateway refuses it at dispatch.
+        dispatch = DispatchInput(content="event from connector", origin="connector", **keys)
+
+        assert dispatch.to_dict() == {
+            "content": "event from connector",
+            "origin": "connector",
+            **keys,
+        }
+
 
 class TestManagedPeerEdge:
     """REQ-43a: ManagedPeerEdge dataclass."""

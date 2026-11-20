@@ -464,9 +464,14 @@ fn request_only_steer(detail: &str) -> Input {
 /// The runner is parked at its boundary with a request-only delivery alone,
 /// and that delivery has not been published. A durable steer is acknowledged
 /// then: the request's input is not fixed yet, so the request carries it.
+///
+/// With `registration_lags` the steer's preparation is still on its way to
+/// the coordinator when the request-only delivery is published, so the park
+/// has to outlast that publication.
 async fn durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(
     rig: DurableSteerRig,
     lag: Arc<RegistrationLag>,
+    registration_lags: bool,
 ) {
     rig.start_busy_turn().await;
     rig.script
@@ -493,10 +498,18 @@ async fn durable_steer_acknowledged_during_a_request_only_park_is_in_that_reques
 
     let steer = peer_steer("payload during the park");
     let steer_id = steer.id().clone();
-    // The admission answers its caller here, and the steer's preparation
-    // reaches the coordinator while the runner is still parked.
+    if registration_lags {
+        lag.arm();
+    }
+    // The admission answers its caller here.
     rig.admit(steer).await;
-    lag.wait_forwarded(1).await;
+    if registration_lags {
+        lag.wait_held(1).await;
+    } else {
+        // The steer's preparation reaches the coordinator while the runner
+        // is still parked.
+        lag.wait_forwarded(1).await;
+    }
     assert_eq!(
         rig.script.steps_done.load(Ordering::SeqCst),
         steps_before,
@@ -506,6 +519,18 @@ async fn durable_steer_acknowledged_during_a_request_only_park_is_in_that_reques
     rig.script
         .prepare_hold_released
         .store(true, Ordering::SeqCst);
+    if registration_lags {
+        // The request-only delivery is published now. A park that ends on
+        // it fixes the request's input here, within this time, without the
+        // acknowledged steer.
+        let _ = tokio::time::timeout(RUNNER_REACHES_THE_BOUNDARY, async {
+            while rig.script.steps_done.load(Ordering::SeqCst) <= steps_before {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        lag.release_through(1);
+    }
     assert!(
         wait_for_steps_done(&rig, steps_before + 1).await,
         "the parked boundary ends once its deliveries are published"
@@ -535,14 +560,20 @@ async fn durable_steer_acknowledged_during_a_request_only_park_is_in_that_reques
 async fn durable_steer_acknowledged_while_the_runner_is_parked_on_request_only_context_is_in_that_request()
  {
     let (rig, lag) = ephemeral_lagging_rig().await;
-    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag).await;
+    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag, false).await;
+}
+
+#[tokio::test]
+async fn durable_steer_whose_registration_lags_a_request_only_park_is_in_that_request() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag, true).await;
 }
 
 #[tokio::test]
 async fn persistent_durable_steer_acknowledged_while_the_runner_is_parked_on_request_only_context_is_in_that_request()
  {
     let (rig, lag) = persistent_lagging_rig().await;
-    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag).await;
+    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag, false).await;
 }
 
 /// The runner is parked with a steer whose publication has not happened.

@@ -464,10 +464,12 @@ nothing delivered (`invalid delivery identity (... (half-pair))`).
 raises `ValueError` in the helper. It sends the supplied values as given.
 Different deliveries may use distinct idempotency keys with the same
 correlation ID. The full constructor and `dispatch_text` also accept the
-pair; the gateway refuses their half-pairs. With the connector or system
-origin a correlation id that is not a canonical UUID is turned into one
-deterministically, and the gateway carries that UUID, not the source
-string; with another origin give a canonical UUID.
+pair; the gateway refuses their half-pairs. On a dispatch without
+`expected_scope`, with the connector or system origin a correlation id
+that is not a canonical UUID is turned into one deterministically, and the
+gateway carries that UUID, not the source string; with another origin give
+a canonical UUID. With `expected_scope` the pair is used as supplied and
+nothing is turned into a UUID: give a canonical UUID whatever the origin.
 
 ### Scope-bound dispatch
 

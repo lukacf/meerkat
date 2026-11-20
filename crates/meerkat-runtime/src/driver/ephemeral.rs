@@ -311,12 +311,15 @@ impl KeptInputKind {
 /// in the lane waits until that one's work settles, then reads the lane
 /// again: once the older one has joined the run it prepares for the next
 /// boundary, and if the older one went back to its follow-up turn it follows
-/// it there. The generated lanes stay the order authority; this only
+/// it there. A durable Steer recalled while its work waits for its boundary
+/// is withdrawn: its work drops its preparation, which frees the boundary for
+/// the next one. The generated lanes stay the order authority; this only
 /// sequences the live ingress tasks and is never persisted.
 #[derive(Debug, Default)]
 pub(crate) struct DurableSteerOrder {
     state: std::sync::Mutex<DurableSteerOrderState>,
     settled: crate::tokio::sync::Notify,
+    withdrawn: crate::tokio::sync::Notify,
 }
 
 #[derive(Debug, Default)]
@@ -325,6 +328,8 @@ struct DurableSteerOrderState {
     working: HashSet<InputId>,
     /// The one of them preparing its boundary delivery, if any.
     preparing: Option<InputId>,
+    /// Working inputs a recall abandoned: their work prepares nothing more.
+    withdrawn: HashSet<InputId>,
 }
 
 /// What a durable Steer's live-boundary work does next.
@@ -364,9 +369,40 @@ impl DurableSteerOrder {
             input_id: input_id.clone(),
         }
     }
+
+    /// `input_id` was abandoned by a recall: if its live-boundary work still
+    /// runs, tell it to drop its boundary preparation.
+    pub(crate) fn withdraw(&self, input_id: &InputId) {
+        {
+            let mut state = self.state();
+            if !state.working.contains(input_id) {
+                return;
+            }
+            state.withdrawn.insert(input_id.clone());
+        }
+        self.withdrawn.notify_waiters();
+    }
 }
 
 impl DurableSteerWork {
+    /// Whether a recall withdrew this work's input.
+    pub(crate) fn is_withdrawn(&self) -> bool {
+        self.order.state().withdrawn.contains(&self.input_id)
+    }
+
+    /// Resolves once a recall withdrew this work's input.
+    pub(crate) async fn withdrawn(&self) {
+        loop {
+            let notified = self.order.withdrawn.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_withdrawn() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Notified whenever some durable Steer's work in this work's own order
     /// settles. A waiter waits here, not on whatever order its session's
     /// driver holds now, so it waits on the order its blocker signals.
@@ -400,6 +436,7 @@ impl Drop for DurableSteerWork {
         {
             let mut state = self.order.state();
             state.working.remove(&self.input_id);
+            state.withdrawn.remove(&self.input_id);
             if state.preparing.as_ref() == Some(&self.input_id) {
                 state.preparing = None;
             }

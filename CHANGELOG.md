@@ -66,6 +66,10 @@ them.
   Forge's local setup preset and separately pinned installer catalog are
   unchanged; this does not establish Neon availability there.
 
+### Fixed
+
+- `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary gives that boundary back. The next durable steer in the steer lane now joins the very boundary the recalled one waited for. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Each boundary still takes one durable delivery, in arrival order, and the recall's answers are unchanged. The boundary is freed while the recalled steer still waits for it; a recall that commits after the runner has already parked at that boundary with the steer frees nothing, and that boundary delivers nothing, as before.
+
 ### Upgrade notes
 
 - For ordinary Gemini sessions, pin `--model gemini-4-argon` or

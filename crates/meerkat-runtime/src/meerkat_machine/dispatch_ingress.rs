@@ -1143,6 +1143,7 @@ impl MeerkatMachine {
                         input_id,
                         run_id,
                         appends,
+                        durable_work.as_ref(),
                         fallback_wake,
                     )
                     .await;
@@ -1488,6 +1489,11 @@ impl MeerkatMachine {
     /// run terminal resolves the join from the core delivery witness. Every
     /// refusal before step 4 takes the unchanged queued fallback and never
     /// abandons the input.
+    ///
+    /// A recall that abandons the input while it waits for its boundary
+    /// withdraws `durable_work`: the preparation is dropped before the
+    /// boundary takes it, so that boundary stays free for the next durable
+    /// steer, and the abandoned input's disposition is read from the machine.
     #[allow(clippy::too_many_arguments)]
     async fn commit_durable_live_boundary_input(
         &self,
@@ -1497,6 +1503,7 @@ impl MeerkatMachine {
         input_id: &InputId,
         run_id: RunId,
         appends: meerkat_core::DurableTurnBoundaryAppends,
+        durable_work: Option<&crate::driver::ephemeral::DurableSteerWork>,
         fallback_wake: &mut AcceptedIngressFallbackWakeGuard,
     ) -> Result<
         (
@@ -1515,17 +1522,46 @@ impl MeerkatMachine {
         // The boundary callback may re-enter MeerkatMachine. Drop M before its
         // first poll; the process-owned outer ingress task retains all witnesses.
         drop(held_mutation_gate);
-        let prepared = witness
-            .boundary_handle
-            .prepare_turn_boundary_delivery(
-                &run_id,
-                meerkat_core::TurnBoundaryDelivery::DurableAppends(appends),
-            )
-            .await;
+        let prepare = witness.boundary_handle.prepare_turn_boundary_delivery(
+            &run_id,
+            meerkat_core::TurnBoundaryDelivery::DurableAppends(appends),
+        );
+        let prepared = match durable_work {
+            Some(work) => crate::tokio::select! {
+                biased;
+                prepared = prepare => Some(prepared),
+                () = work.withdrawn() => None,
+            },
+            None => Some(prepare.await),
+        };
         let held_mutation_gate = self
             .lock_live_session_mutation_gate(session_id, &witness.mutation_gate)
             .await
             .map_err(degraded_gate_wait_refusal)?;
+        let prepared = match prepared {
+            Some(prepared)
+                if !durable_work
+                    .is_some_and(crate::driver::ephemeral::DurableSteerWork::is_withdrawn) =>
+            {
+                prepared
+            }
+            withdrawn => {
+                // Recalled: the abandon is committed, so no boundary can
+                // join it. Dropping the preparation withdraws its delivery
+                // (or aborts it, had the boundary parked it already).
+                drop(withdrawn);
+                let disposition =
+                    waited_durable_steer_disposition(&*witness.driver.lock().await, input_id)?;
+                tracing::debug!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    input_id = %input_id,
+                    ?disposition,
+                    "durable steer recalled before its boundary; its boundary is free"
+                );
+                return Ok((held_mutation_gate, disposition));
+            }
+        };
 
         let revalidation = match self
             .revalidate_live_boundary_attachment(session_id, witness, &run_id, input_id)

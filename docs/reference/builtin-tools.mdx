@@ -707,10 +707,11 @@ the privileged spawn arguments, unless its controlling host narrowed it with
 an operator authority ceiling on its spawn request. See
 [Placed-member operator authority](/guides/mobs#placed-member-operator-authority).
 
-Retirement cascades like a process tree. Retiring a member retires every member
-it transitively spawned, deepest first, then the member itself, each through
-the same exact-incarnation retire; every retirement is attempted and the first
-failure is reported, so a retry converges. The cascade lives in the core
+Retirement follows the recorded fork tree. It retires a member's fork
+descendants deepest first, then the member itself. An ordinary `spawn_member`,
+`spawn_many_members` or `mob_spawn_member` does not add the new member to
+that tree. Each retirement targets the exact incarnation; every retirement
+is attempted and the first failure is reported, so a retry converges. The cascade lives in the core
 retire, so every path takes it: `mob_retire_member`, `retire_member`, the
 `max_run_secs` autokill, the retirement of a child whose turn failed,
 host-side retirement (`mob/retire` over JSON-RPC, `meerkat_mob_retire` over

@@ -126,13 +126,16 @@ or fallback Azure key/endpoint pair the OpenAI environment default.
 
 </details>
 
-The catalog defaults are `gpt-6-astra` (OpenAI, and the global default),
-`claude-opus-5-5` (Anthropic) and `gemini-4-neon` (Gemini, on paid Gemini API
-tiers; on the free tier select `gemini-3.8-flash` or, from 0.9.15,
-`gemini-4-hydrogen`). Neon supports `low`/`medium`/`high`; Meerkat does not
-yet send Google's `xhigh`. Argon and Hydrogen remain explicitly selectable. Catalog support does not
-guarantee access for an API organization or through Azure, Copilot or custom
-backends, so select an available model explicitly when needed:
+Through 0.9.17, the catalog defaults are `gpt-6-astra` (OpenAI, and the
+global default), `claude-opus-5-5` (Anthropic) and `gemini-4-argon` (Gemini).
+The unreleased catalog changes the Gemini default to `gemini-4-neon`.
+Both Gemini defaults require paid Gemini API access; on the free tier select
+`gemini-3.8-flash` or `gemini-4-hydrogen` (available from 0.9.15).
+Unreleased Neon support includes `low`/`medium`/`high`; Meerkat does not yet
+send Google's `xhigh`. Argon and Hydrogen remain explicitly selectable.
+Catalog support does not guarantee access for an API organization or through
+Azure, Copilot or custom backends, so select an available model explicitly
+when needed:
 
 ```bash
 rkat run --model gpt-6-luna "Explain async/await"

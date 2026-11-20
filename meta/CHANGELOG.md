@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour only (wire; not measured by the Rust semver gate): WorkGraph targets in the identity form. `meta/workgraph/goal/create`, `meta/workgraph/attention/reassign` and the Console's `meta/workgraph/attention/break_glass_reassign` refuse a target `{kind: "identity", identity}` whose `identity` begins with `mk--`, the marker of an encoded member id: JSON-RPC `-32602`, message `Invalid params: target.identity may not use the reserved encoded roster-id namespace`, no `data`. The refused request writes nothing to the work graph. Through 0.9.17 such a string was taken as it was written. The identity form takes an identity's name; see Upgrade for what each form of a target names.
+- Behaviour only (wire): the owner key answered for a new WorkGraph goal or reassignment made in the identity form, for an identity whose name is not its own member id (a name with a colon, such as `team:helper`): `attention.target.owner_key.id` ends in the member id (`mob/<mob_id>/agent/mk--team_chelper`). Through 0.9.17 it ended in the name (`mob/<mob_id>/agent/team:helper`). A name that is its own member id (`helper`) is answered as before. See Fixed and Upgrade.
+- Behaviour only (wire): for such an identity, the identity form and the session form of one member are one binding target. A second goal or reassignment onto the member through the other form is refused `-32042` (`workgraph_conflict`), naming the binding that holds the member, where through 0.9.17 it was admitted. And a refusal `-32042` is no longer given in one case: a binding whose owner key ends in the name (stored by a release through 0.9.17 in the identity form, or written with the owner form) and a new goal or reassignment in the identity form are two binding targets, where through 0.9.17 they were one, so the new one is admitted.
+- Behaviour only (wire): for such an identity, the refusal of a WorkGraph target that is a member private to a person (`-32602`, `data.kind = "private_member_workgraph_target"`) applies to the identity form as it does to the other forms and to every other name: on `goal/create`, `attention/reassign` and `attention/break_glass_reassign`. Through 0.9.17 such a request was admitted for the callers who may see the member and on the stdio gateway. A binding made in the identity form onto such a name before its member exists is held paused when the member is built private to a person, as it is for every other name.
+
+### Upgrade
+
+- WorkGraph, the three forms of a goal's or a reassignment's target, and what each names:
+  - `{kind: "identity", identity}` takes an identity's NAME (`team:helper`) and names the member seated for that name in this mob. It is the form for a caller that knows a member by its name. From this release it stores the member's owner key.
+  - `{kind: "session", session_id}` takes a session id and names the member that holds that session, or the session itself when no member of this mob holds it.
+  - `{kind: "owner", owner_key: {kind, id}}` (and `lowered_owner`, the spelling answers use) takes an owner key exactly as written and stores it unchanged. A member's owner key is `{kind: "agent", id: "mob/<mob_id>/agent/<member_id>"}`. Nothing is looked up or rewritten for it: a key whose last segment is not a member id of this mob names no member.
+- WorkGraph goals created before this release are not changed by the upgrade: there is no migration. For an identity whose name is not its own member id, a binding that an earlier release stored through the identity form keeps the key that release stored (its last segment is the name). Such a binding is listed as before and reads active, and no turn of the member runs under it, as before the upgrade. An operator who wants that work to reach the member may close the goal and create it again, or reassign the binding in the identity form (`meta/workgraph/attention/reassign` for a `coordinate` binding; the Console's break-glass reassignment for a `pursue` binding). Nothing does this automatically.
+- A client that keeps owner keys from earlier answers: a key kept from a release through 0.9.17 for such an identity is still accepted wherever an owner key is (it is stored and compared as written), and it is not the key new goals store. `meta/workgraph/attention/list` filtered by the kept key lists the bindings stored under it and not new goals, and a new goal in the identity form is admitted beside a binding stored under the kept key. Take the key from the answer of the goal you created.
+- A client that sent a member's encoded id (`mk--...`) in the identity form: send the identity's name there (see Breaking).
+
+### Fixed
+
+- WorkGraph: a new goal or reassignment whose target is given in the identity form stores the member's own owner key when the identity's name is not its own member id (a name with a colon, such as `team:helper`), the key the session form stores for that member. Goals created before this release are not changed (see Breaking and Upgrade).
+
 ## [0.9.17] - 2026-11-18
 
 ### Breaking

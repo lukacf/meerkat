@@ -85,8 +85,8 @@ When updating architecture docs or reviewing current code, do not stop at the
 - Azure OpenAI auth/backend support, project-local CLI realm defaults, HTML
   artifact output, typed transcript notices, provider-native search/image
   improvements, structured skill identity, and model-aware compaction defaults.
-- `gemini-4-argon` is the catalog default Gemini text model (paid Gemini API
-  tiers only); it and `gemini-3.8-flash` are `ModelTier::Recommended`
+- `gemini-4-neon` is the catalog default Gemini text model (paid Gemini API
+  tiers only); it, Argon, Hydrogen and `gemini-3.8-flash` are `ModelTier::Recommended`
   (`crates/meerkat-models/src/catalog.rs`), and older Flash rows such as
   `gemini-3.6-flash` and `gemini-3.5-flash` are `ModelTier::Supported`. The
   Google Code Assist and Copilot Gemini login routes default to

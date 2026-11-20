@@ -329,7 +329,7 @@ crate ownership, construction paths and failure domains.
 ## Meerkat Meta
 
 <p align="center">
-  <img src="meta/docs/images/meta-console.png" alt="Meta console with conversations, topology and roster" width="900">
+  <img src="meta/docs/images/meta-console.png" alt="Meerkat Meta console showing a sample team conversation, the agent roster, and a pending approval" width="900">
 </p>
 
 Meerkat Meta composes Core agents into applications with lasting identities,

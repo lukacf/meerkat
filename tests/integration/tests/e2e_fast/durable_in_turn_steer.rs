@@ -18,8 +18,9 @@
 //! Every other content steer (a peer message, request or lifecycle notice, a
 //! text-only prompt, an external event, a local flow step) joins the running
 //! turn the same way, and a peer steer emits exactly one
-//! `peer_content_ingested`. Three peer steers admitted inside one gated
-//! boundary each land exactly once, in arrival order.
+//! `peer_content_ingested`. Several steers admitted while one request or its
+//! tools are in flight all join the NEXT model request, in arrival order,
+//! each with one transcript row and one `boundary_append_applied`.
 //!
 //! On a SQLite realm, a wired member's peer message that joins the running
 //! turn is answered with `reply_to_peer` naming the Delivery ID its notice
@@ -656,6 +657,9 @@ struct Outcome {
     history: Vec<Value>,
     /// `peer_content_ingested` events the target session published.
     peer_ingested: usize,
+    /// The input of each `boundary_append_applied` event the target session
+    /// published, in publication order.
+    boundary_appends: Vec<String>,
 }
 
 async fn run_scenario(gate: Gate, steers: Vec<meerkat_runtime::Input>) -> Outcome {
@@ -705,13 +709,18 @@ async fn run_scenario_with(
     .expect("subscribe to the target's session events");
     let peer_ingested = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let ingested = Arc::clone(&peer_ingested);
+    let boundary_appends = Arc::new(Mutex::new(Vec::new()));
+    let appended = Arc::clone(&boundary_appends);
     let event_reader = tokio::spawn(async move {
         while let Some(envelope) = futures::StreamExt::next(&mut events).await {
-            if matches!(
-                envelope.payload,
-                meerkat_core::AgentEvent::PeerContentIngested { .. }
-            ) {
-                ingested.fetch_add(1, Ordering::SeqCst);
+            match envelope.payload {
+                meerkat_core::AgentEvent::PeerContentIngested { .. } => {
+                    ingested.fetch_add(1, Ordering::SeqCst);
+                }
+                meerkat_core::AgentEvent::BoundaryAppendApplied { input_id, .. } => {
+                    appended.lock().unwrap().push(input_id.to_string());
+                }
+                _ => {}
             }
         }
     });
@@ -741,12 +750,14 @@ async fn run_scenario_with(
     let requests = requests.lock().unwrap().clone();
     event_reader.abort();
     let peer_ingested = peer_ingested.load(Ordering::SeqCst);
+    let boundary_appends = boundary_appends.lock().unwrap().clone();
     let _ = mob_state.mob_destroy(&mob_id).await;
     Outcome {
         requests,
         first_after_gate,
         history,
         peer_ingested,
+        boundary_appends,
     }
 }
 
@@ -1026,11 +1037,11 @@ async fn e2e_fast_peer_steer_without_a_later_boundary_takes_exactly_one_follow_u
     assert_eq!(outcome.peer_ingested, 1, "peer_content_ingested events");
 }
 
-/// Three peer steers admitted inside one gated boundary each
-/// land exactly once, in arrival order, and once a request carries one, every
-/// later request carries it once. Where each lands (one per boundary, the
-/// last possibly in the follow-up turn) is pinned exactly by the runtime
-/// test `three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order`.
+/// Three peer steers admitted inside one gated boundary each land exactly
+/// once, in arrival order, all in the first model request after the gate,
+/// and every later request carries each once. The runtime test
+/// `three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order`
+/// pins the same at the boundary.
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order() {
     let outcome = run_scenario_with(
@@ -1072,11 +1083,123 @@ async fn e2e_fast_three_peer_steers_in_one_gated_boundary_land_once_each_in_arri
         rows.windows(2).all(|pair| pair[0] < pair[1]),
         "transcript rows in arrival order: {rows:?}"
     );
-    assert!(
-        first_requests.windows(2).all(|pair| pair[0] <= pair[1]),
-        "first delivery in arrival order: {first_requests:?}"
+    assert_eq!(
+        first_requests,
+        vec![outcome.first_after_gate; 3],
+        "all three first reach the model in the next request after the gate"
     );
     assert_eq!(outcome.peer_ingested, 3, "peer_content_ingested events");
+    assert_eq!(
+        outcome.boundary_appends.len(),
+        3,
+        "one boundary_append_applied per steer: {:?}",
+        outcome.boundary_appends
+    );
+}
+
+/// Index of the first message of `messages` that carries `token`.
+fn token_position(messages: &[Message], token: &str) -> Option<usize> {
+    messages
+        .iter()
+        .position(|message| format!("{message:?}").contains(token))
+}
+
+/// Peer steers A and B, admitted in that order while the turn is held at
+/// `gate`, both join the first model request after the gate: A before B in
+/// that request and in the transcript, one transcript row and one
+/// `boundary_append_applied` each (named by their input ids, in order), one
+/// `peer_content_ingested` each, and no follow-up turn.
+async fn two_peer_steers_join_the_next_request(gate: Gate) -> Outcome {
+    let (token_a, token_b) = (ORDERED_PEER_TOKENS[0], ORDERED_PEER_TOKENS[1]);
+    let steers = vec![peer_message_steer(token_a), peer_message_steer(token_b)];
+    let ids = steers
+        .iter()
+        .map(|steer| steer.id().to_string())
+        .collect::<Vec<_>>();
+    assert_ne!(ids[0], ids[1]);
+    let outcome = run_scenario(gate, steers).await;
+
+    for request in &outcome.requests[..outcome.first_after_gate] {
+        for token in [token_a, token_b] {
+            assert_eq!(
+                token_rows(&request.messages, token),
+                0,
+                "{token} is in no request made before the gate released"
+            );
+        }
+    }
+    let next = &outcome.requests[outcome.first_after_gate];
+    assert!(next.in_turn, "the next request belongs to the running turn");
+    let at_a = token_position(&next.messages, token_a);
+    let at_b = token_position(&next.messages, token_b);
+    assert!(
+        at_a.is_some() && at_b.is_some(),
+        "the next outbound model request carries both payloads: A at {at_a:?}, B at {at_b:?}"
+    );
+    assert!(
+        at_a < at_b,
+        "A before B in that request: {at_a:?}, {at_b:?}"
+    );
+    for (index, request) in outcome.requests[outcome.first_after_gate..]
+        .iter()
+        .enumerate()
+    {
+        for token in [token_a, token_b] {
+            assert_eq!(
+                token_rows(&request.messages, token),
+                1,
+                "request {index} after the gate carries {token} exactly once"
+            );
+        }
+    }
+    assert_eq!(
+        outcome.boundary_appends, ids,
+        "one boundary_append_applied per steer, by input id, A then B"
+    );
+    let (row_a, _) = the_row_with(&outcome.history, token_a);
+    let (row_b, _) = the_row_with(&outcome.history, token_b);
+    assert_eq!(row_b, row_a + 1, "adjacent transcript rows, A then B");
+    assert_eq!(history_role(&outcome.history[row_a - 1]), "tool_results");
+    assert_eq!(history_role(&outcome.history[row_b + 1]), "block_assistant");
+    assert_eq!(outcome.peer_ingested, 2, "peer_content_ingested events");
+    assert!(
+        outcome.requests.iter().all(|request| request.in_turn),
+        "no follow-up turn runs"
+    );
+    assert_eq!(
+        assistant_run_ids(&outcome.history).len(),
+        1,
+        "every assistant message belongs to the one running run"
+    );
+    outcome
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_two_peer_steers_admitted_while_tools_run_both_join_the_next_request() {
+    two_peer_steers_join_the_next_request(Gate::Tool).await;
+}
+
+/// The same while a model request is in flight: that request is not
+/// cancelled (it returns its tool calls and carries neither steer), and the
+/// request after it carries both.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_two_peer_steers_admitted_while_a_request_is_in_flight_both_join_the_next_request()
+{
+    let outcome = two_peer_steers_join_the_next_request(Gate::ModelThenTools).await;
+    let in_flight = &outcome.requests[outcome.first_after_gate - 1];
+    assert!(
+        in_flight.in_turn,
+        "the request held in flight is the running turn's"
+    );
+    let history = outcome
+        .history
+        .iter()
+        .map(Value::to_string)
+        .collect::<String>();
+    assert!(
+        history.contains("toolu_p1"),
+        "the in-flight request completed with its tool call; it was not cancelled"
+    );
 }
 
 /// The one history row that carries `token`, with its position.

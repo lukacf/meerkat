@@ -837,3 +837,72 @@ async fn persistent_crash_after_three_steers_joined_one_boundary_delivers_each_o
     )
     .await;
 }
+
+/// An input that only a fresh turn applies (here a prompt steer that routes
+/// to another model) keeps its own rule when it is admitted between two
+/// durable steers: it joins no boundary and takes the follow-up turn, and
+/// the two durable steers join the next request, in their order.
+#[tokio::test]
+async fn fresh_turn_only_steer_between_two_durable_steers_takes_the_follow_up() {
+    let rig = DurableSteerRig::ephemeral().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let before = peer_steer("fresh turn row payload before");
+    let before_id = before.id().clone();
+    rig.admit(before).await;
+    rig.wait_for_waiting_delivery().await;
+    let routed = Input::Prompt(crate::input::PromptInput::new(
+        "fresh turn row routed prompt",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "claude-sonnet-4-5",
+                )),
+                ..steer_metadata()
+            },
+        ),
+    ));
+    let routed_id = routed.id().clone();
+    rig.admit(routed).await;
+    let after = peer_steer("fresh turn row payload after");
+    let after_id = after.id().clone();
+    rig.admit(after).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let next_request = last_take(&rig);
+    assert_eq!(
+        take_ids(&next_request),
+        vec![before_id.clone(), after_id.clone()],
+        "the two durable steers join; the fresh-turn-only input does not"
+    );
+    assert!(
+        next_request
+            .iter()
+            .all(|(_, payload)| !payload.contains("routed prompt"))
+    );
+    assert_eq!(
+        rig.phase(&routed_id).await,
+        Some(InputLifecycleState::Queued)
+    );
+
+    // The run ends: exactly one follow-up turn starts with the routed prompt.
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [&before_id, &routed_id, &after_id] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    let primitives = rig.script.primitives();
+    assert_eq!(contributions(&primitives, &routed_id), 1);
+    assert_eq!(contributions(&primitives, &before_id), 0);
+    assert_eq!(contributions(&primitives, &after_id), 0);
+    assert_eq!(rig.script.applied_durable(), vec![before_id, after_id]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
+}

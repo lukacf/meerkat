@@ -61793,11 +61793,11 @@ fn past_run_settlement_notice() -> chrono::DateTime<chrono::Utc> {
 /// session registry was not readable), and `last_completed`, the census's
 /// last completed reading before this call where it differs from
 /// `expected`. The census answers that reading when a session's ledger
-/// cannot be read without blocking and no session is positively unsettled,
-/// and a session's ledger is busy for a moment after its loop takes a step,
-/// its last one included. Any other count is a wrong reading and fails
-/// immediately; an admitted reading that does not give way to `expected`
-/// fails at the bound. So a wrong reading that happens to equal
+/// cannot be read without blocking and no session is positively unsettled;
+/// as the census's own doc says, such a miss is what a healthy session in
+/// the middle of a commit looks like. Any other count is a wrong reading
+/// and fails immediately; an admitted reading that does not give way to
+/// `expected` fails at the bound. So a wrong reading that happens to equal
 /// `last_completed` is caught at the five second bound, not at once.
 ///
 /// Each caller's `last_completed` is derived for a fixture with ONE

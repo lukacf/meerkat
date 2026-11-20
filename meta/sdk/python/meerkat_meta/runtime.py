@@ -5454,7 +5454,10 @@ class MobHandle:
         id. ``{"kind": "owner", "owner_key": {"kind": ..., "id": ...}}``
         takes an owner key and stores it as written; a member's key is
         ``mob/<mob_id>/agent/<member_id>``. Read the stored target from the
-        result's ``attention.target``.
+        result's ``attention.target``. The refusal of a target that is a
+        member private to a person names the member by its member id
+        (``data.member``, the encoded form ``mk--...`` for a name that is
+        not a valid member id as written), not by the name sent.
         """
         params: dict[str, Any] = {"title": title, "target": target, **kwargs}
         raw = await self._runtime._rpc("meta/workgraph/goal/create", params)

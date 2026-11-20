@@ -4448,16 +4448,22 @@ something different. `{kind: "identity", identity}` takes an identity's name
 and names the member seated for that name in this mob; the stored target is
 that member's owner key. A name that begins with `mk--` is refused (`-32602`):
 that prefix marks an encoded member id, which is not a name. A name that holds
-a `/` is refused (`-32602`).
+a `/` is refused (`-32602`). A generated runtime alias
+(`rt:<identity>:<generation>`) is taken as a name like any other and is not
+reduced to its identity: no member holds that name, so such a goal is active
+and reaches no turn.
 `{kind: "session", session_id}` takes a session id; a session a member of this
 mob holds is stored as that member's owner key, any other session as the
 session. `{kind: "owner", owner_key: {kind, id}}` takes an owner key and
 stores it as written (`lowered_owner` is the same form under the spelling
 answers use). A member's owner key is
 `{kind: "agent", id: "mob/<mob_id>/agent/<member_id>"}`: its last segment is
-the member's id in the mob, which is the identity's name only where the name
-is a valid member id (`helper`), and the encoded form otherwise (`team:helper`
-is `mk--team_chelper`). Answers always carry the stored target
+the member's id in the mob. That is the identity's name only where the name is
+a valid member id as written: an ASCII letter or `_` first, then only ASCII
+letters, digits, `-` and `_` (`helper`). Any other name is seated under its
+encoded form: a name with a colon (`team:helper` is `mk--team_chelper`), and
+likewise one with a dot, a space, a leading digit or a non-ASCII letter.
+Answers always carry the stored target
 (`attention.target`, kind `lowered_owner` or `session`).
 
 ### Errors
@@ -4470,7 +4476,7 @@ is `mk--team_chelper`). Answers always carry the stored target
 | `-32602` | invalid params (including `realm_id`, a non-default namespace where refused, or `limit` above 1000) | none |
 | `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign` is in the identity form and its `identity` begins with `mk--` (an encoded member id, not a name); nothing is written | none |
 | `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign` names a member of another mob; its bindings live only in that mob's realm (`mob.<mob_id>`), so the write is refused before it happens | `attention_target_realm_mismatch` (`data.owner_key`, `data.mob_id`, `data.required_realm_id`, `data.realm_id`) |
-| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`; from 0.9.17, for the target of those three methods, a caller the access rules refuse the request reads their refusal, `-32030`, as for any other name) | `private_member_workgraph_target` (`data.member`) |
+| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`; from 0.9.17, for the target of those three methods, a caller the access rules refuse the request reads their refusal, `-32030`, as for any other name) | `private_member_workgraph_target` (`data.member`: the member's id in the mob, which the message names too; for a name that is not a valid member id as written it is the encoded form, `mk--...`, not the name the request sent) |
 | `-32030` | ABAC denial on the console surface | `access_denied` |
 
 SDK method names are the RPC names with the `meta/workgraph/` prefix

@@ -4923,7 +4923,10 @@ export function workGraphCloseOptionsToDict(
  * in the runtime's mob (the gateway stores that member's owner key; a name
  * beginning with `mk--` is refused). `session` takes a session id. `owner`
  * takes an owner key and stores it as written; a member's key is
- * `mob/<mob_id>/agent/<member_id>`. Used by both `workgraphGoalCreate` and
+ * `mob/<mob_id>/agent/<member_id>`. The refusal of a target that is a member
+ * private to a person names the member by its member id (`data.member`, the
+ * encoded form `mk--...` for a name that is not a valid member id as
+ * written), not by the name sent. Used by both `workgraphGoalCreate` and
  * `workgraphAttentionReassign`.
  */
 export type WorkGraphGoalTarget =

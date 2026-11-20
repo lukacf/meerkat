@@ -812,7 +812,7 @@ if [[ ! -x "${durable_multi_steer_audit}" ]]; then
   echo "error: durable multi-steer audit runner is missing from workspace runfiles: ${durable_multi_steer_audit}" >&2
   exit 1
 fi
-if run_part audits-k; then
+if run_part audits-d; then
   echo "running bounded durable multi-steer TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_multi_steer_audit}" "${DURABLE_MULTI_STEER_AUDIT_MAX_STEPS:-20}" --mutants
 fi
@@ -1799,10 +1799,10 @@ run_machine_verify() {
 # (0.9.11; 97 s locally with 4 TLC workers, about 110-160 s at that
 # factor): about 565-660 s;
 # audits-v = its reseat and names runs: 500-665, the shard 525-690 s;
-# audits-k also runs the durable multi-steer audit with --mutants (eleven
-# runs of the MeerkatMachine model: 77 s locally with 4 TLC workers, beside
-# the apply part's 339 s in the same local run; not yet measured on a hosted
-# runner).
+# audits-d also runs the durable multi-steer audit with --mutants (eleven
+# runs of the MeerkatMachine model: 75 s locally with 4 TLC workers, beside
+# the part's other audits' 288 s in the same local run; not yet measured on
+# a hosted runner).
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these

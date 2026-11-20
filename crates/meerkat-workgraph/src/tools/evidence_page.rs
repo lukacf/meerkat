@@ -56,6 +56,11 @@ pub(super) fn project(item: WorkItem, arguments: &Value) -> Result<Value, WorkGr
         }
         return Ok(json!({ "item": item }));
     };
+    if arguments.get("cursor").is_some() {
+        return Err(invalid(
+            "use evidence_cursor with evidence_limit; cursor does not continue evidence pages",
+        ));
+    }
     let limit = limit
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())

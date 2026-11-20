@@ -328,6 +328,34 @@ async fn get_recent_evidence_rejects_invalid_bounds_and_cursors_without_writing(
 }
 
 #[tokio::test]
+async fn get_recent_evidence_refuses_generic_cursor_only_when_bound_is_present() {
+    let service = service();
+    let item = create(
+        &service,
+        json!([{"kind": "note", "id": "one"}, {"kind": "note", "id": "two"}]),
+    )
+    .await;
+    let page = get(&service, json!({"id": item["id"], "evidence_limit": 1})).await;
+    let continuation = cursor(&page);
+    for wrong_cursor in [json!(continuation), Value::Null] {
+        let error = handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_get",
+            &json!({"id": item["id"], "evidence_limit": 1, "cursor": wrong_cursor}),
+        )
+        .await
+        .expect_err("a generic cursor must not silently repeat the first evidence page");
+        assert_eq!(error.code, WorkGraphToolErrorCode::InvalidArguments);
+        assert!(error.message.contains("evidence_cursor"), "{error:?}");
+        assert_eq!(
+            get(&service, json!({"id": item["id"], "cursor": wrong_cursor})).await,
+            json!({"item": item}),
+            "without an evidence bound the previously ignored cursor stays ignored"
+        );
+    }
+}
+
+#[tokio::test]
 async fn get_recent_evidence_unbounded_read_preserves_full_history_bytes() {
     let service = service();
     let item = create(

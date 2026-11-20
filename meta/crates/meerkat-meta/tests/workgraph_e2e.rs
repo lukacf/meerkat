@@ -343,6 +343,85 @@ async fn member_tools_and_attention_overlay_reach_live_turns() {
     );
 }
 
+/// A goal bound in the identity form reaches the turns of the member it
+/// names, also when the member's name is not its own member id
+/// (`team:helper`, seated as `mk--team_chelper`): the member's next turn
+/// runs under the binding.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_goal_reaches_the_turns_of_a_member_whose_name_is_not_its_member_id() {
+    const NAME: &str = "team:helper";
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let client = CaptureClient::default();
+    let definition = MobDefinition::from_toml(
+        &WORKGRAPH_E2E_TOML.replace("workgraph-e2e-mob", "workgraph-e2e-member-id-mob"),
+    )
+    .expect("parse e2e definition");
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .definition(definition)
+            .persistent_state(state_dir.path())
+            .default_llm_client(Arc::new(client.clone()))
+            .build(),
+    )
+    .await
+    .expect("persistent workgraph runtime builds");
+    runtime
+        .spawn_many(vec![SpawnMemberSpec::from_wire(
+            "worker".to_string(),
+            NAME.to_string(),
+            None,
+            None,
+            None,
+        )])
+        .await
+        .expect("spawn a member whose name is not its own member id");
+
+    // Turn 1, no binding: the whole WorkGraph surface.
+    meerkat_meta::send_message_on_mob(&runtime.mob_handle(), NAME, "hello".to_string())
+        .await
+        .expect("first send");
+    let captured = client.wait_for_request(1).await;
+    let unbound_tools = captured[0].clone();
+    assert!(
+        has_tool(&unbound_tools, "workgraph_create") && has_tool(&unbound_tools, "send_message"),
+        "an unbound turn has the whole surface: {unbound_tools:?}"
+    );
+
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "watch the queue",
+            "target": { "kind": "identity", "identity": NAME },
+        }),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response:#?}");
+
+    // Turn 2: under the binding (the pursue allow-set).
+    meerkat_meta::send_message_on_mob(&runtime.mob_handle(), NAME, "how is the queue?".to_string())
+        .await
+        .expect("second send");
+    let captured = client.wait_for_request(2).await;
+    let bound_tools = &captured[1];
+    assert!(
+        has_tool(bound_tools, "workgraph_get"),
+        "the turn has the binding's tools: {bound_tools:?}"
+    );
+    for blocked in ["workgraph_create", "workgraph_claim", "send_message"] {
+        assert!(
+            !has_tool(bound_tools, blocked),
+            "a turn under the binding does not offer {blocked}: {bound_tools:?}"
+        );
+    }
+
+    let teardown = runtime.stop_mob_for_teardown().await;
+    assert!(
+        teardown.teardown_may_proceed(),
+        "teardown must not be blocked by a member's runtime readiness: {teardown:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A member's own WorkGraph calls
 // ---------------------------------------------------------------------------
@@ -1877,5 +1956,142 @@ async fn a_binding_made_before_its_member_is_held_when_the_member_is_private_to_
     .expect("the owner writes to the private member");
     model.turn_ended("OWNER-ASKS-AFTER-CREATION").await;
 
+    teardown(runtime).await;
+}
+
+/// The host binds no goal, in the identity form, onto a member private to a
+/// person.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_binds_no_identity_goal_onto_a_member_private_to_a_person() {
+    const MOB: &str = "workgraph-member-calls-private-identity-goal";
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let model = CallingModel::default();
+    let runtime = member_calls_runtime(MOB, state_dir.path(), &model).await;
+    spawn_private_worker(&runtime, "private-helper").await;
+
+    let refused = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "work for a private member",
+            "target": { "kind": "identity", "identity": "private-helper" },
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("private_member_workgraph_target"),
+        "{refused:#?}"
+    );
+    assert!(bindings(&runtime).await.is_empty(), "nothing is bound");
+    teardown(runtime).await;
+}
+
+/// The same refusal for a member private to a person whose name is not its
+/// own member id (`team:helper-side-1`, seated as
+/// `mk--team_chelper-side-1`), for a goal and for a reassignment.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_binds_no_identity_goal_onto_a_private_member_whose_name_is_not_its_member_id() {
+    const MOB: &str = "workgraph-member-calls-private-member-id";
+    const NAME: &str = "team:helper-side-1";
+    const MEMBER_ID: &str = "mk--team_chelper-side-1";
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let model = CallingModel::default();
+    let runtime = member_calls_runtime(MOB, state_dir.path(), &model).await;
+    // The handle seats a member under its member id.
+    spawn_private_worker(&runtime, MEMBER_ID).await;
+
+    let refused = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "work for a private member",
+            "target": { "kind": "identity", "identity": NAME },
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("private_member_workgraph_target"),
+        "{refused:#?}"
+    );
+    assert!(bindings(&runtime).await.is_empty(), "nothing is bound");
+
+    // A reassignment onto it, in the identity form.
+    spawn_worker(&runtime, "holder").await;
+    let goal = host_goal(&runtime, "movable work", "holder", "coordinate").await;
+    let moved = rpc(
+        &runtime,
+        "meta/workgraph/attention/reassign",
+        json!({
+            "binding_id": binding_id(&goal),
+            "expected_revision": binding_revision(&goal),
+            "target": { "kind": "identity", "identity": NAME },
+        }),
+    )
+    .await;
+    assert_eq!(
+        moved["error"]["data"]["kind"],
+        json!("private_member_workgraph_target"),
+        "{moved:#?}"
+    );
+    let listed = bindings(&runtime).await;
+    assert_eq!(
+        binding(&listed, &binding_id(&goal))["target"],
+        goal["attention"]["target"],
+        "the binding stays where it was: {listed:#?}"
+    );
+    teardown(runtime).await;
+}
+
+/// A binding the host made onto a name before its member existed is held
+/// when the member built under that name is private to a person, also when
+/// the name is not its own member id: the key stored for the name is the
+/// member id the name will have.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_binding_made_before_its_member_is_held_when_the_private_members_name_is_not_its_member_id()
+ {
+    const MOB: &str = "workgraph-member-calls-bound-before-member-id";
+    const NAME: &str = "team:later";
+    const MEMBER_ID: &str = "mk--team_clater";
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let model = CallingModel::default();
+    let runtime = member_calls_runtime(MOB, state_dir.path(), &model).await;
+    let goal = host_goal(&runtime, "work for a later member", NAME, "pursue").await;
+    let listed = bindings(&runtime).await;
+    assert_eq!(
+        binding(&listed, &binding_id(&goal))["status"]["state"],
+        json!("active"),
+        "the host binds a name no member holds yet: {listed:#?}"
+    );
+
+    spawn_private_worker(&runtime, MEMBER_ID).await;
+
+    let listed = bindings(&runtime).await;
+    let held = binding(&listed, &binding_id(&goal));
+    assert_eq!(
+        held["status"]["state"],
+        json!("paused"),
+        "the build of a member private to a person holds a binding that names it: {held:#?}"
+    );
+    let resumed = rpc(
+        &runtime,
+        "meta/workgraph/attention/resume",
+        json!({
+            "binding_id": binding_id(&goal),
+            "expected_revision": held["machine_state"]["revision"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        resumed["error"]["data"]["kind"],
+        json!("private_member_workgraph_target"),
+        "the host does not resume it: {resumed:#?}"
+    );
+    assert_eq!(
+        held["target"]["owner_key"]["id"],
+        json!(format!("mob/{MOB}/agent/{MEMBER_ID}")),
+        "the key of a name no member held yet is the member id the name has now"
+    );
     teardown(runtime).await;
 }

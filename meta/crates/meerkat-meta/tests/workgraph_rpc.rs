@@ -1319,6 +1319,407 @@ async fn session_and_identity_goal_targets_conflict_as_the_same_member() {
     runtime.mob_handle().stop().await.expect("stop");
 }
 
+// ---------------------------------------------------------------------------
+// The identity form for a name that is not its own member id
+// ---------------------------------------------------------------------------
+//
+// `team:helper` is a name the roster cannot seat as it is written: its
+// member is seated under the member id `mk--team_chelper`
+// (`meerkat_mob::ids::member_id_for_name`).
+
+/// A member whose name is not its own member id, seated as the runtime
+/// seats a member a caller names, and its session.
+async fn spawn_encoded_member(runtime: &UnifiedRuntime) -> String {
+    runtime
+        .spawn_many(vec![SpawnMemberSpec::from_wire(
+            "worker".to_string(),
+            "team:helper".to_string(),
+            None,
+            None,
+            None,
+        )])
+        .await
+        .expect("spawn a member whose name is not its own member id");
+    runtime
+        .mob_handle()
+        .resolve_bridge_session_id_observation(&AgentIdentity::from("mk--team_chelper"))
+        .await
+        .expect("the member is seated under its member id")
+        .to_string()
+}
+
+/// The owner key of that member: its member id under its mob.
+fn encoded_member_key(runtime: &UnifiedRuntime) -> Value {
+    json!({
+        "kind": "agent",
+        "id": format!("mob/{}/agent/mk--team_chelper", runtime_mob_id(runtime)),
+    })
+}
+
+/// How many events the WorkGraph holds.
+async fn event_count(runtime: &UnifiedRuntime) -> usize {
+    let page = rpc(runtime, "meta/workgraph/events", json!({ "limit": 200 })).await;
+    result(&page)["events"].as_array().unwrap().len()
+}
+
+/// The session form stores the member's owner key: its member id under its
+/// mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_goal_on_a_name_that_is_not_its_member_id_keys_the_member_id() {
+    let runtime = build_runtime().await;
+    let session_id = spawn_encoded_member(&runtime).await;
+
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "session-form goal",
+            "target": { "kind": "session", "session_id": session_id },
+        }),
+    )
+    .await;
+    let goal = result(&response).clone();
+    assert_eq!(
+        goal["attention"]["target"],
+        json!({ "kind": "lowered_owner", "owner_key": encoded_member_key(&runtime) }),
+        "{goal:#?}"
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// The identity form takes a member's name and stores the member's owner
+/// key: the same key the session form stores for that member.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_goal_on_a_name_that_is_not_its_member_id_keys_the_member_id() {
+    let runtime = build_runtime().await;
+    let session_id = spawn_encoded_member(&runtime).await;
+
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "identity-form goal",
+            "target": { "kind": "identity", "identity": "team:helper" },
+        }),
+    )
+    .await;
+    let identity_goal = result(&response).clone();
+    assert_eq!(
+        identity_goal["attention"]["target"],
+        json!({ "kind": "lowered_owner", "owner_key": encoded_member_key(&runtime) }),
+        "the identity form stores the member's key: {identity_goal:#?}"
+    );
+
+    // Free the member, then the session form: the same key.
+    let binding_id = identity_goal["attention"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let item_revision = identity_goal["item"]["revision"].as_u64().unwrap();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/confirm",
+        json!({ "binding_id": binding_id, "expected_revision": item_revision }),
+    )
+    .await;
+    let item_revision = result(&response)["item"]["revision"].as_u64().unwrap();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/request_close",
+        json!({ "binding_id": binding_id, "expected_revision": item_revision }),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response:#?}");
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "session-form goal",
+            "target": { "kind": "session", "session_id": session_id },
+        }),
+    )
+    .await;
+    assert_eq!(
+        result(&response)["attention"]["target"],
+        identity_goal["attention"]["target"],
+        "both forms store one key for one member"
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// A member takes one occupying binding, in whichever form each goal names
+/// it, also when its name is not its own member id.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_and_identity_goal_targets_conflict_for_a_name_that_is_not_its_member_id() {
+    let runtime = build_runtime().await;
+    let session_id = spawn_encoded_member(&runtime).await;
+
+    // Identity first, session second.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "identity-form goal",
+            "target": { "kind": "identity", "identity": "team:helper" },
+        }),
+    )
+    .await;
+    let identity_goal = result(&response).clone();
+    let identity_binding = identity_goal["attention"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "session-form goal for the same member",
+            "target": { "kind": "session", "session_id": session_id },
+        }),
+    )
+    .await;
+    assert_eq!(error_code(&response), -32042, "{response:#?}");
+    assert!(
+        response["error"]["data"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&identity_binding),
+        "{response:#?}"
+    );
+
+    // Free the member, then session first, identity second.
+    let item_revision = identity_goal["item"]["revision"].as_u64().unwrap();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/confirm",
+        json!({ "binding_id": identity_binding, "expected_revision": item_revision }),
+    )
+    .await;
+    let item_revision = result(&response)["item"]["revision"].as_u64().unwrap();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/request_close",
+        json!({ "binding_id": identity_binding, "expected_revision": item_revision }),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response:#?}");
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "session-form goal",
+            "target": { "kind": "session", "session_id": session_id },
+        }),
+    )
+    .await;
+    let session_binding = result(&response)["attention"]["binding_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "identity-form goal for the same member",
+            "target": { "kind": "identity", "identity": "team:helper" },
+        }),
+    )
+    .await;
+    assert_eq!(error_code(&response), -32042, "{response:#?}");
+    assert!(
+        response["error"]["data"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&session_binding),
+        "{response:#?}"
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// The host may bind a name before its member exists. The key stored for
+/// such a name is the member id the name will have.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_goal_on_a_name_no_member_holds_keys_the_member_id_it_will_have() {
+    let runtime = build_runtime().await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "work for a later member",
+            "target": { "kind": "identity", "identity": "team:later" },
+        }),
+    )
+    .await;
+    let goal = result(&response).clone();
+    assert_eq!(goal["attention"]["status"]["state"], json!("active"));
+    assert_eq!(
+        goal["attention"]["target"]["owner_key"]["id"],
+        json!(format!(
+            "mob/{}/agent/mk--team_clater",
+            runtime_mob_id(&runtime)
+        ))
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// The identity form takes an identity's name. A string that begins with
+/// the marker of an encoded member id is refused there (`-32602`, no
+/// data), on a goal and on a reassignment, and the refused request writes
+/// nothing: no item, no binding, no event, and a binding it named stays as
+/// it was. The owner form takes an owner key as it is written: given this
+/// member's key it stores that key.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_target_refuses_the_encoded_spelling_of_a_member_id_and_writes_nothing() {
+    let runtime = build_runtime().await;
+    let _session_id = spawn_encoded_member(&runtime).await;
+    let refused = |response: &Value| {
+        response["error"]["code"] == json!(-32602)
+            && response["error"]["data"].is_null()
+            && response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| {
+                    message.contains(
+                        "target.identity may not use the reserved encoded roster-id namespace",
+                    )
+                })
+    };
+
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "named by the encoded id",
+            "target": { "kind": "identity", "identity": "mk--team_chelper" },
+        }),
+    )
+    .await;
+    assert!(refused(&response), "{response:#?}");
+    let listed = rpc(&runtime, "meta/workgraph/attention/list", json!({})).await;
+    assert!(
+        result(&listed)["attention"].as_array().unwrap().is_empty(),
+        "no binding: {listed:#?}"
+    );
+    let items = rpc(&runtime, "meta/workgraph/list", json!({})).await;
+    assert!(
+        result(&items)["items"].as_array().unwrap().is_empty(),
+        "no item: {items:#?}"
+    );
+    assert_eq!(event_count(&runtime).await, 0, "no event");
+
+    // A reassignment onto the encoded spelling: refused, the binding stays.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "movable work",
+            "target": { "kind": "identity", "identity": "holder" },
+            "mode": "coordinate",
+        }),
+    )
+    .await;
+    let movable = result(&response).clone();
+    let events_before = event_count(&runtime).await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/attention/reassign",
+        json!({
+            "binding_id": movable["attention"]["binding_id"],
+            "expected_revision": movable["attention"]["machine_state"]["revision"],
+            "target": { "kind": "identity", "identity": "mk--team_chelper" },
+        }),
+    )
+    .await;
+    assert!(refused(&response), "{response:#?}");
+    let status = rpc(
+        &runtime,
+        "meta/workgraph/goal/status",
+        json!({ "binding_id": movable["attention"]["binding_id"] }),
+    )
+    .await;
+    assert_eq!(
+        result(&status)["attention"],
+        movable["attention"],
+        "the binding is as it was"
+    );
+    assert_eq!(event_count(&runtime).await, events_before, "no event");
+
+    // The owner form stores the key it is given.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "named by its key",
+            "target": { "kind": "owner", "owner_key": encoded_member_key(&runtime) },
+        }),
+    )
+    .await;
+    assert_eq!(
+        result(&response)["attention"]["target"],
+        json!({ "kind": "lowered_owner", "owner_key": encoded_member_key(&runtime) }),
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// An owner key is taken as it is written. A key whose last segment is the
+/// name `team:helper` is the key of a name no member holds: it is accepted
+/// and stored unchanged, and it is not the key a goal in the identity form
+/// stores. A goal in the identity form is admitted beside it, and a list
+/// filtered by that key shows that key's binding only.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_key_holding_the_name_is_taken_as_written_and_is_not_the_identity_forms_key() {
+    let runtime = build_runtime().await;
+    let _session_id = spawn_encoded_member(&runtime).await;
+    let name_key = json!({
+        "kind": "agent",
+        "id": format!("mob/{}/agent/team:helper", runtime_mob_id(&runtime)),
+    });
+    let name_target = json!({ "kind": "lowered_owner", "owner_key": name_key });
+
+    // Accepted, stored as written.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({ "title": "bound by a key holding the name", "target": name_target }),
+    )
+    .await;
+    let name_goal = result(&response).clone();
+    assert_eq!(
+        name_goal["attention"]["target"], name_target,
+        "{name_goal:#?}"
+    );
+
+    // A goal in the identity form is another target.
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "a goal for the member",
+            "target": { "kind": "identity", "identity": "team:helper" },
+        }),
+    )
+    .await;
+    let member_goal = result(&response).clone();
+    assert_eq!(
+        member_goal["attention"]["target"]["owner_key"],
+        encoded_member_key(&runtime)
+    );
+
+    // A list filtered by the key holding the name shows its binding only.
+    let listed = rpc(
+        &runtime,
+        "meta/workgraph/attention/list",
+        json!({ "target": name_target }),
+    )
+    .await;
+    let listed = result(&listed)["attention"].as_array().unwrap().clone();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    assert_eq!(
+        listed[0]["binding_id"],
+        name_goal["attention"]["binding_id"]
+    );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
 /// Round-2 hole 5 (TOCTOU): two concurrent `goal/create` calls for the same
 /// target must admit exactly one — the admission gate serializes the
 /// check-then-act window shared by the stdin and console surfaces.

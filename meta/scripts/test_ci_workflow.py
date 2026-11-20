@@ -9,7 +9,9 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -42,13 +44,59 @@ SETUP_RUST = "./.github/actions/setup-rust-ci"
 # The jobs that run on pull requests only: the root CI runs their tests on
 # the push (main unit, feature suite and closure-tests rows for Meta's
 # packages).
-PULL_REQUEST_ONLY_JOBS = {"rust-unit": "rust", "rust-conformance": "rust", "rust-integration": "integration",
+PULL_REQUEST_ONLY_JOBS = {"rust-unit-build": "rust", "rust-unit": "rust", "rust-conformance": "rust",
+                          "rust-integration": "integration",
                           "rust-extension-state-lib": "extension_state", "rust-voice-lib": "voice"}
 PULL_REQUEST_ONLY = " && github.event_name == 'pull_request'"
 # Meta's workspace packages: the only ones a Meta job names to Cargo.
 META_PACKAGES = ("meerkat-meta", "meta-extension-state", "meta-store-conformance")
 SETUP_SCCACHE = "./.github/actions/setup-sccache-ci"
 SETUP_MOLD = "./.github/actions/setup-mold-ci"
+# The step of a rust-unit leg that checks the archive it fetched before any
+# test runs.
+UNIT_LEG_GUARD = "Check the fetched archive and the workspace path it was built at"
+# The text no run line of a Meta workflow may hold (see
+# test_cargo_runs_one_package_from_the_root_wrapper).
+NAMES_THE_WORKSPACE = re.compile(r"--workspace(?!-remap(\s|$))")
+# The four jobs whose compile of meerkat-meta is measured: the step that
+# compiles, its whole `run` text (the commands as they were, with Cargo's
+# `--timings` on the compiling one and nothing else added), and what the
+# report line says was built.
+_BACKENDS = ("library_mode_reference", "console_acceptance_fixture", "memory_console_reference",
+             "workgraph_console_reference", "mcp_apps_gateway_fixture")
+_EXTENSION_STATE = "extension-state,announcement-test-faults,console-test-faults"
+COMPILE_PATHS = {
+    "rust-unit-build": (
+        "Build the lib test archive",
+        "./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings "
+        '--archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"',
+        "meerkat-meta lib test, default features",
+    ),
+    "rust-extension-state-lib": (
+        "Extension-state lib tests",
+        f"./scripts/repo-cargo test -p meerkat-meta --features {_EXTENSION_STATE} --lib --timings "
+        "-- extension_ document_mcp_child_supply",
+        f"meerkat-meta lib test, features {_EXTENSION_STATE}, filter extension_ document_mcp_child_supply",
+    ),
+    "rust-voice-lib": (
+        "Voice lib cases",
+        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings console_voice\n"
+        "./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration",
+        "meerkat-meta lib test, features openai-live, filters console_voice and gateway_openai_live_registration",
+    ),
+    "console-backends": (
+        "Build console acceptance backends",
+        "./scripts/repo-cargo build -p meerkat-meta " + " ".join(f"--example {name}" for name in _BACKENDS)
+        + " --timings",
+        "meerkat-meta examples " + ", ".join(_BACKENDS) + ", default features",
+    ),
+}
+MEASURE_BEFORE = "Compile statistics, before"
+MEASURE_AFTER = "Compile statistics and timing report, after"
+MEASURE_UPLOAD = "Retain the Cargo timing reports"
+# What stands in for a bucket name in the rows: it must never reach a line
+# the report step prints.
+FIXTURE_LOCATION_NAME = "fixture-cache-location-name"
 
 
 def load(path: Path) -> dict:
@@ -368,7 +416,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual([use for use in reference_uses if use in setup_order], setup_order)
         jobs = rust_jobs(meta)
         self.assertEqual(sorted(jobs), sorted(["test-python", "console-backends", "console-fixtures",
-                                               "console-acceptance", "flow-editor", "rust-unit",
+                                               "console-acceptance", "flow-editor", "rust-unit-build",
                                                "rust-examples", "rust-conformance", "rust-integration",
                                                "rust-features-check", "rust-extension-state",
                                                "rust-extension-state-lib", "rust-voice", "rust-voice-lib",
@@ -406,7 +454,11 @@ class CiWorkflowTests(unittest.TestCase):
             default = ((workflow.get("defaults") or {}).get("run") or {}).get("working-directory")
             self.assertEqual(default, "meta", path.name)
             for _, step, line in run_lines(workflow):
-                self.assertNotIn("--workspace", line, path.name)
+                # No step may hold the text `--workspace`, Cargo's flag in
+                # any spelling, except as nextest's `--workspace-remap`,
+                # which only tells an archived test binary where this
+                # checkout is and selects no package.
+                self.assertIsNone(NAMES_THE_WORKSPACE.search(line), f"{path.name}: {line}")
                 self.assertIsNone(re.search(r"(^|[\s;&|(])cargo\s", line), f"{path.name}: raw cargo in {line}")
                 if "repo-cargo" not in line:
                     continue
@@ -421,6 +473,35 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
         self.assertEqual(len(commands), 25, commands)
         self.assertNotIn("repo-cargo", INSTALLER_WORKFLOW.read_text())
+
+    def test_the_no_workspace_rule_passes_only_the_archive_remap_flag(self):
+        """The rule of the test above refuses the text `--workspace` in a run
+        line however it is written (a bare flag, with a value, inside an
+        array, in quotes, as the head of another word), and passes it only as
+        nextest's `--workspace-remap` followed by a space or the line's end."""
+        refused = (
+            "./scripts/repo-cargo nextest run --workspace --no-fail-fast",
+            "./scripts/repo-cargo test --workspace",
+            "./scripts/repo-cargo check --workspace=all",
+            "args=(--workspace)",
+            'args+=("--workspace")',
+            "./scripts/repo-cargo test '--workspace'",
+            "./scripts/repo-cargo test --workspace-remapped",
+            "cargo-nextest nextest run --archive-file a.tar.zst --workspace-remap=/somewhere",
+            'cargo-nextest nextest run --archive-file a.tar.zst --workspace-remap "${GITHUB_WORKSPACE}" --workspace',
+        )
+        passed = (
+            'cargo-nextest nextest run --archive-file a.tar.zst --workspace-remap "${GITHUB_WORKSPACE}" --no-fail-fast',
+            'cargo-nextest nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \\',
+            "cargo-nextest nextest list --archive-file a.tar.zst --workspace-remap",
+            "./scripts/repo-cargo nextest run -p meerkat-meta --lib --no-fail-fast",
+        )
+        for line in refused:
+            with self.subTest(refused=line):
+                self.assertIsNotNone(NAMES_THE_WORKSPACE.search(line))
+        for line in passed:
+            with self.subTest(passed=line):
+                self.assertIsNone(NAMES_THE_WORKSPACE.search(line))
 
     def test_every_external_action_is_pinned_and_takes_the_root_pins(self):
         """The repository's Actions policy refuses an action that is not
@@ -793,7 +874,7 @@ class CiWorkflowTests(unittest.TestCase):
         backends = workflow["jobs"]["console-backends"]
         runs = [step.get("run", "") for step in steps_of(backends)]
         build = runs.index("./scripts/repo-cargo build -p meerkat-meta "
-                           + " ".join(f"--example {name}" for name in examples))
+                           + " ".join(f"--example {name}" for name in examples) + " --timings")
         self.assertLess(runs.index("npm --prefix console run build --silent"), build)
         pack = next(run for run in runs if run.startswith("tar "))
         self.assertEqual(pack, 'tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" '
@@ -1019,19 +1100,164 @@ class CiWorkflowTests(unittest.TestCase):
         # expand them against the checkout.
         self.assertIn('read -r -a patterns <<< "${TESTS}"\n', job_block("rust-integration"))
 
-    def test_the_unit_partitions_run_every_lib_test_once(self):
-        """rust-unit's legs each compile meerkat-meta's lib test harness and
-        run one nextest count partition of its tests: the matrix is 1..N and
-        the job's name and its --partition both say N, so every test runs in
-        exactly one leg."""
-        job = load(CI_WORKFLOW)["jobs"]["rust-unit"]
+    def test_the_unit_lane_builds_once_and_its_partitions_run_every_lib_test_once(self):
+        """rust-unit-build compiles meerkat-meta's lib test harness once into
+        a nextest archive, checks that the count partitions cover its tests
+        exactly once and hands it to the run's legs; each rust-unit leg runs
+        one count partition from that archive and compiles nothing. The
+        matrix is 1..N and the job's name, the build's check and the leg's
+        --partition all say N, so every test runs in exactly one leg. The
+        selection (the package's lib, default features), the nextest profile
+        (the default one) and Meta's 16 MiB stack are the ones the legs had
+        when each compiled the harness itself."""
+        workflow = load(CI_WORKFLOW)
+        build, job = workflow["jobs"]["rust-unit-build"], workflow["jobs"]["rust-unit"]
         legs = job["strategy"]["matrix"]["partition"]
         self.assertEqual(legs, list(range(1, len(legs) + 1)))
         self.assertEqual(job["name"], f"rust-unit (${{{{ matrix.partition }}}}/{len(legs)})")
-        step = next(step for step in steps_of(job) if step.get("name") == "Lib tests")
-        self.assertEqual(step["env"]["PARTITION"], "${{ matrix.partition }}")
-        self.assertEqual(step["run"].strip(), "./scripts/repo-cargo nextest run -p meerkat-meta --lib "
+        self.assertIs(job["strategy"]["fail-fast"], False)
+        self.assertEqual(build["name"], "rust-unit-build")
+        self.assertNotIn("strategy", build)
+        self.assertEqual(build["needs"], "changes")
+        self.assertEqual(job["needs"], ["changes", "rust-unit-build"])
+        self.assertEqual(build["if"], job["if"])
+        archive = "nextest-meta-unit.tar.zst"
+        built_at = "nextest-meta-unit.workspace"
+        artifact = "nextest-meta-unit-${{ github.run_id }}"
+        stack = "16777216"
+
+        def named(owner: dict, name: str) -> tuple[int, dict]:
+            found = [(index, step) for index, step in enumerate(steps_of(owner)) if step.get("name") == name]
+            self.assertEqual(len(found), 1, name)
+            return found[0]
+
+        # The build: one archive of the package's lib tests, through the root
+        # wrapper, on Meta's stack (the step's environment reaches rustc too,
+        # as the legs' step did).
+        compile_at, compile_step = named(build, "Build the lib test archive")
+        self.assertEqual(compile_step["working-directory"], ".")
+        self.assertEqual(compile_step["env"], {"RUST_MIN_STACK": stack})
+        self.assertEqual(compile_step["run"].strip(), COMPILE_PATHS["rust-unit-build"][1])
+        self.assertEqual(COMPILE_PATHS["rust-unit-build"][1],
+                         "./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings "
+                         f'--archive-file "${{RUNNER_TEMP}}/{archive}"')
+        archives = [line for _, _, line in run_lines(workflow) if re.search(r"\bnextest archive\b", line)]
+        self.assertEqual(len(archives), 1, archives)
+        record_at, record = named(build, "Record the workspace path the archive was built at")
+        self.assertEqual(record["run"].strip(),
+                         f"printf '%s\\n' \"${{GITHUB_WORKSPACE}}\" > \"${{RUNNER_TEMP}}/{built_at}\"")
+        check_at, check = named(build, "Verify the partitions cover every test exactly once")
+        self.assertEqual(check["working-directory"], ".")
+        self.assertEqual(check["env"], {"PARTITIONS": str(len(legs))})
+        self.assertIn(f'archive="${{RUNNER_TEMP}}/{archive}"\n', check["run"])
+        self.assertIn('cargo-nextest nextest list --archive-file "${archive}" '
+                      '--workspace-remap "${GITHUB_WORKSPACE}" \\\n', check["run"])
+        self.assertIn('list --partition "count:${index}/${PARTITIONS}" >> "${RUNNER_TEMP}/union.txt"\n', check["run"])
+        self.assertIn('[[ -s "${RUNNER_TEMP}/all.txt" ]]', check["run"])
+        self.assertIn('cmp -s "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt"', check["run"])
+        self.assertNotIn("--profile", check["run"])
+        # The archive's upload; the timing reports' upload is the job's last
+        # step (test_the_four_compile_paths_are_measured_in_steps_of_their_own).
+        upload_at, upload = named(build, "Retain the lib test archive")
+        self.assertEqual(uses_of(upload), "actions/upload-artifact")
+        self.assertEqual([step.get("name") for step in steps_of(build) if uses_of(step) == "actions/upload-artifact"],
+                         ["Retain the lib test archive", MEASURE_UPLOAD])
+        # Keyed by the run, not the attempt: a rerun of one failed leg finds
+        # the archive the first attempt built, and a rerun of the build
+        # replaces it.
+        self.assertEqual(upload["with"]["name"], artifact)
+        self.assertEqual([line.strip() for line in upload["with"]["path"].splitlines()],
+                         [f"${{{{ runner.temp }}}}/{archive}", f"${{{{ runner.temp }}}}/{built_at}"])
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertIs(upload["with"]["overwrite"], True)
+        self.assertEqual(upload["with"]["retention-days"], 1)
+        self.assertEqual([compile_at, record_at, check_at, upload_at],
+                         sorted([compile_at, record_at, check_at, upload_at]))
+        self.assertEqual(build["timeout-minutes"], job["timeout-minutes"])
+
+        # The legs: the checkout, Rust, nextest and the run's own archive,
+        # fetched by name alone (no token, run or repository: the action then
+        # reads the current run's artifacts only).
+        self.assertEqual([uses_of(step) for step in steps_of(job) if uses_of(step)],
+                         ["actions/checkout", SETUP_RUST, "./.github/actions/setup-cargo-tool-ci",
+                          "actions/download-artifact"])
+        fetch_at, fetch = next((index, step) for index, step in enumerate(steps_of(job))
+                               if uses_of(step) == "actions/download-artifact")
+        self.assertEqual(fetch["with"], {"name": artifact, "path": "${{ runner.temp }}/nextest-archive"})
+        # The lib's tests read fixtures by the build's absolute path
+        # (env!("CARGO_MANIFEST_DIR")), and some return early when a file
+        # is absent: a leg at another path fails before it runs any. The
+        # same step refuses a fetched archive or path record that is not a
+        # non-empty file (test_a_unit_leg_refuses_an_archive_it_cannot_trust
+        # runs it).
+        guard_at, guard = named(job, UNIT_LEG_GUARD)
+        self.assertEqual(guard["shell"], "bash")
+        self.assertIn(f'archive="${{RUNNER_TEMP}}/nextest-archive/{archive}"\n', guard["run"])
+        self.assertIn(f'record="${{RUNNER_TEMP}}/nextest-archive/{built_at}"\n', guard["run"])
+        self.assertIn('if [[ ! -s "${archive}" ]]; then\n', guard["run"])
+        self.assertIn('if [[ ! -s "${record}" ]]; then\n', guard["run"])
+        self.assertIn('if [[ -z "${built}" || "${built}" != "${GITHUB_WORKSPACE}" ]]; then\n', guard["run"])
+        self.assertEqual(guard["run"].count("exit 1\n"), 3)
+        run_at, step = named(job, "Lib tests")
+        self.assertEqual([fetch_at, guard_at, run_at], sorted([fetch_at, guard_at, run_at]))
+        self.assertEqual(run_at, len(steps_of(job)) - 1)
+        self.assertEqual(step["working-directory"], ".")
+        self.assertEqual(step["env"], {"RUST_MIN_STACK": stack, "PARTITION": "${{ matrix.partition }}"})
+        # A partition that selects no test is a failure, said in the command
+        # and not left to nextest's default.
+        self.assertEqual(step["run"].strip(),
+                         f'cargo-nextest nextest run --archive-file "${{RUNNER_TEMP}}/nextest-archive/{archive}" '
+                         '--workspace-remap "${GITHUB_WORKSPACE}" --no-tests=fail '
                          f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
+        # A leg compiles nothing and holds no identity: no wrapper, compiler
+        # cache, linker or registry step, no permissions of its own.
+        self.assertNotIn("permissions", job)
+        self.assertNotIn("env", job)
+        code = "\n".join(line for line in job_block("rust-unit").splitlines() if not line.strip().startswith("#"))
+        for absent in ("repo-cargo", SETUP_SCCACHE, SETUP_MOLD, "Swatinem/rust-cache", "id-token", "RUSTC_WRAPPER"):
+            self.assertNotIn(absent, code)
+
+    def test_a_unit_leg_refuses_an_archive_it_cannot_trust(self):
+        """Before it runs a test, a rust-unit leg checks what it fetched: the
+        archive and the record of the workspace path it was built at are
+        non-empty files, and that path is the leg's own. The step's own
+        script, run as the runner runs a `shell: bash` step, goes on only for
+        the build's path; another path, a missing, empty or blank record and
+        a missing or empty archive each stop the leg with their own error
+        line."""
+        steps = steps_of(load(CI_WORKFLOW)["jobs"]["rust-unit"])
+        (guard,) = [step for step in steps if step.get("name") == UNIT_LEG_GUARD]
+        self.assertEqual(guard["shell"], "bash")
+        self.assertLess(steps.index(guard), len(steps) - 1)
+        self.assertEqual(steps[-1]["name"], "Lib tests")
+        here = "/work/meerkat"
+        cases = (
+            ("the build's path", b"archive", f"{here}\n", 0, ""),
+            ("another path", b"archive", "/elsewhere/meerkat\n", 1, "was built at '/elsewhere/meerkat'"),
+            ("no record", b"archive", None, 1, "path the archive was built at is missing or empty"),
+            ("an empty record", b"archive", "", 1, "path the archive was built at is missing or empty"),
+            ("a blank line for a record", b"archive", "\n", 1, "was built at ''"),
+            ("no archive", None, f"{here}\n", 1, "the lib test archive is missing or empty"),
+            ("an empty archive", b"", f"{here}\n", 1, "the lib test archive is missing or empty"),
+        )
+        for name, archive, record, status, said in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temp:
+                fetched = Path(temp) / "nextest-archive"
+                fetched.mkdir()
+                if archive is not None:
+                    (fetched / "nextest-meta-unit.tar.zst").write_bytes(archive)
+                if record is not None:
+                    (fetched / "nextest-meta-unit.workspace").write_text(record)
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", guard["run"]],
+                    env={"PATH": os.environ["PATH"], "RUNNER_TEMP": temp, "GITHUB_WORKSPACE": here},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                errors = [line for line in result.stdout.splitlines() if line.startswith("::error::")]
+                self.assertEqual(len(errors), status, result.stdout)
+                if said:
+                    self.assertIn(said, errors[0])
 
     def test_the_examples_build_takes_the_bin_tests_profile_on_a_pull_request(self):
         """rust-examples builds every example with one wrapper line whose
@@ -1100,6 +1326,341 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("codegen-units", profile["test"])
         self.assertNotIn("codegen-units", profile["dev"])
 
+    def test_the_four_compile_paths_are_measured_in_steps_of_their_own(self):
+        """The four jobs that compile meerkat-meta's long targets (the unit
+        build, the extension-state lib, the voice lib and the console
+        backends) are measured without touching what they do. The compile
+        step keeps exactly its commands, with Cargo's `--timings` on the
+        compiling one: no suffix, pipe, wrapper, condition or
+        continue-on-error, so its exit stays the commands' own. The compiler
+        cache's statistics are read in a step directly before and a step
+        directly after it, the same bytes in the four jobs, and the timing
+        reports are uploaded by the job's last step. Each added step carries
+        continue-on-error: it can only keep its own failure from failing the
+        job. No other job holds such a step."""
+        workflow = load(CI_WORKFLOW)
+        added = (MEASURE_BEFORE, MEASURE_AFTER, MEASURE_UPLOAD)
+        measured = {name for name, job in workflow["jobs"].items()
+                    if any(step.get("name") in added for step in steps_of(job))}
+        self.assertEqual(measured, set(COMPILE_PATHS))
+        before_runs, after_runs = set(), set()
+        for name, (compile_name, command, selection) in COMPILE_PATHS.items():
+            with self.subTest(job=name):
+                steps = steps_of(workflow["jobs"][name])
+                names = [step.get("name") for step in steps]
+                for step_name in (compile_name, *added):
+                    self.assertEqual(names.count(step_name), 1, step_name)
+                at = names.index(compile_name)
+                compile_step = steps[at]
+                self.assertEqual(compile_step["run"].strip(), command)
+                for key in ("continue-on-error", "if", "shell"):
+                    self.assertNotIn(key, compile_step)
+                for line in command.splitlines():
+                    self.assertTrue(line.startswith("./scripts/repo-cargo "), line)
+                    self.assertIsNone(re.search(r"[;|&<>`]|\$\(|\bset [+-]", line), line)
+                self.assertEqual(command.count("--timings"), 1)
+                self.assertIn(" --timings", command.splitlines()[0])
+                before, after = steps[at - 1], steps[at + 1]
+                self.assertEqual((before.get("name"), after.get("name")), (MEASURE_BEFORE, MEASURE_AFTER))
+                for step in (before, after):
+                    self.assertIs(step["continue-on-error"], True)
+                    self.assertEqual(step["shell"], "bash")
+                    self.assertNotIn("uses", step)
+                self.assertNotIn("if", before)
+                self.assertNotIn("env", before)
+                self.assertEqual(after["if"], "${{ !cancelled() }}")
+                # No key of the step's own carries the cache's name: the
+                # runner writes a run step's `env:` into the log. The script
+                # reads the name from the workflow's environment.
+                self.assertEqual(after["env"], {"INSTR_SELECTION": selection, "INSTR_PACKAGE": "meerkat-meta"})
+                # The report line names the job by its key; the run's job
+                # listing names it by `name`: the two are the same word.
+                self.assertEqual(workflow["jobs"][name]["name"], name)
+                before_runs.add(before["run"])
+                after_runs.add(after["run"])
+                upload = steps[-1]
+                self.assertEqual(upload.get("name"), MEASURE_UPLOAD)
+                self.assertEqual(uses_of(upload), "actions/upload-artifact")
+                self.assertIs(upload["continue-on-error"], True)
+                self.assertEqual(upload["if"], "${{ !cancelled() }}")
+                self.assertEqual(upload["with"], {
+                    "name": "meta-ci-timings-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}",
+                    "path": "${{ github.workspace }}/target/cargo-timings/",
+                    "if-no-files-found": "ignore",
+                    "retention-days": 7,
+                })
+                self.assertNotIn("strategy", workflow["jobs"][name])
+        # One text for each added step, whichever job it stands in.
+        self.assertEqual(len(before_runs), 1)
+        self.assertEqual(len(after_runs), 1)
+        (before_run,), (after_run,) = before_runs, after_runs
+        read = 'sccache --show-stats --stats-format json > "${{RUNNER_TEMP}}/instr-sccache-{}.json" 2>/dev/null || true'
+        self.assertEqual(before_run.strip(), read.format("before"))
+        self.assertEqual(after_run.splitlines()[0], read.format("after"))
+        # The statistics are only read (never zeroed), only as JSON into a
+        # file (the text form prints the cache's location), and the report
+        # names no location field.
+        for text in (before_run, after_run):
+            self.assertEqual(len(re.findall(r"\bsccache --", text)), 1)
+            self.assertNotIn("--zero-stats", text)
+            self.assertNotIn("show-adv-stats", text)
+        for word in ("cache_location", "Cache location", "basedirs"):
+            self.assertNotIn(word, after_run)
+        # The cache's bucket name is the workflow's own variable and an input
+        # of the cache's setup action; no step's `env:` repeats it.
+        self.assertIn('os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")', after_run)
+        for name, job in workflow["jobs"].items():
+            for step in steps_of(job):
+                self.assertNotIn("SCCACHE_GCS_BUCKET_NAME", json.dumps(step.get("env") or {}), name)
+        self.assertEqual(workflow["env"]["CARGO_TARGET_DIR"], "${{ github.workspace }}/target")
+
+    def run_step(self, script: str, env: dict[str, str], path_dir: Path) -> subprocess.CompletedProcess:
+        """A step's `run` text as the runner runs a `shell: bash` step, with
+        only `path_dir` on PATH."""
+        return subprocess.run(
+            [shutil.which("bash"), "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+            env={**env, "PATH": str(path_dir)}, capture_output=True, text=True,
+        )
+
+    def measured_after_step(self) -> str:
+        steps = steps_of(load(CI_WORKFLOW)["jobs"]["rust-unit-build"])
+        (step,) = [step for step in steps if step.get("name") == MEASURE_AFTER]
+        return step["run"]
+
+    @staticmethod
+    def sccache_reading(requests: int, hits: int, misses: int, compiled_seconds: float, hit_seconds: float,
+                        reasons: dict[str, int], not_compile: int) -> str:
+        """The statistics as sccache prints them with --stats-format json: its
+        server info, the counters under `stats`, and the cache's location."""
+        def duration(seconds: float) -> dict:
+            return {"secs": int(seconds), "nanos": int(round((seconds - int(seconds)) * 1e9))}
+        return json.dumps({
+            "stats": {
+                "compile_requests": requests,
+                "requests_unsupported_compiler": 0,
+                "requests_not_compile": not_compile,
+                "requests_not_cacheable": sum(reasons.values()),
+                "requests_executed": hits + misses,
+                "cache_errors": {"counts": {}, "adv_counts": {}},
+                "cache_hits": {"counts": {"Rust": hits - 2, "C/C++": 2}, "adv_counts": {"rust": hits}},
+                "cache_misses": {"counts": {"Rust": misses}, "adv_counts": {"rust": misses}},
+                "cache_timeouts": 0,
+                "cache_read_errors": 0,
+                "non_cacheable_compilations": 0,
+                "forced_recaches": 0,
+                "cache_write_errors": 0,
+                "cache_writes": 0,
+                "cache_write_duration": duration(0),
+                "cache_read_hit_duration": duration(hit_seconds),
+                "compilations": misses,
+                "compiler_write_duration": duration(compiled_seconds),
+                "compile_fails": 0,
+                "not_cached": reasons,
+                "dist_compiles": {},
+                "dist_errors": 0,
+                "multi_level": None,
+            },
+            "cache_location": f"gcs, name: {FIXTURE_LOCATION_NAME}, prefix: sccache/fixture",
+            "cache_size": None,
+            "max_cache_size": None,
+            "use_preprocessor_cache_mode": False,
+            "version": "0.18.0",
+            "basedirs": [f"/work/{FIXTURE_LOCATION_NAME}"],
+        })
+
+    def measured_scene(self, root: Path, *, tools: bool = True, before: bool = True,
+                       after: str | None = None, reports: dict[str, str] | None = None) -> tuple[dict, Path]:
+        """A runner's temporary directory, target directory and PATH for the
+        report step: stand-ins for sccache, rustc and Cargo (or none), the
+        reading taken before the compile (or none), and timing reports."""
+        temp, target, tools_dir = root / "temp", root / "target", root / "bin"
+        for folder in (temp, target, tools_dir):
+            folder.mkdir()
+        (tools_dir / "python3").symlink_to(os.path.realpath(sys.executable))
+        if before:
+            (temp / "instr-sccache-before.json").write_text(
+                self.sccache_reading(10, 7, 3, 30.0, 1.5, {"crate-type": 1}, 1))
+        if tools:
+            answer = root / "sccache-answer.json"
+            answer.write_text(after if after is not None
+                              else self.sccache_reading(410, 399, 5, 75.5, 41.5,
+                                                        {"crate-type": 3, "incremental": 1}, 6))
+            stand_ins = {
+                "sccache": 'case "$*" in --version) echo "sccache 0.18.0";; '
+                           f'*) printf "%s\\n" "$(<"{answer}")";; esac',
+                "rustc": 'echo "rustc 1.97.0 (fixture)"',
+                "cargo": 'echo "cargo 1.97.0 (fixture)"',
+            }
+            for name, body in stand_ins.items():
+                tool = tools_dir / name
+                tool.write_text(f"#!{shutil.which('bash')}\n{body}\n")
+                tool.chmod(0o755)
+        if reports is not None:
+            (target / "cargo-timings").mkdir()
+            for name, text in reports.items():
+                (target / "cargo-timings" / name).write_text(text)
+        env = {
+            "RUNNER_TEMP": str(temp), "CARGO_TARGET_DIR": str(target), "GITHUB_JOB": "rust-unit-build",
+            "GITHUB_RUN_ID": "4242", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_NAME": "fixture-runner",
+            "ImageOS": "ubuntu24", "ImageVersion": "20261116.133.1",
+            "INSTR_SELECTION": COMPILE_PATHS["rust-unit-build"][2], "INSTR_PACKAGE": "meerkat-meta",
+            "SCCACHE_GCS_BUCKET_NAME": FIXTURE_LOCATION_NAME,
+        }
+        return env, tools_dir
+
+    def test_the_compile_report_prints_deltas_and_never_the_cache_location(self):
+        """The step after a compile prints, from two readings of the compiler
+        cache's statistics, the difference of each counter and of the three
+        time totals it keeps, the reasons of the calls it did not handle,
+        and the selected package's lines of Cargo's timing report. The
+        cache's location is in the statistics it reads and never in a line
+        it prints; a timing report that holds the name is deleted before the
+        upload, and said so by count."""
+        # The report page's own forms, as Cargo 1.97.0 writes them: summary
+        # cells and the unit data embedded in the page.
+        unit_data = json.dumps([
+            {"i": 0, "name": "serde", "version": "1.0.228", "mode": "todo", "target": "", "start": 0.5,
+             "duration": 2.25, "features": ["default", "std"], "sections": None,
+             "unblocked_units": [1], "unblocked_rmeta_units": []},
+            {"i": 1, "name": "meerkat-meta", "version": "0.0.0", "mode": "todo",
+             "target": ' meerkat_meta "lib" (test)', "start": 95.0, "duration": 1610.5, "features": [],
+             "sections": None, "unblocked_units": [], "unblocked_rmeta_units": []},
+        ])
+        clean = (
+            "<html><table>\n<tr>\n<td>Targets:</td><td>meerkat-meta 0.0.0 (lib)</td>\n</tr>\n"
+            "<tr>\n<td>Profile:</td><td>test</td>\n</tr>\n<tr>\n<td>Fresh units:</td><td>390</td>\n</tr>\n"
+            "<tr>\n<td>Dirty units:</td><td>2</td>\n</tr>\n<tr>\n<td>Total units:</td><td>392</td>\n</tr>\n"
+            "<tr>\n<td>Total time:</td><td>1701.2s (28m 21.2s)</td>\n</tr>\n</table><script>\n"
+            f"const UNIT_DATA = {unit_data};\nconst CONCURRENCY_DATA = [];\n</script></html>\n"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            env, tools_dir = self.measured_scene(Path(root), reports={
+                "cargo-timing.html": clean,
+                "cargo-timing-20261119T030000Z.html": clean.replace("<html>", f"<html>{FIXTURE_LOCATION_NAME}"),
+            })
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+            kept = sorted(path.name for path in (Path(root) / "target" / "cargo-timings").iterdir())
+            reading = json.loads((Path(root) / "temp" / "instr-sccache-after.json").read_text())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        printed = result.stdout + result.stderr
+        # The reading the step took does hold the location; no line says it.
+        self.assertIn(FIXTURE_LOCATION_NAME, reading["cache_location"])
+        self.assertNotIn(FIXTURE_LOCATION_NAME, printed)
+        for word in ("cache_location", "Cache location", "gcs", "basedirs"):
+            self.assertNotIn(word, printed)
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines and all(line.startswith("meta-ci-instr: ") for line in lines), result.stdout)
+        said = [line.removeprefix("meta-ci-instr: ") for line in lines]
+        self.assertEqual(said, [
+            "job=rust-unit-build job_id=unknown (not read by this step; join the run's job listing by name) "
+            'run=4242 attempt=1 runner=fixture-runner image=ubuntu24/20261116.133.1 '
+            'selection="meerkat-meta lib test, default features"',
+            'versions rustc="rustc 1.97.0 (fixture)" cargo="cargo 1.97.0 (fixture)" sccache="sccache 0.18.0" '
+            "(nextest: its install step's own line, in the jobs that install it)",
+            "sccache delta compile_requests=400 requests_executed=394 cache_hits=392 cache_misses=2 "
+            "cache_errors=0 cache_timeouts=0 cache_read_errors=0 forced_recaches=0 cache_writes=0 "
+            "cache_write_errors=0 compilations=2 compile_fails=0 non_cacheable_compilations=0",
+            "sccache delta not handled: non_cacheable_calls=3 non_compilation_calls=5 unsupported_compiler_calls=0",
+            "sccache delta non-cacheable reasons: crate-type=2 incremental=1",
+            "sccache delta seconds: compiling=45.5 (2 compilations sccache ran) cache_read_hits=40.0 (392 hits) "
+            "cache_writes=0.0 (0 writes)",
+            "sccache time of non-cacheable calls: unknown (sccache keeps no time for a call it does not "
+            "handle; see the Cargo timing lines)",
+            f"Cargo timing reports: 1 file(s), {len(clean.encode())} bytes; 1 withheld (it held the cache's name)",
+            'Cargo timing summary: profile="test" total_units="392" fresh_units="390" dirty_units="2" '
+            'total_time="1701.2s (28m 21.2s)"',
+            "Cargo timing unit: meerkat-meta 0.0.0 target=\"meerkat_meta 'lib' (test)\" mode=todo start=95.0 "
+            "duration=1610.5 features=none",
+        ])
+        self.assertEqual(kept, ["cargo-timing.html"])
+
+    def test_the_compile_report_says_unknown_and_never_fails(self):
+        """What the report step cannot read it calls `unknown`, with no
+        number in its place, and it ends with status 0 whatever is missing:
+        a reading, the tools, the reports, their data, or Python itself."""
+        def figures(stdout: str) -> list[str]:
+            return [line for line in stdout.splitlines() if "sccache delta" in line]
+
+        with tempfile.TemporaryDirectory() as root:
+            env, tools_dir = self.measured_scene(Path(root), before=False, reports={})
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(figures(result.stdout), [])
+        self.assertIn("meta-ci-instr: sccache statistics: unknown (the reading before the compile is missing "
+                      "or unreadable)\n", result.stdout)
+        self.assertIn("meta-ci-instr: Cargo timing reports: 0 file(s), 0 bytes\n", result.stdout)
+        self.assertIn("meta-ci-instr: Cargo timing units: unknown (no report)\n", result.stdout)
+
+        with tempfile.TemporaryDirectory() as root:
+            env, tools_dir = self.measured_scene(Path(root), after="not statistics", reports={
+                "cargo-timing.html": "<html>a report in a form this step does not know</html>\n"})
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(figures(result.stdout), [])
+        self.assertIn("meta-ci-instr: sccache statistics: unknown (the reading after the compile is missing "
+                      "or unreadable)\n", result.stdout)
+        self.assertIn("meta-ci-instr: Cargo timing summary: profile=unknown total_units=unknown "
+                      "fresh_units=unknown dirty_units=unknown total_time=unknown\n", result.stdout)
+        self.assertIn("meta-ci-instr: Cargo timing units: unknown (report data not recognised)\n", result.stdout)
+
+        # One counter gone from a reading: that figure is unknown, the others stand.
+        with tempfile.TemporaryDirectory() as root:
+            partial = json.loads(self.sccache_reading(410, 399, 5, 75.5, 41.5, {"crate-type": 3}, 6))
+            del partial["stats"]["cache_misses"], partial["stats"]["compiler_write_duration"]
+            env, tools_dir = self.measured_scene(Path(root), after=json.dumps(partial))
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(" cache_hits=392 cache_misses=unknown ", result.stdout)
+        self.assertIn(" compiling=unknown (2 compilations sccache ran) ", result.stdout)
+        self.assertIn("meta-ci-instr: Cargo timing reports: unknown (no report directory)\n", result.stdout)
+
+        # A second reading lower than the first (another server answered) is
+        # no measurement: those figures are unknown, never a negative number.
+        with tempfile.TemporaryDirectory() as root:
+            env, tools_dir = self.measured_scene(
+                Path(root), after=self.sccache_reading(4, 2, 1, 5.0, 0.5, {}, 0))
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(re.search(r"=-\d", result.stdout), result.stdout)
+        self.assertIn("sccache delta compile_requests=unknown requests_executed=unknown cache_hits=unknown "
+                      "cache_misses=unknown cache_errors=0 ", result.stdout)
+        self.assertIn("sccache delta non-cacheable reasons: crate-type=unknown\n", result.stdout)
+        self.assertIn(" compiling=unknown (unknown compilations sccache ran) cache_read_hits=unknown "
+                      "(unknown hits) cache_writes=0.0 (0 writes)\n", result.stdout)
+        self.assertIn("meta-ci-instr: sccache delta: unknown where the second reading was lower than the "
+                      "first or not a count (cache_hits, cache_misses, cache_read_hit_duration, compilations, "
+                      "compile_requests, compiler_write_duration, not_cached, requests_executed, "
+                      "requests_not_cacheable, requests_not_compile)\n", result.stdout)
+
+        # No sccache, rustc or Cargo on PATH.
+        with tempfile.TemporaryDirectory() as root:
+            env, tools_dir = self.measured_scene(Path(root), tools=False)
+            result = self.run_step(self.measured_after_step(), env, tools_dir)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(figures(result.stdout), [])
+        self.assertIn('versions rustc="unknown" cargo="unknown" sccache="unknown" ', result.stdout)
+        self.assertIn("sccache statistics: unknown (the reading after the compile is missing or unreadable)\n",
+                      result.stdout)
+
+        # No Python either: one line, still status 0.
+        with tempfile.TemporaryDirectory() as root:
+            env, _ = self.measured_scene(Path(root), tools=False)
+            empty = Path(root) / "empty"
+            empty.mkdir()
+            result = self.run_step(self.measured_after_step(), env, empty)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "meta-ci-instr: unknown (the report script did not run)\n")
+
+        # The step before the compile, with no sccache: nothing printed, status 0.
+        steps = steps_of(load(CI_WORKFLOW)["jobs"]["rust-unit-build"])
+        (before,) = [step for step in steps if step.get("name") == MEASURE_BEFORE]
+        with tempfile.TemporaryDirectory() as root:
+            env, _ = self.measured_scene(Path(root), tools=False, before=False)
+            empty = Path(root) / "empty"
+            empty.mkdir()
+            result = self.run_step(before["run"], env, empty)
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
     def test_gate_requires_every_job_it_lists(self):
         """A job absent from `gate` can fail without failing the check suite.
 
@@ -1123,7 +1684,8 @@ class CiWorkflowTests(unittest.TestCase):
         listed = set(gate["needs"])
         must_gate = {"changes", "meta-checks", "test-typescript", "test-python", "console-backends", "console",
                      "console-browser", "console-fixtures", "console-acceptance", "console-perf",
-                     "flow-editor-contracts", "flow-editor", "rust-unit", "rust-examples", "rust-conformance",
+                     "flow-editor-contracts", "flow-editor", "rust-unit-build", "rust-unit", "rust-examples",
+                     "rust-conformance",
                      "rust-integration", "rust-features-check", "rust-extension-state",
                      "rust-extension-state-lib", "rust-voice", "rust-voice-lib"}
         missing = must_gate - listed
@@ -1196,6 +1758,9 @@ class CiWorkflowTests(unittest.TestCase):
             ("a docs-only change of Meta's", lanes_skipped, docs_only, 0),
             ("the python lane skipped when classified false", {"test-python": "skipped"}, console_only, 0),
             ("meta-checks skipped while Meta is reached", {"meta-checks": "skipped"}, docs_only, 1),
+            ("the unit legs skipped behind a failed build",
+             {"rust-unit-build": "failure", "rust-unit": "skipped"}, every, 1),
+            ("the unit legs skipped behind a build that passed", {"rust-unit": "skipped"}, every, 1),
             ("the browser legs skipped behind failed backends",
              {"console-backends": "failure", "console-browser": "skipped", "console": "skipped"}, every, 1),
             ("a skipped job of a running lane", {"flow-editor-contracts": "skipped"}, console_only, 1),

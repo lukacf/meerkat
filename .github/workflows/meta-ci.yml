@@ -31,7 +31,9 @@ name: Meta CI
 # budget on that compile (the library 337 s, its test harness 505 s, on 4
 # CPUs of the machine the jobs were sized on; hosted runners compiled Meta
 # 1.4 to 1.65 times slower), so each job compiles one configuration of it
-# and the long ones are split by test.
+# and the long ones are split by test. The lib test harness, the longest
+# compile, is built once per run (rust-unit-build) and its tests run in
+# four jobs from that build's archive.
 #
 # Jobs (each runs only when `changes` says Meta is reached; lane jobs only
 # when their lane is):
@@ -41,8 +43,10 @@ name: Meta CI
 #   test-typescript          - the TypeScript SDK suite
 #   test-python              - the Python SDK suite against a fresh
 #                              rpc_gateway
+#   rust-unit-build          - pull requests: Meta's lib test harness,
+#                              compiled once into a nextest archive
 #   rust-unit (x4)           - pull requests: Meta's lib tests, a nextest
-#                              partition per leg
+#                              partition per leg, run from that archive
 #   rust-examples            - every example built and linked (a pull
 #                              request also runs the bin tests and
 #                              meta-extension-state's suite)
@@ -337,24 +341,25 @@ jobs:
   # Meta's lib tests with default features, on a pull request that reaches
   # the rust lane. The root CI runs them on the push (main unit,
   # closure-tests), where its plan leaves every crate that compiles the
-  # meerkat-mob chain, so a push does not run this job. The lib's test
+  # meerkat-mob chain, so a push does not run these jobs. The lib's test
   # harness is one rustc process: 505 s on 4 CPUs of the machine the budget
   # was sized on, and hosted runners compiled Meta 1.4 to 1.65 times slower
-  # than that (Meta CI run 40465856836), so the compile alone takes most of
-  # the budget. Four legs each compile it and run a quarter of the tests
-  # (nextest --partition count:i/4; all of them took 253 s on a runner).
-  # Each Cargo invocation selects one package, as the root CI's main unit
+  # than that (Meta CI run 40465856836). A leg that compiled it itself spent
+  # 1745 to 2180 s on that one crate after its dependencies came from the
+  # cache (three legs read, of Meta CI runs 44384937646, 44374539616 and
+  # 44388159849), and then ran a quarter of the tests in 144 to 188 s. So
+  # this job compiles it once per run into a nextest archive, as the root
+  # CI's main-unit-archive-build does, and the rust-unit legs run it. One
+  # compile is still longer than the budget: building once takes three
+  # compiles off a run, it does not bring the lane's path under the budget.
+  # The Cargo invocation selects one package, as the root CI's main unit
   # rows do: Cargo resolves features per invocation, so Core's crates then
   # compile with the same features and are those rows' sccache objects; the
   # job compiles Meta's crates only.
-  rust-unit:
-    name: rust-unit (${{ matrix.partition }}/4)
+  rust-unit-build:
+    name: rust-unit-build
     needs: changes
     if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4]
     runs-on: ubuntu-24.04
     # With no sccache objects for the current lock state or version, Meta's
     # Rust lanes ran 54 to over 60 minutes (rust-unit legs were cut at 60).
@@ -391,14 +396,391 @@ jobs:
         uses: ./.github/actions/setup-cargo-tool-ci
         with:
           tool: nextest
+      # Measurement only: the compiler cache's counters before the compile,
+      # into a file. It prints nothing and cannot fail the job.
+      - name: Compile statistics, before
+        continue-on-error: true
+        shell: bash
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
+      # The selection, features and profile the legs' own `nextest run`
+      # compiled: the package's lib tests, default features, Cargo's test
+      # profile. Meta's 16 MiB stack (ci/products.json test_stack) is set
+      # here too, as it was for that compile.
+      - name: Build the lib test archive
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo nextest archive -p meerkat-meta --lib --timings --archive-file "${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
+      # Measurement only: the difference of the compiler cache's counters
+      # across the compile, and the timing report Cargo wrote. Every figure
+      # is one the tool states; what cannot be read is printed as "unknown".
+      # The statistics hold the cache's location: they go to a file and only
+      # named counters are printed. It cannot fail the job, and it runs
+      # after a failed compile too, whose result stays the job's.
+      - name: Compile statistics and timing report, after
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          INSTR_SELECTION: "meerkat-meta lib test, default features"
+          INSTR_PACKAGE: meerkat-meta
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
+          python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
+
+
+          def say(text):
+              if WITHHOLD and WITHHOLD in text:
+                  text = "unknown (a line was withheld: it held the cache's name)"
+              print(f"meta-ci-instr: {text}", flush=True)
+
+
+          def env(name):
+              return os.environ.get(name) or "unknown"
+
+
+          def first_line(argv):
+              try:
+                  done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                  lines = done.stdout.strip().splitlines()
+                  return lines[0].strip() if done.returncode == 0 and lines else "unknown"
+              except Exception:
+                  return "unknown"
+
+
+          def reading(name):
+              try:
+                  text = (Path(os.environ["RUNNER_TEMP"]) / name).read_text(encoding="utf-8")
+                  stats = json.loads(text)["stats"]
+                  return stats if isinstance(stats, dict) else None
+              except Exception:
+                  return None
+
+
+          def count(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict):
+                  value = value.get("counts")
+                  if not isinstance(value, dict) or not all(type(item) is int for item in value.values()):
+                      return None
+                  return sum(value.values())
+              return value if type(value) is int else None
+
+
+          def seconds(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict) and type(value.get("secs")) is int and type(value.get("nanos")) is int:
+                  return value["secs"] + value["nanos"] / 1e9
+              return None
+
+
+          def shown(value, digits=None):
+              if value is None:
+                  return "unknown"
+              return f"{value:.{digits}f}" if digits is not None else str(value)
+
+
+          def plain(value):
+              return re.sub(r"[^A-Za-z0-9_.+()' /:,-]", "?", str(value).replace('"', "'")).strip()[:120]
+
+
+          def number(value):
+              return f"{value:.1f}" if type(value) in (int, float) else "unknown"
+
+
+          def statistics():
+              before, after = reading("instr-sccache-before.json"), reading("instr-sccache-after.json")
+              missing = "before" if before is None else "after" if after is None else None
+              if missing:
+                  say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
+                  return
+
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
+              def delta(key, read=count):
+                  first, last = read(before, key), read(after, key)
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
+
+              counters = (
+                  "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
+                  "cache_timeouts", "cache_read_errors", "forced_recaches", "cache_writes",
+                  "cache_write_errors", "compilations", "compile_fails", "non_cacheable_compilations",
+              )
+              say("sccache delta " + " ".join(f"{key}={shown(delta(key))}" for key in counters))
+              say(
+                  "sccache delta not handled:"
+                  f" non_cacheable_calls={shown(delta('requests_not_cacheable'))}"
+                  f" non_compilation_calls={shown(delta('requests_not_compile'))}"
+                  f" unsupported_compiler_calls={shown(delta('requests_unsupported_compiler'))}"
+              )
+              first, last = before.get("not_cached"), after.get("not_cached")
+              if isinstance(first, dict) and isinstance(last, dict):
+                  moved = []
+                  for reason in sorted(set(first) | set(last)):
+                      was, now = first.get(reason, 0), last.get(reason, 0)
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
+                          moved.append(f"{plain(reason)}={now - was}")
+                  say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
+              else:
+                  say("sccache delta non-cacheable reasons: unknown")
+              say(
+                  "sccache delta seconds:"
+                  f" compiling={shown(delta('compiler_write_duration', seconds), 1)}"
+                  f" ({shown(delta('compilations'))} compilations sccache ran)"
+                  f" cache_read_hits={shown(delta('cache_read_hit_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_hits'))} hits)"
+                  f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_writes'))} writes)"
+              )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
+
+
+          def timing_reports():
+              target = os.environ.get("CARGO_TARGET_DIR", "")
+              folder = Path(target) / "cargo-timings"
+              if not target or not folder.is_dir():
+                  say("Cargo timing reports: unknown (no report directory)")
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              kept, named, unread = [], 0, 0
+              for path in sorted(folder.iterdir()):
+                  if not path.is_file():
+                      continue
+                  try:
+                      data = path.read_bytes()
+                  except OSError:
+                      data = None
+                  if data is None or (WITHHOLD and WITHHOLD.encode() in data):
+                      named, unread = named + (data is not None), unread + (data is None)
+                      try:
+                          path.unlink()
+                      except OSError:
+                          path.write_bytes(b"")
+                      continue
+                  kept.append((path.name, data))
+              say(
+                  f"Cargo timing reports: {len(kept)} file(s), {sum(len(data) for _, data in kept)} bytes"
+                  + (f"; {named} withheld (it held the cache's name)" if named else "")
+                  + (f"; {unread} deleted unread" if unread else "")
+              )
+              if not kept:
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              source = dict(kept).get("cargo-timing.html", kept[-1][1])
+              # The report's own summary cells and unit data, as it states them.
+              cells = dict(re.findall(rb"<td>([A-Za-z ]+):</td>\s*<td>([^<]*)</td>", source))
+              summary = (
+                  ("profile", b"Profile"), ("total_units", b"Total units"), ("fresh_units", b"Fresh units"),
+                  ("dirty_units", b"Dirty units"), ("total_time", b"Total time"),
+              )
+              say("Cargo timing summary: " + " ".join(
+                  f'{label}="{plain(cells[key].decode("utf-8", "replace"))}"' if cells.get(key, b"").strip()
+                  else f"{label}=unknown"
+                  for label, key in summary
+              ))
+              found = re.search(rb"UNIT_DATA\s*=\s*(\[.*?\]);\s*\n", source, re.S)
+              try:
+                  units = json.loads(found.group(1)) if found else None
+              except ValueError:
+                  units = None
+              if not isinstance(units, list):
+                  say("Cargo timing units: unknown (report data not recognised)")
+                  return
+              package = os.environ.get("INSTR_PACKAGE", "")
+              mine = [unit for unit in units if isinstance(unit, dict) and unit.get("name") == package]
+              if not mine:
+                  say("Cargo timing units: unknown (the report names no unit of the selected package)")
+              for unit in mine:
+                  features = unit.get("features")
+                  if isinstance(features, list):
+                      features = ",".join(plain(feature) for feature in features) or "none"
+                  else:
+                      features = "unknown"
+                  say(
+                      f"Cargo timing unit: {plain(unit.get('name'))} {plain(unit.get('version'))}"
+                      f' target="{plain(unit.get("target"))}" mode={plain(unit.get("mode"))}'
+                      f" start={number(unit.get('start'))} duration={number(unit.get('duration'))}"
+                      f" features={features}"
+                  )
+
+
+          def identity():
+              say(
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
+                  f' selection="{env("INSTR_SELECTION")}"'
+              )
+              say(
+                  f'versions rustc="{first_line(["rustc", "-V"])}" cargo="{first_line(["cargo", "-V"])}"'
+                  f' sccache="{first_line(["sccache", "--version"])}"'
+                  " (nextest: its install step's own line, in the jobs that install it)"
+              )
+
+
+          def untimed():
+              say(
+                  "sccache time of non-cacheable calls: unknown (sccache keeps no time for a call it does"
+                  " not handle; see the Cargo timing lines)"
+              )
+
+
+          for part in (identity, statistics, untimed, timing_reports):
+              try:
+                  part()
+              except Exception as error:
+                  say(f"unknown (a part of the report failed: {type(error).__name__})")
+          PY
+      # The lib's tests read fixtures by this checkout's absolute path
+      # (env!("CARGO_MANIFEST_DIR")); a leg refuses to run at another one.
+      - name: Record the workspace path the archive was built at
+        run: printf '%s\n' "${GITHUB_WORKSPACE}" > "${RUNNER_TEMP}/nextest-meta-unit.workspace"
+      # The root CI's check of its own archives (main-unit-archive-build),
+      # with the legs' count partitions and nextest's default profile: the
+      # partitions' lists, together, are the archive's whole list with no
+      # test twice. It prints the count and the list's digest.
+      - name: Verify the partitions cover every test exactly once
+        working-directory: .
+        shell: bash
+        env:
+          PARTITIONS: "4"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/nextest-meta-unit.tar.zst"
+          list() {
+            cargo-nextest nextest list --archive-file "${archive}" --workspace-remap "${GITHUB_WORKSPACE}" \
+              --message-format oneline "$@" | LC_ALL=C sort
+          }
+          list > "${RUNNER_TEMP}/all.txt"
+          [[ -s "${RUNNER_TEMP}/all.txt" ]] || { echo "::error::the lib test archive lists no test"; exit 1; }
+          : > "${RUNNER_TEMP}/union.txt"
+          for (( index = 1; index <= PARTITIONS; index++ )); do
+            list --partition "count:${index}/${PARTITIONS}" >> "${RUNNER_TEMP}/union.txt"
+          done
+          LC_ALL=C sort "${RUNNER_TEMP}/union.txt" -o "${RUNNER_TEMP}/union.txt"
+          duplicates="$(uniq -d "${RUNNER_TEMP}/union.txt" | wc -l)"
+          if [[ "${duplicates}" != "0" ]] || ! cmp -s "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt"; then
+            echo "::error::the ${PARTITIONS} partitions do not cover the archive's $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once (duplicates: ${duplicates})"
+            diff "${RUNNER_TEMP}/all.txt" "${RUNNER_TEMP}/union.txt" | head -20 || true
+            exit 1
+          fi
+          echo "meta-unit: ${PARTITIONS} partitions cover all $(wc -l < "${RUNNER_TEMP}/all.txt") tests exactly once (sha256 of the sorted list: $(sha256sum < "${RUNNER_TEMP}/all.txt" | cut -d ' ' -f 1))"
+      - name: Retain the lib test archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          # Keyed by the run, not the attempt: a rerun of one failed leg does
+          # not run this job again and reads the archive of the run's first
+          # attempt, and a rerun of this job replaces it.
+          name: nextest-meta-unit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/nextest-meta-unit.tar.zst
+            ${{ runner.temp }}/nextest-meta-unit.workspace
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+      # The reports Cargo wrote for the compile (--timings), as evidence
+      # beside the lines above. Never a reason to fail the job.
+      - name: Retain the Cargo timing reports
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: meta-ci-timings-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The lib tests, a quarter per leg (nextest --partition count:i/4), run
+  # from rust-unit-build's archive: a leg compiles nothing, so it sets up
+  # no compiler cache, linker or registry and holds no identity. It reads
+  # the archive of its own run only (the artifact's name alone: no token,
+  # run or repository), the way the console jobs read the backends.
+  rust-unit:
+    name: rust-unit (${{ matrix.partition }}/4)
+    needs: [changes, rust-unit-build]
+    if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    # The legs' limit from when each compiled the harness itself, kept.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Install nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
+      - name: Fetch the lib test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: nextest-meta-unit-${{ github.run_id }}
+          path: ${{ runner.temp }}/nextest-archive
+      # Before any test: what was fetched is a non-empty archive and a
+      # non-empty record of the path it was built at, and that path is this
+      # leg's own. Some of the lib's tests return early when a fixture they
+      # read by the build's absolute path is absent, which would pass at
+      # another path.
+      - name: Check the fetched archive and the workspace path it was built at
+        shell: bash
+        run: |
+          archive="${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.tar.zst"
+          record="${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.workspace"
+          if [[ ! -s "${archive}" ]]; then
+            echo "::error::the lib test archive is missing or empty at ${archive}"
+            exit 1
+          fi
+          if [[ ! -s "${record}" ]]; then
+            echo "::error::the record of the workspace path the archive was built at is missing or empty at ${record}"
+            exit 1
+          fi
+          built="$(cat "${record}")"
+          if [[ -z "${built}" || "${built}" != "${GITHUB_WORKSPACE}" ]]; then
+            echo "::error::the lib test archive was built at '${built}'; this leg runs at ${GITHUB_WORKSPACE}"
+            exit 1
+          fi
       # Meta's tests run on the 16 MiB thread stack its product line sets
       # (ci/products.json test_stack); the root's Cargo configuration gives 8.
+      # The archive's binary runs against this checkout, with nextest's
+      # default profile, as before; a partition that selects no test fails
+      # (nextest's documented default, stated). (A block: the lane doctor
+      # reads a one-line `run:` that starts with cargo as a wrapper bypass.)
       - name: Lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
           PARTITION: ${{ matrix.partition }}
-        run: ./scripts/repo-cargo nextest run -p meerkat-meta --lib --partition "count:${PARTITION}/4" --no-fail-fast
+        run: |
+          cargo-nextest nextest run --archive-file "${RUNNER_TEMP}/nextest-archive/nextest-meta-unit.tar.zst" --workspace-remap "${GITHUB_WORKSPACE}" --no-tests=fail --partition "count:${PARTITION}/4" --no-fail-fast
 
   # Every example built and linked (Cargo's default test selection builds
   # them; the root CI only type-checks them), on every run that reaches the
@@ -749,11 +1131,272 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # Measurement only: the compiler cache's counters before the compile,
+      # into a file. It prints nothing and cannot fail the job.
+      - name: Compile statistics, before
+        continue-on-error: true
+        shell: bash
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
       - name: Extension-state lib tests
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
-        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib -- extension_ document_mcp_child_supply
+        run: ./scripts/repo-cargo test -p meerkat-meta --features extension-state,announcement-test-faults,console-test-faults --lib --timings -- extension_ document_mcp_child_supply
+      # Measurement only: the difference of the compiler cache's counters
+      # across the compile, and the timing report Cargo wrote. Every figure
+      # is one the tool states; what cannot be read is printed as "unknown".
+      # The statistics hold the cache's location: they go to a file and only
+      # named counters are printed. It cannot fail the job, and it runs
+      # after a failed compile too, whose result stays the job's.
+      - name: Compile statistics and timing report, after
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          INSTR_SELECTION: "meerkat-meta lib test, features extension-state,announcement-test-faults,console-test-faults, filter extension_ document_mcp_child_supply"
+          INSTR_PACKAGE: meerkat-meta
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
+          python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
+
+
+          def say(text):
+              if WITHHOLD and WITHHOLD in text:
+                  text = "unknown (a line was withheld: it held the cache's name)"
+              print(f"meta-ci-instr: {text}", flush=True)
+
+
+          def env(name):
+              return os.environ.get(name) or "unknown"
+
+
+          def first_line(argv):
+              try:
+                  done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                  lines = done.stdout.strip().splitlines()
+                  return lines[0].strip() if done.returncode == 0 and lines else "unknown"
+              except Exception:
+                  return "unknown"
+
+
+          def reading(name):
+              try:
+                  text = (Path(os.environ["RUNNER_TEMP"]) / name).read_text(encoding="utf-8")
+                  stats = json.loads(text)["stats"]
+                  return stats if isinstance(stats, dict) else None
+              except Exception:
+                  return None
+
+
+          def count(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict):
+                  value = value.get("counts")
+                  if not isinstance(value, dict) or not all(type(item) is int for item in value.values()):
+                      return None
+                  return sum(value.values())
+              return value if type(value) is int else None
+
+
+          def seconds(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict) and type(value.get("secs")) is int and type(value.get("nanos")) is int:
+                  return value["secs"] + value["nanos"] / 1e9
+              return None
+
+
+          def shown(value, digits=None):
+              if value is None:
+                  return "unknown"
+              return f"{value:.{digits}f}" if digits is not None else str(value)
+
+
+          def plain(value):
+              return re.sub(r"[^A-Za-z0-9_.+()' /:,-]", "?", str(value).replace('"', "'")).strip()[:120]
+
+
+          def number(value):
+              return f"{value:.1f}" if type(value) in (int, float) else "unknown"
+
+
+          def statistics():
+              before, after = reading("instr-sccache-before.json"), reading("instr-sccache-after.json")
+              missing = "before" if before is None else "after" if after is None else None
+              if missing:
+                  say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
+                  return
+
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
+              def delta(key, read=count):
+                  first, last = read(before, key), read(after, key)
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
+
+              counters = (
+                  "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
+                  "cache_timeouts", "cache_read_errors", "forced_recaches", "cache_writes",
+                  "cache_write_errors", "compilations", "compile_fails", "non_cacheable_compilations",
+              )
+              say("sccache delta " + " ".join(f"{key}={shown(delta(key))}" for key in counters))
+              say(
+                  "sccache delta not handled:"
+                  f" non_cacheable_calls={shown(delta('requests_not_cacheable'))}"
+                  f" non_compilation_calls={shown(delta('requests_not_compile'))}"
+                  f" unsupported_compiler_calls={shown(delta('requests_unsupported_compiler'))}"
+              )
+              first, last = before.get("not_cached"), after.get("not_cached")
+              if isinstance(first, dict) and isinstance(last, dict):
+                  moved = []
+                  for reason in sorted(set(first) | set(last)):
+                      was, now = first.get(reason, 0), last.get(reason, 0)
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
+                          moved.append(f"{plain(reason)}={now - was}")
+                  say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
+              else:
+                  say("sccache delta non-cacheable reasons: unknown")
+              say(
+                  "sccache delta seconds:"
+                  f" compiling={shown(delta('compiler_write_duration', seconds), 1)}"
+                  f" ({shown(delta('compilations'))} compilations sccache ran)"
+                  f" cache_read_hits={shown(delta('cache_read_hit_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_hits'))} hits)"
+                  f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_writes'))} writes)"
+              )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
+
+
+          def timing_reports():
+              target = os.environ.get("CARGO_TARGET_DIR", "")
+              folder = Path(target) / "cargo-timings"
+              if not target or not folder.is_dir():
+                  say("Cargo timing reports: unknown (no report directory)")
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              kept, named, unread = [], 0, 0
+              for path in sorted(folder.iterdir()):
+                  if not path.is_file():
+                      continue
+                  try:
+                      data = path.read_bytes()
+                  except OSError:
+                      data = None
+                  if data is None or (WITHHOLD and WITHHOLD.encode() in data):
+                      named, unread = named + (data is not None), unread + (data is None)
+                      try:
+                          path.unlink()
+                      except OSError:
+                          path.write_bytes(b"")
+                      continue
+                  kept.append((path.name, data))
+              say(
+                  f"Cargo timing reports: {len(kept)} file(s), {sum(len(data) for _, data in kept)} bytes"
+                  + (f"; {named} withheld (it held the cache's name)" if named else "")
+                  + (f"; {unread} deleted unread" if unread else "")
+              )
+              if not kept:
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              source = dict(kept).get("cargo-timing.html", kept[-1][1])
+              # The report's own summary cells and unit data, as it states them.
+              cells = dict(re.findall(rb"<td>([A-Za-z ]+):</td>\s*<td>([^<]*)</td>", source))
+              summary = (
+                  ("profile", b"Profile"), ("total_units", b"Total units"), ("fresh_units", b"Fresh units"),
+                  ("dirty_units", b"Dirty units"), ("total_time", b"Total time"),
+              )
+              say("Cargo timing summary: " + " ".join(
+                  f'{label}="{plain(cells[key].decode("utf-8", "replace"))}"' if cells.get(key, b"").strip()
+                  else f"{label}=unknown"
+                  for label, key in summary
+              ))
+              found = re.search(rb"UNIT_DATA\s*=\s*(\[.*?\]);\s*\n", source, re.S)
+              try:
+                  units = json.loads(found.group(1)) if found else None
+              except ValueError:
+                  units = None
+              if not isinstance(units, list):
+                  say("Cargo timing units: unknown (report data not recognised)")
+                  return
+              package = os.environ.get("INSTR_PACKAGE", "")
+              mine = [unit for unit in units if isinstance(unit, dict) and unit.get("name") == package]
+              if not mine:
+                  say("Cargo timing units: unknown (the report names no unit of the selected package)")
+              for unit in mine:
+                  features = unit.get("features")
+                  if isinstance(features, list):
+                      features = ",".join(plain(feature) for feature in features) or "none"
+                  else:
+                      features = "unknown"
+                  say(
+                      f"Cargo timing unit: {plain(unit.get('name'))} {plain(unit.get('version'))}"
+                      f' target="{plain(unit.get("target"))}" mode={plain(unit.get("mode"))}'
+                      f" start={number(unit.get('start'))} duration={number(unit.get('duration'))}"
+                      f" features={features}"
+                  )
+
+
+          def identity():
+              say(
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
+                  f' selection="{env("INSTR_SELECTION")}"'
+              )
+              say(
+                  f'versions rustc="{first_line(["rustc", "-V"])}" cargo="{first_line(["cargo", "-V"])}"'
+                  f' sccache="{first_line(["sccache", "--version"])}"'
+                  " (nextest: its install step's own line, in the jobs that install it)"
+              )
+
+
+          def untimed():
+              say(
+                  "sccache time of non-cacheable calls: unknown (sccache keeps no time for a call it does"
+                  " not handle; see the Cargo timing lines)"
+              )
+
+
+          for part in (identity, statistics, untimed, timing_reports):
+              try:
+                  part()
+              except Exception as error:
+                  say(f"unknown (a part of the report failed: {type(error).__name__})")
+          PY
+      # The reports Cargo wrote for the compile (--timings), as evidence
+      # beside the lines above. Never a reason to fail the job.
+      - name: Retain the Cargo timing reports
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: meta-ci-timings-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The openai-live feature's voice tests on a loopback provider (never paid
   # credentials): its integration targets, filtered to their voice and
@@ -860,13 +1503,274 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # Measurement only: the compiler cache's counters before the compile,
+      # into a file. It prints nothing and cannot fail the job.
+      - name: Compile statistics, before
+        continue-on-error: true
+        shell: bash
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
       - name: Voice lib cases
         working-directory: .
         env:
           RUST_MIN_STACK: "16777216"
         run: |
-          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib console_voice
+          ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib --timings console_voice
           ./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib gateway_openai_live_registration
+      # Measurement only: the difference of the compiler cache's counters
+      # across the compile, and the timing report Cargo wrote. Every figure
+      # is one the tool states; what cannot be read is printed as "unknown".
+      # The statistics hold the cache's location: they go to a file and only
+      # named counters are printed. It cannot fail the job, and it runs
+      # after a failed compile too, whose result stays the job's.
+      - name: Compile statistics and timing report, after
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          INSTR_SELECTION: "meerkat-meta lib test, features openai-live, filters console_voice and gateway_openai_live_registration"
+          INSTR_PACKAGE: meerkat-meta
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
+          python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
+
+
+          def say(text):
+              if WITHHOLD and WITHHOLD in text:
+                  text = "unknown (a line was withheld: it held the cache's name)"
+              print(f"meta-ci-instr: {text}", flush=True)
+
+
+          def env(name):
+              return os.environ.get(name) or "unknown"
+
+
+          def first_line(argv):
+              try:
+                  done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                  lines = done.stdout.strip().splitlines()
+                  return lines[0].strip() if done.returncode == 0 and lines else "unknown"
+              except Exception:
+                  return "unknown"
+
+
+          def reading(name):
+              try:
+                  text = (Path(os.environ["RUNNER_TEMP"]) / name).read_text(encoding="utf-8")
+                  stats = json.loads(text)["stats"]
+                  return stats if isinstance(stats, dict) else None
+              except Exception:
+                  return None
+
+
+          def count(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict):
+                  value = value.get("counts")
+                  if not isinstance(value, dict) or not all(type(item) is int for item in value.values()):
+                      return None
+                  return sum(value.values())
+              return value if type(value) is int else None
+
+
+          def seconds(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict) and type(value.get("secs")) is int and type(value.get("nanos")) is int:
+                  return value["secs"] + value["nanos"] / 1e9
+              return None
+
+
+          def shown(value, digits=None):
+              if value is None:
+                  return "unknown"
+              return f"{value:.{digits}f}" if digits is not None else str(value)
+
+
+          def plain(value):
+              return re.sub(r"[^A-Za-z0-9_.+()' /:,-]", "?", str(value).replace('"', "'")).strip()[:120]
+
+
+          def number(value):
+              return f"{value:.1f}" if type(value) in (int, float) else "unknown"
+
+
+          def statistics():
+              before, after = reading("instr-sccache-before.json"), reading("instr-sccache-after.json")
+              missing = "before" if before is None else "after" if after is None else None
+              if missing:
+                  say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
+                  return
+
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
+              def delta(key, read=count):
+                  first, last = read(before, key), read(after, key)
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
+
+              counters = (
+                  "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
+                  "cache_timeouts", "cache_read_errors", "forced_recaches", "cache_writes",
+                  "cache_write_errors", "compilations", "compile_fails", "non_cacheable_compilations",
+              )
+              say("sccache delta " + " ".join(f"{key}={shown(delta(key))}" for key in counters))
+              say(
+                  "sccache delta not handled:"
+                  f" non_cacheable_calls={shown(delta('requests_not_cacheable'))}"
+                  f" non_compilation_calls={shown(delta('requests_not_compile'))}"
+                  f" unsupported_compiler_calls={shown(delta('requests_unsupported_compiler'))}"
+              )
+              first, last = before.get("not_cached"), after.get("not_cached")
+              if isinstance(first, dict) and isinstance(last, dict):
+                  moved = []
+                  for reason in sorted(set(first) | set(last)):
+                      was, now = first.get(reason, 0), last.get(reason, 0)
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
+                          moved.append(f"{plain(reason)}={now - was}")
+                  say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
+              else:
+                  say("sccache delta non-cacheable reasons: unknown")
+              say(
+                  "sccache delta seconds:"
+                  f" compiling={shown(delta('compiler_write_duration', seconds), 1)}"
+                  f" ({shown(delta('compilations'))} compilations sccache ran)"
+                  f" cache_read_hits={shown(delta('cache_read_hit_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_hits'))} hits)"
+                  f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_writes'))} writes)"
+              )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
+
+
+          def timing_reports():
+              target = os.environ.get("CARGO_TARGET_DIR", "")
+              folder = Path(target) / "cargo-timings"
+              if not target or not folder.is_dir():
+                  say("Cargo timing reports: unknown (no report directory)")
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              kept, named, unread = [], 0, 0
+              for path in sorted(folder.iterdir()):
+                  if not path.is_file():
+                      continue
+                  try:
+                      data = path.read_bytes()
+                  except OSError:
+                      data = None
+                  if data is None or (WITHHOLD and WITHHOLD.encode() in data):
+                      named, unread = named + (data is not None), unread + (data is None)
+                      try:
+                          path.unlink()
+                      except OSError:
+                          path.write_bytes(b"")
+                      continue
+                  kept.append((path.name, data))
+              say(
+                  f"Cargo timing reports: {len(kept)} file(s), {sum(len(data) for _, data in kept)} bytes"
+                  + (f"; {named} withheld (it held the cache's name)" if named else "")
+                  + (f"; {unread} deleted unread" if unread else "")
+              )
+              if not kept:
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              source = dict(kept).get("cargo-timing.html", kept[-1][1])
+              # The report's own summary cells and unit data, as it states them.
+              cells = dict(re.findall(rb"<td>([A-Za-z ]+):</td>\s*<td>([^<]*)</td>", source))
+              summary = (
+                  ("profile", b"Profile"), ("total_units", b"Total units"), ("fresh_units", b"Fresh units"),
+                  ("dirty_units", b"Dirty units"), ("total_time", b"Total time"),
+              )
+              say("Cargo timing summary: " + " ".join(
+                  f'{label}="{plain(cells[key].decode("utf-8", "replace"))}"' if cells.get(key, b"").strip()
+                  else f"{label}=unknown"
+                  for label, key in summary
+              ))
+              found = re.search(rb"UNIT_DATA\s*=\s*(\[.*?\]);\s*\n", source, re.S)
+              try:
+                  units = json.loads(found.group(1)) if found else None
+              except ValueError:
+                  units = None
+              if not isinstance(units, list):
+                  say("Cargo timing units: unknown (report data not recognised)")
+                  return
+              package = os.environ.get("INSTR_PACKAGE", "")
+              mine = [unit for unit in units if isinstance(unit, dict) and unit.get("name") == package]
+              if not mine:
+                  say("Cargo timing units: unknown (the report names no unit of the selected package)")
+              for unit in mine:
+                  features = unit.get("features")
+                  if isinstance(features, list):
+                      features = ",".join(plain(feature) for feature in features) or "none"
+                  else:
+                      features = "unknown"
+                  say(
+                      f"Cargo timing unit: {plain(unit.get('name'))} {plain(unit.get('version'))}"
+                      f' target="{plain(unit.get("target"))}" mode={plain(unit.get("mode"))}'
+                      f" start={number(unit.get('start'))} duration={number(unit.get('duration'))}"
+                      f" features={features}"
+                  )
+
+
+          def identity():
+              say(
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
+                  f' selection="{env("INSTR_SELECTION")}"'
+              )
+              say(
+                  f'versions rustc="{first_line(["rustc", "-V"])}" cargo="{first_line(["cargo", "-V"])}"'
+                  f' sccache="{first_line(["sccache", "--version"])}"'
+                  " (nextest: its install step's own line, in the jobs that install it)"
+              )
+
+
+          def untimed():
+              say(
+                  "sccache time of non-cacheable calls: unknown (sccache keeps no time for a call it does"
+                  " not handle; see the Cargo timing lines)"
+              )
+
+
+          for part in (identity, statistics, untimed, timing_reports):
+              try:
+                  part()
+              except Exception as error:
+                  say(f"unknown (a part of the report failed: {type(error).__name__})")
+          PY
+      # The reports Cargo wrote for the compile (--timings), as evidence
+      # beside the lines above. Never a reason to fail the job.
+      - name: Retain the Cargo timing reports
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: meta-ci-timings-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The five acceptance backends, built once from freshly built console
   # bundles (the backends embed crates/meerkat-meta/console-dist, which
@@ -914,9 +1818,259 @@ jobs:
           cache-targets: "false"
       - run: npm --prefix console ci --silent --no-fund --no-audit
       - run: npm --prefix console run build --silent
+      # Measurement only: the compiler cache's counters before the compile,
+      # into a file. It prints nothing and cannot fail the job.
+      - name: Compile statistics, before
+        continue-on-error: true
+        shell: bash
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-before.json" 2>/dev/null || true
       - name: Build console acceptance backends
         working-directory: .
-        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture
+        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture --timings
+      # Measurement only: the difference of the compiler cache's counters
+      # across the compile, and the timing report Cargo wrote. Every figure
+      # is one the tool states; what cannot be read is printed as "unknown".
+      # The statistics hold the cache's location: they go to a file and only
+      # named counters are printed. It cannot fail the job, and it runs
+      # after a failed compile too, whose result stays the job's.
+      - name: Compile statistics and timing report, after
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          INSTR_SELECTION: "meerkat-meta examples library_mode_reference, console_acceptance_fixture, memory_console_reference, workgraph_console_reference, mcp_apps_gateway_fixture, default features"
+          INSTR_PACKAGE: meerkat-meta
+        run: |
+          sccache --show-stats --stats-format json > "${RUNNER_TEMP}/instr-sccache-after.json" 2>/dev/null || true
+          python3 - <<'PY' || echo "meta-ci-instr: unknown (the report script did not run)"
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          # The cache's bucket name, from the workflow's own environment: no
+          # line printed here may hold it, and no report that holds it stays.
+          WITHHOLD = os.environ.get("SCCACHE_GCS_BUCKET_NAME", "")
+
+
+          def say(text):
+              if WITHHOLD and WITHHOLD in text:
+                  text = "unknown (a line was withheld: it held the cache's name)"
+              print(f"meta-ci-instr: {text}", flush=True)
+
+
+          def env(name):
+              return os.environ.get(name) or "unknown"
+
+
+          def first_line(argv):
+              try:
+                  done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                  lines = done.stdout.strip().splitlines()
+                  return lines[0].strip() if done.returncode == 0 and lines else "unknown"
+              except Exception:
+                  return "unknown"
+
+
+          def reading(name):
+              try:
+                  text = (Path(os.environ["RUNNER_TEMP"]) / name).read_text(encoding="utf-8")
+                  stats = json.loads(text)["stats"]
+                  return stats if isinstance(stats, dict) else None
+              except Exception:
+                  return None
+
+
+          def count(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict):
+                  value = value.get("counts")
+                  if not isinstance(value, dict) or not all(type(item) is int for item in value.values()):
+                      return None
+                  return sum(value.values())
+              return value if type(value) is int else None
+
+
+          def seconds(stats, key):
+              value = stats.get(key)
+              if isinstance(value, dict) and type(value.get("secs")) is int and type(value.get("nanos")) is int:
+                  return value["secs"] + value["nanos"] / 1e9
+              return None
+
+
+          def shown(value, digits=None):
+              if value is None:
+                  return "unknown"
+              return f"{value:.{digits}f}" if digits is not None else str(value)
+
+
+          def plain(value):
+              return re.sub(r"[^A-Za-z0-9_.+()' /:,-]", "?", str(value).replace('"', "'")).strip()[:120]
+
+
+          def number(value):
+              return f"{value:.1f}" if type(value) in (int, float) else "unknown"
+
+
+          def statistics():
+              before, after = reading("instr-sccache-before.json"), reading("instr-sccache-after.json")
+              missing = "before" if before is None else "after" if after is None else None
+              if missing:
+                  say(f"sccache statistics: unknown (the reading {missing} the compile is missing or unreadable)")
+                  return
+
+              # A counter that is lower in the second reading is no measurement
+              # (another server may have answered): that figure is unknown.
+              lower = []
+
+              def delta(key, read=count):
+                  first, last = read(before, key), read(after, key)
+                  if first is None or last is None:
+                      return None
+                  if last < first:
+                      lower.append(key)
+                      return None
+                  return last - first
+
+              counters = (
+                  "compile_requests", "requests_executed", "cache_hits", "cache_misses", "cache_errors",
+                  "cache_timeouts", "cache_read_errors", "forced_recaches", "cache_writes",
+                  "cache_write_errors", "compilations", "compile_fails", "non_cacheable_compilations",
+              )
+              say("sccache delta " + " ".join(f"{key}={shown(delta(key))}" for key in counters))
+              say(
+                  "sccache delta not handled:"
+                  f" non_cacheable_calls={shown(delta('requests_not_cacheable'))}"
+                  f" non_compilation_calls={shown(delta('requests_not_compile'))}"
+                  f" unsupported_compiler_calls={shown(delta('requests_unsupported_compiler'))}"
+              )
+              first, last = before.get("not_cached"), after.get("not_cached")
+              if isinstance(first, dict) and isinstance(last, dict):
+                  moved = []
+                  for reason in sorted(set(first) | set(last)):
+                      was, now = first.get(reason, 0), last.get(reason, 0)
+                      if type(was) is not int or type(now) is not int or now < was:
+                          lower.append("not_cached")
+                          moved.append(f"{plain(reason)}=unknown")
+                      elif now != was:
+                          moved.append(f"{plain(reason)}={now - was}")
+                  say("sccache delta non-cacheable reasons: " + (" ".join(moved) or "none"))
+              else:
+                  say("sccache delta non-cacheable reasons: unknown")
+              say(
+                  "sccache delta seconds:"
+                  f" compiling={shown(delta('compiler_write_duration', seconds), 1)}"
+                  f" ({shown(delta('compilations'))} compilations sccache ran)"
+                  f" cache_read_hits={shown(delta('cache_read_hit_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_hits'))} hits)"
+                  f" cache_writes={shown(delta('cache_write_duration', seconds), 1)}"
+                  f" ({shown(delta('cache_writes'))} writes)"
+              )
+              if lower:
+                  say(
+                      "sccache delta: unknown where the second reading was lower than the first or not a"
+                      f" count ({', '.join(sorted(set(lower)))})"
+                  )
+
+
+          def timing_reports():
+              target = os.environ.get("CARGO_TARGET_DIR", "")
+              folder = Path(target) / "cargo-timings"
+              if not target or not folder.is_dir():
+                  say("Cargo timing reports: unknown (no report directory)")
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              kept, named, unread = [], 0, 0
+              for path in sorted(folder.iterdir()):
+                  if not path.is_file():
+                      continue
+                  try:
+                      data = path.read_bytes()
+                  except OSError:
+                      data = None
+                  if data is None or (WITHHOLD and WITHHOLD.encode() in data):
+                      named, unread = named + (data is not None), unread + (data is None)
+                      try:
+                          path.unlink()
+                      except OSError:
+                          path.write_bytes(b"")
+                      continue
+                  kept.append((path.name, data))
+              say(
+                  f"Cargo timing reports: {len(kept)} file(s), {sum(len(data) for _, data in kept)} bytes"
+                  + (f"; {named} withheld (it held the cache's name)" if named else "")
+                  + (f"; {unread} deleted unread" if unread else "")
+              )
+              if not kept:
+                  say("Cargo timing units: unknown (no report)")
+                  return
+              source = dict(kept).get("cargo-timing.html", kept[-1][1])
+              # The report's own summary cells and unit data, as it states them.
+              cells = dict(re.findall(rb"<td>([A-Za-z ]+):</td>\s*<td>([^<]*)</td>", source))
+              summary = (
+                  ("profile", b"Profile"), ("total_units", b"Total units"), ("fresh_units", b"Fresh units"),
+                  ("dirty_units", b"Dirty units"), ("total_time", b"Total time"),
+              )
+              say("Cargo timing summary: " + " ".join(
+                  f'{label}="{plain(cells[key].decode("utf-8", "replace"))}"' if cells.get(key, b"").strip()
+                  else f"{label}=unknown"
+                  for label, key in summary
+              ))
+              found = re.search(rb"UNIT_DATA\s*=\s*(\[.*?\]);\s*\n", source, re.S)
+              try:
+                  units = json.loads(found.group(1)) if found else None
+              except ValueError:
+                  units = None
+              if not isinstance(units, list):
+                  say("Cargo timing units: unknown (report data not recognised)")
+                  return
+              package = os.environ.get("INSTR_PACKAGE", "")
+              mine = [unit for unit in units if isinstance(unit, dict) and unit.get("name") == package]
+              if not mine:
+                  say("Cargo timing units: unknown (the report names no unit of the selected package)")
+              for unit in mine:
+                  features = unit.get("features")
+                  if isinstance(features, list):
+                      features = ",".join(plain(feature) for feature in features) or "none"
+                  else:
+                      features = "unknown"
+                  say(
+                      f"Cargo timing unit: {plain(unit.get('name'))} {plain(unit.get('version'))}"
+                      f' target="{plain(unit.get("target"))}" mode={plain(unit.get("mode"))}'
+                      f" start={number(unit.get('start'))} duration={number(unit.get('duration'))}"
+                      f" features={features}"
+                  )
+
+
+          def identity():
+              say(
+                  f"job={env('GITHUB_JOB')} job_id=unknown (not read by this step; join the run's job"
+                  f" listing by name) run={env('GITHUB_RUN_ID')} attempt={env('GITHUB_RUN_ATTEMPT')}"
+                  f" runner={env('RUNNER_NAME')} image={env('ImageOS')}/{env('ImageVersion')}"
+                  f' selection="{env("INSTR_SELECTION")}"'
+              )
+              say(
+                  f'versions rustc="{first_line(["rustc", "-V"])}" cargo="{first_line(["cargo", "-V"])}"'
+                  f' sccache="{first_line(["sccache", "--version"])}"'
+                  " (nextest: its install step's own line, in the jobs that install it)"
+              )
+
+
+          def untimed():
+              say(
+                  "sccache time of non-cacheable calls: unknown (sccache keeps no time for a call it does"
+                  " not handle; see the Cargo timing lines)"
+              )
+
+
+          for part in (identity, statistics, untimed, timing_reports):
+              try:
+                  part()
+              except Exception as error:
+                  say(f"unknown (a part of the report failed: {type(error).__name__})")
+          PY
       # The artifact keeps no file mode; the archive keeps the binaries
       # executable.
       - name: Pack the backends
@@ -931,6 +2085,17 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 1
+      # The reports Cargo wrote for the compile (--timings), as evidence
+      # beside the lines above. Never a reason to fail the job.
+      - name: Retain the Cargo timing reports
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: meta-ci-timings-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The console lane's contract checks and its API, voice, memory and
   # workgraph suites, on the shared backends.
@@ -1365,7 +2530,7 @@ jobs:
   gate:
     name: Meta gate
     if: always()
-    needs: [changes, meta-checks, test-typescript, test-python, rust-unit, rust-examples, rust-conformance, rust-integration, rust-features-check, rust-extension-state, rust-extension-state-lib, rust-voice, rust-voice-lib, console-backends, console, console-browser, console-fixtures, console-acceptance, console-perf, flow-editor-contracts, flow-editor]
+    needs: [changes, meta-checks, test-typescript, test-python, rust-unit-build, rust-unit, rust-examples, rust-conformance, rust-integration, rust-features-check, rust-extension-state, rust-extension-state-lib, rust-voice, rust-voice-lib, console-backends, console, console-browser, console-fixtures, console-acceptance, console-perf, flow-editor-contracts, flow-editor]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -1421,6 +2586,7 @@ jobs:
           check meta-checks "${{ needs.meta-checks.result }}" meta
           check test-typescript "${{ needs.test-typescript.result }}" meta
           check test-python "${{ needs.test-python.result }}" python
+          check rust-unit-build "${{ needs.rust-unit-build.result }}" rust pull_request
           check rust-unit "${{ needs.rust-unit.result }}" rust pull_request
           check rust-examples "${{ needs.rust-examples.result }}" rust
           check rust-conformance "${{ needs.rust-conformance.result }}" rust pull_request
@@ -1463,7 +2629,7 @@ jobs:
           GUARD_LANE_REASONS: "{}"
           GUARD_LANE_JOBS: ""
           # The jobs that wait for another job besides the classification.
-          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends
+          LANE_UPSTREAMS: console=console-backends;console-browser*=console-backends;rust-unit*=rust-unit-build
           # Seconds to wait before each retry of a GitHub API request that
           # answered with a server error (5xx).
           API_RETRY_DELAYS: 5 10 20

@@ -14562,6 +14562,59 @@ mod tests {
     }
 
     #[test]
+    fn create_session_model_gemini_neon_default_preserves_explicit_and_configured_models() {
+        // Request model, global config model, Gemini config model, result.
+        for (requested, global, configured, expected) in [
+            (None, "", "", "gemini-4-neon"),
+            (None, "gpt-6-astra", "", "gemini-4-neon"),
+            (None, "", "gemini-4-argon", "gemini-4-argon"),
+            (None, "", "gemini-4-hydrogen", "gemini-4-hydrogen"),
+            (
+                None,
+                "gemini-4-argon",
+                "gemini-4-hydrogen",
+                "gemini-4-argon",
+            ),
+            (
+                Some("gemini-4-argon"),
+                "",
+                "gemini-4-hydrogen",
+                "gemini-4-argon",
+            ),
+            (
+                Some("gemini-4-hydrogen"),
+                "gemini-4-argon",
+                "",
+                "gemini-4-hydrogen",
+            ),
+            (
+                Some("gemini-3.1-pro-preview"),
+                "",
+                "",
+                "gemini-3.1-pro-preview",
+            ),
+        ] {
+            let mut config = Config::default();
+            config.agent.model = global.to_string();
+            config.models.gemini = configured.to_string();
+            let resolved = resolve_create_session_model(
+                &config,
+                CreateSessionModelResolutionRequest {
+                    model: requested.map(str::to_string),
+                    provider: Some(Provider::Gemini),
+                    ..Default::default()
+                },
+            )
+            .expect("Gemini selection resolves without provider access");
+            assert_eq!(resolved.provider, Provider::Gemini);
+            assert_eq!(
+                resolved.model, expected,
+                "request={requested:?}, agent={global}, Gemini={configured}"
+            );
+        }
+    }
+
+    #[test]
     fn create_session_model_binding_default_wins_when_model_omitted() {
         let (mut config, auth_binding) = create_model_configured_auth_binding(
             Provider::Gemini,

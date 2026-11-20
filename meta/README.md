@@ -71,7 +71,7 @@ control a gateway; they do not bundle its executable. Rust hosts can embed Meta.
   work, approvals and the timeline in one browser interface.
 
 <p align="center">
-  <img src="docs/images/meta-console.png" alt="Meta console with conversations, topology and roster" width="900">
+  <img src="docs/images/meta-console.png" alt="Meerkat Meta console showing a sample team conversation, the agent roster, and a pending approval" width="900">
 </p>
 
 Core owns the agent loop, sessions, stable agent identity, spawning, mob

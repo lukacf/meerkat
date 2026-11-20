@@ -35,7 +35,29 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Behavior:** Core's Gemini catalog default changes from `gemini-4-argon`
+  to `gemini-4-neon`. A Gemini session without an explicit model or applicable
+  configured/binding default now uses Neon. With thinking unset, Meerkat sends
+  no thinking override and Google's documented default changes from Argon's
+  `medium` to Neon's `high`. Browser bootstrap also uses Neon when Gemini is the
+  highest-priority configured provider and has no explicit/configured model.
+  The Gemini fallback web-search helper selects Neon directly from the catalog;
+  main-session model, config and binding pins do not override that helper.
+  Existing session models and explicit/configured session pins retain their
+  precedence. The global and image defaults are unchanged. No wire/schema
+  break is introduced.
+
 ### Added
+
+- `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
+  shared 1,048,576-token context and a 65,536-token synchronous output cap.
+  Meerkat supports thinking levels `low`/`medium`/`high`. Google's `xhigh` is
+  not expressible by Meerkat's Gemini tag and is refused by strict
+  `reasoning_effort` validation; an unsupported turn reasoning preference is
+  instead not applied, preserving the existing level or provider default.
+  Long decode is not added.
 
 - `workgraph_get` accepts an explicit `evidence_limit` (1 through 20) and
   `evidence_cursor` for newest-first evidence pages. The bounded reply replaces
@@ -47,6 +69,23 @@ them.
   schema change for every caller, including the public MCP server, which serves
   the same tool definition. Storage, RPC, REST, generated schema files and SDKs
   are unchanged.
+
+### Changed
+
+- Core catalog presentation identifies Neon as the Gemini default. Hydrogen
+  remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
+  Forge's local setup preset and separately pinned installer catalog are
+  unchanged; this does not establish Neon availability there.
+
+### Upgrade notes
+
+- For ordinary Gemini sessions, pin `--model gemini-4-argon` or
+  `[models] gemini = "gemini-4-argon"` to retain Argon, or set
+  `--reasoning-effort medium` to keep medium thinking on Neon. These session
+  overrides do not change the fallback web-search helper. Remove any custom
+  `[models.gemini-4-neon]` entry before upgrading because model IDs must be
+  unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
+  behavior and rollback notes.
 
 ## [0.9.17] - 2026-11-18
 

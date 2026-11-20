@@ -19,7 +19,7 @@
 //! sent, and reads the agent's durable transcript after each step.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,8 @@ use meerkat_mob::{MobDefinition, ProfileName};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
+#[path = "support/custody_wait.rs"]
+mod custody_wait;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -274,6 +276,8 @@ impl meerkat_client::LlmClient for RecordingClient {
 /// One booted gateway runtime and what its members' model was asked.
 struct Rig {
     runtime: meerkat_meta::UnifiedRuntime,
+    /// The state directory the runtime was booted on.
+    state: PathBuf,
     roster: Arc<MutableRosterProvider>,
     asked: mpsc::UnboundedReceiver<String>,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -315,6 +319,7 @@ async fn boot_with(
         .expect("build the gateway-shaped UnifiedRuntime");
     Rig {
         runtime,
+        state: state.to_path_buf(),
         roster,
         asked,
         requests,
@@ -709,8 +714,9 @@ impl Rig {
 
     /// Shut down before a reopen over the same state directory in this
     /// process: stand the durable child root down, bounded, until it is
-    /// released.
-    async fn shutdown_for_reopen(self) {
+    /// released; then drop this lifetime's handles and wait, bounded, until
+    /// its execution custody is released (`support/custody_wait.rs`).
+    async fn shutdown_for_reopen(mut self) {
         let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !child_root_released(&outcome) && std::time::Instant::now() < deadline {
@@ -725,6 +731,9 @@ impl Rig {
             child_root_released(&outcome),
             "the durable child root is released before the reopen: {outcome:?}"
         );
+        let state = std::mem::take(&mut self.state);
+        drop(self);
+        custody_wait::predecessor_custody_released(&state).await;
     }
 }
 
@@ -734,6 +743,66 @@ fn child_root_released(outcome: &meerkat_meta::ChildMobStandDownOutcome) -> bool
         meerkat_meta::ChildMobStandDownOutcome::Released { .. }
             | meerkat_meta::ChildMobStandDownOutcome::NotConfigured
     )
+}
+
+/// The wait a reopen makes (`support/custody_wait.rs`) lasts until nothing
+/// holds the execution custody: a shared lock on the custody file, released
+/// a while later from another thread, keeps the wait until that release. With
+/// no holder the wait returns at once. Where the kernel's lock table cannot
+/// name the file (btrfs subvolumes, overlayfs) nothing can be read, and the
+/// wait returns at once while the lock is held too.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_waits_until_the_execution_custody_is_released() {
+    const HELD_FOR: Duration = Duration::from_millis(400);
+    let temp = tempfile::tempdir().unwrap();
+    let mut custody = temp
+        .path()
+        .join(meerkat_meta::storage_layout::RUNTIME_DB_FILE_NAME)
+        .into_os_string();
+    custody.push(".execution-custody");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&custody)
+        .expect("create the custody file");
+    held.lock_shared()
+        .expect("hold the custody as a hosted runtime does");
+    let readable = custody_wait::custody_holder_named(Path::new(&custody)) == Some(true);
+
+    let started = std::time::Instant::now();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(HELD_FOR);
+        drop(held);
+    });
+    custody_wait::predecessor_custody_released(temp.path()).await;
+    let waited = started.elapsed();
+    if readable {
+        assert!(
+            waited >= HELD_FOR,
+            "the wait ended after {waited:?}, before the holder released"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wait went on for {waited:?} after the holder released"
+        );
+    } else {
+        assert!(
+            waited < HELD_FOR,
+            "a lock the table cannot name was waited on for {waited:?}"
+        );
+    }
+    release.join().expect("the holder's thread");
+
+    let started = std::time::Instant::now();
+    custody_wait::predecessor_custody_released(temp.path()).await;
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(1),
+        "with no holder the wait took {waited:?}"
+    );
 }
 
 /// A configured agent, live and idle: its configuration's instructions

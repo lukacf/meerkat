@@ -1263,6 +1263,28 @@ async fn e2e_fast_text_steers_waiting_on_tools_join_next_request() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_mixed_kind_steers_waiting_on_tools_join_next_request_in_admission_order() {
+    let tokens = [TEXT_PROMPT_TOKEN, PEER_MESSAGE_TOKEN, EXTERNAL_EVENT_TOKEN];
+    // Admission answers while probe_block holds the turn; the existing
+    // preparation interval precedes release. Later tools add no delay.
+    let outcome = run_scenario_with(
+        Gate::Tool,
+        vec![
+            text_prompt_steer(tokens[0]),
+            peer_message_steer(tokens[1]),
+            external_event_steer(tokens[2]),
+        ],
+        Duration::ZERO,
+    )
+    .await;
+    assert_waiting_steers_join_next_request(&outcome, &tokens, "mixed-kinds");
+    assert_eq!(
+        outcome.peer_ingested, 1,
+        "only the peer input emits peer_content_ingested"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_steer_after_request_snapshot_waits_for_next_boundary() {
     // The provider already received request 2, which proves that its join
     // commit and snapshot are complete. This covers admission after that

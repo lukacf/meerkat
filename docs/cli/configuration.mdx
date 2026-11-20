@@ -742,6 +742,20 @@ change; the exit status is 2 for it too. A word that is not a level
 (`--reasoning-effort x_high`) is an argument error: exit status 2 with the
 argument parser's text on stderr and nothing on stdout.
 
+For an automated caller, retry the unchanged request later only if `error.details`
+has `kind: "reasoning_effort_refused"`, `reasoning_effort_refusal.reason` is
+`"supported_levels_unavailable"`, and `retryable` is the boolean `true`.
+If the reason is unrecognized or any of these fields is missing or malformed,
+surface the original error instead of retrying.
+
+`retryable` says the level may be accepted later, not that the refused run
+left nothing: a run refused at its session's build creates no session; after
+a refusal inside the turn, check `rkat session list` before a fresh run.
+
+Do not infer the decision
+from the message or from `supported`: both unreadable and unstated levels
+give `null`, while an empty list means the model or route accepts no level.
+
 ## See also
 
 - [Realms](/concepts/realms)

@@ -24,6 +24,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use crate::input_state::InputLifecycleState;
 
 mod next_request;
+mod next_request_recovery;
 mod recall;
 mod request_only_context;
 mod requester;

@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Upgrade
 
+- TypeScript host runnables are opt-in access to the existing gateway
+  contract. Existing callers, defaults, wire schemas and stored forms are
+  unchanged. Declare stored schedules' runnable names and register their
+  handlers on the builder on every boot before `build()` connects;
+  upgrading alone supplies neither declaration nor handler. Registering
+  only after `build()` returns leaves a startup gap for stored schedules.
 - WorkGraph, the three forms of a goal's or a reassignment's target, and what each names:
   - `{kind: "identity", identity}` takes an identity's NAME (`team:helper`) and names the member seated for that name in this mob. It is the form for a caller that knows a member by its name. From this release it stores the member's owner key.
   - `{kind: "session", session_id}` takes a session id and names the member that holds that session, or the session itself when no member of this mob holds it.
@@ -23,6 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - WorkGraph goals created before this release are not changed by the upgrade: there is no migration. For an identity whose name is not its own member id, a binding that an earlier release stored through the identity form keeps the key that release stored (its last segment is the name). Such a binding is listed as before and reads active, and no turn of the member runs under it, as before the upgrade. An operator who wants that work to reach the member may close the goal and create it again, or reassign the binding in the identity form (`meta/workgraph/attention/reassign` for a `coordinate` binding; the Console's break-glass reassignment for a `pursue` binding). Nothing does this automatically.
 - A client that keeps owner keys from earlier answers: a key kept from a release through 0.9.17 for such an identity is still accepted wherever an owner key is (it is stored and compared as written), and it is not the key new goals store. `meta/workgraph/attention/list` filtered by the kept key lists the bindings stored under it and not new goals, and a new goal in the identity form is admitted beside a binding stored under the kept key. Take the key from the answer of the goal you created.
 - A client that sent a member's encoded id (`mk--...`) in the identity form: send the identity's name there (see Breaking).
+
+### Added
+
+- The TypeScript SDK exposes the existing gateway host-runnable path:
+  hosts declare deterministic schedule targets with
+  `MetaBuilder.hostRunnables(names)` and handle their fires with
+  `MetaRuntime.onScheduleFire(name, handler)`, matching Python SDK dispatch.
+  Chainable `MetaBuilder.onScheduleFire(name, handler)` installs host-local
+  handlers before `build()` connects, including for schedules already stored
+  at startup. Each runtime copies the handlers; its later replacements
+  survive reconnect without reinstalling builder defaults.
+  `build()` refuses builder handlers for undeclared names, naming them before
+  any gateway transport starts. Registration may precede declaration;
+  declared names without handlers and later runtime registration remain allowed.
+  Sync and async handlers receive the raw occurrence; errors fail the
+  occurrence attempt, and returning nothing acknowledges completion. The
+  SDK includes a runnable source collector example. Against the published
+  Meta 0.9.15 Linux x86_64 gateway, the example succeeds, and a stored
+  occurrence due while stopped completes on a fresh-process restart with
+  builder registration. A declared runnable
+  without a handler records `delivery_failed` / `runtime_rejected`, while
+  an undeclared source-runner target records `misfired` / `target_missing`
+  under the default policy without an SDK callback. These occurrences are
+  terminal with no next retry action and are not delivered later when a
+  handler is registered; later interval occurrences remain pending. Older
+  gateways have not been checked.
 
 ### Fixed
 

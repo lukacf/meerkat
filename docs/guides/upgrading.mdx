@@ -55,6 +55,58 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Unreleased
+
+### Gemini provider default: Argon to Neon
+
+Core's Gemini session-model resolver now selects `gemini-4-neon` instead of
+`gemini-4-argon` when no explicit model or applicable configured/binding default
+is supplied. Both require a paid Gemini API tier. For these sessions, retain
+Argon with `--model gemini-4-argon` or `[models] gemini = "gemini-4-argon"`.
+Explicit model selections, configured/binding defaults and existing sessions'
+recorded models keep their precedence. Hydrogen remains recommended and
+selectable; `gemini-3.1-pro-preview` remains at the supported catalog tier.
+
+An unset thinking level sends no thinking override. For a session moving from
+Argon to Neon, Google's documented default therefore changes from `medium` to
+`high`; Meerkat does not explicitly send `high`. To retain medium thinking in
+that session, keep Argon or set `--reasoning-effort medium` (or the corresponding
+`reasoning_effort` parameter). An unsupported turn reasoning preference, such
+as `xhigh`, is recorded as not applied and preserves the existing request level
+or provider default. This is separate from strict `reasoning_effort` validation.
+
+Two other consumers use the catalog default:
+
+- Browser bootstrap with a Gemini key and no explicit model or configured
+  Gemini model now selects Neon when Gemini is the highest-priority configured
+  provider. An existing configured Gemini model remains in effect.
+- When the fallback web-search helper uses Gemini, it now selects Neon directly
+  from the catalog. It does not use the main session's explicit model,
+  `[models] gemini` override or binding default. Pinning the session to Argon
+  therefore does not retain Argon for this helper. The helper supplies no
+  thinking override, so Google's documented Neon default is `high`.
+
+With no provider, model, binding or configured default, the global catalog
+fallback remains `gpt-6-astra`. Image-generation defaults are unchanged.
+The existing Google Code Assist and Copilot Gemini login defaults remain
+`gemini-3.8-flash`; catalog support does not establish access on those routes.
+Forge's local setup preset still selects `gemini-3.1-pro-preview`, and its
+separately pinned installer catalog is unchanged. This Core catalog/resolver
+change does not establish Neon availability in that installer.
+
+### A custom `gemini-4-neon` entry
+
+The unreleased catalog includes `gemini-4-neon`. Model IDs must be unique across
+built-in, custom and self-hosted entries. Remove any custom
+`[models.gemini-4-neon]` entry from realm/project configurations and mob
+definitions before upgrading, or validation refuses the duplicate ID.
+The built-in row supports `low`, `medium` and `high`; Google's `xhigh` level
+is not yet expressible by Meerkat's Gemini tag. Neon requires a paid Gemini
+API tier. Its provider default is separate from the global and image defaults.
+See [Providers](/concepts/providers) for the synchronous limits. If rolling
+back to 0.9.17, restore the custom entry where you still select Neon; that
+release has no built-in Neon row.
+
 ## Upgrading to 0.9.17
 
 This section is for systems running 0.9.16. The full list of changes is in

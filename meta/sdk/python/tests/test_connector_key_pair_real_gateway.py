@@ -6,10 +6,18 @@ needs no provider key. The model is the local chat-completions fake of the
 cross-mob rows.
 
 ``DispatchInput.connector`` checks the pair where the input is built; the
-gateway checks it again before anything is delivered. This row dispatches the
-helper's keyed input through ``runtime.dispatch`` and reads the gateway's
-admission answer. It then sends each half pair, which only the full
-constructor can build, and reads the gateway's own refusal.
+gateway checks it again before anything is delivered. This row is about the
+gateway's side of a plain ``meta/dispatch`` (no ``expected_scope``) with the
+connector origin and a canonical UUID as the correlation id, so nothing in
+it depends on how another route or another origin treats the pair:
+
+- the gateway admits the helper's keyed input (a result, not a refusal);
+- it kept the idempotency key: a repeat of the pair is answered with the
+  first admission's turn ticket, and another key under the same correlation
+  id with a ticket of its own;
+- it reads each key at admission: a half pair, which only the full
+  constructor can build, is refused with the gateway's own words for the
+  missing half.
 
 Run:
     META_GATEWAY_BIN=<path to an rpc_gateway> PYTHONPATH=sdk/python \
@@ -32,9 +40,9 @@ from meerkat_meta.identity_first_models import (
 
 from .test_wire_cross_mob_real_gateways import (
     _GATEWAY_BIN,
+    _MODEL,
     _FakeModel,
     _config_toml,
-    _mob_toml,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -44,8 +52,26 @@ pytestmark = pytest.mark.skipif(
 
 _MOB_ID = "connector-key-pair"
 _IDENTITY = "domain:intake"
+# A canonical UUID: the gateway carries it as given on every route.
 _CORRELATION = "7c2d9a4b-3e18-4b7a-8f55-1a9e0c6b2d10"
 _KEY = "source-event-42"
+_OTHER_KEY = "source-event-43"
+
+# Turn-driven, so a dispatch that asks for it gets a turn ticket.
+_MOB_TOML = f"""\
+[mob]
+id = "{_MOB_ID}"
+
+[profiles.worker]
+model = "{_MODEL}"
+provider = "self_hosted"
+self_hosted_server_id = "local"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+"""
 
 # Each half pair and the gateway's words for it.
 _HALF_PAIRS = [
@@ -59,7 +85,10 @@ class _Roster:
         del context
         return [
             DurableAgentSpec(
-                identity=_IDENTITY, profile="worker", addressability="addressable"
+                identity=_IDENTITY,
+                profile="worker",
+                addressability="addressable",
+                runtime_mode_override="turn_driven",
             )
         ]
 
@@ -67,7 +96,7 @@ class _Roster:
 async def _gateway(tmp_path: Path, base_url: str):
     root = tmp_path / _MOB_ID
     root.mkdir()
-    (root / "mob.toml").write_text(_mob_toml(_MOB_ID))
+    (root / "mob.toml").write_text(_MOB_TOML)
     (root / "config.toml").write_text(_config_toml(base_url))
     return await (
         Meta.builder()
@@ -87,27 +116,47 @@ async def test_the_gateway_admits_the_helpers_pair_and_refuses_each_half(tmp_pat
     runtime = None
     try:
         runtime = await _gateway(tmp_path, fake.base_url)
+        capabilities = await runtime.mob_handle().capabilities()
+        print(
+            f"GATEWAY contract_version={capabilities.contract_version}"
+            f" serves_meta_dispatch={'meta/dispatch' in capabilities.methods}"
+            f" feature_capabilities={sorted(capabilities.feature_capabilities)}"
+        )
 
         keyed = DispatchInput.connector(
             "connector event", correlation_id=_CORRELATION, idempotency_key=_KEY
         )
-        assert keyed.to_dict() == {
-            "content": "connector event",
-            "origin": "connector",
-            "correlation_id": _CORRELATION,
-            "idempotency_key": _KEY,
-        }
         # The answer to `meta/dispatch` is the gateway's admission of the
         # input: the pair passed its check and the delivery was taken. A
         # refusal is an error, never this result.
-        admitted = await runtime.dispatch(_IDENTITY, keyed)
+        admitted = await runtime.dispatch(_IDENTITY, keyed, track_turn=True)
         assert isinstance(admitted, DispatchResult), admitted
         assert isinstance(admitted.fencing_token, int), admitted
         assert isinstance(admitted.durable, bool), admitted
+        assert admitted.turn_ticket, admitted.turn_unavailable
         print(
             "ADMITTED the helper's pair:"
             f" fencing_token={admitted.fencing_token} durable={admitted.durable}"
             f" completion_baseline={admitted.completion_baseline}"
+            f" turn_ticket={admitted.turn_ticket}"
+        )
+
+        # The gateway kept the idempotency key: the same pair again is the
+        # first admission, and another key is an admission of its own.
+        repeated = await runtime.dispatch(_IDENTITY, keyed, track_turn=True)
+        assert repeated.turn_ticket == admitted.turn_ticket, (repeated, admitted)
+        other = await runtime.dispatch(
+            _IDENTITY,
+            DispatchInput.connector(
+                "connector event", correlation_id=_CORRELATION, idempotency_key=_OTHER_KEY
+            ),
+            track_turn=True,
+        )
+        assert other.turn_ticket, other.turn_unavailable
+        assert other.turn_ticket != admitted.turn_ticket, (other, admitted)
+        print(
+            f"SAME PAIR AGAIN: turn_ticket={repeated.turn_ticket} (the first admission's);"
+            f" ANOTHER KEY, same correlation id: turn_ticket={other.turn_ticket}"
         )
 
         # The control: the gateway refuses a half pair with its own words,

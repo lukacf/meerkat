@@ -23,6 +23,8 @@ struct RegistrationLag {
     held: AtomicUsize,
     /// How many of them, oldest first, may go on to the coordinator.
     released: AtomicUsize,
+    /// Durable preparations handed on to the coordinator, held or not.
+    forwarded: AtomicUsize,
 }
 
 impl RegistrationLag {
@@ -47,6 +49,17 @@ impl RegistrationLag {
         })
         .await
         .unwrap_or_else(|_| panic!("{expected} durable preparations reach the boundary handle"));
+    }
+
+    /// Wait until `expected` durable preparations reached the coordinator.
+    async fn wait_forwarded(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.forwarded.load(Ordering::SeqCst) < expected {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{expected} durable preparations reach the coordinator"));
     }
 
     async fn hold(&self) {
@@ -90,6 +103,9 @@ impl CoreExecutorBoundaryHandle for LaggingRegistrationBoundaryHandle {
             meerkat_core::TurnBoundaryDelivery::DurableAppends(_)
         ) {
             self.lag.hold().await;
+            // The coordinator registers the delivery in the first poll of
+            // the call below, in this same poll of this task.
+            self.lag.forwarded.fetch_add(1, Ordering::SeqCst);
         }
         self.inner
             .prepare_turn_boundary_delivery(expected_run_id, delivery)
@@ -415,4 +431,196 @@ async fn acknowledged_second_steer_behind_a_registered_holder_is_in_the_earliest
 #[tokio::test]
 async fn acknowledged_second_steer_behind_a_lagging_holder_is_in_the_earliest_request() {
     acknowledged_second_steer_is_in_the_earliest_request(false).await;
+}
+
+async fn wait_for_prepare_hold(rig: &DurableSteerRig) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rig.script.prepare_hold_reached.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("a preparation parks the runner and is held before it publishes");
+}
+
+/// A steer that reaches the model as request-only context: a continuation
+/// with a turn append.
+fn request_only_steer(detail: &str) -> Input {
+    let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
+    continuation.turn_append = Some(notice_append(detail, ConversationAppendRole::SystemNotice));
+    let continuation = Input::Continuation(continuation);
+    assert_eq!(
+        crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+            &continuation,
+            false
+        )
+        .expect("generated admission")
+        .live_boundary_delivery(),
+        Some(crate::ingress_types::LiveBoundaryDeliveryClass::RequestOnly),
+    );
+    continuation
+}
+
+/// The runner is parked at its boundary with a request-only delivery alone,
+/// and that delivery has not been published. A durable steer is acknowledged
+/// then: the request's input is not fixed yet, so the request carries it.
+async fn durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(
+    rig: DurableSteerRig,
+    lag: Arc<RegistrationLag>,
+) {
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let context = request_only_steer("request-only context");
+    let context_id = context.id().clone();
+    rig.admit(context).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rig.state.has_registered_request_only_delivery_for_test() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the request-only steer prepares for the open boundary");
+
+    // The runner parks with the request-only delivery alone; its ingress is
+    // held before it publishes, so the park lasts.
+    rig.script.prepare_hold_armed.store(true, Ordering::SeqCst);
+    let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
+    let takes_before = rig.script.boundary_takes().len();
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    wait_for_prepare_hold(&rig).await;
+
+    let steer = peer_steer("payload during the park");
+    let steer_id = steer.id().clone();
+    // The admission answers its caller here, and the steer's preparation
+    // reaches the coordinator while the runner is still parked.
+    rig.admit(steer).await;
+    lag.wait_forwarded(1).await;
+    assert_eq!(
+        rig.script.steps_done.load(Ordering::SeqCst),
+        steps_before,
+        "the runner is still parked: the request's input is not fixed yet"
+    );
+
+    rig.script
+        .prepare_hold_released
+        .store(true, Ordering::SeqCst);
+    assert!(
+        wait_for_steps_done(&rig, steps_before + 1).await,
+        "the parked boundary ends once its deliveries are published"
+    );
+    let request = rig.script.boundary_takes()[takes_before].clone();
+    assert_eq!(
+        take_ids(&request),
+        vec![steer_id.clone()],
+        "the steer was acknowledged before the request's input was fixed: \
+         the request carries it beside the request-only context"
+    );
+    assert!(
+        request[0].1.contains("payload during the park"),
+        "the steer's payload: {request:?}"
+    );
+    assert_eq!(
+        *rig.script.request_only_taken.lock().unwrap(),
+        vec![1],
+        "the request-only context reached the same request"
+    );
+    rig.wait_for_phase(&context_id, InputLifecycleState::Consumed)
+        .await;
+    finish_without_a_follow_up(&rig, &[steer_id]).await;
+}
+
+#[tokio::test]
+async fn durable_steer_acknowledged_while_the_runner_is_parked_on_request_only_context_is_in_that_request()
+ {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag).await;
+}
+
+#[tokio::test]
+async fn persistent_durable_steer_acknowledged_while_the_runner_is_parked_on_request_only_context_is_in_that_request()
+ {
+    let (rig, lag) = persistent_lagging_rig().await;
+    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag).await;
+}
+
+/// The runner is parked with a steer whose publication has not happened.
+/// That steer is recalled, and two more steers are acknowledged while the
+/// runner is still parked. The boundary neither waits for ever nor ends
+/// without them: the request carries the two, in order, and never the
+/// recalled one.
+#[tokio::test]
+async fn steers_acknowledged_after_the_parked_holder_was_recalled_are_in_that_request() {
+    let (rig, _lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    rig.script.prepare_hold_armed.store(true, Ordering::SeqCst);
+    let holder = peer_steer("recalled holder payload");
+    let holder_id = holder.id().clone();
+    rig.admit(holder).await;
+    rig.wait_for_waiting_delivery().await;
+    let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
+    let takes_before = rig.script.boundary_takes().len();
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    wait_for_prepare_hold(&rig).await;
+
+    let recalled = tokio::time::timeout(
+        Duration::from_secs(5),
+        rig.adapter.recall_queued_input(&rig.session_id, &holder_id),
+    )
+    .await
+    .expect("a recall answers without waiting for a boundary")
+    .expect("recall");
+    assert_eq!(
+        recalled,
+        Some(crate::queued_input_recall::QueuedInputRecall::Abandoned {
+            input_id: holder_id.clone(),
+            attempt_count: 0,
+        })
+    );
+    let second = peer_steer("second payload after the recall");
+    let second_id = second.id().clone();
+    let third = peer_steer("third payload after the recall");
+    let third_id = third.id().clone();
+    rig.admit(second).await;
+    rig.admit(third).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let lane = rig.steer_queue().await;
+    assert!(lane.contains(&second_id) && lane.contains(&third_id));
+    assert_eq!(
+        rig.script.steps_done.load(Ordering::SeqCst),
+        steps_before,
+        "the runner is still parked"
+    );
+
+    rig.script
+        .prepare_hold_released
+        .store(true, Ordering::SeqCst);
+    assert!(
+        wait_for_steps_done(&rig, steps_before + 1).await,
+        "the parked boundary ends: nothing waits for the recalled steer"
+    );
+    let request = rig.script.boundary_takes()[takes_before].clone();
+    assert_eq!(
+        take_ids(&request),
+        vec![second_id.clone(), third_id.clone()],
+        "both steers were acknowledged before the request's input was fixed"
+    );
+    assert!(request[0].1.contains("second payload after the recall"));
+    assert!(request[1].1.contains("third payload after the recall"));
+    assert!(
+        request
+            .iter()
+            .all(|(_, payload)| !payload.contains("recalled holder payload")),
+        "the recalled steer reaches no request: {request:?}"
+    );
+    finish_without_a_follow_up(&rig, &[second_id, third_id]).await;
+    assert_eq!(contributions(&rig.script.primitives(), &holder_id), 0);
+    assert_eq!(
+        rig.phase(&holder_id).await,
+        Some(InputLifecycleState::Abandoned)
+    );
 }

@@ -61,10 +61,21 @@ struct ConsoleEventReplayState {
     runtime_to_identity: BTreeMap<String, String>,
     response_phase_by_identity: BTreeMap<String, Option<String>>,
     /// Console identity metadata registered by spawn paths (spawn labels,
-    /// `spawned_by` lineage, `via_tool`). Merged into identity projections
-    /// and access-control attribute priming; member/roster labels win on
-    /// conflict.
-    labels_by_identity: BTreeMap<String, BTreeMap<String, String>>,
+    /// `spawned_by` lineage, `via_tool`), keyed by the mob a spawn seated
+    /// its member in and the member's console identity. Merged into the
+    /// identity projections and access-control attribute priming of that
+    /// mob's row; member/roster labels win on conflict.
+    spawn_registry: crate::console_spawn::SpawnRegistry,
+    /// Where the spawn registry's settle has read each mob's member
+    /// lifecycle journal up to.
+    spawn_journal_read_to: BTreeMap<String, u64>,
+    /// The mobs whose entries cannot be told until the process restarts.
+    spawn_journal_untold: BTreeSet<String>,
+    /// The seats the settles have read, per mob and roster member.
+    spawn_seats: BTreeMap<(String, String), crate::console_spawn::SeenSeats>,
+    /// How many journal reads the spawn registry's settles made.
+    #[cfg(test)]
+    spawn_journal_reads: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +132,12 @@ impl ConsoleEventStore {
                 callback_pending_by_identity: BTreeSet::new(),
                 runtime_to_identity: BTreeMap::new(),
                 response_phase_by_identity: BTreeMap::new(),
-                labels_by_identity: BTreeMap::new(),
+                spawn_registry: crate::console_spawn::SpawnRegistry::default(),
+                spawn_journal_read_to: BTreeMap::new(),
+                spawn_journal_untold: BTreeSet::new(),
+                spawn_seats: BTreeMap::new(),
+                #[cfg(test)]
+                spawn_journal_reads: 0,
             })),
             event_tx,
             blob_store: Arc::new(OnceLock::new()),
@@ -259,52 +275,218 @@ impl ConsoleEventStore {
             .or_insert(identity);
     }
 
-    /// Register console identity metadata (spawn labels, lineage). Merges
-    /// per key; the latest registration wins so a respawn can update labels.
+    /// Register console identity metadata (spawn labels, lineage) for the
+    /// member a spawn seated as `member_id` in `mob_id`, under its console
+    /// identity. Merges per key; the latest registration wins so a respawn
+    /// can update labels. The entry is that mob's alone: a member of the
+    /// same name in another mob has its own.
     pub(crate) async fn register_identity_labels(
         &self,
-        identity: impl Into<String>,
+        mob_id: &str,
+        identity: &str,
+        member_id: &str,
         labels: BTreeMap<String, String>,
     ) {
-        let identity = identity.into();
-        if identity.trim().is_empty() || labels.is_empty() {
+        if mob_id.trim().is_empty() || identity.trim().is_empty() || labels.is_empty() {
             return;
         }
         let mut state = self.state.write().await;
         state
-            .labels_by_identity
-            .entry(identity)
-            .or_default()
-            .extend(labels);
+            .spawn_registry
+            .register(mob_id, identity, member_id, labels);
     }
 
-    /// Remove one registered console metadata key for an identity, e.g. a
-    /// stale `spawned_by` after a respawn whose spawner is unknown.
-    pub(crate) async fn unregister_identity_label(&self, identity: &str, key: &str) {
+    /// Remove one registered console metadata key of an identity in
+    /// `mob_id`, e.g. a stale `spawned_by` after a respawn whose spawner is
+    /// unknown.
+    pub(crate) async fn unregister_identity_label(&self, mob_id: &str, identity: &str, key: &str) {
         let mut state = self.state.write().await;
-        if let Some(labels) = state.labels_by_identity.get_mut(identity) {
-            labels.remove(key);
-            if labels.is_empty() {
-                state.labels_by_identity.remove(identity);
-            }
-        }
+        state.spawn_registry.unregister_label(mob_id, identity, key);
     }
 
-    /// Registered console metadata for one identity, if any.
-    pub(crate) async fn identity_labels(&self, identity: &str) -> Option<BTreeMap<String, String>> {
+    /// Registered console metadata of one identity in `mob_id`, if any
+    /// ([`crate::console_spawn::SpawnRegistry::labels_of_row`]).
+    pub(crate) async fn identity_labels(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Option<BTreeMap<String, String>> {
         self.state
             .read()
             .await
-            .labels_by_identity
-            .get(identity)
+            .spawn_registry
+            .labels_of_row(mob_id, identity)
             .cloned()
     }
 
-    /// Snapshot of all registered console identity metadata.
-    pub(crate) async fn identity_labels_snapshot(
+    /// The mobs the spawn registry holds an entry of.
+    pub(crate) async fn spawn_registry_mobs(&self) -> BTreeSet<String> {
+        self.state.read().await.spawn_registry.mobs()
+    }
+
+    /// Where the settle of the spawn registry stands with `mob_id`'s member
+    /// lifecycle journal: the cursor it has read up to, if it has read the
+    /// journal, and `Err` when the mob's entries cannot be told
+    /// ([`Self::mark_spawn_journal_untold`]).
+    pub(crate) async fn spawn_journal_cursor(
         &self,
-    ) -> BTreeMap<String, BTreeMap<String, String>> {
-        self.state.read().await.labels_by_identity.clone()
+        mob_id: &str,
+    ) -> Result<Option<u64>, crate::console_spawn::SpawnEntryNotTold> {
+        let state = self.state.read().await;
+        if state.spawn_journal_untold.contains(mob_id) {
+            return Err(crate::console_spawn::SpawnEntryNotTold);
+        }
+        Ok(state.spawn_journal_read_to.get(mob_id).copied())
+    }
+
+    /// Begin the settle of `mob_id` at `head`, the head of its journal: a
+    /// mob the settle never read is read from there on.
+    pub(crate) async fn begin_spawn_journal(&self, mob_id: &str, head: u64) {
+        self.state
+            .write()
+            .await
+            .spawn_journal_read_to
+            .entry(mob_id.to_string())
+            .or_insert(head);
+    }
+
+    /// Apply what one read of `mob_id`'s journal from `from` to `to` found:
+    /// `seats` holds, per roster member seated in that stretch, the
+    /// generation of its latest seat and whether any of its seats was made
+    /// by no rotation (the generation of the latest such seat), and `reset`
+    /// says the mob was reset in it. An entry registered for a member
+    /// seated anew by no rotation was an earlier member's and ends; a reset
+    /// ends every entry of the mob. Answers the console identities of the
+    /// entries ended, and `None`, with nothing applied, when another read
+    /// moved the cursor first: one stretch is applied once.
+    pub(crate) async fn apply_spawn_journal(
+        &self,
+        mob_id: &str,
+        from: u64,
+        to: u64,
+        seats: &BTreeMap<String, crate::console_spawn::SeenSeats>,
+        reset: bool,
+    ) -> Option<BTreeSet<String>> {
+        let mut state = self.state.write().await;
+        if state.spawn_journal_read_to.get(mob_id) != Some(&from) {
+            return None;
+        }
+        state.spawn_journal_read_to.insert(mob_id.to_string(), to);
+        let mut fresh = BTreeSet::new();
+        for (member_id, read) in seats {
+            let seen = state
+                .spawn_seats
+                .entry((mob_id.to_string(), member_id.clone()))
+                .or_default();
+            seen.seen = seen.seen.max(read.seen);
+            if read.fresh.is_some() {
+                seen.fresh = read.fresh;
+                fresh.insert(member_id.clone());
+            }
+        }
+        Some(state.spawn_registry.end_entries(mob_id, &fresh, reset))
+    }
+
+    /// Mark `mob_id`'s entries as not to be told until the process restarts:
+    /// a spawn registered an entry there that no read of the journal stood
+    /// behind, or the journal held a fact the reading does not know.
+    pub(crate) async fn mark_spawn_journal_untold(&self, mob_id: &str) {
+        self.state
+            .write()
+            .await
+            .spawn_journal_untold
+            .insert(mob_id.to_string());
+    }
+
+    /// Note that `member_id` holds `generation` in `mob_id`, and, with
+    /// `registered_identity`, that the entry of that console identity there
+    /// was registered for the member seated at that generation.
+    pub(crate) async fn note_spawn_seat(
+        &self,
+        mob_id: &str,
+        member_id: &str,
+        generation: u64,
+        registered_identity: Option<&str>,
+    ) {
+        let mut state = self.state.write().await;
+        let seen = state
+            .spawn_seats
+            .entry((mob_id.to_string(), member_id.to_string()))
+            .or_default();
+        seen.seen = seen.seen.max(generation);
+        if let Some(identity) = registered_identity {
+            state
+                .spawn_registry
+                .note_entry_seat(mob_id, identity, generation);
+        }
+    }
+
+    /// Whether the settles have read the seat of `member_id` in `mob_id` at
+    /// `generation`: a row above what they know of is of a seat not read
+    /// yet.
+    pub(crate) async fn spawn_seat_is_read(
+        &self,
+        mob_id: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> bool {
+        self.state
+            .read()
+            .await
+            .spawn_seats
+            .get(&(mob_id.to_string(), member_id.to_string()))
+            .is_some_and(|seen| generation <= seen.seen)
+    }
+
+    /// What the registry holds for one incarnation of a member: the roster
+    /// row of `identity` in `mob_id`, seated as `member_id` at `generation`,
+    /// whose seat the settles have read. An entry is the row's when the row
+    /// is at or after the seat the entry was registered for; with no entry
+    /// the row alone decides. A row seated before the entry's seat, or,
+    /// with no entry, before the name's latest seat that no rotation made,
+    /// is an earlier member's, whose entry is gone: what its spawn
+    /// registered cannot be told.
+    pub(crate) async fn spawn_labels_of_incarnation(
+        &self,
+        mob_id: &str,
+        identity: &str,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<Option<BTreeMap<String, String>>, crate::console_spawn::SpawnEntryNotTold> {
+        let state = self.state.read().await;
+        match state.spawn_registry.entry_of_row(mob_id, identity) {
+            Some(entry) => match entry.seat_generation {
+                Some(seat) if generation < seat => Err(crate::console_spawn::SpawnEntryNotTold),
+                _ => Ok(Some(entry.labels.clone())),
+            },
+            None => match state
+                .spawn_seats
+                .get(&(mob_id.to_string(), member_id.to_string()))
+                .and_then(|seen| seen.fresh)
+            {
+                Some(fresh) if generation < fresh => Err(crate::console_spawn::SpawnEntryNotTold),
+                _ => Ok(None),
+            },
+        }
+    }
+
+    /// Count `reads` journal reads of the spawn registry's settle.
+    #[cfg(test)]
+    pub(crate) async fn note_spawn_journal_reads(&self, reads: u64) {
+        let mut state = self.state.write().await;
+        state.spawn_journal_reads = state.spawn_journal_reads.saturating_add(reads);
+    }
+
+    /// How many journal reads the spawn registry's settles made.
+    #[cfg(test)]
+    pub(crate) async fn spawn_journal_reads(&self) -> u64 {
+        self.state.read().await.spawn_journal_reads
+    }
+
+    /// Snapshot of the spawn registry: all registered console identity
+    /// metadata, each entry under its mob and console identity.
+    pub(crate) async fn identity_labels_snapshot(&self) -> crate::console_spawn::SpawnRegistry {
+        self.state.read().await.spawn_registry.clone()
     }
 
     pub(crate) async fn replay_all(

@@ -175,9 +175,11 @@ Use `shell_job_status`, `shell_jobs`, and `shell_job_cancel` with that stable
 ID. The record survives restart, but the subprocess does not become resumable:
 a lost worker is terminally classified `worker_lost` and is not replayed.
 
-`monitor_start` is a separate high-trust, opt-in tool for scripts that emit
-framed notifications, checkpoints, progress, and completion. It is not enabled
-by the standard shell category alone.
+`monitor_start` is the shell family's tool for scripts that emit framed
+notifications, checkpoints, progress, and completion. The shell category turns
+it on with the rest of the family where the session has durable job and blob
+stores. Its entry in the built-in tools reference says what a monitor may do
+(it can start turns of its own session) and how to deny it.
 
 ## Register MCP servers
 

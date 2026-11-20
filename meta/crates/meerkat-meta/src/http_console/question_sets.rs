@@ -68,6 +68,11 @@ pub(super) fn list(
     access_view: Option<&AccessView>,
     response_id: Value,
 ) -> Value {
+    // A caller who cannot be told yet whose a set is asks again, whatever
+    // sets are open.
+    if gating_origins_not_read(access_view) {
+        return response_value(response_id, None, Some(gating_origins_not_read_error()));
+    }
     let sets = match runtime.ask_user_slot().decisions() {
         Some(decisions) => open_question_sets(&decisions),
         None => Ok(Vec::new()),
@@ -76,7 +81,7 @@ pub(super) fn list(
         Ok(sets) => response_value(
             response_id,
             Some(question_sets_result(sets.iter().filter(|set| {
-                gating_origin_visible(access_view, set.asker())
+                gating_origin_visible(access_view, set.asker(), Some(set.created_at_ms()))
             }))),
             None,
         ),
@@ -120,6 +125,8 @@ struct FencedPerson<'a, 'fence> {
     fence: Option<&'a AccessDecisionFence<'fence>>,
     access_view: Option<&'a AccessView>,
     asker: &'a str,
+    /// When the set was asked.
+    asked_at_ms: u64,
     ineligible: OnceLock<Ineligible>,
 }
 
@@ -129,7 +136,11 @@ impl ConsentEligibility for FencedPerson<'_, '_> {
             let _ = self.ineligible.set(Ineligible::Refused(refusal));
             return Err(ConsentIneligible);
         }
-        if !gating_origin_shown_when_applied(self.fence, self.access_view, Some(self.asker)) {
+        if !gating_origin_shown_when_applied(
+            self.fence,
+            self.access_view,
+            Some((self.asker, Some(self.asked_at_ms))),
+        ) {
             let _ = self.ineligible.set(Ineligible::Hidden);
             return Err(ConsentIneligible);
         }
@@ -153,8 +164,10 @@ pub(super) async fn decide(
     authenticated_principal: Option<&str>,
 ) -> Option<Value> {
     // The asking member is judged by the read's own rule: a set the read
-    // does not list to the caller is not one it decides by its id.
-    if !gating_origin_visible(access_view, set.asker()) {
+    // does not list to the caller is not one it decides by its id. (A
+    // caller who cannot be told yet whose a set is was answered by the arm
+    // before it came here.)
+    if !gating_origin_visible(access_view, set.asker(), Some(set.created_at_ms())) {
         return None;
     }
     let Some(decider) =
@@ -260,6 +273,7 @@ pub(super) async fn decide(
         fence: fence.as_ref(),
         access_view,
         asker: set.asker(),
+        asked_at_ms: set.created_at_ms(),
         ineligible: OnceLock::new(),
     };
     let decided = answer_question_set(&decisions, decide, &eligibility);

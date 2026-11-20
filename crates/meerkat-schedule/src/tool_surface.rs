@@ -6,7 +6,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use serde_json::Value;
 
-use crate::tools::run_schedule_tools_call;
+use crate::tools::{refuse_write_out_of_reach, run_schedule_tools_call};
 use crate::{ScheduleService, schedule_tools_list};
 
 /// Reusable tool dispatcher that exposes the built-in schedule tool surface.
@@ -39,6 +39,17 @@ impl AgentToolDispatcher for ScheduleToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    /// A create or update the turn of a session makes is put to the host's
+    /// write judge first, as [`crate::ScheduleToolDispatcher`] puts it.
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let is_schedule_tool = self.tool_defs.iter().any(|tool| tool.name == call.name);
         if !is_schedule_tool {
             return Err(ToolError::NotFound {
@@ -52,6 +63,7 @@ impl AgentToolDispatcher for ScheduleToolSurface {
                 format!("invalid schedule tool-call arguments JSON: {error}"),
             )
         })?;
+        refuse_write_out_of_reach(&self.service, call.name, &args, context).await?;
         let result = run_schedule_tools_call(&self.service, call.name, &args)
             .await
             .map_err(|failure| {

@@ -77,6 +77,11 @@ mod identity_tools_tests;
 mod reserved_identity_tests;
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[path = "mob_handle_runtime_created_mob_owner_tests.rs"]
+mod created_mob_owner_tests;
+
+#[cfg(test)]
 pub(crate) fn acquisition_observation_probe(
     reject: bool,
     reads: Arc<std::sync::atomic::AtomicUsize>,
@@ -1484,7 +1489,7 @@ fn no_op_pre_build_hook() -> PreBuildHook {
 
 /// `inner` behind one more layer that runs `hook` on every member build and
 /// forwards everything else.
-fn with_pre_build_hook(
+pub(crate) fn with_pre_build_hook(
     inner: Arc<dyn MobSessionService>,
     hook: PreBuildHook,
 ) -> Arc<dyn MobSessionService> {
@@ -2883,6 +2888,29 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                     crate::member_comms_id::reserved_authority_label_refusal(key),
                 ));
             }
+            // Nor does an agent's spawn carry a label key that differs only
+            // by letter case from a label only Meta writes, or one Core
+            // reserves for runtime facts (`role`, `mob_id`, `meerkat_id`,
+            // the `meerkat` namespace): refused as console member creation
+            // refuses it.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && let Some(refusal) =
+                    crate::console_spawn::caller_reserved_label_refusal_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name, refusal,
+                ));
+            }
+            // Nor does an agent's spawn set a key of a member's row that is
+            // the Console's own: the row says those itself.
+            if crate::console_spawn::is_console_spawn_tool(call.name)
+                && let Some(key) = crate::console_spawn::console_row_label_in_spawn_args(&args)
+            {
+                return Err(meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    crate::console_spawn::console_row_label_refusal(key),
+                ));
+            }
             let identity_runtime = self
                 .identity_runtime
                 .read()
@@ -3411,7 +3439,32 @@ impl AutoWireParentMobToolDispatcher {
             }
         }
         for seed in &seeds {
+            // An entry is of the one member its spawn seated. Before this
+            // spawn's is registered the mob's journal is read to its head,
+            // which ends what an earlier member of the name left there; the
+            // entry then notes the seat it was registered for.
+            let mob_id = seed
+                .mob_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|mob_id| !mob_id.is_empty());
+            let handle = match mob_id {
+                Some(mob_id) => {
+                    let handle = self
+                        .implicit_delegate_retirement_overrides
+                        .mob_handle(mob_id)
+                        .await;
+                    sink.settle_before_registering(mob_id, handle.as_ref())
+                        .await;
+                    handle
+                }
+                None => None,
+            };
             sink.project_spawned_member(seed).await;
+            if let Some(handle) = handle.as_ref() {
+                sink.note_registered_seat(handle, seed.identity.trim(), seed.member_id.trim())
+                    .await;
+            }
         }
     }
 
@@ -3692,9 +3745,29 @@ fn idle_retire_patched_tool_def(
         Arc::new(delegate_tool_def_with_idle_retire_secs(tool))
     } else if tool.name == "mob_spawn_member" {
         Arc::new(mob_spawn_tool_def_with_idle_retire_secs(tool))
+    } else if tool.name == "mob_create" {
+        Arc::new(mob_create_tool_def_with_schedules_note(tool))
     } else {
         Arc::clone(tool)
     }
+}
+
+/// What `mob_create` says of schedules on these mob tools: a create here ends
+/// the schedules that name the new mob's id
+/// ([`crate::mob_schedules_release`]). The one that writes such a schedule is
+/// an agent, and an agent reads its tools, not a release's notes.
+const MOB_CREATE_SCHEDULES_NOTE: &str = "A schedule that names a mob id is ended when a mob is created under that id: create the mob \
+     first, then write its schedules.";
+
+fn mob_create_tool_def_with_schedules_note(
+    tool: &meerkat_core::types::ToolDef,
+) -> meerkat_core::types::ToolDef {
+    let mut patched = tool.clone();
+    if !patched.description.contains(MOB_CREATE_SCHEDULES_NOTE) {
+        patched.description.push_str("\n\nSCHEDULES:\n");
+        patched.description.push_str(MOB_CREATE_SCHEDULES_NOTE);
+    }
+    patched
 }
 
 fn delegate_tool_def_with_idle_retire_secs(
@@ -4234,6 +4307,9 @@ fn sanitize_create_session_request_llm_override(req: &mut CreateSessionRequest) 
     ));
 }
 
+/// The shell tools of a session without a durable job store: the family
+/// without `monitor_start`, which needs one (as `shell` needs one for
+/// `background`). A member on a gateway with persistent state lists all five.
 #[cfg(test)]
 const NATIVE_SHELL_TOOL_NAMES: [&str; 4] = [
     "shell",
@@ -7747,6 +7823,12 @@ pub struct MobBootstrapSpec {
     /// `workgraph_attention_reassign` runs the same duplicate-binding guard
     /// (and holds the same gate) as the RPC surfaces.
     pub(crate) workgraph_admission_slots: Vec<crate::workgraph_admission::WorkGraphAdmissionSlot>,
+    /// The WorkGraph tools of this runtime's members: the base
+    /// session-service wrapper puts the tools each member build carries
+    /// behind the runtime's admission
+    /// ([`crate::workgraph_wiring::MemberWorkGraphTools`]). Its admission
+    /// slot is filled with [`Self::workgraph_admission_slots`].
+    pub(crate) member_workgraph_tools: crate::workgraph_wiring::MemberWorkGraphTools,
     /// Empties this spec's builder tool slots once nothing holds the
     /// composition (see [`CompositionRelease`]).
     pub(crate) composition_release: CompositionRelease,
@@ -7811,6 +7893,10 @@ pub struct MobBootstrapSpec {
     /// mobs exist, as a gateway composition adopts its own
     /// ([`crate::gateway_composition::adopt_schedule_mob_targets`]).
     pub(crate) schedule_target_registry: Option<crate::schedule_wiring::ScheduleMobTargetRegistry>,
+    /// The late-bound release of the schedules the launch keeps under a
+    /// mob's id (`crate::mob_schedules_release`); see
+    /// [`Self::with_mob_schedules_declared`].
+    pub(crate) mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
     /// Late-bound personal accounts the base session-service wrapper
     /// classifies each member build's personal MCP servers with
     /// (`crate::personal_accounts`); see [`Self::with_personal_mcp_accounts`].
@@ -7906,15 +7992,23 @@ impl MobBootstrapSpec {
         let personal_accounts_slot =
             crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
+        // The WorkGraph tools a member build carries go behind this
+        // runtime's admission (`MemberWorkGraphTools`): the runtime binds
+        // the mob's scope before it builds a member and fills the admission
+        // once it has its mob handle.
+        let member_workgraph_tools = crate::workgraph_wiring::MemberWorkGraphTools::default();
         // The `ask_user` tool is mounted last, over the tools every other
         // hook left on the build.
         let ask_user_slot = crate::ask_user::AskUserSlot::default();
-        let session_service = Arc::new(PreBuildMobSessionService {
-            inner: session_service,
-            hook: ask_user_slot.after_hook(
+        let base_hook = ask_user_slot.after_hook(
+            member_workgraph_tools.after_hook(
                 personal_accounts_slot
                     .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
             ),
+        );
+        let session_service = Arc::new(PreBuildMobSessionService {
+            inner: session_service,
+            hook: base_hook,
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7984,6 +8078,7 @@ impl MobBootstrapSpec {
             #[cfg(feature = "workgraph-pursuit-test-vehicle")]
             workgraph_pursuit: Default::default(),
             workgraph_admission_slots: Vec::new(),
+            member_workgraph_tools,
             composition_release: CompositionRelease::default(),
             workgraph_admission_sidecar: None,
             workgraph_realm_migration: crate::workgraph_realm::WorkGraphRealmMigrationMode::default(
@@ -7999,6 +8094,7 @@ impl MobBootstrapSpec {
             private_owners,
             ask_user_slot,
             schedule_target_registry: None,
+            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -8025,6 +8121,18 @@ impl MobBootstrapSpec {
         &self,
     ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
         self.side_chat_memory_slot.clone()
+    }
+
+    /// Say that this launch has schedules, before its runtime is built. A
+    /// mob the launch's mob set creates beside the launch mob must find
+    /// none of the schedules an earlier mob of its id left, so from here on
+    /// such a create is refused until the composition that owns the
+    /// schedule service has handed the release of a mob's schedules to the
+    /// runtime. A launch that says nothing has no schedules to release.
+    #[must_use]
+    pub fn with_mob_schedules_declared(self) -> Self {
+        self.mob_schedules.declare();
+        self
     }
 
     /// Classify every member build of this spec's personal MCP servers with
@@ -9186,6 +9294,13 @@ impl MobBootstrapSpec {
             .comms(caps.comms)
             .memory(caps.memory)
             .mcp_apps(caps.mcp_apps);
+        // The runtime declares the directory its stores live in, and the
+        // skill files its definition names, to the members' file tools.
+        factory = crate::gateway_composition::declare_host_paths(
+            factory,
+            [store_path.clone()],
+            crate::gateway_composition::definition_skill_files(&definition),
+        );
         if let Some(provider) = mcp_call_context_provider {
             factory = factory.mcp_call_context_provider(provider);
         }
@@ -9484,6 +9599,7 @@ impl MobBootstrapSpec {
             None,
             None,
             None,
+            Vec::new(),
         )
         .await
     }
@@ -9541,6 +9657,7 @@ impl MobBootstrapSpec {
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
         personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
+        host_named_paths: Vec<PathBuf>,
     ) -> Result<Self, StorageResolutionError> {
         // The startup checks and the composition record need to know whether
         // the mob store outlives the process.
@@ -9718,6 +9835,18 @@ impl MobBootstrapSpec {
         if let Some(root) = session_identity_config_root {
             factory = factory.user_config_root(root);
         }
+        // The runtime declares the directory its stores live in, the files
+        // its host names (`host_named_paths`: the access file a builder was
+        // given) and the skill files its definition names to the members'
+        // file tools.
+        factory =
+            crate::gateway_composition::declare_host_paths(
+                factory,
+                [store_path.clone()],
+                host_named_paths.into_iter().chain(
+                    crate::gateway_composition::definition_skill_files(&definition),
+                ),
+            );
         if let Some(provider) = mcp_call_context_provider {
             factory = factory.mcp_call_context_provider(provider);
         }
@@ -9789,9 +9918,16 @@ impl MobBootstrapSpec {
         // firing host — authored schedules become durable rows the embedder's
         // own driver (or a gateway pointed at the same store) fires.
         let mut schedule_target_registry = None;
+        let mut mob_schedules_release = None;
         let schedule_slot = schedule_store.map(|store| {
             let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            // This launch owns its schedule service, so it hands the
+            // release of a mob's schedules to its own runtime.
+            mob_schedules_release = Some(crate::schedule_wiring::MobAgentSchedules::new(
+                attached.service.clone(),
+                attached.mob_target_registry.clone(),
+            ));
             schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
@@ -10002,6 +10138,9 @@ impl MobBootstrapSpec {
             slots.push(slot);
         }
         spec.schedule_target_registry = schedule_target_registry;
+        if let Some(release) = mob_schedules_release {
+            spec.mob_schedules.bind(Arc::new(release));
+        }
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -10069,6 +10208,7 @@ impl MobBootstrapSpec {
             None,
             None,
             None,
+            Vec::new(),
         )
     }
 
@@ -10100,6 +10240,7 @@ impl MobBootstrapSpec {
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
         personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
+        host_named_paths: Vec<PathBuf>,
     ) -> Result<Self, StorageResolutionError> {
         caps.image_generation |= mob_definition_may_use_image_generation(&definition);
         let config = crate::compaction_policy::with_meta_compaction_defaults(
@@ -10190,6 +10331,18 @@ impl MobBootstrapSpec {
         if let Some(root) = session_identity_config_root {
             factory = factory.user_config_root(root);
         }
+        // The runtime declares the directory its stores live in, the files
+        // its host names (`host_named_paths`: the access file a builder was
+        // given) and the skill files its definition names to the members'
+        // file tools.
+        factory =
+            crate::gateway_composition::declare_host_paths(
+                factory,
+                [store_path.clone()],
+                host_named_paths.into_iter().chain(
+                    crate::gateway_composition::definition_skill_files(&definition),
+                ),
+            );
         if let Some(provider) = mcp_call_context_provider {
             factory = factory.mcp_call_context_provider(provider);
         }
@@ -10247,9 +10400,16 @@ impl MobBootstrapSpec {
         // in a caller-supplied remote store. Library mode wires no firing
         // host (see `UnifiedRuntimeBuilder::schedule_store`).
         let mut schedule_target_registry = None;
+        let mut mob_schedules_release = None;
         let schedule_slot = schedule_store.map(|store| {
             let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            // This launch owns its schedule service, so it hands the
+            // release of a mob's schedules to its own runtime.
+            mob_schedules_release = Some(crate::schedule_wiring::MobAgentSchedules::new(
+                attached.service.clone(),
+                attached.mob_target_registry.clone(),
+            ));
             schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
@@ -10445,6 +10605,9 @@ impl MobBootstrapSpec {
             slots.push(slot);
         }
         spec.schedule_target_registry = schedule_target_registry;
+        if let Some(release) = mob_schedules_release {
+            spec.mob_schedules.bind(Arc::new(release));
+        }
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -11043,6 +11206,8 @@ pub struct MobRuntime {
     console_schedules: crate::console_schedules::ConsoleSchedules,
     /// See [`MobBootstrapSpec::with_personal_mcp_accounts`].
     personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot,
+    /// See [`MobBootstrapSpec::with_mob_schedules_declared`].
+    mob_schedules: crate::mob_schedules_release::MobSchedulesSlot,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -11521,6 +11686,11 @@ impl MobRuntime {
                 )
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
             spec.private_owners.bind_child_mobs(state);
+            // Before a mob is created under an id, the admission asks for
+            // the release of the schedules the launch keeps under that id
+            // ([`crate::mob_schedules_release`]).
+            spec.private_owners
+                .bind_create_release(Arc::new(spec.mob_schedules.clone()));
         }
         auto_mark_declared_resume_overrides(&mut spec.definition);
         let ephemeral_dir = spec._ephemeral_dir.clone();
@@ -11796,6 +11966,11 @@ impl MobRuntime {
         // apply_runtime_turn for every mob-executor turn iff the builder
         // carries the service.
         builder = builder.with_workgraph_service(spec.workgraph_service.clone());
+        // The same service decides which member builds get their WorkGraph
+        // tools behind this runtime's admission: bound here, before the mob
+        // is built, so no member is built without it.
+        spec.member_workgraph_tools
+            .bind(spec.workgraph_service.as_ref(), &mob_id);
 
         // Durable workers (members spawned with a durable identity: the
         // members of a `durable = true` profile, and every identity-first
@@ -11898,6 +12073,11 @@ impl MobRuntime {
             }
             handle
         };
+        // A side chat's `memory` tool is gated as its source agent's own is:
+        // by the definition this mob runs (a resumed mob runs its stored
+        // one), which is the handle's.
+        spec.side_chat_memory_slot
+            .bind_definition(handle.definition());
         #[cfg(feature = "workgraph-pursuit-test-vehicle")]
         crate::workgraph_pursuit_test_vehicle::attach(&spec.workgraph_pursuit, &handle)?;
         if let Some(state) = agent_mob_mcp_state.as_ref() {
@@ -11980,7 +12160,14 @@ impl MobRuntime {
             Some(Arc::clone(&session_service)),
             spec.workgraph_admission_sidecar,
         ));
-        for slot in &spec.workgraph_admission_slots {
+        // The members' own WorkGraph tools read the same admission through
+        // their slot, filled with the builders' slots.
+        let member_tools_admission = spec.member_workgraph_tools.admission_slot();
+        for slot in spec
+            .workgraph_admission_slots
+            .iter()
+            .chain(std::iter::once(&member_tools_admission))
+        {
             spec.composition_release.register_slot(slot);
             *slot
                 .write()
@@ -12002,6 +12189,51 @@ impl MobRuntime {
             )),
             None => None,
         };
+        // A stored attention binding whose target is a member private to a
+        // person is held paused from the start, before any member takes a
+        // turn (`WorkGraphAdmission::hold_bindings_onto_private_members`).
+        // Only the launch that speaks for the composition writes; a
+        // candidate launch holds every member's run starts anyway. What is
+        // held is health-visible beside the storage slots, by binding id:
+        // the summary is read by more people than a private member's owner.
+        let held_private_member_bindings = match spec.workgraph_service.as_ref() {
+            Some(service)
+                if spec.composition_authority.speaks_for_composition()
+                    && service.store().kind() != meerkat::WorkGraphStoreKind::Disabled =>
+            {
+                match workgraph_admission
+                    .hold_bindings_onto_private_members(service)
+                    .await
+                {
+                    Ok(held) => held,
+                    Err(error) => {
+                        tracing::error!(
+                            error = ?error,
+                            "the attention bindings could not be read at the start; a binding \
+                             onto a member private to a person may still be active"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        let held_private_member_bindings_slot =
+            (!held_private_member_bindings.is_empty()).then(|| {
+                crate::storage_health::StorageSlotSummary::degraded(
+                    "workgraph_attention",
+                    format!(
+                        "{} attention binding(s) name a member private to a person and are held \
+                         paused: {}; reassign each to another member or close its goal",
+                        held_private_member_bindings.len(),
+                        held_private_member_bindings
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                )
+            });
         // A member created under one of the console's runtime-plane
         // identities before every creation path refused them still comes up.
         crate::member_comms_id::warn_reserved_identity_members(&handle).await;
@@ -12009,6 +12241,14 @@ impl MobRuntime {
         // their durable records in the background from the start, and read
         // again until it is read; no request waits for it.
         spec.private_owners.seed_in_background(&handle);
+        // The question sets a member private to a person asked end with it,
+        // in every launch that speaks for its composition, whatever else it
+        // composes. A candidate launch follows no end: it changes nothing.
+        if spec.composition_authority.speaks_for_composition() {
+            spec.ask_user_slot
+                .follow_private_member_ends(&spec.private_owners)
+                .await;
+        }
         let runtime = Self {
             handle,
             runtime_delivery,
@@ -12024,13 +12264,14 @@ impl MobRuntime {
             workgraph_service: spec.workgraph_service,
             workgraph_admission,
             workgraph_realm_migration,
-            resolved_storage: match (spec.resolved_storage, candidate_composition_slot) {
-                (Some(mut summary), Some(slot)) => {
-                    summary.slots.push(slot);
-                    Some(summary)
-                }
-                (summary, _) => summary,
-            },
+            resolved_storage: spec.resolved_storage.map(|mut summary| {
+                summary.slots.extend(
+                    candidate_composition_slot
+                        .into_iter()
+                        .chain(held_private_member_bindings_slot),
+                );
+                summary
+            }),
             durable_runtime_store: spec.durable_runtime_store,
             committed_boundary_recoverer: spec.committed_boundary_recoverer,
             controller_pin_source: spec.controller_pin_source,
@@ -12051,6 +12292,7 @@ impl MobRuntime {
             ask_user_slot: spec.ask_user_slot,
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: spec.personal_accounts_slot,
+            mob_schedules: spec.mob_schedules,
         };
         // Agent schedule tools attached over an injected schedule store
         // judge their targets with this runtime's mobs and with who its
@@ -12121,6 +12363,7 @@ impl MobRuntime {
             ask_user_slot: crate::ask_user::AskUserSlot::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
+            mob_schedules: crate::mob_schedules_release::MobSchedulesSlot::default(),
         }
     }
 
@@ -12188,6 +12431,14 @@ impl MobRuntime {
     /// [`crate::console_schedules::ConsoleSchedules`]).
     pub(crate) fn console_schedules(&self) -> &crate::console_schedules::ConsoleSchedules {
         &self.console_schedules
+    }
+
+    /// The launch's late-bound release of the schedules it keeps under a
+    /// mob's id (see [`crate::mob_schedules_release`]): the composition
+    /// that owns the schedule service binds it, and the create admission
+    /// asks it before a mob is created under an id.
+    pub(crate) fn mob_schedules(&self) -> &crate::mob_schedules_release::MobSchedulesSlot {
+        &self.mob_schedules
     }
 
     /// The typed refusal of `method`'s attach of `session_id` as a member's
@@ -12740,15 +12991,80 @@ impl MobRuntime {
         }
     }
 
-    /// Console identity metadata registered by agent-tool spawns, keyed by
-    /// console identity. Empty when no console sink is installed.
-    pub(crate) async fn console_identity_labels(
-        &self,
-    ) -> BTreeMap<String, BTreeMap<String, String>> {
+    /// Console identity metadata registered by agent-tool spawns: the spawn
+    /// registry, each entry under its mob and console identity, settled
+    /// against the member lifecycle journal of each mob it holds an entry of
+    /// ([`Self::settled_spawn_registry`]). Empty when no console sink is
+    /// installed.
+    pub(crate) async fn console_identity_labels(&self) -> crate::console_spawn::SpawnRegistry {
         match self.console_spawn_sink() {
-            Some(sink) => sink.identity_labels_snapshot().await,
-            None => BTreeMap::new(),
+            Some(sink) => self.settled_spawn_registry(&sink).await,
+            None => crate::console_spawn::SpawnRegistry::default(),
         }
+    }
+
+    /// The registry of `sink` as a reader takes it: each mob it holds an
+    /// entry of is first settled against that mob's member lifecycle
+    /// journal ([`ConsoleSpawnSink::settle_with_journal`]), so an entry
+    /// registered for a member whose name was seated anew since is gone
+    /// before the reader meets the new member's row. A mob whose journal
+    /// could not be read is noted in the copy: its entries cannot be told
+    /// for this request. A mob this runtime finds no handle of is a mob it
+    /// reads no roster row of, and nothing takes its entries.
+    pub(crate) async fn settled_spawn_registry(
+        &self,
+        sink: &ConsoleSpawnSink,
+    ) -> crate::console_spawn::SpawnRegistry {
+        let mut unread = Vec::new();
+        let mobs = sink.spawn_registry_mobs().await;
+        if !mobs.is_empty() {
+            let own = self.handle();
+            let managed = match self.agent_mob_mcp_state() {
+                Some(state)
+                    if mobs
+                        .iter()
+                        .any(|mob_id| mob_id.as_str() != own.mob_id().as_str()) =>
+                {
+                    Box::pin(state.mob_handles_snapshot())
+                        .await
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            for mob_id in mobs {
+                let handle = if mob_id == own.mob_id().as_str() {
+                    Some(own.clone())
+                } else {
+                    managed
+                        .iter()
+                        .find(|(managed_id, _)| managed_id.as_str() == mob_id)
+                        .map(|(_, handle)| handle.clone())
+                };
+                if let Some(handle) = handle
+                    && sink.settle_with_journal(&handle).await.unread
+                {
+                    unread.push(mob_id);
+                }
+            }
+        }
+        let mut registry = sink.identity_labels_snapshot().await;
+        for mob_id in unread {
+            registry.note_unread_mob(&mob_id);
+        }
+        registry
+    }
+
+    /// The console identities of `earlier`, a copy of the registry a request
+    /// took before it read the roster, whose entry cannot be told now that
+    /// the roster is read: the registry is settled once more, and a name
+    /// seated anew by no rotation between the two has no entry any more.
+    /// What the request read of such a member may be either member's.
+    pub(crate) async fn spawn_entries_not_told(
+        &self,
+        earlier: &crate::console_spawn::SpawnRegistry,
+    ) -> BTreeSet<String> {
+        let now = self.console_identity_labels().await;
+        earlier.identities_not_told(&now)
     }
 
     pub(crate) fn implicit_delegate_retirement_overrides(
@@ -15229,6 +15545,167 @@ mod tests {
         assert!(
             matches!(passed, meerkat_core::ToolError::NotFound { .. }),
             "a spawn without a reserved label reaches the mob tools: {passed:?}"
+        );
+    }
+
+    /// The Console writes some keys of a member's row from its own facts
+    /// (the member's role, the mob it sits in, the host of an implicit
+    /// delegate, its group, whether it can be addressed) and reads the
+    /// host's marks from others (`console_watched`, `console_alert_level`,
+    /// `console_degraded`, `console_degraded_reason`, `singleton`).
+    /// An agent's spawn naming such a key among its labels is refused typed,
+    /// as invalid arguments naming the label, before the mob tools see it:
+    /// in the call's own labels or an entry's, on each spawn tool the
+    /// wrapper serves. A spawn with a display name only reaches them.
+    #[tokio::test]
+    async fn an_agent_spawn_naming_a_key_the_row_writes_itself_is_refused_typed() {
+        use meerkat_core::AgentToolDispatcher as _;
+        let dispatcher = wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default());
+        let refused_spawns = [
+            (
+                "mob_spawn_member",
+                "role",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-1",
+                    "labels": { "role": "delegate" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "source_mob_id",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [{
+                        "profile": "worker",
+                        "member_id": "worker-2",
+                        "labels": { "source_mob_id": "another-mob" },
+                    }],
+                }),
+            ),
+            (
+                "delegate",
+                "delegate_host_identity",
+                serde_json::json!({
+                    "member_id": "worker-3",
+                    "task": "look",
+                    "labels": { "delegate_host_identity": "another-host" },
+                }),
+            ),
+            (
+                "fork_off",
+                "addressable",
+                serde_json::json!({
+                    "member_id": "worker-4",
+                    "members": [{ "labels": { "addressable": "false" } }],
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "group",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-6",
+                    "labels": { "group": "workers" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "console_watched",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-7",
+                    "labels": { "console_watched": "true" },
+                }),
+            ),
+            (
+                "delegate",
+                "console_alert_level",
+                serde_json::json!({
+                    "member_id": "worker-8",
+                    "task": "look",
+                    "labels": { "console_alert_level": "critical" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "console_degraded",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [{
+                        "profile": "worker",
+                        "member_id": "worker-9",
+                        "labels": { "console_degraded": "true" },
+                    }],
+                }),
+            ),
+            (
+                "fork_off",
+                "console_degraded_reason",
+                serde_json::json!({
+                    "member_id": "worker-10",
+                    "labels": { "console_degraded_reason": "a reason" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "singleton",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-11",
+                    "labels": { "singleton": "true" },
+                }),
+            ),
+        ];
+        for (tool, label, args) in refused_spawns {
+            let args =
+                serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+            let refused = dispatcher
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "spawn-row-key",
+                        name: tool,
+                        args: &args,
+                    },
+                    &meerkat_core::ToolDispatchContext::default(),
+                )
+                .await
+                .expect_err("a key the row writes itself is refused");
+            assert!(
+                matches!(&refused, meerkat_core::ToolError::InvalidArguments { name, reason }
+                    if name == tool && reason.contains(label)),
+                "{tool} meets the refusal typed, naming {label}: {refused:?}"
+            );
+        }
+
+        let display = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "mob_id": "child",
+                "profile": "worker",
+                "member_id": "worker-5",
+                "labels": { "display_name": "Worker 5" },
+            })
+            .to_string(),
+        )
+        .expect("raw args");
+        let passed = dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "spawn-display",
+                    name: "mob_spawn_member",
+                    args: &display,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+            )
+            .await
+            .expect_err("the empty mob tools know no tool");
+        assert!(
+            matches!(passed, meerkat_core::ToolError::NotFound { .. }),
+            "a spawn with a display name reaches the mob tools: {passed:?}"
         );
     }
 
@@ -17864,7 +18341,7 @@ shell = true
 
         assert_eq!(
             visible, expected,
-            "native shell must add exactly four shell tools without filtering MCP, mob, memory, schedule, or image surfaces"
+            "native shell without a durable job store must add exactly the four standard shell tools, no monitor_start, without filtering MCP, mob, memory, schedule, or image surfaces"
         );
         for broad_builtin in ["task_list", "task_create", "apply_patch", "browse_skills"] {
             assert!(!visible.contains(broad_builtin), "unexpected broad builtin");
@@ -23576,6 +24053,7 @@ comms = true
                 None,
                 None,
                 None,
+                Vec::new(),
             )
             .await
             .expect("persistent constructor")
@@ -23599,6 +24077,7 @@ comms = true
                 None,
                 None,
                 None,
+                Vec::new(),
             )
             .expect("bootstrap spec")
         }
@@ -25364,7 +25843,7 @@ image_generation = true
                     "profile": "person-worker",
                     "member_id": "worker-3",
                     "initial_message": "Find the person",
-                    "labels": { "group": "workers" }
+                    "labels": { "team": "workers" }
                 }),
             )
             .await;
@@ -25376,10 +25855,10 @@ image_generation = true
             );
 
             let labels = store
-                .identity_labels("worker-3")
+                .identity_labels("ops", "worker-3")
                 .await
                 .expect("spawn registers console identity labels");
-            assert_eq!(labels.get("group").map(String::as_str), Some("workers"));
+            assert_eq!(labels.get("team").map(String::as_str), Some("workers"));
             assert_eq!(
                 labels.get("spawned_by").map(String::as_str),
                 Some("ops-lead")
@@ -25532,7 +26011,7 @@ image_generation = true
                 kickoff_events(&store).await.is_empty(),
                 "failed spawns must not seed console chats"
             );
-            assert!(store.identity_labels("worker-3").await.is_none());
+            assert!(store.identity_labels("ops", "worker-3").await.is_none());
         }
     }
 

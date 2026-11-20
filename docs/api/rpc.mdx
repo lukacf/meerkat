@@ -41,6 +41,13 @@ The RPC surface is fully runtime-backed:
     `rkat-rpc --tcp` is a JSON-RPC host transport. It is not the signed
     Meerkat peer/comms channel used by remote agents or external mob members;
     use `rkat run --comms-listen-tcp ...` for that.
+
+    The listener speaks JSON lines only. A connection whose first line is an
+    HTTP request line (a method, a target and an HTTP version) is closed on
+    that line: nothing the request carries is read or run, and the server
+    logs a warning with the peer's address. Only the first line is read this
+    way; a later line that is not JSON is answered with a parse error, as
+    before.
   </Step>
   <Step title="Send the handshake">
     ```json
@@ -126,7 +133,7 @@ of this full catalog.
 | `jobs/health` | Jobs | — | `JobsHealthResult` | Read realm-scoped detached-job health, owed outbox deliveries, and undrained runtime deliveries |
 | `jobs/subscribe` | Jobs | `JobsSubscribeParams` | `JobsSubscribeResult` | Add a durable record, notification, or event delivery subscription |
 | `jobs/unsubscribe` | Jobs | `JobsUnsubscribeParams` | `JobsUnsubscribeResult` | Remove a durable delivery subscription |
-| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a high-trust durable script monitor with explicit restart and output contracts |
+| `monitors/start` | Jobs | `MonitorsStartParams` | `MonitorsStartResult` | Start a durable script monitor with explicit restart and output contracts |
 | `meta/jobs/heartbeat` | Host jobs | `MetaJobHeartbeatParams` | `MetaJobMutationResult` | Renew the exact committed attempt lease |
 | `meta/jobs/progress` | Host jobs | `MetaJobProgressParams` | `MetaJobMutationResult` | Commit progress under exact attempt/fence authority |
 | `meta/jobs/checkpoint` | Host jobs | `MetaJobCheckpointParams` | `MetaJobMutationResult` | Commit a restart checkpoint under exact attempt/fence authority |
@@ -399,6 +406,15 @@ no run in flight, including repeated staging churn. `session_run_start` covers
 a current staged run that is overdue to begin. Neither claims to measure a run
 that began and then stopped producing progress.
 
+The host also measures `session_run_settlement`: `degraded` while a registered
+session holds a run whose terminal commit landed and whose completion has
+stayed unsettled for a minute, whether or not its runtime loop is still alive.
+Such a session accepts input and runs none of it. The host logs an error that
+names the session, the run and its inputs once a minute for as long as it
+lasts, and a mob logs an error that names the member when the member's status
+is read. A session that is busy at the moment of a health read is not a failed
+read: the check then keeps its last complete reading.
+
 ## Protocol
 
 Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message types:
@@ -651,9 +667,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.16"
+      "version": "0.9.17"
     },
-    "contract_version": "0.9.16",
+    "contract_version": "0.9.17",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -983,7 +999,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.16",
+    "agent_version": "0.9.17",
     "model_name": "claude-opus-5"
   }
 }
@@ -2543,7 +2559,7 @@ cancellation request, `jobs/retry` asks the generated job machine to schedule a
 retry at `retry_due_at_ms`, and subscribe/unsubscribe manage durable
 record/notification/event delivery.
 
-`monitors/start` is the explicit high-trust script-monitor entry point. It
+`monitors/start` is the host's script-monitor entry point. It
 requires `session_id`, a caller-stable `submission_key`, `command`, positive
 `timeout_secs`, `restart_class`, and `delivery`. The default output protocol is
 `framed_jsonl`; `lines` is also supported. Agent-authored monitors cannot claim
@@ -4151,7 +4167,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 16},
+    "contract_version": {"major": 0, "minor": 9, "patch": 17},
     "providers": [
       {
         "provider": "anthropic",
@@ -4215,7 +4231,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 16},
+    "contract_version": {"major": 0, "minor": 9, "patch": 17},
     "capabilities": [
       {
         "id": "sessions",

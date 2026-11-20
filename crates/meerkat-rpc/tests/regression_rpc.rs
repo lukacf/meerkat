@@ -92,6 +92,36 @@ fn spawn_test_server() -> (
     BufReader<tokio::io::DuplexStream>,
     tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
 ) {
+    spawn_test_server_over(None)
+}
+
+/// The test server; with `document`, its configuration is that document
+/// file (the test's own, so the test can rewrite it), and otherwise a store
+/// with no document.
+fn spawn_test_server_over(
+    document: Option<&std::path::Path>,
+) -> (
+    tokio::io::DuplexStream,
+    BufReader<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+) {
+    let (writer, reader, handle, _store) = spawn_test_server_of(document, true);
+    (writer, reader, handle)
+}
+
+/// [`spawn_test_server_over`], with the server's config store. With
+/// `config_runtime` false the server has no config runtime, as a host
+/// that composes the server over a store of its own may: its config
+/// writes go to the store as they are sent.
+fn spawn_test_server_of(
+    document: Option<&std::path::Path>,
+    config_runtime: bool,
+) -> (
+    tokio::io::DuplexStream,
+    BufReader<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+    Arc<dyn meerkat_core::ConfigStore>,
+) {
     let temp = tempfile::tempdir().unwrap();
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
@@ -110,16 +140,32 @@ fn spawn_test_server() -> (
         meerkat_rpc::router::NotificationSink::noop(),
     )
     .expect("compose the RPC session runtime");
-    let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
-        Config::default(),
-        meerkat_models::canonical(),
-    ));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> = match document {
+        Some(path) => Arc::new(meerkat_core::FileConfigStore::new(
+            path.to_path_buf(),
+            meerkat_models::canonical(),
+        )),
+        None => Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        )),
+    };
     runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
-    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
-        Arc::clone(&config_store),
-        temp.path().join("config_state.json"),
-    )));
+    // A document's generation sidecar lies beside it, as a host's does: a
+    // write takes the fence of each file it writes, and two unrelated
+    // directories share no fence set.
+    let state_path = document.map_or_else(
+        || temp.path().join("config_state.json"),
+        |path| path.with_file_name("config_state.json"),
+    );
+    if config_runtime {
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            state_path,
+        )));
+    }
     let runtime = Arc::new(runtime);
+    let served_store = Arc::clone(&config_store);
 
     let (server_reader, client_writer) = tokio::io::duplex(4096);
     let (client_reader, server_writer) = tokio::io::duplex(4096);
@@ -133,7 +179,7 @@ fn spawn_test_server() -> (
     });
 
     let client_reader = BufReader::new(client_reader);
-    (client_writer, client_reader, server_handle)
+    (client_writer, client_reader, server_handle, served_store)
 }
 
 async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json::Value) {
@@ -822,6 +868,515 @@ async fn config_get_set_patch_roundtrip() {
         get_resp3["result"]["config"]["max_tokens"], patched_max_tokens,
         "config/get after patch should match"
     );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 11b. config_writes_refuse_the_secret_marker_where_no_value_is_stored
+// ---------------------------------------------------------------------------
+
+/// A write that carries the text a configuration answer shows in place of a
+/// stored secret value, where the document holds no value it can stand for,
+/// is refused as invalid params that name the text, and nothing is written:
+/// by `config/set` and by `config/patch`.
+#[tokio::test]
+async fn config_writes_refuse_the_secret_marker_where_no_value_is_stored() {
+    const MARKER: &str = "<redacted>";
+    let (mut writer, mut reader, handle) = spawn_test_server();
+    let get_req = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "config/get"});
+    send_request(&mut writer, &get_req).await;
+    let initial = read_response(&mut reader).await;
+    assert!(initial["error"].is_null(), "config/get failed: {initial}");
+
+    let added = serde_json::json!([{
+        "name": "added",
+        "url": "http://synthetic.invalid/mcp",
+        "headers": {"X-Synthetic": MARKER},
+    }]);
+    let mut with_marker = initial["result"]["config"].clone();
+    with_marker["tools"]["mcp_servers"] = added.clone();
+    for (id, method, params) in [
+        (2, "config/set", serde_json::json!({"config": with_marker})),
+        (
+            3,
+            "config/patch",
+            serde_json::json!({"tools": {"mcp_servers": added}}),
+        ),
+    ] {
+        let request =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        send_request(&mut writer, &request).await;
+        let response = read_response(&mut reader).await;
+        assert_eq!(
+            response["error"]["code"], -32602,
+            "{method} with the marker where nothing is stored: {response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(MARKER)),
+            "{method}: {response}"
+        );
+    }
+
+    let get_req = serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "config/get"});
+    send_request(&mut writer, &get_req).await;
+    let after = read_response(&mut reader).await;
+    assert_eq!(
+        after["result"]["generation"],
+        initial["result"]["generation"]
+    );
+    assert_eq!(
+        after["result"]["config"]["tools"]["mcp_servers"],
+        serde_json::json!([])
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 11c. config_patch_refused_for_a_document_that_does_not_load_shows_no_stored_value
+// ---------------------------------------------------------------------------
+
+/// The refusal of a `config/patch` whose document would no longer load
+/// names what is wrong and where, and holds no value of the stored document:
+/// not the line of the document the error sits on (here an auth profile's
+/// source, stored on one line with its value). Invalid params; the
+/// generation is as before. And a `config/get` of a stored document that
+/// itself no longer parses answers an error of the same form.
+#[tokio::test]
+async fn config_patch_refused_for_a_document_that_does_not_load_shows_no_stored_value() {
+    let stored = ["synthetic", "stored", "value"].join(" ");
+    let document = format!(
+        "[realm.team.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+         source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, &document).unwrap();
+    let (mut writer, mut reader, handle) = spawn_test_server_over(Some(&path));
+    let get_req = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "config/get"});
+    send_request(&mut writer, &get_req).await;
+    let initial = read_response(&mut reader).await;
+    assert!(initial["error"].is_null(), "config/get failed: {initial}");
+
+    let patch_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "config/patch",
+        "params": {"realm": {"team": {"auth": {"inline": {"source": {"kind": "no_such_kind"}}}}}},
+    });
+    send_request(&mut writer, &patch_req).await;
+    let refused = read_response(&mut reader).await;
+    assert_eq!(refused["error"]["code"], -32602);
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !refused.to_string().contains(&stored),
+        "the refusal holds a stored value"
+    );
+    assert!(message.contains("line"), "{message}");
+
+    let get_req = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "config/get"});
+    send_request(&mut writer, &get_req).await;
+    let after = read_response(&mut reader).await;
+    assert_eq!(
+        after["result"]["generation"],
+        initial["result"]["generation"]
+    );
+
+    // The stored document itself no longer parses (the inline table is not
+    // closed): a read answers an error that says where and holds no value.
+    std::fs::write(&path, document.replace(" }\n", "\n")).unwrap();
+    let get_req = serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "config/get"});
+    send_request(&mut writer, &get_req).await;
+    let broken = read_response(&mut reader).await;
+    let message = broken["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !broken["error"].is_null(),
+        "a document that does not parse is not answered: {broken}"
+    );
+    assert!(
+        !broken.to_string().contains(&stored),
+        "the error holds a stored value"
+    );
+    assert!(
+        message.contains("line ") && message.contains("column "),
+        "{message}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 11d. config_answers_show_a_marker_and_writes_resolve_it
+// ---------------------------------------------------------------------------
+
+/// The answers that return the configuration document (`config/get`, and
+/// the results of `config/patch` and `config/set`) show a marker in place
+/// of each stored secret value. A `config/set` of the shown document keeps
+/// the stored values; the marker text is never stored. A stored inline
+/// secret stays with the route it was stored for: a `config/patch` of the
+/// address of the backend its binding uses is refused unless the same
+/// patch states the secret.
+#[tokio::test]
+async fn config_answers_show_a_marker_and_writes_resolve_it() {
+    const MARKER: &str = "<redacted>";
+    const HEADER: &str = "/tools/mcp_servers/0/headers/X-Synthetic";
+    const SECRET: &str = "/realm/team/auth/main/source/secret";
+    const OTHER: &str = "http://other.synthetic.invalid/v1";
+    let value = |n: u8| format!("synthetic stored value {n:02}");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[[tools.mcp_servers]]\nname = \"remote\"\nurl = \"http://synthetic.invalid/mcp\"\n\
+             headers = {{ X-Synthetic = \"{}\" }}\n\n\
+             [realm.team.backend.main]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://synthetic.invalid/v1\"\n\n\
+             [realm.team.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n\
+             [realm.team.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n",
+            value(1),
+            value(2)
+        ),
+    )
+    .unwrap();
+    let (mut writer, mut reader, handle) = spawn_test_server_over(Some(&path));
+    let mut id = 0;
+    let mut call = |method: &str, params: serde_json::Value| {
+        id += 1;
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    };
+
+    // The answers show the marker; the stored document keeps its values.
+    send_request(&mut writer, &call("config/get", serde_json::json!({}))).await;
+    let got = read_response(&mut reader).await;
+    assert!(got["error"].is_null(), "config/get failed: {got}");
+    let mut restated = got["result"]["config"].clone();
+    *restated.pointer_mut(HEADER).unwrap() = serde_json::json!(value(1));
+    *restated.pointer_mut(SECRET).unwrap() = serde_json::json!(value(2));
+    send_request(
+        &mut writer,
+        &call("config/patch", serde_json::json!({"max_tokens": 2048})),
+    )
+    .await;
+    let patched = read_response(&mut reader).await;
+    send_request(
+        &mut writer,
+        &call("config/set", serde_json::json!({"config": restated})),
+    )
+    .await;
+    let set = read_response(&mut reader).await;
+    for (what, answer) in [
+        ("config/get", &got),
+        ("config/patch", &patched),
+        ("config/set", &set),
+    ] {
+        assert!(answer["error"].is_null(), "{what} failed: {answer}");
+        assert!(
+            !answer.to_string().contains("synthetic stored value"),
+            "the answer to {what} holds a stored value"
+        );
+        for place in [HEADER, SECRET] {
+            assert_eq!(
+                answer["result"]["config"].pointer(place),
+                Some(&serde_json::json!(MARKER)),
+                "the answer to {what} at {place}"
+            );
+        }
+    }
+
+    // A set of the shown document keeps the stored values.
+    let mut shown = got["result"]["config"].clone();
+    *shown.pointer_mut(HEADER).unwrap() = serde_json::json!(MARKER);
+    *shown.pointer_mut(SECRET).unwrap() = serde_json::json!(MARKER);
+    shown["max_tokens"] = serde_json::json!(4096);
+    send_request(
+        &mut writer,
+        &call("config/set", serde_json::json!({"config": shown})),
+    )
+    .await;
+    let reset = read_response(&mut reader).await;
+    assert!(reset["error"].is_null(), "config/set failed: {reset}");
+    let stored = std::fs::read_to_string(&path).unwrap();
+    assert!(stored.contains(&value(1)) && stored.contains(&value(2)));
+    assert!(!stored.contains(MARKER), "the marker text is never stored");
+
+    // The address of the backend the secret's binding uses.
+    let moved = serde_json::json!({"realm": {"team": {"backend": {"main": {"base_url": OTHER}}}}});
+    send_request(&mut writer, &call("config/patch", moved)).await;
+    let refused = read_response(&mut reader).await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("the auth profile `main`") && message.contains("again in the same write"),
+        "{message}"
+    );
+    assert!(std::fs::read_to_string(&path).unwrap().contains(&value(2)));
+    let stated = serde_json::json!({"realm": {"team": {
+        "backend": {"main": {"base_url": OTHER}},
+        "auth": {"main": {"source": {"secret": "a secret the writer states"}}},
+    }}});
+    send_request(&mut writer, &call("config/patch", stated)).await;
+    let moved_with_it = read_response(&mut reader).await;
+    assert!(
+        moved_with_it["error"].is_null(),
+        "config/patch failed: {moved_with_it}"
+    );
+    let stored = std::fs::read_to_string(&path).unwrap();
+    assert!(stored.contains("a secret the writer states") && stored.contains(OTHER));
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 11e. config_patch_that_makes_a_profile_an_inline_secret_must_state_it
+// ---------------------------------------------------------------------------
+
+/// A `config/patch` that makes an auth profile an inline secret states the
+/// secret itself: a `secret` key that an earlier form of the profile left in
+/// the document is not taken up. So two patches that never state the secret
+/// (another kind for the profile's source with another address, then the
+/// inline kind again) do not put the stored value in force at that address;
+/// the second commits when it states a secret.
+#[tokio::test]
+async fn config_patch_that_makes_a_profile_an_inline_secret_must_state_it() {
+    const OTHER: &str = "http://other.synthetic.invalid/v1";
+    const KIND: &str = "/result/config/realm/team/auth/main/source/kind";
+    let stored = ["synthetic", "stored", "value"].join(" ");
+    let stated = "a secret the writer states";
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[realm.team.backend.main]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://synthetic.invalid/v1\"\n\n\
+             [realm.team.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n\n\
+             [realm.team.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n"
+        ),
+    )
+    .unwrap();
+    let (mut writer, mut reader, handle) = spawn_test_server_over(Some(&path));
+    let mut id = 0;
+    let mut call = |method: &str, params: serde_json::Value| {
+        id += 1;
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    };
+
+    let first = serde_json::json!({"realm": {"team": {
+        "auth": {"main": {"source": {"kind": "env", "env": "MEERKAT_RPC_ROW_VALUE"}}},
+        "backend": {"main": {"base_url": OTHER}},
+    }}});
+    send_request(&mut writer, &call("config/patch", first)).await;
+    let committed = read_response(&mut reader).await;
+    assert!(
+        committed["error"].is_null(),
+        "config/patch failed: {committed}"
+    );
+
+    let inline_again = serde_json::json!({"realm": {"team": {
+        "auth": {"main": {"source": {"kind": "inline_secret"}}},
+    }}});
+    send_request(&mut writer, &call("config/patch", inline_again.clone())).await;
+    let refused = read_response(&mut reader).await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("the auth profile `main`")
+            && message.contains("does not state the secret"),
+        "{message}"
+    );
+    assert!(
+        !refused.to_string().contains(&stored),
+        "the refusal holds a stored value"
+    );
+    send_request(&mut writer, &call("config/get", serde_json::json!({}))).await;
+    let got = read_response(&mut reader).await;
+    assert_eq!(
+        got.pointer(KIND),
+        Some(&serde_json::json!("env")),
+        "the profile is as the first patch left it"
+    );
+
+    let mut with_secret = inline_again;
+    with_secret["realm"]["team"]["auth"]["main"]["source"]["secret"] = serde_json::json!(stated);
+    send_request(&mut writer, &call("config/patch", with_secret)).await;
+    let restated = read_response(&mut reader).await;
+    assert!(
+        restated["error"].is_null(),
+        "config/patch failed: {restated}"
+    );
+    let document = std::fs::read_to_string(&path).unwrap();
+    assert!(document.contains(stated) && document.contains(OTHER));
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 11f. config_writes_with_no_config_runtime_refuse_the_secret_marker
+// ---------------------------------------------------------------------------
+
+/// A server with no config runtime writes its configuration to the store as
+/// it is sent: nothing there puts a stored value back in place of the
+/// marker. So a `config/set` and a `config/patch` that carry the marker are
+/// refused as invalid params and the store keeps its value; the same writes
+/// with a value commit.
+#[tokio::test]
+async fn config_writes_with_no_config_runtime_refuse_the_secret_marker() {
+    const MARKER: &str = "<redacted>";
+    const SECRET: &str = "/realm/team/auth/main/source/secret";
+    let value = |n: u8| format!("synthetic stored value {n:02}");
+    let (mut writer, mut reader, handle, store) = spawn_test_server_of(None, false);
+    let stored_secret = || {
+        let store = Arc::clone(&store);
+        async move {
+            serde_json::to_value(store.get().await.unwrap())
+                .unwrap()
+                .pointer(SECRET)
+                .cloned()
+        }
+    };
+    let mut id = 0;
+    let mut call = |method: &str, params: serde_json::Value| {
+        id += 1;
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    };
+
+    // A write with a value commits, and the answer shows the marker.
+    send_request(&mut writer, &call("config/get", serde_json::json!({}))).await;
+    let initial = read_response(&mut reader).await;
+    assert!(initial["error"].is_null(), "config/get failed: {initial}");
+    let mut document = initial["result"]["config"].clone();
+    document["realm"] = serde_json::json!({"team": {
+        "backend": {"main": {"provider": "openai", "backend_kind": "openai_api",
+            "base_url": "http://synthetic.invalid/v1"}},
+        "auth": {"main": {"provider": "openai", "auth_method": "api_key",
+            "source": {"kind": "inline_secret", "secret": value(1)}}},
+        "binding": {"main": {"backend_profile": "main", "auth_profile": "main"}},
+    }});
+    send_request(
+        &mut writer,
+        &call("config/set", serde_json::json!({"config": document})),
+    )
+    .await;
+    let set = read_response(&mut reader).await;
+    assert!(set["error"].is_null(), "config/set failed: {set}");
+    let shown = set["result"]["config"].clone();
+    assert_eq!(shown.pointer(SECRET), Some(&serde_json::json!(MARKER)));
+    assert_eq!(stored_secret().await, Some(serde_json::json!(value(1))));
+
+    // The marker, in a set of the shown document and in a patch.
+    let marker_patch = serde_json::json!({"realm": {"team": {
+        "auth": {"main": {"source": {"secret": MARKER}}},
+    }}});
+    for (method, params) in [
+        ("config/set", serde_json::json!({"config": shown})),
+        ("config/patch", marker_patch),
+    ] {
+        send_request(&mut writer, &call(method, params)).await;
+        let refused = read_response(&mut reader).await;
+        assert_eq!(refused["error"]["code"], -32602, "{method}: {refused}");
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(MARKER) && message.contains("Nothing was written"),
+            "{method}: {message}"
+        );
+        assert_eq!(
+            stored_secret().await,
+            Some(serde_json::json!(value(1))),
+            "{method}: the store keeps its value"
+        );
+    }
+
+    // A patch with a value commits.
+    let value_patch = serde_json::json!({"realm": {"team": {
+        "auth": {"main": {"source": {"secret": value(2)}}},
+    }}});
+    send_request(&mut writer, &call("config/patch", value_patch)).await;
+    let patched = read_response(&mut reader).await;
+    assert!(patched["error"].is_null(), "config/patch failed: {patched}");
+    assert_eq!(stored_secret().await, Some(serde_json::json!(value(2))));
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 11g. an_auth_profile_override_cannot_name_another_bindings_inline_secret
+// ---------------------------------------------------------------------------
+
+/// A request that names a binding and overrides its auth profile cannot
+/// name a profile that holds an inline secret, unless it is the binding's
+/// own: the secret goes only where a binding that names its profile sends
+/// it. `auth/status/get` resolves such a request and refuses it as invalid
+/// params; the binding's own inline profile and an override to a profile
+/// with no secret in the document are not refused that way.
+#[tokio::test]
+async fn an_auth_profile_override_cannot_name_another_bindings_inline_secret() {
+    const REFUSAL: &str = "cannot take auth profile 'inline' as an override";
+    let stored = ["synthetic", "stored", "value"].join(" ");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[realm.team.backend.vendor]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\n\
+             [realm.team.backend.elsewhere]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://other.synthetic.invalid/v1\"\n\n\
+             [realm.team.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{stored}\" }}\n\n\
+             [realm.team.auth.plain]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"env\", env = \"MEERKAT_RPC_ROW_VALUE\" }}\n\n\
+             [realm.team.auth.spare]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"env\", env = \"MEERKAT_RPC_ROW_SPARE\" }}\n\n\
+             [realm.team.binding.main]\nbackend_profile = \"vendor\"\nauth_profile = \"inline\"\n\n\
+             [realm.team.binding.free]\nbackend_profile = \"elsewhere\"\nauth_profile = \"plain\"\n"
+        ),
+    )
+    .unwrap();
+    let (mut writer, mut reader, handle) = spawn_test_server_over(Some(&path));
+    let mut id = 0;
+    let mut status = |binding: &str, profile: &str| {
+        id += 1;
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "auth/status/get",
+            "params": {"realm_id": "team", "binding_id": binding, "profile_id": profile},
+        })
+    };
+
+    send_request(&mut writer, &status("free", "inline")).await;
+    let refused = read_response(&mut reader).await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(REFUSAL) && message.contains("inline secret"),
+        "{message}"
+    );
+    assert!(
+        !refused.to_string().contains(&stored),
+        "the refusal holds a stored value"
+    );
+
+    for (binding, profile) in [("main", "inline"), ("free", "spare")] {
+        send_request(&mut writer, &status(binding, profile)).await;
+        let answer = read_response(&mut reader).await;
+        assert!(
+            !answer.to_string().contains("as an override"),
+            "{binding} with {profile} is refused as an override: {answer}"
+        );
+        assert!(!answer.to_string().contains(&stored));
+    }
 
     drop(writer);
     handle.await.unwrap().unwrap();

@@ -228,6 +228,11 @@ struct GatewayRuntimeOptions {
     /// refuses init; `None` keeps `Config::default()`. A native realm's
     /// effective configuration takes this slot when the launch names one.
     host_config: Option<Config>,
+    /// The files `runtime_options.meerkat_config_path`,
+    /// `routing_config_path`, `gating_config_path` and `console_config_path`
+    /// name, kept beside what was read from them: the launch declares each
+    /// to the members' file tools.
+    named_config_files: Vec<PathBuf>,
     /// `runtime_options.native_realm`: the native realm whose effective
     /// configuration every gateway-built agent starts from, read once at
     /// init into `host_config` with Core's native reader, in place of
@@ -504,6 +509,7 @@ impl Default for GatewayRuntimeOptions {
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             compaction: None,
             host_config: None,
+            named_config_files: Vec::new(),
             native_realm: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
@@ -799,6 +805,40 @@ fn launch_provider_auth_persistence(
             }),
         (None, None) => Ok(None),
     }
+}
+
+/// The configuration files and roots a launch names, for
+/// [`crate::gateway_composition::declare_host_paths`]: the host
+/// configuration file, the routing, gating and console files, each by its
+/// own path (their directories are the launch's to choose and are not
+/// declared), the access file administrator edits persist to with the
+/// sibling a save of it is written through, the
+/// provider credentials root, the realms root of a native realm, and the
+/// directory of a durable work graph store; and the skill files
+/// `definition` names by path. A `.rkat` directory under a root the launch
+/// names (the session identity root, a native realm's user configuration
+/// root) needs no declaration.
+fn launch_named_paths(options: &GatewayRuntimeOptions, definition: &MobDefinition) -> Vec<PathBuf> {
+    let mut named = crate::gateway_composition::definition_skill_files(definition);
+    named.extend(options.named_config_files.iter().cloned());
+    named.extend(
+        options
+            .access
+            .as_ref()
+            .map(crate::AccessController::persist_paths)
+            .unwrap_or_default(),
+    );
+    named.extend(options.provider_credentials_root.clone());
+    named.extend(
+        options
+            .native_realm
+            .as_ref()
+            .map(|realm| realm.state_root.clone()),
+    );
+    if let GatewayWorkgraphOption::DurableDir(directory) = &options.workgraph {
+        named.push(directory.clone());
+    }
+    named
 }
 
 /// The identity policy a launch uses: the native host's Rust form
@@ -5273,6 +5313,75 @@ actions = ["agent.view"]
             Err(err) => err,
         };
         assert!(err.contains("access_config_path"), "{err}");
+    }
+
+    /// A refusal of an access file's content names the file: a file that
+    /// does not parse, one that does not validate, and an approver map that
+    /// names an ingress the launch does not declare.
+    #[test]
+    fn gateway_runtime_options_name_the_refused_access_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for (name, content) in [
+            ("unparsed.toml", "enabled = ["),
+            ("no-admin.toml", "enabled = true"),
+            (
+                "undeclared-ingress.toml",
+                r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#,
+            ),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write access config");
+            let params = json!({
+                "runtime_options": { "access_config_path": path.to_string_lossy() }
+            });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("{name} must refuse initialization"),
+                Err(err) => err,
+            };
+            assert!(
+                err.starts_with("runtime_options.access_config_path is invalid: "),
+                "{name}: {err}"
+            );
+            assert!(
+                err.ends_with(&format!(" (file '{}')", path.display())),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    /// A refusal of a gating file's content names the file: a file that
+    /// does not parse and ones whose actions are not valid.
+    #[test]
+    fn gateway_runtime_options_name_the_refused_gating_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        for (name, content) in [
+            ("unparsed.toml", "actions = ["),
+            ("unparsed.json", "{"),
+            ("no-actions.toml", "title = \"no actions\"\n"),
+            ("no-tier.toml", "[actions.deploy]\nnote = \"no tier\"\n"),
+            ("unknown-tier.toml", "[actions]\ndeploy = \"r9\"\n"),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write gating config");
+            let params = json!({
+                "runtime_options": { "gating_config_path": path.to_string_lossy() }
+            });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("{name} must refuse initialization"),
+                Err(err) => err,
+            };
+            assert!(err.contains("gating_config_path"), "{name}: {err}");
+            assert!(
+                err.ends_with(&format!(" (file '{}')", path.display())),
+                "{name}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -9890,6 +9999,7 @@ fn parse_gateway_runtime_options(
             crate::gateway_composition::load_gateway_host_config(std::path::Path::new(path))
                 .map_err(|error| format!("runtime_options.meerkat_config_path: {error}"))?,
         );
+        parsed.named_config_files.push(PathBuf::from(path));
     }
     if let Some(value) = runtime_options.get("http_listen") {
         let listen = value
@@ -9952,6 +10062,7 @@ fn parse_gateway_runtime_options(
         .and_then(Value::as_str)
     {
         parsed.routing_routes = parse_gateway_routing_config_path(path)?;
+        parsed.named_config_files.push(PathBuf::from(path));
     }
     // An explicit gating path must be a path string; absent or null keeps
     // gating off.
@@ -9960,6 +10071,7 @@ fn parse_gateway_runtime_options(
         Some(Value::String(path)) => {
             OptInConfigPath::Gating.refuse_empty(path)?;
             parsed.gating = parse_gateway_gating_config_path(path)?;
+            parsed.named_config_files.push(PathBuf::from(path));
         }
         Some(_) => {
             return Err("runtime_options.gating_config_path must be a string".to_string());
@@ -9974,6 +10086,7 @@ fn parse_gateway_runtime_options(
     {
         parsed.console_ui = load_console_ui_config_from_path_for_realm(path, None)
             .map_err(|err| format!("runtime_options.console_config_path is invalid: {err}"))?;
+        parsed.named_config_files.push(PathBuf::from(path));
     }
     // The decision ingresses a declared host channel attests people
     // through; absent or null declares none.
@@ -9992,10 +10105,14 @@ fn parse_gateway_runtime_options(
         None | Some(Value::Null) => {}
         Some(Value::String(path)) => {
             OptInConfigPath::Access.refuse_empty(path)?;
-            parsed.access =
-                Some(crate::AccessController::load(path).map_err(|err| {
-                    format!("runtime_options.access_config_path is invalid: {err}")
-                })?);
+            parsed.access = Some(crate::AccessController::load(path).map_err(|err| {
+                let refusal = format!("runtime_options.access_config_path is invalid: {err}");
+                // A read failure names the file itself.
+                match err {
+                    crate::AccessConfigError::Io(_) => refusal,
+                    _ => naming_the_file(refusal, path),
+                }
+            })?);
         }
         Some(_) => {
             return Err("runtime_options.access_config_path must be a string".to_string());
@@ -10007,7 +10124,16 @@ fn parse_gateway_runtime_options(
         parsed.access.as_ref(),
         &parsed.decision_ingresses.clone().unwrap_or_default(),
     )
-    .map_err(|err| format!("runtime_options.access_config_path is invalid: {err}"))?;
+    .map_err(|err| {
+        let refusal = format!("runtime_options.access_config_path is invalid: {err}");
+        match runtime_options
+            .get("access_config_path")
+            .and_then(Value::as_str)
+        {
+            Some(path) => naming_the_file(refusal, path),
+            None => refusal,
+        }
+    })?;
     // The account modes of MCP servers; absent or null keeps every server's
     // account the system's.
     match runtime_options.get("mcp_accounts") {
@@ -10434,17 +10560,36 @@ impl OptInConfigPath {
     }
 }
 
+/// `refusal` of the content of the configuration file at `path`, with the
+/// file named: a launch can apply such a file without its program naming
+/// it, and the option's name alone does not say which file was refused.
+fn naming_the_file(refusal: String, path: &str) -> String {
+    format!("{refusal} (file '{path}')")
+}
+
 fn read_gateway_config_file(path: &str, option_name: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read runtime_options.{option_name} '{path}': {err}"))?;
     if path.ends_with(".json") {
-        return serde_json::from_str(&text)
-            .map_err(|err| format!("invalid JSON in runtime_options.{option_name}: {err}"));
+        return serde_json::from_str(&text).map_err(|err| {
+            naming_the_file(
+                format!("invalid JSON in runtime_options.{option_name}: {err}"),
+                path,
+            )
+        });
     }
-    let toml_value: toml::Value = toml::from_str(&text)
-        .map_err(|err| format!("invalid TOML in runtime_options.{option_name}: {err}"))?;
-    serde_json::to_value(toml_value)
-        .map_err(|err| format!("failed to normalize runtime_options.{option_name}: {err}"))
+    let toml_value: toml::Value = toml::from_str(&text).map_err(|err| {
+        naming_the_file(
+            format!("invalid TOML in runtime_options.{option_name}: {err}"),
+            path,
+        )
+    })?;
+    serde_json::to_value(toml_value).map_err(|err| {
+        naming_the_file(
+            format!("failed to normalize runtime_options.{option_name}: {err}"),
+            path,
+        )
+    })
 }
 
 fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, String> {
@@ -10459,6 +10604,11 @@ fn parse_gateway_routing_config_path(path: &str) -> Result<Vec<RuntimeRoute>, St
 
 fn parse_gateway_gating_config_path(path: &str) -> Result<GatewayGatingConfig, String> {
     let value = read_gateway_config_file(path, "gating_config_path")?;
+    gating_config_of(&value).map_err(|refusal| naming_the_file(refusal, path))
+}
+
+/// The gating configuration the content `value` of a gating file defines.
+fn gating_config_of(value: &Value) -> Result<GatewayGatingConfig, String> {
     let actions = value
         .get("actions")
         .and_then(Value::as_object)
@@ -18209,6 +18359,57 @@ external_addressable = true
             PROVIDER_CREDENTIALS_ROOT_UNDER_HOST.to_string(),
         ));
     }
+    // The members' file tools are rooted in the directory that holds the
+    // state directory. The gateway starts only where that root is apart
+    // from every directory the launch names for its state. A launch
+    // without a state directory roots them in a workspace of its own,
+    // which holds none of these, and is not asked.
+    if let Some(tools_root) = persistent_state
+        .as_deref()
+        .and_then(std::path::Path::parent)
+    {
+        let kept = [
+            (
+                "the realms root of runtime_options.native_realm",
+                gateway_options
+                    .native_realm
+                    .as_ref()
+                    .map(|realm| realm.state_root.clone()),
+            ),
+            (
+                "the provider credentials root (runtime_options.provider_credentials_root)",
+                gateway_options.provider_credentials_root.clone(),
+            ),
+            (
+                "the durable work graph directory (runtime_options.workgraph)",
+                match &gateway_options.workgraph {
+                    GatewayWorkgraphOption::DurableDir(directory) => Some(directory.clone()),
+                    GatewayWorkgraphOption::Enabled | GatewayWorkgraphOption::Disabled => None,
+                },
+            ),
+        ];
+        for (what, directory) in kept {
+            if let Some(directory) = directory
+                && let Some((root, directory)) =
+                    crate::gateway_composition::tools_root_in_state(tools_root, &directory)
+            {
+                return Err(fail_init(
+                    &request_id,
+                    -32602,
+                    format!(
+                        "runtime_options: the members' file tools are rooted at {}, the \
+                         directory that holds persistent_state, and that directory is {what} {} \
+                         or lies inside it. The gateway keeps that directory out of the file \
+                         tools' reach, so the two must be apart: place persistent_state in a \
+                         directory outside it, or name a directory for it that does not hold \
+                         the directory persistent_state lies in",
+                        root.display(),
+                        directory.display()
+                    ),
+                ));
+            }
+        }
+    }
     // The identity policy, settled before the durable phase: the native
     // host's Rust form or the init option, never both, checked against the
     // definition's profiles, and refused on a launch without persistence.
@@ -18864,6 +19065,14 @@ external_addressable = true
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             factory = factory.user_config_root(root.clone());
         }
+        // The gateway declares its state directory (the scratch root of a
+        // launch without one) and the configuration files and roots its
+        // launch names to the members' file tools.
+        factory = crate::gateway_composition::declare_host_paths(
+            factory,
+            [storage_layout.state_dir().to_path_buf()],
+            launch_named_paths(&gateway_options, &definition),
+        );
         // The host composes this factory's MCP constructions, and installs its
         // operation refusal observer and operation review (with the review's
         // consent settlement on this runtime), before it is cloned for live or
@@ -19195,6 +19404,13 @@ external_addressable = true
                 notify_orchestrator_on_resume: true,
                 default_llm_client: default_llm_client.clone(),
             });
+        // The launch has a schedule service: it says so before its runtime is
+        // built, so that a create under a mob's id waits for the release of
+        // that mob's schedules to be bound to the runtime and never goes on
+        // without it.
+        if schedule_host_inputs.is_some() {
+            spec = spec.with_mob_schedules_declared();
+        }
         #[cfg(feature = "workgraph-pursuit-test-vehicle")]
         crate::workgraph_pursuit_test_vehicle::carry(&mut spec, workgraph_pursuit);
         spec.committed_boundary_recoverer = Some(committed_boundary_recoverer);
@@ -19287,10 +19503,31 @@ external_addressable = true
         // The supported persistent service/machine pair does not require
         // durable session files on read-only container filesystems.
         let temp_dir = Some(tempfile::tempdir().expect("create temp dir for agent working space"));
-        let agent_workspace = temp_dir
+        // The members' file tools and shell are rooted in a workspace inside
+        // this launch's own temporary directory: the agent factory roots
+        // them in the directory that holds its store, so its store is a
+        // directory of that workspace (declared to the file tools below).
+        // Both go with the temporary directory when the gateway exits.
+        let member_workspace = temp_dir
             .as_ref()
-            .map(|dir| dir.path())
+            .map(|dir| dir.path().join("workspace"))
             .expect("temp dir for agent working space");
+        let agent_store = member_workspace.join(".gateway-store");
+        std::fs::create_dir_all(&agent_store).map_err(|error| {
+            fail_init(
+                &request_id,
+                STORAGE_RESOLUTION_CODE,
+                format!(
+                    "failed to create the members' workspace {}: {error}",
+                    member_workspace.display()
+                ),
+            )
+        })?;
+        tracing::info!(
+            path = %member_workspace.display(),
+            "members' file tools and shell are rooted in this launch's own workspace"
+        );
+        let agent_workspace = agent_store.as_path();
         let binary_blob_store: Arc<dyn BinaryBlobStore> = Arc::new(ObjectStoreBlobStore::memory());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(Base64BlobStoreAdapter::new(binary_blob_store.clone()));
@@ -19341,6 +19578,17 @@ external_addressable = true
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             factory = factory.user_config_root(root.clone());
         }
+        // The gateway declares its state directory (the scratch root of a
+        // launch without one) and the configuration files and roots its
+        // launch names to the members' file tools.
+        factory = crate::gateway_composition::declare_host_paths(
+            factory,
+            [
+                storage_layout.state_dir().to_path_buf(),
+                agent_store.clone(),
+            ],
+            launch_named_paths(&gateway_options, &definition),
+        );
         // The host composes this factory's MCP constructions, and installs its
         // operation refusal observer and operation review (with the review's
         // consent settlement on this runtime), before it is cloned for live or
@@ -19687,6 +19935,13 @@ external_addressable = true
     // The memory-stack region below also fills the slot a console side
     // chat's `memory` tool is bound to its own identity with.
     let side_chat_memory_slot = mob_spec.side_chat_memory_slot();
+    // The mob is built before that region runs, and a member that owes work
+    // at this start is built with the mob: say now that a recorder will be
+    // bound, so a side chat built until then is wrapped and offers no
+    // `memory` tool until it is.
+    if gateway_options.agent_memory.is_some() {
+        side_chat_memory_slot.expect_recorder();
+    }
 
     let timeout = GATEWAY_RUNTIME_EVENT_DRAIN_TIMEOUT;
     let persistent_metadata: Arc<dyn PersistentMetadataStore> = if persistent_state.is_some() {
@@ -20144,39 +20399,67 @@ external_addressable = true
         > = Arc::new(std::sync::OnceLock::new());
         let mut agent_memory_distiller: Option<Arc<crate::memory::distiller::DistillerEngine>> =
             None;
-        let agent_memory_provider: Option<Arc<dyn crate::AgentMemoryProvider>> =
-            if let Some(agent_memory) = gateway_options.agent_memory.as_ref() {
-                // Concrete store construction is the only per-kind decision
-                // left (M4 de-weld); everything downstream assembles on the
-                // provider's advertised capabilities.
-                // Agent memory is a durable storage slot: an open failure is
-                // a storage-resolution refusal (-32014), same as the other
-                // fail-closed store opens above.
-                let provider: Arc<dyn crate::AgentMemoryProvider> = match agent_memory.store {
-                    // The live markdown execution path is retired: refuse
-                    // with the typed migration verdict instead of booting
-                    // a store that silently has no firewall, no ledger
-                    // and no judgment plane. The markdown READER is
-                    // untouched and still runs, as the one-shot import
-                    // inside SqliteAgentMemoryStore::open.
-                    GatewayAgentMemoryStoreKind::Markdown => {
-                        let migration = AgentMemoryStoreMigration::MarkdownIsImportOnly;
-                        return Err(fail_init(
-                            &request_id,
-                            migration.code(),
-                            migration.message(),
-                        ));
-                    }
-                    GatewayAgentMemoryStoreKind::Sqlite => Arc::new(
+        // The agent memory store is opened and its first start's step is run
+        // (`crate::memory::set_aside`) before anything takes the store: the
+        // engines, the panel, the side chat recorder, the injector and the
+        // customizer below are all given it only from `agent_memory_store`.
+        // A step that cannot run refuses the launch.
+        let agent_memory_store: Option<(
+            &GatewayAgentMemoryOptions,
+            Arc<dyn crate::AgentMemoryProvider>,
+        )> = match gateway_options.agent_memory.as_ref() {
+            None => None,
+            // Concrete store construction is the only per-kind decision
+            // left (M4 de-weld); everything downstream assembles on the
+            // provider's advertised capabilities.
+            // Agent memory is a durable storage slot: an open failure is
+            // a storage-resolution refusal (-32014), same as the other
+            // fail-closed store opens above.
+            Some(agent_memory) => match agent_memory.store {
+                // The live markdown execution path is retired: refuse
+                // with the typed migration verdict instead of booting
+                // a store that silently has no firewall, no ledger
+                // and no judgment plane. The markdown READER is
+                // untouched and still runs, as the one-shot import
+                // inside SqliteAgentMemoryStore::open.
+                GatewayAgentMemoryStoreKind::Markdown => {
+                    let migration = AgentMemoryStoreMigration::MarkdownIsImportOnly;
+                    return Err(fail_init(
+                        &request_id,
+                        migration.code(),
+                        migration.message(),
+                    ));
+                }
+                GatewayAgentMemoryStoreKind::Sqlite => {
+                    let store =
                         crate::SqliteAgentMemoryStore::open(&agent_memory.path).map_err(|e| {
                             fail_init(
                                 &request_id,
                                 STORAGE_RESOLUTION_CODE,
                                 format!("failed to open agent memory store: {e}"),
                             )
-                        })?,
-                    ),
-                };
+                        })?;
+                    let start = Box::pin(crate::memory::set_aside::memory_start_for(
+                        &store,
+                        &agent_memory.config.realm,
+                        runtime.mob_runtime(),
+                        crate::memory::set_aside::bound_at_a_gateway_start(),
+                    ))
+                    .await;
+                    match start {
+                        crate::memory::set_aside::MemoryStart::Attach => Some((
+                            agent_memory,
+                            Arc::new(store) as Arc<dyn crate::AgentMemoryProvider>,
+                        )),
+                        crate::memory::set_aside::MemoryStart::Refuse { message } => {
+                            return Err(fail_init(&request_id, STORAGE_RESOLUTION_CODE, message));
+                        }
+                    }
+                }
+            },
+        };
+        let agent_memory_provider: Option<Arc<dyn crate::AgentMemoryProvider>> =
+            if let Some((agent_memory, provider)) = agent_memory_store {
                 if provider.as_taintable().is_some() {
                     // Shared read handle on the persistent session store
                     // for the Distiller's evidence windows and the

@@ -1992,3 +1992,379 @@ async fn an_adoption_of_an_agent_configured_with_the_approval_branch_label_is_re
     assert_eq!(adopted.outcome.token(), "done", "{adopted:?}");
     rig.shutdown().await;
 }
+
+/// What a host configures for its one agent, as the seam is told.
+struct ConfiguredAgent(DurableAgentSpec);
+
+#[async_trait]
+impl meerkat_meta::identity_creation::AgentSpecs for ConfiguredAgent {
+    async fn configured_spec(
+        &self,
+        _mob: &meerkat_mob::MobHandle,
+        name: &str,
+    ) -> Option<DurableAgentSpec> {
+        (self.0.identity.as_str() == name).then(|| self.0.clone())
+    }
+
+    fn is_authority_field(&self, _key: &str) -> bool {
+        false
+    }
+}
+
+/// A host's roster that lists the one agent it configures.
+struct ConfiguredRoster(DurableAgentSpec);
+
+#[async_trait]
+impl RosterProvider for ConfiguredRoster {
+    async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
+        Ok(vec![self.0.clone()])
+    }
+}
+
+/// A host's agent customizer that answers an agent's build with the labels
+/// the host declares for it, as a host that reads them from the agent's
+/// record does. With no label declared it sets none.
+struct DeclaredLabelsCustomizer(BTreeMap<String, String>);
+
+#[async_trait]
+impl meerkat_meta::identity_first::contracts::AgentCustomizer for DeclaredLabelsCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &meerkat_meta::identity_first::AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        draft: &mut meerkat_meta::identity_first::AgentBuildDraft,
+    ) -> Result<(), meerkat_meta::identity_first::CustomizerError> {
+        for (key, value) in &self.0 {
+            draft.labels.insert(key.clone(), value.clone());
+        }
+        Ok(())
+    }
+}
+
+/// What makes a host compose the builds of its agents.
+#[derive(Clone, Copy)]
+enum ComposingHost<'a> {
+    /// It registers an agent customizer, which answers each agent's
+    /// declared labels.
+    Customizer,
+    /// It configures agent memory, kept under the directory, and registers
+    /// no customizer of its own.
+    AgentMemory(&'a Path),
+}
+
+/// [`boot`] for a host that configures `configured` and composes the
+/// builds of its agents as `host` says.
+async fn boot_composing_host(
+    state: &Path,
+    mob_id: &str,
+    configured: &DurableAgentSpec,
+    composing: ComposingHost<'_>,
+) -> Rig {
+    let (asked_tx, asked) = mpsc::unbounded_channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let builder = UnifiedRuntimeBuilder::default()
+        .definition(definition(mob_id))
+        .persistent_state(state)
+        .continuity_from_state_dir(state)
+        .await
+        .expect("open the state-dir identity substrate")
+        .roster_provider(Arc::new(ConfiguredRoster(configured.clone())))
+        .identity_runtime_instance_id("meta-identity-executor")
+        .default_llm_client(Arc::new(RecordingClient {
+            asked: asked_tx,
+            requests: Arc::clone(&requests),
+        }));
+    let builder = match composing {
+        ComposingHost::Customizer => builder.agent_customizer(Arc::new(DeclaredLabelsCustomizer(
+            configured.labels.clone(),
+        ))),
+        ComposingHost::AgentMemory(directory) => builder.agent_memory(
+            Arc::new(
+                meerkat_meta::SqliteAgentMemoryStore::open(directory)
+                    .expect("open the agent memory store"),
+            ),
+            meerkat_meta::AgentMemoryConfig::default(),
+        ),
+    };
+    let runtime = Box::pin(builder.build())
+        .await
+        .expect("build the gateway-shaped UnifiedRuntime");
+    Rig {
+        runtime,
+        asked,
+        requests,
+        step: Arc::new(RecordingStep::default()),
+    }
+}
+
+/// On a host that composes the builds of its agents: adopt the configured
+/// agent `configured`, restart the gateway, and send to the agent. Its
+/// member is built again on the restart's first send, the send is served,
+/// and the member carries the labels its record holds.
+async fn an_adopted_configured_agent_is_served_after_a_restart(
+    configured: DurableAgentSpec,
+    composing: ComposingHost<'_>,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot_composing_host(temp.path(), &mob_id, &configured, composing).await;
+    assert!(rig.seated(DECLARED), "{:?}", rig.standing(DECLARED));
+
+    let facts = RequesterFacts::host(SURFACE);
+    let requester = host();
+    let row = meerkat_mob::CreatedIdentitySpec::new(
+        configured.identity.as_str(),
+        configured.profile.clone(),
+    )
+    .with_labels(configured.labels.clone());
+    let digest =
+        Sha256Digest::parse(&row.spec_digest().expect("the spec's digest")).expect("a digest");
+    let normalized = normalize_adopt(
+        &allow_all(),
+        &facts,
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(
+            DECLARED,
+            digest.clone(),
+            None,
+            "worker",
+            configured.labels.clone(),
+        ),
+        &AdoptIdentitySpec::new(DECLARED, digest),
+    )
+    .expect("the adoption is allowed by the rules");
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), "adopt-configured").expect("a request id");
+    let consent = consent_of_plan(&normalized.plan).expect("the policy allows the change");
+    let mob = rig.mob();
+    let adopted = CoreChangeExecutor::new()
+        .with_agent_specs(Arc::new(ConfiguredAgent(configured.clone())))
+        .commit(
+            ChangeCommit::new(
+                &mob,
+                &operation_id,
+                &requester,
+                consent,
+                &normalized.request,
+            )
+            .of_configured_target(true),
+        )
+        .await
+        .expect("the seam answers a typed outcome");
+    assert_eq!(adopted.outcome.token(), "done", "{adopted:?}");
+    drop(mob);
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot_composing_host(temp.path(), &mob_id, &configured, composing).await;
+    let answer = rig.send(DECLARED, "after-the-adoption").await;
+    assert!(
+        answer["error"].is_null(),
+        "the adopted agent's send is served after a restart: {answer}"
+    );
+    assert!(
+        rig.asked("after-the-adoption").await,
+        "the adopted agent's member is built and runs the turn"
+    );
+    let member = rig
+        .mob()
+        .get_member(&id(DECLARED))
+        .await
+        .expect("the roster reads")
+        .expect("the agent has a member");
+    assert_eq!(
+        member.labels, configured.labels,
+        "the member carries the labels its record holds"
+    );
+    rig.shutdown().await;
+}
+
+/// Row (RED): a configured agent whose host declares application labels
+/// for it and answers them in its agent customizer is served after its
+/// adoption and a restart: its member is built with the labels its record
+/// holds.
+///
+/// RED on the old tree: the member's seat keeps the labels it was seated
+/// with as a configured agent, the customizer's answer differs from them,
+/// and every build after the adoption is refused for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_configured_agent_with_declared_labels_is_served_after_a_restart() {
+    let mut configured = spec(DECLARED);
+    configured
+        .labels
+        .insert("team".to_owned(), "support".to_owned());
+    configured
+        .labels
+        .insert("recall_class".to_owned(), "internal".to_owned());
+    an_adopted_configured_agent_is_served_after_a_restart(configured, ComposingHost::Customizer)
+        .await;
+}
+
+/// Row (RED): a configured agent with no label of its own, on a host whose
+/// agent customizer sets no label, is served after its adoption and a
+/// restart all the same.
+///
+/// RED on the old tree: the member's seat keeps the two labels a
+/// configured agent's seat carries, its record carries neither, and every
+/// build after the adoption is refused for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_configured_agent_with_no_label_of_its_own_is_served_after_a_restart() {
+    an_adopted_configured_agent_is_served_after_a_restart(
+        spec(DECLARED),
+        ComposingHost::Customizer,
+    )
+    .await;
+}
+
+/// Row (RED): a host that configures agent memory and registers no build
+/// customizer of its own composes the builds of its agents all the same.
+/// Its configured agent is served after its adoption and a restart.
+///
+/// RED on the old tree: every build after the adoption is refused for
+/// good, as on a host with a customizer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_configured_agent_is_served_after_a_restart_on_a_host_with_agent_memory_alone() {
+    let memory = tempfile::tempdir().unwrap();
+    an_adopted_configured_agent_is_served_after_a_restart(
+        spec(DECLARED),
+        ComposingHost::AgentMemory(memory.path()),
+    )
+    .await;
+}
+
+/// Row: one update that sets a value the agent already has serves an
+/// adopted agent again, on a host that composes the builds of its agents.
+/// A configured agent with a display name is adopted and the gateway
+/// restarts. An update that sets its display name to the name it has
+/// commits: the answer is `done`, the agent is `committed` at its next
+/// revision, and the answer names no seat. The agent's next send is
+/// served, and its member carries the labels its record holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_update_that_sets_an_unchanged_value_serves_an_adopted_configured_agent() {
+    const NAME: &str = "The declared agent";
+    let mut configured = spec(DECLARED);
+    configured.display_name =
+        Some(meerkat_meta::identity_first::DisplayName::parse(NAME).expect("a display name"));
+    configured
+        .labels
+        .insert("team".to_owned(), "support".to_owned());
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host_kind = ComposingHost::Customizer;
+    let rig = boot_composing_host(temp.path(), &mob_id, &configured, host_kind).await;
+    assert!(rig.seated(DECLARED), "{:?}", rig.standing(DECLARED));
+
+    let facts = RequesterFacts::host(SURFACE);
+    let requester = host();
+    let row = meerkat_mob::CreatedIdentitySpec::new(
+        configured.identity.as_str(),
+        configured.profile.clone(),
+    )
+    .with_labels(configured.labels.clone())
+    .with_display_name(NAME);
+    let digest =
+        Sha256Digest::parse(&row.spec_digest().expect("the spec's digest")).expect("a digest");
+    let normalized = normalize_adopt(
+        &allow_all(),
+        &facts,
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(
+            DECLARED,
+            digest.clone(),
+            None,
+            "worker",
+            configured.labels.clone(),
+        ),
+        &AdoptIdentitySpec::new(DECLARED, digest),
+    )
+    .expect("the adoption is allowed by the rules");
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), "adopt-configured").expect("a request id");
+    let consent = consent_of_plan(&normalized.plan).expect("the policy allows the change");
+    let mob = rig.mob();
+    let adopted = CoreChangeExecutor::new()
+        .with_agent_specs(Arc::new(ConfiguredAgent(configured.clone())))
+        .commit(
+            ChangeCommit::new(
+                &mob,
+                &operation_id,
+                &requester,
+                consent,
+                &normalized.request,
+            )
+            .of_configured_target(true),
+        )
+        .await
+        .expect("the seam answers a typed outcome");
+    let IdentityOutcome::Done { agents, .. } = &adopted.outcome else {
+        panic!("the adoption is done: {:?}", adopted.outcome);
+    };
+    let adopted_digest = agents[0]
+        .spec_digest
+        .clone()
+        .expect("an adopted agent has a spec digest");
+    drop(mob);
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot_composing_host(temp.path(), &mob_id, &configured, host_kind).await;
+    let profiles = BTreeSet::from(["worker".to_owned()]);
+    let peers = BTreeMap::new();
+    let update: UpdateIdentitySpec = serde_json::from_value(json!({
+        "identity": DECLARED,
+        "expected_spec_digest": adopted_digest.as_str(),
+        "set": {"display_name": NAME},
+    }))
+    .expect("an update");
+    let update = normalize_update(
+        &allow_all(),
+        &RequestContext {
+            requester: &facts,
+            profiles: &profiles,
+            peers: &peers,
+        },
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(
+            DECLARED,
+            adopted_digest.clone(),
+            Some(1),
+            "worker",
+            configured.labels.clone(),
+        ),
+        &update,
+    )
+    .expect("the update is allowed");
+    let updated = rig.commit(&host(), "same-display-name", &update).await;
+    let IdentityOutcome::Done { agents, .. } = &updated.outcome else {
+        panic!("the update is done: {:?}", updated.outcome);
+    };
+    assert_eq!(agents[0].state.token(), "committed", "{updated:?}");
+    assert!(
+        agents[0].seat.is_none(),
+        "an update names no seat: {updated:?}"
+    );
+    assert_eq!(
+        agents[0].spec_revision,
+        Some(2),
+        "an unchanged value commits the record at its next revision: {updated:?}"
+    );
+
+    let answer = rig.send(DECLARED, "after-the-update").await;
+    assert!(
+        answer["error"].is_null(),
+        "the adopted agent's send is served after the update: {answer}"
+    );
+    assert!(
+        rig.asked("after-the-update").await,
+        "the adopted agent's member is built and runs the turn"
+    );
+    let member = rig
+        .mob()
+        .get_member(&id(DECLARED))
+        .await
+        .expect("the roster reads")
+        .expect("the agent has a member");
+    assert_eq!(
+        member.labels, configured.labels,
+        "the member carries the labels its record holds"
+    );
+    rig.shutdown().await;
+}

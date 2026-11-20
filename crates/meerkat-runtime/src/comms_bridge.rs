@@ -311,13 +311,20 @@ fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types
     }
 }
 
+/// The structured payload a peer interaction carries, when it carries one.
+///
+/// A payload that is JSON null is no payload: the input is admitted without
+/// one. A peer input's optional payload is stored as absent or as its value,
+/// and a stored JSON null reads back as absent, so an input admitted with a
+/// null payload would not read back as it was written.
 fn peer_payload(interaction: &InboxInteraction) -> Option<serde_json::Value> {
-    match &interaction.content {
+    let payload = match &interaction.content {
         InteractionContent::Message { .. }
-        | InteractionContent::IncarnationFencedMessage { .. } => None,
-        InteractionContent::Request { params, .. } => Some(params.clone()),
-        InteractionContent::Response { result, .. } => Some(result.clone()),
-    }
+        | InteractionContent::IncarnationFencedMessage { .. } => return None,
+        InteractionContent::Request { params, .. } => params,
+        InteractionContent::Response { result, .. } => result,
+    };
+    (!payload.is_null()).then(|| payload.clone())
 }
 
 fn external_event_payload(interaction: &InboxInteraction) -> serde_json::Value {
@@ -1406,6 +1413,77 @@ mod tests {
         } else {
             panic!("Expected PeerInput");
         }
+    }
+
+    /// A response sent without a result carries JSON null on the wire. The
+    /// peer input is admitted without a payload: a stored JSON null reads
+    /// back as absent, so an input admitted with a null payload would not
+    /// read back as it was written.
+    #[test]
+    fn a_null_result_is_no_payload() {
+        for status in [
+            ResponseStatus::Accepted,
+            ResponseStatus::Completed,
+            ResponseStatus::Failed,
+        ] {
+            let interaction = InboxInteraction {
+                objective_id: None,
+                sender_taint: None,
+                from_route: Some(meerkat_core::comms::PeerId::from_uuid(
+                    uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f2").unwrap(),
+                )),
+                from: "peer-1".into(),
+                content: InteractionContent::Response {
+                    status,
+                    result: serde_json::Value::Null,
+                    in_reply_to: make_interaction_id(),
+                    blocks: None,
+                },
+                id: make_interaction_id(),
+                rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+            };
+            let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
+            let Input::Peer(peer) = &input else {
+                panic!("Expected PeerInput");
+            };
+            assert_eq!(
+                peer.payload, None,
+                "{:?} carries no payload",
+                interaction.content
+            );
+            let stored = serde_json::to_vec(&input).unwrap();
+            let reread: Input = serde_json::from_slice(&stored).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&reread).unwrap(),
+                stored,
+                "the admitted input reads back as it was written"
+            );
+        }
+
+        // A result that is not null is carried as the payload.
+        let interaction = InboxInteraction {
+            objective_id: None,
+            sender_taint: None,
+            from_route: None,
+            from: "peer-1".into(),
+            content: InteractionContent::Response {
+                status: ResponseStatus::Accepted,
+                result: serde_json::json!({"token": "accepted"}),
+                in_reply_to: make_interaction_id(),
+                blocks: None,
+            },
+            id: make_interaction_id(),
+            rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        };
+        let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
+        let Input::Peer(peer) = &input else {
+            panic!("Expected PeerInput");
+        };
+        assert_eq!(peer.payload, Some(serde_json::json!({"token": "accepted"})));
     }
 
     #[test]

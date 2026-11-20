@@ -22,6 +22,8 @@ max_output_chars = 40000
 [rest]
 host = "127.0.0.1"
 port = 8080
+# allowed_origins = ["https://app.example.com"]  # origins of the browser pages the REST server answers (default: none)
+# served_hosts = ["api.example.com"]  # host names the REST server answers for besides localhost and address literals
 
 [store]
 # database_dir = "/path/to/db"  # session database directory (server surfaces)

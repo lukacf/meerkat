@@ -22,6 +22,7 @@ import type { MetaBuilderConfig } from "./builder.js";
 import {
   CallbackDispatcher,
   type DecisionNoticeHandler,
+  type ScheduleFireHandler,
   type SessionAgentBuilder,
 } from "./agent-builder.js";
 import {
@@ -1467,6 +1468,9 @@ export class MetaRuntime {
     this._config = config;
     this._transport = transport ?? null;
     this._injectedTransport = transport ?? null;
+    for (const [name, handler] of config.scheduleFireHandlers ?? []) {
+      this._dispatcher.registerScheduleFireHandler(name, handler);
+    }
   }
 
   /** @internal */
@@ -1783,6 +1787,10 @@ export class MetaRuntime {
       return ready;
     }
     if (settled.outcome === "failed") {
+      // The gateway exits now, with no answer to a shutdown request: the stop
+      // that follows must not make one, or its rejection would be thrown in
+      // place of this refusal.
+      transport.initSettledFailed();
       const data = settled.data;
       const errorData: Record<string, unknown> =
         typeof data === "object" && data !== null && !Array.isArray(data)
@@ -1829,6 +1837,9 @@ export class MetaRuntime {
     }
     if (this._config.routingConfigPath) {
       runtimeOptions.routing_config_path = this._config.routingConfigPath;
+    }
+    if (this._config.hostRunnables?.length) {
+      runtimeOptions.host_runnables = [...this._config.hostRunnables];
     }
     if (this._config.workgraphEnabled !== null) {
       runtimeOptions.workgraph = this._config.workgraphEnabled;
@@ -2042,6 +2053,21 @@ export class MetaRuntime {
    */
   onDecisionNotice(handler: DecisionNoticeHandler): void {
     this._dispatcher.registerDecisionNoticeHandler(handler);
+  }
+
+  /**
+   * Register or replace a named host runnable's handler. Registration survives
+   * reconnecting this runtime. For a fresh process, use
+   * `MetaBuilder.onScheduleFire` before `build()` starts the initial connection.
+   * Pairs with `MetaBuilder.hostRunnables`. The handler receives
+   * the raw occurrence (`schedule_id`, `occurrence_id`, `due_at`, optional
+   * `payload`) and may be sync or async; throwing or rejecting fails the
+   * durable occurrence attempt. Register before an existing schedule can
+   * fire. Return values cross the callback bridge but are not stored as
+   * schedule results; a handler returning nothing acknowledges completion.
+   */
+  onScheduleFire(name: string, handler: ScheduleFireHandler): void {
+    this._dispatcher.registerScheduleFireHandler(name, handler);
   }
 
   sseBridge(): SseBridge {

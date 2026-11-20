@@ -275,7 +275,9 @@ impl CopilotTokenExchangeError {
             CopilotHttpTransportError::Request(request) if request.is_timeout() => {
                 exchange_timeout()
             }
-            CopilotHttpTransportError::Request(request) if request.is_connect() => {
+            CopilotHttpTransportError::Request(request)
+                if request.is_connect() || connection_broke(request) =>
+            {
                 meerkat_llm_core::LlmError::ConnectionReset
             }
             CopilotHttpTransportError::Request(_) => meerkat_llm_core::LlmError::Unknown {
@@ -298,6 +300,29 @@ impl CopilotTokenExchangeError {
             not_before: None,
         })
     }
+}
+
+/// Whether a request failed because its established connection broke: an
+/// I/O error of kind connection reset, connection aborted, broken pipe or
+/// unexpected end of file anywhere in the error's source chain. A peer that
+/// closes the connection without a reset leaves no I/O error and is not one.
+fn connection_broke(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// The class of a token exchange that timed out: on its request bound, or
@@ -5531,7 +5556,31 @@ mod tests {
         assert!(!spec.with_image_input_support(false).supports_image_input());
     }
 
+    /// This test's own Copilot account. A credential identity names one
+    /// AuthMachine lease and one entry of the process-wide login lifecycle
+    /// lock, so rows that shared an account contended for that entry whenever
+    /// the suite ran as threads of one process: a turn parked behind another
+    /// row's token load, and a bare lease release answered busy. Every test
+    /// thread gets an account of its own (a `#[tokio::test]` runs on its
+    /// test's thread); everything one test builds still shares one account.
     fn account_identity() -> AuthCredentialIdentity {
+        static NEXT_TEST_ACCOUNT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        thread_local! {
+            static TEST_ACCOUNT: CredentialAccountId = CredentialAccountId::parse(format!(
+                "github_copilot_test_{}",
+                NEXT_TEST_ACCOUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
+            .expect("valid account id");
+        }
+        AuthCredentialIdentity::Account(CredentialAccountRef {
+            realm: RealmId::global(),
+            account: TEST_ACCOUNT.with(Clone::clone),
+        })
+    }
+
+    /// The account the zero-config Copilot routes name.
+    fn zero_config_account_identity() -> AuthCredentialIdentity {
         AuthCredentialIdentity::Account(CredentialAccountRef {
             realm: RealmId::global(),
             account: CredentialAccountId::parse("github_copilot").expect("valid account id"),
@@ -7717,23 +7766,25 @@ mod tests {
             Some(meerkat_llm_core::LlmError::NetworkTimeout { .. })
         ));
 
-        // A refused connection, through the production transport.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = closed.local_addr().unwrap();
-        drop(closed);
+        // A refused connection, through the production transport. The port
+        // is bound, never listens and stays bound until the answer is in: a
+        // port that was bound and freed can be given to another test's
+        // listener before the request reaches it.
+        let unlistened = tokio::net::TcpSocket::new_v4().unwrap();
+        unlistened.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = unlistened.local_addr().unwrap();
         let refused = match ReqwestCopilotHttpTransport::new()
             .get(&format!("http://{address}/token"), HeaderMap::new())
             .await
         {
             Err(error) => error,
-            Ok(response) => panic!("a closed port answered: status {}", response.status),
+            Ok(response) => panic!("an unlistened port answered: status {}", response.status),
         };
+        drop(unlistened);
+        let class = retryable_class(&refused);
         assert!(
-            matches!(
-                retryable_class(&refused),
-                Some(meerkat_llm_core::LlmError::ConnectionReset)
-            ),
-            "{refused:?}"
+            matches!(class, Some(meerkat_llm_core::LlmError::ConnectionReset)),
+            "a refused connection is classified {class:?}, from {refused:?}"
         );
 
         for failure in [
@@ -7745,6 +7796,106 @@ mod tests {
         ] {
             assert!(retryable_class(&failure).is_none(), "{failure:?}");
         }
+    }
+
+    /// A connection the peer resets after it was established is a connection
+    /// failure of the exchange, as a refused connection is. The request's
+    /// own timeout stays a timeout, and a connection the peer closes without
+    /// a reset stays unclassified.
+    #[tokio::test]
+    async fn token_exchange_reset_after_connect_is_a_connection_failure() {
+        use tokio::io::AsyncReadExt;
+
+        fn retryable_class(
+            error: &CopilotHttpTransportError,
+        ) -> Option<meerkat_llm_core::LlmError> {
+            match CopilotTokenExchangeError::from_transport(error) {
+                CopilotTokenExchangeError::Unavailable(unavailable) => Some(unavailable.retryable),
+                CopilotTokenExchangeError::Failed(_) => None,
+            }
+        }
+
+        async fn exchange_error(address: std::net::SocketAddr) -> CopilotHttpTransportError {
+            match ReqwestCopilotHttpTransport::new()
+                .get(&format!("http://{address}/token"), HeaderMap::new())
+                .await
+            {
+                Err(error) => error,
+                Ok(response) => panic!("the endpoint answered: status {}", response.status),
+            }
+        }
+
+        // An endpoint that accepts the connection and resets it once the
+        // request has begun to arrive: a socket closed with unread data is
+        // reset.
+        let resetting = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = resetting.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = resetting.accept().await.unwrap();
+            let mut first = [0_u8; 1];
+            assert_eq!(stream.peek(&mut first).await.unwrap(), 1);
+            drop(stream);
+        });
+        let reset = exchange_error(address).await;
+        peer.await.unwrap();
+        let class = retryable_class(&reset);
+        assert!(
+            matches!(class, Some(meerkat_llm_core::LlmError::ConnectionReset)),
+            "a connection reset after the connect is classified {class:?}, from {reset:?}"
+        );
+
+        // Control: a refused connection. The port is bound, never listens
+        // and stays bound until the answer is in.
+        let unlistened = tokio::net::TcpSocket::new_v4().unwrap();
+        unlistened.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let refused = exchange_error(unlistened.local_addr().unwrap()).await;
+        drop(unlistened);
+        let class = retryable_class(&refused);
+        assert!(
+            matches!(class, Some(meerkat_llm_core::LlmError::ConnectionReset)),
+            "a refused connection is classified {class:?}, from {refused:?}"
+        );
+
+        // Control: a request that passes its bound stays a timeout.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let timed_out = reqwest::Client::builder()
+            .timeout(StdDuration::from_millis(50))
+            .build()
+            .unwrap()
+            .get(format!("http://{}/token", silent.local_addr().unwrap()))
+            .send()
+            .await
+            .expect_err("a silent endpoint times out");
+        let class = retryable_class(&CopilotHttpTransportError::Request(timed_out));
+        assert!(
+            matches!(
+                class,
+                Some(meerkat_llm_core::LlmError::NetworkTimeout { .. })
+            ),
+            "a timeout is classified {class:?}"
+        );
+
+        // Control: an endpoint that reads the request and closes without a
+        // reset. That failure carries no I/O error and stays unclassified.
+        let closing = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closing.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = closing.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "the request ends with a blank line");
+                request.extend_from_slice(&chunk[..read]);
+            }
+        });
+        let closed = exchange_error(address).await;
+        peer.await.unwrap();
+        let class = retryable_class(&closed);
+        assert!(
+            matches!(class, Some(meerkat_llm_core::LlmError::Unknown { .. })),
+            "a connection closed without a reset is classified {class:?}, from {closed:?}"
+        );
     }
 
     #[test]
@@ -7824,6 +7975,198 @@ mod tests {
                 .as_ref()
                 .map(|cache| cache.token.as_str()),
             Some("derived-two")
+        );
+    }
+
+    /// A model listing that answers 401 again, to the token minted after its
+    /// first 401, refuses the sign-in: the mint makes exactly one re-mint
+    /// and two listings (the second with the new token), marks the account
+    /// as needing a new sign-in and fails as `user_reauth_required`. That
+    /// kind does not clear on its own and the agent loop does not retry it.
+    /// No token and no model list are kept, so the account resolves no route
+    /// without a list (the state a retryable `supported_levels_unavailable`
+    /// effort refusal reports), and the next mint fails the same way without
+    /// a request.
+    #[tokio::test]
+    async fn a_second_model_discovery_401_at_the_mint_needs_a_new_sign_in() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-one"),
+            json_response(401, serde_json::json!({"message": "expired"})),
+            token_response("derived-two"),
+            json_response(401, serde_json::json!({"message": "expired"})),
+        ]));
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        let token_url = state
+            .config
+            .endpoints()
+            .expect("the default endpoints")
+            .copilot_token_url
+            .to_string();
+        let authorizer = CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding,
+            env,
+            transport: transport.clone(),
+        };
+        let source_phase = || {
+            auth_lease
+                .snapshot(&meerkat_core::handles::LeaseKey::from_credential_identity(
+                    &account_identity(),
+                ))
+                .phase
+        };
+        assert_eq!(
+            source_phase(),
+            Some(meerkat_core::handles::AuthLeasePhase::Valid),
+            "the sign-in is valid before the mint"
+        );
+
+        let error = authorizer
+            .prime()
+            .await
+            .expect_err("a second listing 401 fails the mint");
+        println!("second 401 at the mint: error Display = {error}");
+        println!("second 401 at the mint: error Debug = {error:?}");
+
+        // The error: a sign-in error, by value and by its wire kind.
+        let ProviderAuthError::Auth(auth_error) = &error else {
+            panic!("a second listing 401 is an auth error: {error:?}");
+        };
+        assert_eq!(*auth_error, AuthError::UserReauthRequired);
+        let kind = auth_error.kind();
+        println!("second 401 at the mint: auth kind = {}", kind.as_str());
+        assert_eq!(kind.as_str(), "user_reauth_required");
+        assert!(
+            !kind.clears_on_its_own(),
+            "a new sign-in is not a failure that clears on its own"
+        );
+
+        // As a turn's failure it is an authentication failure the agent loop
+        // does not retry.
+        let turn_failure = meerkat_llm_core::LlmError::from_authorizer(auth_error.clone());
+        println!("second 401 at the mint: as a turn failure = {turn_failure}");
+        assert!(
+            matches!(
+                turn_failure,
+                meerkat_llm_core::LlmError::AuthenticationFailed { .. }
+            ),
+            "{turn_failure:?}"
+        );
+        assert!(
+            matches!(
+                turn_failure.failure_reason(),
+                meerkat_core::error::LlmFailureReason::AuthError
+            ),
+            "{turn_failure:?}"
+        );
+        assert!(
+            meerkat_core::retry::LlmRetryFailure::from_agent_error(
+                &turn_failure.clone().into_agent_error("openai"),
+            )
+            .is_none(),
+            "the agent loop does not retry a turn that needs a new sign-in: {turn_failure:?}"
+        );
+        // The typed turn error a surface reports for it.
+        let turn_error = meerkat_core::TurnErrorMetadata::from_agent_error(
+            &turn_failure.clone().into_agent_error("openai"),
+        )
+        .expect("an LLM failure has turn error metadata");
+        let turn_error = serde_json::to_value(&turn_error).expect("serialize the turn error");
+        println!("second 401 at the mint: turn error = {turn_error}");
+        assert_eq!(
+            turn_error,
+            serde_json::json!({
+                "kind": "llm_failure",
+                "terminal": true,
+                "outcome": "failed",
+                "detail": "Authentication failed: user reauth required",
+                "provider": "openai",
+                "retryable": false,
+                "reason": {"reason_type": "llm_auth_error"},
+            })
+        );
+
+        // The requests: mint, listing, one re-mint, one more listing with the
+        // new token.
+        let requests = transport
+            .requests
+            .lock()
+            .iter()
+            .map(|(url, headers)| {
+                (
+                    url.clone(),
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mints = requests.iter().filter(|(url, _)| *url == token_url).count();
+        let listing_bearers = requests
+            .iter()
+            .filter(|(url, _)| url.ends_with("/models"))
+            .map(|(_, bearer)| bearer.clone())
+            .collect::<Vec<_>>();
+        println!(
+            "second 401 at the mint: requests = {}, mints = {mints}, listings = {}",
+            requests.len(),
+            listing_bearers.len()
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(url, _)| url.ends_with("/models"))
+                .collect::<Vec<_>>(),
+            [false, true, false, true],
+            "mint, listing, re-mint, listing"
+        );
+        assert_eq!(mints, 2, "the first mint and exactly one re-mint");
+        assert_eq!(
+            listing_bearers,
+            [
+                Some("Bearer derived-one".to_string()),
+                Some("Bearer derived-two".to_string()),
+            ],
+            "exactly two listings, the second with the token minted after the first 401"
+        );
+
+        // The account: marked as needing a new sign-in, with no token and no
+        // model list kept.
+        println!(
+            "second 401 at the mint: sign-in phase = {:?}",
+            source_phase()
+        );
+        assert_eq!(
+            source_phase(),
+            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+        );
+        assert!(
+            state.cache.read().is_none(),
+            "a refused mint keeps no token and no list"
+        );
+        assert!(authorizer.model_snapshot().is_none());
+        assert!(authorizer.api_base().is_none());
+
+        // The next mint fails the same way and sends nothing.
+        let again = authorizer
+            .prime()
+            .await
+            .expect_err("the account still needs a new sign-in");
+        println!("second 401 at the mint: the next mint = {again}");
+        assert_eq!(
+            again,
+            ProviderAuthError::Auth(AuthError::UserReauthRequired)
+        );
+        assert_eq!(
+            transport.request_count(),
+            4,
+            "an account that needs a new sign-in sends no request"
         );
     }
 
@@ -13218,10 +13561,10 @@ mod tests {
                 assert_eq!(target.backend.backend_kind, route.backend_kind());
                 assert_eq!(target.auth_profile.auth_method, route.token_auth_method());
                 assert_eq!(target.auth_profile.source, env_source());
-                assert_eq!(target.credential_identity, account_identity());
+                assert_eq!(target.credential_identity, zero_config_account_identity());
                 ProviderRuntimeCatalog::validate_binding_with_credential_identity(
                     &reference,
-                    account_identity(),
+                    zero_config_account_identity(),
                     &target.backend,
                     &target.auth_profile,
                     &target.binding.policy,
@@ -14964,6 +15307,130 @@ mod tests {
             );
             assert_eq!(transport.request_count(), 5);
             assert_eq!(session.bearers(), ["Bearer derived-one"]);
+        }
+
+        /// A running session whose token refresh meets a listing that
+        /// answers 401 twice (to the refreshed token and to the one minted
+        /// after its 401): the turn fails once with an authentication
+        /// failure the agent loop does not retry, without a request signed,
+        /// and the account needs a new sign-in. Until then the session's
+        /// turns fail the same way and no session builds on the account,
+        /// both without a request. After a new sign-in the same session's
+        /// next turn mints from it and is served.
+        #[tokio::test]
+        async fn a_second_listing_401_at_a_running_sessions_mint_needs_a_new_sign_in() {
+            let clock = TestClock::new();
+            let unauthorized = || json_response(401, serde_json::json!({"message": "expired"}));
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                // The refresh, due after 200 s.
+                token_at("derived-two", clock.at(3600), 200),
+                unauthorized(),
+                token_at("derived-three", clock.at(3600), 200),
+                unauthorized(),
+                // The new sign-in's mint.
+                token_at("derived-four", clock.at(7200), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+            assert!(session.turn().await.is_empty(), "the first turn is served");
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+            assert_eq!(transport.request_count(), 2);
+
+            // The refresh is due: the turn mints, and the listing refuses the
+            // new token and the one minted after that.
+            clock.set(201);
+            let events = session.turn().await;
+            println!("running session, second 401 at the mint: turn = {events:?}");
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            println!("running session, second 401 at the mint: turn error Display = {error}");
+            assert!(
+                matches!(
+                    error,
+                    meerkat_llm_core::LlmError::AuthenticationFailed { message }
+                        if message == "user reauth required"
+                ),
+                "{error:?}"
+            );
+            assert!(
+                matches!(
+                    error.failure_reason(),
+                    meerkat_core::error::LlmFailureReason::AuthError
+                ) && !retried(error),
+                "a turn that needs a new sign-in is an auth failure the loop does not retry: {error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(
+                transport.request_count(),
+                6,
+                "one refresh mint, one re-mint and two listings"
+            );
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one"],
+                "the failed turn signed no request"
+            );
+
+            // Until a new sign-in: the session's next turn fails the same
+            // way, and no session builds on the account; neither sends a
+            // request.
+            let events = session.turn().await;
+            println!("running session, the next turn before a new sign-in: {events:?}");
+            let [Err(again)] = events.as_slice() else {
+                panic!("the next turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    again,
+                    meerkat_llm_core::LlmError::AuthenticationFailed { message }
+                        if message == "user reauth required"
+                ) && !retried(again),
+                "{again:?}"
+            );
+            let build = account
+                .try_session([])
+                .await
+                .err()
+                .expect("no session builds on an account that needs a new sign-in");
+            println!("running session, a new build before a new sign-in: {build}");
+            assert_eq!(
+                build,
+                ProviderAuthError::Auth(AuthError::UserReauthRequired)
+            );
+            assert_eq!(transport.request_count(), 6);
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+
+            // A new sign-in: the same session's next turn mints from it and
+            // is served.
+            let new_expiry =
+                DateTime::from_timestamp(clock.at(86_400).timestamp(), 0).expect("a whole second");
+            account.sign_in_again("github-new-token", new_expiry).await;
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            let events = session.turn_across_a_route_change().await;
+            println!("running session, the turn after a new sign-in: {events:?}");
+            assert!(
+                events.is_empty(),
+                "the session is served again after a new sign-in: {events:?}"
+            );
+            assert_eq!(
+                transport.request_count(),
+                8,
+                "the new sign-in's mint and listing"
+            );
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one", "Bearer derived-four"]
+            );
         }
 
         /// A mint whose model listing answers a 403 that asks for no account

@@ -4759,6 +4759,7 @@ mod tests {
             "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-4-hydrogen",
+            "gemini-4-neon",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.1-pro-preview",
@@ -4793,6 +4794,9 @@ mod tests {
             ("gemini-4-hydrogen", GeminiThinkingLevel::Low, "low"),
             ("gemini-4-hydrogen", GeminiThinkingLevel::Medium, "medium"),
             ("gemini-4-hydrogen", GeminiThinkingLevel::High, "high"),
+            ("gemini-4-neon", GeminiThinkingLevel::Low, "low"),
+            ("gemini-4-neon", GeminiThinkingLevel::Medium, "medium"),
+            ("gemini-4-neon", GeminiThinkingLevel::High, "high"),
             (
                 "gemini-3.5-flash-lite",
                 GeminiThinkingLevel::Minimal,
@@ -4963,7 +4967,7 @@ mod tests {
     }
 
     /// Google documents a fourth thinking level, `xhigh`, for Gemini 4
-    /// Hydrogen only. The Gemini thinking level has no such value in this
+    /// Hydrogen and Neon. The Gemini thinking level has no such value in this
     /// release: a Gemini provider tag that names it does not parse, in the
     /// flat field or in the nested config, so no request can carry it. The
     /// levels the type has parse and are sent in lower case.
@@ -5005,14 +5009,19 @@ mod tests {
     /// Gemini 4 Argon and Gemini 4 Carbon ignore sampling parameters, do not
     /// support explicit context caching, and think at their default level
     /// (`medium`) unless the caller picks one. Gemini 4 Hydrogen's row is
-    /// theirs under its own identity, and its default level is `high`. A
+    /// theirs under its own identity. Hydrogen and Neon default to `high`. A
     /// default request carries none of those fields and keeps the caller's
     /// output budget.
     #[test]
     fn test_gemini_4_default_request_sends_no_sampling_caching_or_thinking_override()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
-        for model in ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"] {
+        for model in [
+            "gemini-4-argon",
+            "gemini-4-carbon",
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
+        ] {
             let mut request = LlmRequest::new(
                 model,
                 vec![Message::User(UserMessage::text("test".to_string()))],

@@ -621,7 +621,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>, bound_run_resumable: Bool)
-- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind)
+- `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind, pending_terminal_carrier: Bool)
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
 - `ClassifyInputTerminality`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
@@ -9260,55 +9260,115 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing`
 - From: `Initializing`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Initializing`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralIdle`
 - From: `Idle`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Idle`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralAttached`
 - From: `Attached`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Attached`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralRunning`
 - From: `Running`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Running`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralRetired`
 - From: `Retired`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Retired`
 
 ### `ClassifyRecoveredInputDurabilityDiscardEphemeralStopped`
 - From: `Stopped`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `ephemeral_durability`
+  - `unfinished_work`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Stopped`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing`
+- From: `Initializing`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Initializing`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle`
+- From: `Idle`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Idle`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached`
+- From: `Attached`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Attached`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning`
+- From: `Running`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Running`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired`
+- From: `Retired`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
+- Emits: `RecoveredInputDurabilityClassified`
+- To: `Retired`
+
+### `ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped`
+- From: `Stopped`
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
+- Guards:
+  - `ephemeral_durability`
+  - `pending_terminal_carrier`
 - Emits: `RecoveredInputDurabilityClassified`
 - To: `Stopped`
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing`
 - From: `Initializing`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9316,7 +9376,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle`
 - From: `Idle`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9324,7 +9384,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached`
 - From: `Attached`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9332,7 +9392,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning`
 - From: `Running`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9340,7 +9400,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired`
 - From: `Retired`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`
@@ -9348,7 +9408,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped`
 - From: `Stopped`
-- On: `ClassifyRecoveredInputDurability`(input_id, durability)
+- On: `ClassifyRecoveredInputDurability`(input_id, durability, pending_terminal_carrier)
 - Guards:
   - `retained_durability`
 - Emits: `RecoveredInputDurabilityClassified`

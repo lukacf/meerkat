@@ -266,7 +266,7 @@ the token store. It sets `[realm.global] default_binding` if none is set.
 - Each binding's `default_model` is the provider's catalog default at login
   time, except that `global:google_oauth` (Gemini Code Assist) and
   `global:copilot_gemini` start on `gemini-3.8-flash` (0.9.1), because the
-  catalog's Gemini default (`gemini-4-argon`) is not verified on those routes. A plain `rkat run` still uses the global default model; select the
+  catalog's Gemini default (`gemini-4-neon`) is not verified on those routes. A plain `rkat run` still uses the global default model; select the
   login with `--auth-binding` or a matching `--model`:
   `rkat run --auth-binding global:anthropic_oauth "hi"`.
 - The browser step waits 2 minutes; Ctrl-C cancels and nothing is saved

@@ -7,6 +7,7 @@ mod boot_obligation_rows;
 mod created_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod declared_apply_rows;
+mod delegate_helper_trust_rows;
 mod ensure_convergence_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod event_log_reads;
@@ -15424,18 +15425,32 @@ fn test_comms_name_for(mob_id: &MobId, profile: &str, agent_identity: &str) -> S
     format!("{mob_id}/{profile}/{agent_identity}")
 }
 
-struct SpawnProvisionedCommandDelayGuard;
+/// Holds back the provisioned completion of the spawns of ONE mob, until it
+/// is dropped. The delay is per mob so that rows running side by side in one
+/// process do not end each other's delay or sleep through it.
+struct SpawnProvisionedCommandDelayGuard {
+    mob_id: MobId,
+}
 
 impl SpawnProvisionedCommandDelayGuard {
-    fn set(delay_ms: u64) -> Self {
-        super::actor::SPAWN_PROVISIONED_COMMAND_DELAY_MS.store(delay_ms, Ordering::Relaxed);
-        Self
+    fn set(mob_id: &MobId, delay_ms: u64) -> Self {
+        let mut delays = super::actor::SPAWN_PROVISIONED_COMMAND_DELAYS_MS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        delays.retain(|(delayed_mob_id, _)| delayed_mob_id != mob_id);
+        delays.push((mob_id.clone(), delay_ms));
+        Self {
+            mob_id: mob_id.clone(),
+        }
     }
 }
 
 impl Drop for SpawnProvisionedCommandDelayGuard {
     fn drop(&mut self) {
-        super::actor::SPAWN_PROVISIONED_COMMAND_DELAY_MS.store(0, Ordering::Relaxed);
+        super::actor::SPAWN_PROVISIONED_COMMAND_DELAYS_MS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(delayed_mob_id, _)| *delayed_mob_id != self.mob_id);
     }
 }
 
@@ -63239,7 +63254,10 @@ async fn a_cancelled_resumed_spawn_keeps_its_session(drain: ProvisionedSpawnDrai
     let identity = AgentIdentity::from("w-resumed-drain");
     let session_id = seed_existing_worker_session(&service, &definition.id, &identity).await;
 
-    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(
+        &definition.id,
+        PROVISIONED_SPAWN_COMPLETION_DELAY_MS,
+    );
     let pending_spawn = {
         let handle = handle.clone();
         let identity = identity.clone();
@@ -63515,7 +63533,10 @@ async fn a_cancelled_fresh_spawn_cleans_up_its_session(drain: ProvisionedSpawnDr
     let identity = AgentIdentity::from("w-fresh-drain");
     let comms_name = test_comms_name_for(&definition.id, "worker", identity.as_str());
 
-    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(
+        &definition.id,
+        PROVISIONED_SPAWN_COMPLETION_DELAY_MS,
+    );
     let pending_spawn = {
         let handle = handle.clone();
         let identity = identity.clone();
@@ -63601,7 +63622,10 @@ async fn stop_after_a_coordinator_owned_resumed_spawn_provisioned_releases_the_s
         .expect("coordinator owner context");
     let coordinator_registry = Arc::clone(&coordinator.ops_registry);
 
-    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(
+        &definition.id,
+        PROVISIONED_SPAWN_COMPLETION_DELAY_MS,
+    );
     let pending_spawn = {
         let handle = handle.clone();
         let identity = identity.clone();
@@ -64032,8 +64056,9 @@ async fn test_retire_retry_drains_exact_failed_pending_cleanup_before_classifyin
 
 #[tokio::test]
 async fn test_retire_absent_does_not_cancel_later_pending_spawn_incarnation() {
-    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
-    let (handle, service) = create_test_mob(sample_definition()).await;
+    let definition = sample_definition();
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(&definition.id, 500);
+    let (handle, service) = create_test_mob(definition).await;
     let agent_identity = AgentIdentity::from("w-retire-absent-pending-spawn");
     let comms_name = test_comms_name("worker", agent_identity.as_str());
 
@@ -73497,6 +73522,140 @@ async fn cold_resume_cleanup_held_member_is_isolated() {
         "held custody stays retained"
     );
     assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// The repair advice of a member left Broken by a resume whose own attempt
+/// could not be certified: for a Recovery corruption cause the member is left
+/// as it is (a retire, respawn or rotation is refused in that state), and the
+/// retire or respawn repair is named for every other cause only.
+#[cfg(feature = "runtime-adapter")]
+fn assert_uncertified_resume_repair_advice(text: &str, context: &str) {
+    for clause in [
+        "if the cause is a Recovery corruption, leave the member as it is: do not retire, respawn or rotate it (all are refused in this state and leave the mob unable to start)",
+        "send it nothing",
+        "keep a copy of the state directory",
+        "see Known limitations in the release notes",
+        "for any other cause, repair required: retire or respawn the member (not for a Recovery corruption)",
+    ] {
+        assert!(
+            text.contains(clause),
+            "{context}: the advice must carry '{clause}': {text}"
+        );
+    }
+    assert!(
+        !text.contains("until retired or respawned"),
+        "{context}: the advice must not name retire or respawn as the repair of every cause: {text}"
+    );
+}
+
+/// A member parked as unproven carries the repair advice that leaves a
+/// Recovery corruption member as it is, in its Broken error.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_unproven_member_advice_leaves_a_recovery_corruption_member_as_it_is() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["advice-a", "advice-b"]).await;
+    let (parked_identity, parked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        parked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("an unproven member must not stall the mob-wide resume")
+        .expect("resume completes with the unproven member parked");
+    let parked = assert_member_status_for_test(
+        &resumed,
+        parked_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "unproven member",
+    )
+    .await;
+    assert_uncertified_resume_repair_advice(
+        parked.error.as_deref().unwrap_or_default(),
+        "the Broken error of the unproven member",
+    );
+}
+
+/// The actor's log line of a custody parked for a member left Broken carries
+/// the same repair advice.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_unproven_member_log_line_carries_the_repair_advice() {
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let (captured, _capture) = capture_warnings();
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["log-advice-a", "log-advice-b"]).await;
+    let (parked_identity, parked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        parked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("an unproven member must not stall the mob-wide resume")
+        .expect("resume completes with the unproven member parked");
+    assert_member_status_for_test(
+        &resumed,
+        parked_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "unproven member",
+    )
+    .await;
+    let log_line = captured
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .find(|fields| {
+            field(fields, "agent_identity") == Some(parked_identity.as_str())
+                && field(fields, "message").is_some_and(|message| {
+                    message.starts_with(
+                        "explicit resume cannot certify member cleanup; custody remains parked",
+                    )
+                })
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no parked-custody log line for '{parked_identity}'"));
+    assert_uncertified_resume_repair_advice(
+        field(&log_line, "message").unwrap_or_default(),
+        "the log line of the parked custody",
+    );
+}
+
+/// A member whose retained cleanup custody is held by the actor carries the
+/// same repair advice in its Broken error.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_cleanup_held_member_advice_leaves_a_recovery_corruption_member_as_it_is() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["held-advice-a", "held-advice-b"]).await;
+    let (held_identity, held_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        held_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+    super::actor::explicit_resume::CLEANUP_HELD_TEST_SESSIONS
+        .lock()
+        .expect("cleanup held hook")
+        .insert(held_session.clone());
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("held cleanup must not stall the mob-wide resume")
+        .expect("resume completes with the held member isolated");
+    let held = assert_member_status_for_test(
+        &resumed,
+        held_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "held cleanup member",
+    )
+    .await;
+    assert_uncertified_resume_repair_advice(
+        held.error.as_deref().unwrap_or_default(),
+        "the Broken error of the held cleanup member",
+    );
 }
 
 /// #1251 isolation: a member settled Broken whose failed attempt left a
@@ -101720,7 +101879,7 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
 
 #[tokio::test]
 async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (handle, service) = create_test_mob(sample_definition()).await;
     let member = AgentIdentity::from("worker-kickoff-quiesce-destroy");
     handle
         .spawn_with_options(
@@ -101733,6 +101892,17 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         .await
         .expect("spawn turn-driven worker");
 
+    // Machine-owned kickoff facts injected past the shell, as in the retire
+    // row above. The actor then starts the kickoff this live member owes
+    // (`start_owed_kickoffs`): it marks it starting, admits the kickoff input
+    // and waits on its run. Hold that run at the provider so the kickoff is
+    // still in flight when the destroy is admitted. A run that completes
+    // first resolves the kickoff Started: the member is then in neither
+    // kickoff set, the second command below is refused, and the destroy has
+    // nothing to quiesce.
+    service.set_start_turn_delay_ms(600_000);
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let entered_before = *turns_entered.borrow_and_update();
     let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
     handle
         .project_machine_input(
@@ -101743,6 +101913,13 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         )
         .await
         .expect("mark kickoff pending");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        turns_entered.wait_for(|entered| *entered > entered_before),
+    )
+    .await
+    .expect("the owed kickoff run reaches the provider")
+    .expect("start-turn watch");
     handle
         .project_machine_input(
             crate::machines::mob_machine::MobMachineInput::KickoffMarkStarting {
@@ -101751,6 +101928,15 @@ async fn test_destroy_quiesces_machine_inflight_kickoff_without_shell_handle() {
         )
         .await
         .expect("mark kickoff starting");
+
+    let in_flight = handle
+        .query_machine_state()
+        .await
+        .expect("query machine state before the destroy");
+    assert!(
+        in_flight.member_kickoff_starting.contains(&dsl_member),
+        "the machine must hold the kickoff in flight when the destroy is admitted",
+    );
 
     handle.destroy().await.expect(
         "destroy must discharge every kickoff quiesce obligation before the \
@@ -102034,8 +102220,9 @@ async fn test_late_kickoff_failure_outcome_after_retire_is_benign() {
 
 #[tokio::test]
 async fn test_destroy_with_inflight_spawn_provisioning_quiesces_waiter() {
-    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(500);
-    let (handle, service) = create_test_mob(sample_definition()).await;
+    let definition = sample_definition();
+    let _delay_guard = SpawnProvisionedCommandDelayGuard::set(&definition.id, 500);
+    let (handle, service) = create_test_mob(definition).await;
     let member = AgentIdentity::from("w-destroy-pending-spawn");
     let comms_name = test_comms_name("worker", member.as_str());
 

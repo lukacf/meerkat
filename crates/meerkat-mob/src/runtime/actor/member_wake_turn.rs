@@ -533,12 +533,13 @@ impl MobActor {
         // spawn's do, and a same-session successor's declared build rides
         // each build of its incarnation; any other member whose session a
         // build created has none.
-        let (entry, seat_build, resume_from_role) = {
+        let (entry, seat_build, resume_from_role, seat_as_adopted) = {
             let roster = self.roster.read().await;
             (
                 roster.get(&identity).cloned(),
                 roster.next_build(&identity),
                 roster.resume_from_role(&identity).cloned(),
+                roster.seat_is_as_adopted(&identity),
             )
         };
         let Some(entry) = entry else {
@@ -641,6 +642,7 @@ impl MobActor {
                 in_turn: false,
                 seat_build,
                 resume_from_role,
+                seat_as_adopted,
             },
             base: self.dsl_authority.fork(),
             fork_rule,

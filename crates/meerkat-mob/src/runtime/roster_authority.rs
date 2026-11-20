@@ -174,6 +174,12 @@ impl RosterAuthority {
         self.roster.seat_row_labels(identity)
     }
 
+    /// Whether `identity`'s last seat row is still the one its adoption
+    /// into store custody found ([`Roster::seat_is_as_adopted`]).
+    pub(crate) fn seat_is_as_adopted(&self, identity: &AgentIdentity) -> bool {
+        self.roster.seat_is_as_adopted(identity)
+    }
+
     /// Set a store-owned identity's seat labels to its row's
     /// ([`Roster::set_store_owned_seat_labels`]). Counted as a mutation
     /// when the entry changed, which the answer says.

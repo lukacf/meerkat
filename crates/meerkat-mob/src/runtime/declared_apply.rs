@@ -2131,6 +2131,7 @@ impl super::MobHandle {
             Ok(super::identity_change::StoreOwnedSeatRow::Row {
                 labels,
                 label_restamp_owed: true,
+                ..
             }) => labels,
             Ok(_) => return None,
             Err(error) => return Some(failure_outcome(error)),

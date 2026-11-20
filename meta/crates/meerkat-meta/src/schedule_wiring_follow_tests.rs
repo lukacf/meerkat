@@ -597,3 +597,300 @@ async fn a_schedule_whose_delete_fails_keeps_no_other_schedule_of_the_ended_memb
     assert!(warning.contains("WARN"), "{warning}");
     assert!(warning.contains("target_member=side"), "{warning}");
 }
+
+// ---------------------------------------------------------------------------
+// The release of a mob's schedules before a mob is created under its id
+// ---------------------------------------------------------------------------
+
+/// A mob a member created: the one a mob is created under the id of.
+const CREATED: &str = "a-created-mob";
+/// Another mob a member created.
+const BESIDE: &str = "a-mob-beside-it";
+
+fn mob(mob_id: &str) -> meerkat_mob::MobId {
+    meerkat_mob::MobId::from(mob_id)
+}
+
+/// A member target that names the member `member` of the mob `mob_id`.
+fn member_target_in(mob_id: &str, member: &str) -> TargetBinding {
+    TargetBinding::Mob(Box::new(MobTargetBinding::Member {
+        mob_id: mob_id.to_owned(),
+        member_id: member.to_owned(),
+        action: ScheduledMobAction::Send {
+            content: meerkat_core::ContentInput::Text("Check in.".into()),
+            render_metadata: None,
+        },
+    }))
+}
+
+/// An identity target that names the member `member` of the mob `mob_id`.
+fn identity_target_in(mob_id: &str, member: &str) -> TargetBinding {
+    identity_target(&meerkat::surface::mob_member_schedule_identity(
+        &meerkat_core::MobMemberBinding {
+            mob_id: mob_id.to_owned(),
+            role: "worker".to_owned(),
+            member: member.to_owned(),
+        },
+    ))
+}
+
+/// A flow or helper target of a mob, from its stored form.
+fn mob_target(stored: serde_json::Value) -> TargetBinding {
+    TargetBinding::Mob(Box::new(
+        serde_json::from_value(stored).expect("a mob target's stored form"),
+    ))
+}
+
+/// A flow target of the mob `mob_id`.
+fn flow_target_in(mob_id: &str) -> TargetBinding {
+    mob_target(serde_json::json!({
+        "type": "flow",
+        "mob_id": mob_id,
+        "flow_id": "morning-round",
+        "params": {},
+    }))
+}
+
+/// A helper target that spawns a helper in the mob `mob_id`.
+fn spawn_helper_target_in(mob_id: &str) -> TargetBinding {
+    mob_target(serde_json::json!({
+        "type": "spawn_helper",
+        "mob_id": mob_id,
+        "member_id": "helper",
+        "prompt": "Sweep the inbox.",
+    }))
+}
+
+/// A helper target that forks the member `source` of the mob `mob_id`.
+fn fork_helper_target_in(mob_id: &str, source: &str) -> TargetBinding {
+    mob_target(serde_json::json!({
+        "type": "fork_helper",
+        "mob_id": mob_id,
+        "source_member_id": source,
+        "member_id": "helper",
+        "prompt": "Sweep the inbox.",
+    }))
+}
+
+/// The runner schedule of an announcement source of the mob `mob_id`, as
+/// Meta makes it.
+async fn runner_schedule(service: &ScheduleService, name: &str, mob_id: &str) -> ScheduleId {
+    let params = meerkat::HostRunnableParams::try_from(serde_json::json!({
+        "mob_id": mob_id,
+        "source_id": "inbox",
+    }))
+    .expect("runner params");
+    service
+        .create(CreateScheduleRequest {
+            name: Some(name.to_owned()),
+            description: None,
+            trigger: TriggerSpec::Once {
+                due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+            },
+            target: TargetBinding::host_runnable(meerkat::HostRunnableTargetBinding {
+                runnable: meerkat::HostRunnableName::parse("announcements.collect")
+                    .expect("a runnable name"),
+                params: Some(params),
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::from([(super::SOURCE_RUNNER_LABEL.to_owned(), "1".to_owned())]),
+            planning_horizon_days: Some(1),
+            planning_horizon_occurrences: Some(1),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("the runner schedule {name} is created: {error}"))
+        .schedule_id
+}
+
+/// One schedule in each form a schedule names the mob `mob_id`, named
+/// `<prefix>-<form>`, with their ids.
+async fn schedules_that_name(
+    service: &ScheduleService,
+    prefix: &str,
+    mob_id: &str,
+) -> Vec<(String, ScheduleId)> {
+    let mut made = Vec::new();
+    for (form, target) in [
+        ("member", member_target_in(mob_id, "scout")),
+        ("identity", identity_target_in(mob_id, "scout")),
+        ("flow", flow_target_in(mob_id)),
+        ("spawn-helper", spawn_helper_target_in(mob_id)),
+        ("fork-helper", fork_helper_target_in(mob_id, "scout")),
+    ] {
+        let name = format!("{prefix}-{form}");
+        let id = schedule(service, &name, target).await;
+        made.push((name, id));
+    }
+    let name = format!("{prefix}-runner");
+    let id = runner_schedule(service, &name, mob_id).await;
+    made.push((name, id));
+    made
+}
+
+/// The names a release answers, sorted.
+fn released_names(released: &[crate::identity_creation::ScheduleRef]) -> Vec<String> {
+    let mut names: Vec<String> = released
+        .iter()
+        .map(|schedule| schedule.name.clone().expect("a name"))
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// The release of a mob's schedules ends every schedule that names the
+/// mob's id, in every form a schedule names a mob, and names each one it
+/// ended.
+#[tokio::test]
+async fn a_release_ends_every_schedule_that_names_the_mob() {
+    let (service, following) = schedules();
+    let made = schedules_that_name(&service, "named", CREATED).await;
+    let mut expected: Vec<String> = made.iter().map(|(name, _)| name.clone()).collect();
+    expected.sort_unstable();
+
+    let released = following
+        .release_mob(&mob(CREATED))
+        .await
+        .expect("the release of the mob's schedules");
+
+    assert_eq!(released_names(&released), expected, "the schedules ended");
+    for (name, id) in &made {
+        assert_eq!(
+            state(&service, id).await.0,
+            SchedulePhase::Deleted,
+            "{name} is ended"
+        );
+    }
+    let live = service.list().await.expect("the live schedules");
+    assert!(
+        live.is_empty(),
+        "no schedule that names the mob is live: {live:?}"
+    );
+}
+
+/// The release of one mob's schedules leaves every schedule that names
+/// another mob, a session, an agent by its name alone, and a Console
+/// caller's schedule as it is.
+#[tokio::test]
+async fn a_release_leaves_the_schedules_of_every_other_mob_and_of_sessions() {
+    let (service, following) = schedules();
+    let mut kept = schedules_that_name(&service, "beside", BESIDE).await;
+    kept.extend(schedules_that_name(&service, "launch", MOB).await);
+    for (name, target) in [
+        ("a-console-callers", console_target("scout")),
+        ("an-identity-by-name", identity_target("scout")),
+        (
+            "a-session",
+            session_target(&meerkat_core::types::SessionId::new()),
+        ),
+    ] {
+        let id = schedule(&service, name, target).await;
+        kept.push((name.to_owned(), id));
+    }
+
+    let released = following
+        .release_mob(&mob(CREATED))
+        .await
+        .expect("the release of another mob's schedules");
+
+    assert!(released.is_empty(), "{released:?}");
+    for (name, id) in &kept {
+        assert_eq!(
+            state(&service, id).await,
+            (SchedulePhase::Active, false),
+            "{name} is as it was"
+        );
+    }
+}
+
+/// A release that cannot read the schedules is an error, so that the create
+/// it stands in front of is refused.
+#[tokio::test]
+async fn a_release_that_cannot_list_the_schedules_is_an_error() {
+    let service = ScheduleService::new(Arc::new(meerkat::DisabledScheduleStore));
+    let following = MobAgentSchedules::new(service, ScheduleMobTargetRegistry::default());
+
+    let released = following.release_mob(&mob(CREATED)).await;
+
+    assert!(
+        released.is_err(),
+        "a release over a store that answers nothing is an error: {released:?}"
+    );
+}
+
+/// A release asked again ends what an earlier asking left and then answers
+/// that nothing is left.
+#[tokio::test]
+async fn a_release_asked_again_ends_what_is_left_and_then_nothing() {
+    let (service, following) = schedules();
+    let made = schedules_that_name(&service, "named", CREATED).await;
+    // The part an earlier asking did before it stopped.
+    let (first_name, first_id) = &made[0];
+    service
+        .delete(first_id)
+        .await
+        .expect("the part an earlier asking did");
+    let mut left: Vec<String> = made
+        .iter()
+        .map(|(name, _)| name.clone())
+        .filter(|name| name != first_name)
+        .collect();
+    left.sort_unstable();
+
+    let released = following
+        .release_mob(&mob(CREATED))
+        .await
+        .expect("the release asked again");
+    assert_eq!(released_names(&released), left, "what was left is ended");
+    let again = following
+        .release_mob(&mob(CREATED))
+        .await
+        .expect("the release asked once more");
+    assert!(again.is_empty(), "nothing is left: {again:?}");
+}
+
+/// A release that meets a schedule naming a session reads what the stored
+/// session names. When it cannot (here the mob state the sessions are read
+/// from is gone), it is an error, so that the create it stands in front of
+/// is refused, and the schedule is as it was.
+#[tokio::test]
+async fn a_release_that_cannot_read_a_named_session_is_an_error() {
+    let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+    let registry = ScheduleMobTargetRegistry::default();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mob_state = Arc::new(
+        meerkat_mob_mcp::MobMcpState::new(
+            Arc::new(meerkat_session::EphemeralSessionService::new(
+                meerkat::FactoryAgentBuilder::new(
+                    meerkat::AgentFactory::new(dir.path()),
+                    meerkat::Config::default(),
+                ),
+                4,
+            )),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .expect("mob state"),
+    );
+    registry.set_mob_state(Some(Arc::clone(&mob_state)));
+    drop(mob_state);
+    let following = MobAgentSchedules::new(service.clone(), registry);
+    let named = schedule(
+        &service,
+        "a-session",
+        session_target(&meerkat_core::types::SessionId::new()),
+    )
+    .await;
+
+    let released = following.release_mob(&mob(CREATED)).await;
+
+    assert!(
+        released.is_err(),
+        "a release that cannot read the session a schedule names is an error: {released:?}"
+    );
+    assert_eq!(
+        state(&service, &named).await,
+        (SchedulePhase::Active, false),
+        "the schedule is as it was"
+    );
+}

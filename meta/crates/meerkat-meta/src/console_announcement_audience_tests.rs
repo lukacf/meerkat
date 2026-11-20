@@ -1096,6 +1096,69 @@ async fn a_key_a_hidden_member_announced_under_is_answered_as_taken() -> TestRes
     Ok(())
 }
 
+/// What a member private to a person announces reaches no subscription of
+/// a member that is not that person's, whether the subscription starts now
+/// or at an earlier frontier; every other announcement reaches it as
+/// before, and the private member's own subscription receives its own.
+#[tokio::test]
+async fn a_private_members_announcement_reaches_no_other_persons_subscription() -> TestResult {
+    const WORDS: &str = "from the private member";
+    let mut scenes = scenes("announcer-audience").await?;
+    for scene in &mut scenes {
+        let (alice, bob) = (scene.alice.clone(), scene.bob.clone());
+        scene.owner.give_role(SHARED, "worker");
+        scene.owner.give_person(PRIVATE, "worker", "person-alice");
+        // Retained before any subscription exists.
+        scene.owner.announce_as(PRIVATE, "k-early", WORDS).await;
+        scene.served(&alice, "announce", news("k-host")).await;
+        let mut frontier = serde_json::Map::new();
+        frontier.insert(MOB.to_string(), json!(0));
+        let mut early = subscription("sub-early", SHARED);
+        early["start"] = json!({ "kind": "after", "frontier": frontier });
+        scene.served(&bob, "subscriptions/put", early).await;
+        scene
+            .served(
+                &alice,
+                "subscriptions/put",
+                subscription("sub-own", PRIVATE),
+            )
+            .await;
+        // Announced while both subscriptions are live.
+        scene.owner.announce_as(PRIVATE, "k-later", WORDS).await;
+        scene.owner.round_at(100_000).await;
+
+        let shared = scene
+            .served(&bob, "deliveries/list", json!({ "member": member(SHARED) }))
+            .await
+            .to_string();
+        scene.check(shared.contains("the build is green"), || {
+            format!(
+                "the host's announcement is not replayed: {}",
+                brief(&shared)
+            )
+        });
+        scene.check(!shared.contains(WORDS), || {
+            "a delivery to the shared member carries the private member's words".to_string()
+        });
+        scene.check(!shared.contains(PRIVATE), || {
+            "a delivery to the shared member names the private member".to_string()
+        });
+        let own = scene
+            .served(
+                &alice,
+                "deliveries/list",
+                json!({ "member": member(PRIVATE) }),
+            )
+            .await
+            .to_string();
+        scene.check(own.contains(WORDS), || {
+            format!("its own subscription receives {}", brief(&own))
+        });
+    }
+    nothing_found(scenes);
+    Ok(())
+}
+
 /// A role template's change lists its children: none of a member its
 /// caller may not see. A caller who may see the member is listed its child.
 #[tokio::test]

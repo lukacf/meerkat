@@ -1377,6 +1377,37 @@ export class MeerkatClient {
     child.stderr?.on("data", (chunk: string) => {
       this.processStderr = childStderrTail(this.processStderr + chunk);
     });
+    // A write that meets a child whose input is gone fails on the stream,
+    // after the call that made it has returned, and a failed read ends a
+    // stream without a word to any caller. Node raises a stream 'error' that
+    // nobody listens to as an uncaught exception in the host program, so
+    // each of the child's streams has a listener. The child has exited or is
+    // exiting in nearly every case: its exit then settles every pending
+    // call with PROCESS_EXITED and its stderr, as before. A child that still
+    // runs after the grace has a stream this client can no longer use: the
+    // client fails closed, as it does for a corrupted frame.
+    let streamFailed = false;
+    const onStreamFailed = (what: string) => (error: Error) => {
+      if (streamFailed || this.process !== child) return;
+      streamFailed = true;
+      const grace = setTimeout(() => {
+        if (this.process !== child || child.exitCode !== null || child.signalCode !== null) {
+          return;
+        }
+        this.failTransport(
+          new MeerkatError(
+            "PROTOCOL_ERROR",
+            `${what} failed (${error.message}) while ${this.rkatPath} kept running: ` +
+              "its stream can no longer be used",
+          ),
+        );
+      }, CHILD_EXIT_PIPE_GRACE_MS);
+      grace.unref();
+    };
+    child.stdin?.on("error", onStreamFailed("A write to the child's input"));
+    child.stdout?.on("error", onStreamFailed("Reading the child's output"));
+    // The stderr tail only ends early.
+    child.stderr?.on("error", () => {});
     child.once("error", (error) => {
       if (this.process === child) {
         this.process = null;
@@ -1421,6 +1452,8 @@ export class MeerkatClient {
 
     this.rl = createInterface({ input: this.process.stdout! });
     this.rl.on("line", (line: string) => this.handleLine(line, child));
+    // The interface raises its input's error again as its own.
+    this.rl.on("error", onStreamFailed("Reading the child's output"));
 
     // Handshake — `initialize` returns the generated `ServerCapabilities`
     // contract; fields are validated below.
@@ -1539,7 +1572,8 @@ export class MeerkatClient {
    * Surface a typed transport/protocol fault to every pending caller and
    * stream consumer. Used when the read loop encounters a corrupted frame and
    * the stream can no longer be trusted, so callers fail closed instead of
-   * hanging on a dropped response.
+   * hanging on a dropped response. Also used when the child's input or
+   * output failed and the child kept running.
    */
   private failTransport(reason: unknown): void {
     if (!this.transportFault) {

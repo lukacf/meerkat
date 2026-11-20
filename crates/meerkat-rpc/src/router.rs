@@ -7145,6 +7145,7 @@ mod tests {
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ] {
             assert_eq!(
                 checks.get(measured).and_then(serde_json::Value::as_str),
@@ -7189,6 +7190,7 @@ mod tests {
             "session_runtime_loop",
             "session_run_start",
             "session_liveness",
+            "session_run_settlement",
         ]
         .into_iter()
         .filter_map(|key| checks.get(key).and_then(serde_json::Value::as_str))
@@ -12854,7 +12856,10 @@ mod tests {
                     call(
                         &router,
                         "session/create",
-                        keep_alive_create(&format!("keep-alive-fails-at-once-{round}")),
+                        // The flavor is part of the name: both flavors' tests
+                        // can run at once in one process, and a comms name
+                        // is held for the whole process.
+                        keep_alive_create(&format!("keep-alive-fails-at-once-{flavor}-{round}")),
                     ),
                 )
                 .await
@@ -25368,6 +25373,27 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let get_resp2 = router.dispatch(get_req2).await.unwrap();
         let final_config = result_value(&get_resp2);
         assert_eq!(final_config["config"]["max_tokens"], new_max_tokens);
+    }
+
+    /// 12a. `config/patch` changes the REST listener's bind host: the RPC
+    /// config methods write the `rest` table.
+    #[tokio::test]
+    async fn config_patch_changes_the_rest_bind_host() {
+        let (router, _notif_rx) = test_router().await;
+
+        let patch_req = make_request(
+            "config/patch",
+            serde_json::json!({"rest": {"host": "0.0.0.0"}}),
+        );
+        let patch_resp = router.dispatch(patch_req).await.unwrap();
+        assert_eq!(
+            result_value(&patch_resp)["config"]["rest"]["host"],
+            "0.0.0.0"
+        );
+
+        let get_req = make_request_no_params("config/get");
+        let get_resp = router.dispatch(get_req).await.unwrap();
+        assert_eq!(result_value(&get_resp)["config"]["rest"]["host"], "0.0.0.0");
     }
 
     /// 12b. `config/patch` does not re-enable retired legacy skill alias ingress.

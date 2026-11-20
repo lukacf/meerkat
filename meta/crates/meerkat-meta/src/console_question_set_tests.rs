@@ -3548,3 +3548,352 @@ async fn a_hidden_set_between_two_its_reader_may_see_hides_neither() {
     );
     assert_eq!(empty_with_cursor, 0, "{read}");
 }
+
+/// The words the Console ends the rendering of an open question set with,
+/// for a page that cannot answer the set.
+const CLOSING_NOTE: &str = "Answer these questions in the Console, in the agent's chat or under Approvals. If this page offers no way to answer them, it runs an earlier Console: reload the page, or, in an application that builds the Console in, update its Console.";
+
+/// What the Console adds to the held rendering: a blank line and the note.
+fn closing_suffix() -> String {
+    format!("\n\n{CLOSING_NOTE}")
+}
+
+/// A Console whose access control is enforced with BOB as its
+/// administrator: BOB reads every decision whole, answers sets and
+/// withdraws.
+fn administered_by_bob() -> Setup {
+    Setup::enforced().access(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![BOB.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+}
+
+/// BOB's read of `meta/decisions/rendering` for `decision_id`.
+async fn rendering_read(
+    console: &QuestionConsole,
+    decision_id: &str,
+    max_part_bytes: Option<u32>,
+) -> Value {
+    let mut params = json!({ "decision_id": decision_id });
+    if let Some(bytes) = max_part_bytes {
+        params["max_part_bytes"] = json!(bytes);
+    }
+    console_rpc_as(
+        &console.app,
+        Some(&bob()),
+        "meta/decisions/rendering",
+        params,
+    )
+    .await
+}
+
+/// The Console's rendering of an open question set ends with the closing
+/// note, and the answer names what was added in `rendering_suffix`, the
+/// blank line included. Everything else of the answer is the held
+/// rendering's: its digest, its renderer and its parts, for every part
+/// size, are what the same set answers once it has ended.
+#[tokio::test]
+async fn the_console_ends_an_open_sets_rendering_with_a_closing_note_it_names() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let console = QuestionConsole::start(
+        "questions-closing-note",
+        administered_by_bob(),
+        decisions_in(state_dir.path(), "questions-closing-note", true),
+    )
+    .await;
+    let pending_id = console.asked(ASKER, "call-1").await;
+    let held = console.row(&pending_id);
+    let open = rendering_read(&console, &pending_id, None).await;
+    let open_in_parts = rendering_read(&console, &pending_id, Some(16)).await;
+    let answered = console.answer(Some(&bob()), &pending_id).await;
+    let ended = rendering_read(&console, &pending_id, None).await;
+    let ended_in_parts = rendering_read(&console, &pending_id, Some(16)).await;
+    console.stop().await;
+
+    let text = held.descriptor.rendering.as_str();
+    let suffix = closing_suffix();
+    assert_eq!(
+        answered["result"]["outcome"],
+        json!("answered"),
+        "{answered}"
+    );
+    for (open, ended) in [(&open, &ended), (&open_in_parts, &ended_in_parts)] {
+        assert!(open["error"].is_null(), "{open}");
+        assert!(ended["error"].is_null(), "{ended}");
+        // The ended set is read as it is held.
+        assert_eq!(ended["result"]["rendering"], json!(text), "{ended}");
+        assert!(ended["result"].get("rendering_suffix").is_none(), "{ended}");
+        assert!(
+            ended["result"]["parts"]
+                .as_array()
+                .is_some_and(|parts| !parts.is_empty()),
+            "{ended}"
+        );
+        // The open set's answer is that one with the note at the end of the
+        // text and named beside it.
+        let mut expected = ended["result"].clone();
+        expected["rendering"] = json!(format!("{text}{suffix}"));
+        expected["rendering_suffix"] = json!(suffix);
+        assert_eq!(open["result"], expected, "{open}");
+        assert_eq!(
+            open["result"]["subject_digest"],
+            json!(held.descriptor.subject_digest.to_string()),
+            "{open}"
+        );
+    }
+}
+
+/// Only an open question set gets the closing note. A set that was
+/// answered, dismissed or withdrawn, a set past its deadline, and an open
+/// decision of another kind are rendered as they are held, with no
+/// `rendering_suffix`.
+#[tokio::test]
+async fn an_ended_set_and_a_decision_of_another_kind_are_rendered_as_they_are_held() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let now_ms = now_seconds() * 1000;
+    let clock = Arc::new(RowClock(AtomicU64::new(now_ms)));
+    let owner = DurableDecisionService::with_clock(
+        Arc::new(meerkat_store::SqliteDecisionStore::in_store_path(
+            state_dir.path(),
+        )),
+        clock.clone(),
+    );
+    let decisions = decisions_in(state_dir.path(), "questions-ended-rendering", true)
+        .with_owner_for_test(owner);
+    let console = QuestionConsole::start(
+        "questions-ended-rendering",
+        administered_by_bob(),
+        decisions.clone(),
+    )
+    .await;
+    console.runtime.ask_user_slot().fill(
+        AskUserSurface::new(
+            decisions,
+            console.doors.served(),
+            "questions-ended-rendering",
+        )
+        .with_clock(clock.clone()),
+    );
+    let answered = console.asked(ASKER, "answered").await;
+    let dismissed = console.asked(ASKER, "dismissed").await;
+    let withdrawn = console.asked(ASKER, "withdrawn").await;
+    let late = ask(&console.host(ASKER), "late", 60)
+        .await
+        .request_id
+        .expect("asked");
+    let other = held_of_kind(&console.decisions, "release")
+        .decision_id
+        .to_string();
+    let answer = console.answer(Some(&bob()), &answered).await;
+    let dismissal = console
+        .decide(
+            Some(&bob()),
+            json!({
+                "pending_id": dismissed,
+                "decision": "reject",
+                "presented_digest": console.digest(&dismissed),
+            }),
+        )
+        .await;
+    let withdrawal = console_rpc_as(
+        &console.app,
+        Some(&bob()),
+        "meta/decisions/withdraw",
+        json!({ "decision_id": withdrawn }),
+    )
+    .await;
+    clock.0.store(now_ms + 61_000, Ordering::SeqCst);
+    let mut reads = Vec::new();
+    for (what, decision_id) in [
+        ("answered", &answered),
+        ("dismissed", &dismissed),
+        ("withdrawn", &withdrawn),
+        ("past its deadline", &late),
+        ("another kind", &other),
+    ] {
+        let read = rendering_read(&console, decision_id, None).await;
+        reads.push((what, console.row(decision_id), read));
+    }
+    console.stop().await;
+
+    assert_eq!(answer["result"]["outcome"], json!("answered"), "{answer}");
+    assert_eq!(
+        dismissal["result"]["outcome"],
+        json!("dismissed"),
+        "{dismissal}"
+    );
+    assert!(withdrawal["error"].is_null(), "{withdrawal}");
+    for (what, row, read) in reads {
+        if what == "another kind" {
+            assert_eq!(row.state.phase, DecisionPhase::Open, "{what}");
+        } else {
+            assert_eq!(
+                row.descriptor.kind.as_str(),
+                ASK_USER_QUESTIONS_KIND,
+                "{what}"
+            );
+            assert_ne!(row.state.phase, DecisionPhase::Open, "{what}");
+        }
+        assert!(read["error"].is_null(), "{what}: {read}");
+        assert_eq!(
+            read["result"]["rendering"],
+            json!(row.descriptor.rendering.as_str()),
+            "{what}: {read}"
+        );
+        assert!(
+            read["result"].get("rendering_suffix").is_none(),
+            "{what}: {read}"
+        );
+        assert!(
+            !read.to_string().contains("earlier Console"),
+            "{what}: {read}"
+        );
+    }
+}
+
+/// A read of the rendering changes nothing of the held decision, and the
+/// digest it answers is the one a decide compares: the set is answered on
+/// it afterwards.
+#[tokio::test]
+async fn a_set_is_answered_on_its_held_digest_after_its_rendering_was_read() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let console = QuestionConsole::start(
+        "questions-read-then-answer",
+        administered_by_bob(),
+        decisions_in(state_dir.path(), "questions-read-then-answer", true),
+    )
+    .await;
+    let pending_id = console.asked(ASKER, "call-1").await;
+    let before = console.row(&pending_id);
+    let read = rendering_read(&console, &pending_id, Some(16)).await;
+    let after = console.row(&pending_id);
+    let decided = console
+        .decide(
+            Some(&bob()),
+            json!({
+                "pending_id": pending_id,
+                "decision": "approve",
+                "presented_digest": read["result"]["subject_digest"],
+                "answers": [choice("q1", "a")],
+            }),
+        )
+        .await;
+    let row = console.row(&pending_id);
+    console.stop().await;
+
+    assert!(read["error"].is_null(), "{read}");
+    assert_eq!(after, before, "the read changes nothing of the decision");
+    assert_eq!(
+        read["result"]["subject_digest"],
+        json!(before.descriptor.subject_digest.to_string()),
+        "{read}"
+    );
+    assert_eq!(decided["result"]["outcome"], json!("answered"), "{decided}");
+    assert_eq!(row.descriptor, before.descriptor);
+}
+
+/// A stdio connection that writes its notices nowhere.
+struct NoNotices;
+
+#[async_trait::async_trait]
+impl crate::durable_decisions::DecisionNoticeSink for NoNotices {
+    async fn deliver(&self, _line: String) -> bool {
+        true
+    }
+}
+
+/// The stdio host reads the rendering of an open question set as it is
+/// held: the answer has the members it always had, the held text, and no
+/// closing note.
+#[tokio::test]
+async fn the_stdio_host_reads_an_open_sets_rendering_as_it_is_held() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let definition = meerkat_mob::MobDefinition::from_toml(
+        "[mob]\nid = \"questions-stdio-rendering\"\n\n[profiles.lead]\nmodel = \"gpt-5.5\"\n",
+    )
+    .expect("definition");
+    let runtime = Box::pin(
+        crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .persistent_state(state_dir.path())
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("persistent runtime");
+    let requester = DecisionPrincipalKey::of(
+        &PrincipalRef::in_domain(
+            PrincipalKind::SharedAgent,
+            ASKER,
+            TrustDomainId::new("example.org").expect("domain"),
+        )
+        .expect("principal"),
+    )
+    .expect("key");
+    let available = runtime.durable_decisions().is_available();
+    let held = meerkat_runtime::ask_user::hold_ask_user(
+        runtime.durable_decisions().owner(),
+        now_seconds() * 1000,
+        meerkat_runtime::ask_user::AskUserHold {
+            asker: ASKER.to_string(),
+            requester,
+            questions: question_set(),
+            timeout: Duration::from_hours(1),
+            run_id: RunId::new(),
+            call_id: "call-1".to_string(),
+        },
+    )
+    .expect("the set is held");
+    let connection = crate::durable_decisions::StdioDecisionConnection::new(
+        runtime.durable_decisions().realm(),
+        Arc::new(NoNotices),
+    );
+    let decision_id = held.decision_id.to_string();
+    let mut answers = Vec::new();
+    for params in [
+        json!({ "decision_id": decision_id }),
+        json!({ "decision_id": decision_id, "max_part_bytes": 16 }),
+    ] {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": "stdio",
+            "method": "meta/decisions/rendering",
+            "params": params,
+        })
+        .to_string();
+        let answer = connection
+            .handle_line(&runtime, &line)
+            .await
+            .expect("a decision method answers");
+        answers.push(serde_json::from_str::<Value>(&answer).expect("answer JSON"));
+    }
+    let _report = runtime.shutdown().await;
+
+    assert!(available, "the runtime keeps durable decisions");
+    assert_eq!(held.state.phase, DecisionPhase::Open);
+    assert_eq!(held.descriptor.kind.as_str(), ASK_USER_QUESTIONS_KIND);
+    for (answer, max_part_bytes) in answers.iter().zip([None, Some(16)]) {
+        let parts = answer["result"]["parts"].clone();
+        assert!(
+            parts.as_array().is_some_and(|parts| !parts.is_empty()),
+            "{answer}"
+        );
+        let mut result = json!({
+            "decision_id": decision_id,
+            "rendering": held.descriptor.rendering.as_str(),
+            "renderer": held.descriptor.renderer.to_string(),
+            "subject_digest": held.descriptor.subject_digest.to_string(),
+            "parts": parts,
+        });
+        if let Some(bytes) = max_part_bytes {
+            result["max_part_bytes"] = json!(bytes);
+        }
+        assert_eq!(
+            *answer,
+            json!({ "jsonrpc": "2.0", "id": "stdio", "result": result }),
+            "{answer}"
+        );
+        assert!(!answer.to_string().contains("earlier Console"), "{answer}");
+    }
+}

@@ -11073,55 +11073,115 @@ NormalizeRecoveredInputQueuedStopped(input_id, arg_phase, applied_boundary_commi
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(input_id, durability) ==
+ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Initializing"
     /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = FALSE)
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(input_id, durability) ==
+ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Idle"
     /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = FALSE)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(input_id, durability) ==
+ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Attached"
     /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = FALSE)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(input_id, durability) ==
+ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Running"
     /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(input_id, durability) ==
+ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Retired"
     /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = FALSE)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(input_id, durability) ==
+ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Stopped"
     /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = FALSE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(input_id, durability) ==
+ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing(input_id, durability, pending_terminal_carrier) ==
+    /\ phase = "Initializing"
+    /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = TRUE)
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle(input_id, durability, pending_terminal_carrier) ==
+    /\ phase = "Idle"
+    /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = TRUE)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached(input_id, durability, pending_terminal_carrier) ==
+    /\ phase = "Attached"
+    /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = TRUE)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning(input_id, durability, pending_terminal_carrier) ==
+    /\ phase = "Running"
+    /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired(input_id, durability, pending_terminal_carrier) ==
+    /\ phase = "Retired"
+    /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = TRUE)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped(input_id, durability, pending_terminal_carrier) ==
+    /\ phase = "Stopped"
+    /\ (durability = "Ephemeral")
+    /\ (pending_terminal_carrier = TRUE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_13f21d7b87bb884e
+
+
+ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Initializing"
     /\ (IF (durability = "Durable") THEN TRUE ELSE (IF (durability = "Derived") THEN TRUE ELSE (durability = "Missing")))
     /\ phase' = "Initializing"
@@ -11129,7 +11189,7 @@ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(input_
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(input_id, durability) ==
+ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Idle"
     /\ (IF (durability = "Durable") THEN TRUE ELSE (IF (durability = "Derived") THEN TRUE ELSE (durability = "Missing")))
     /\ phase' = "Idle"
@@ -11137,7 +11197,7 @@ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(input_id, dura
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(input_id, durability) ==
+ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Attached"
     /\ (IF (durability = "Durable") THEN TRUE ELSE (IF (durability = "Derived") THEN TRUE ELSE (durability = "Missing")))
     /\ phase' = "Attached"
@@ -11145,7 +11205,7 @@ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(input_id, 
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(input_id, durability) ==
+ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Running"
     /\ (IF (durability = "Durable") THEN TRUE ELSE (IF (durability = "Derived") THEN TRUE ELSE (durability = "Missing")))
     /\ phase' = "Running"
@@ -11153,7 +11213,7 @@ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(input_id, d
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(input_id, durability) ==
+ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Retired"
     /\ (IF (durability = "Durable") THEN TRUE ELSE (IF (durability = "Derived") THEN TRUE ELSE (durability = "Missing")))
     /\ phase' = "Retired"
@@ -11161,7 +11221,7 @@ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(input_id, d
     /\ UnchangedFrame_13f21d7b87bb884e
 
 
-ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(input_id, durability) ==
+ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(input_id, durability, pending_terminal_carrier) ==
     /\ phase = "Stopped"
     /\ (IF (durability = "Durable") THEN TRUE ELSE (IF (durability = "Derived") THEN TRUE ELSE (durability = "Missing")))
     /\ phase' = "Stopped"
@@ -40715,18 +40775,24 @@ Next ==
     \/ (phase = "Running") /\ \E input_id \in StringValues : \E arg_phase \in RecoveredInputObservedPhaseValues : \E applied_boundary_committed \in OptionBoolValues : \E bound_run_resumable \in BOOLEAN : NormalizeRecoveredInputQueuedRunning(input_id, arg_phase, applied_boundary_committed, bound_run_resumable)
     \/ (phase = "Retired") /\ \E input_id \in StringValues : \E arg_phase \in RecoveredInputObservedPhaseValues : \E applied_boundary_committed \in OptionBoolValues : \E bound_run_resumable \in BOOLEAN : NormalizeRecoveredInputQueuedRetired(input_id, arg_phase, applied_boundary_committed, bound_run_resumable)
     \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E arg_phase \in RecoveredInputObservedPhaseValues : \E applied_boundary_committed \in OptionBoolValues : \E bound_run_resumable \in BOOLEAN : NormalizeRecoveredInputQueuedStopped(input_id, arg_phase, applied_boundary_committed, bound_run_resumable)
-    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(input_id, durability)
-    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(input_id, durability)
-    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(input_id, durability)
-    \/ (phase = "Running") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(input_id, durability)
-    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(input_id, durability)
-    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(input_id, durability)
-    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(input_id, durability)
-    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(input_id, durability)
-    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(input_id, durability)
-    \/ (phase = "Running") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(input_id, durability)
-    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(input_id, durability)
-    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(input_id, durability)
+    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralInitializing(input_id, durability, FALSE)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(input_id, durability, FALSE)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralAttached(input_id, durability, FALSE)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralRunning(input_id, durability, FALSE)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralRetired(input_id, durability, FALSE)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityDiscardEphemeralStopped(input_id, durability, FALSE)
+    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierInitializing(input_id, durability, TRUE)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierIdle(input_id, durability, TRUE)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierAttached(input_id, durability, TRUE)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRunning(input_id, durability, TRUE)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierRetired(input_id, durability, TRUE)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrierStopped(input_id, durability, TRUE)
+    \/ (phase = "Initializing") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : \E pending_terminal_carrier \in BOOLEAN : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingInitializing(input_id, durability, pending_terminal_carrier)
+    \/ (phase = "Idle") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : \E pending_terminal_carrier \in BOOLEAN : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(input_id, durability, pending_terminal_carrier)
+    \/ (phase = "Attached") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : \E pending_terminal_carrier \in BOOLEAN : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingAttached(input_id, durability, pending_terminal_carrier)
+    \/ (phase = "Running") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : \E pending_terminal_carrier \in BOOLEAN : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRunning(input_id, durability, pending_terminal_carrier)
+    \/ (phase = "Retired") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : \E pending_terminal_carrier \in BOOLEAN : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingRetired(input_id, durability, pending_terminal_carrier)
+    \/ (phase = "Stopped") /\ \E input_id \in StringValues : \E durability \in InputDurabilityKindValues : \E pending_terminal_carrier \in BOOLEAN : ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingStopped(input_id, durability, pending_terminal_carrier)
     \/ (phase = "Initializing") /\ \E batch_key \in StringValues : \E directed_publication_pending \in BOOLEAN : ClassifyRecoveredTerminalCompletionBatchRecoverInitializing(batch_key, TRUE, TRUE, directed_publication_pending)
     \/ (phase = "Idle") /\ \E batch_key \in StringValues : \E directed_publication_pending \in BOOLEAN : ClassifyRecoveredTerminalCompletionBatchRecoverIdle(batch_key, TRUE, TRUE, directed_publication_pending)
     \/ (phase = "Attached") /\ \E batch_key \in StringValues : \E directed_publication_pending \in BOOLEAN : ClassifyRecoveredTerminalCompletionBatchRecoverAttached(batch_key, TRUE, TRUE, directed_publication_pending)

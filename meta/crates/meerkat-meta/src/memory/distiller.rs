@@ -1289,6 +1289,11 @@ pub(crate) const SKIP_NO_DISCARDS: &str = "no compaction discards to harvest";
 /// nothing to harvest: the distiller never reads it.
 pub(crate) const SKIP_PRIVATE_SESSION: &str =
     "the session is private to one person; its transcript is never distilled";
+/// The skip of a member whose name is no plain identity scope key, which no
+/// run distills for (any cause). For the §8.6 ordering check its compaction
+/// boundary has nothing to harvest, as a private session's has none.
+pub(crate) const SKIP_NO_PLAIN_NAME: &str =
+    "the member's name is no plain memory name; nothing is distilled for it";
 
 impl DistillOutcome {
     /// §8.6 ordering invariant input: whether a compaction-cause run left
@@ -1304,6 +1309,7 @@ impl DistillOutcome {
                 reason == SKIP_NO_DISCARDS
                     || reason == SKIP_NO_DISCARD_SOURCE
                     || reason == SKIP_PRIVATE_SESSION
+                    || reason == SKIP_NO_PLAIN_NAME
             }
         }
     }
@@ -1690,6 +1696,16 @@ impl DistillerEngine {
         discards: Option<Vec<DiscardEntry>>,
         reserved: Option<BudgetPermit>,
     ) -> Result<DistillOutcome, BudgetDenied> {
+        // A name that is no plain identity scope key (it holds a `/`) is
+        // the key of no member's memory
+        // (`crate::memory::records::IdentityScopeKey`): no run distills for
+        // it, whatever the cause, so no scope is ever built from such a
+        // name.
+        if !crate::memory::records::IdentityScopeKey::of(identity).is_named() {
+            return Ok(DistillOutcome::Skipped {
+                reason: SKIP_NO_PLAIN_NAME.to_string(),
+            });
+        }
         // A transcript private to one person is never distilled, whatever
         // the cause: its memory would reach no one else, but nothing in it
         // may leave it. A session whose privacy cannot be read is not
@@ -4115,5 +4131,38 @@ mod tests {
             matches!(outcome, DistillOutcome::Completed { written: 1, .. }),
             "{outcome:?}"
         );
+    }
+
+    /// No run distills for a member whose name is no plain identity scope
+    /// key (a raw member's name may hold a `/`): no scope is built from the
+    /// name, whatever the cause, and the compaction boundary counts as
+    /// harvested, as a private session's does.
+    #[tokio::test]
+    async fn a_member_named_as_a_reserved_key_is_given_no_memory_work() {
+        let provider = Arc::new(CapturingProvider::default());
+        let transcript = slice(&[("user", "the heron is at the north pond")]);
+        let session_key = transcript.session_key.clone();
+        let (engine, _client) = engine_with(
+            vec![NOOP_REPLY],
+            provider,
+            Some(transcript),
+            Vec::new(),
+            None,
+            enabled_config(),
+        );
+        for name in [
+            "private/console-caller:v1:aa/ledger-side",
+            "set-aside/ledger-side",
+            "team/ledger-side",
+        ] {
+            for cause in [DistillCause::Interactions, DistillCause::Compaction] {
+                let outcome = engine.distill_now(name, &session_key, cause).await;
+                assert!(
+                    matches!(&outcome, DistillOutcome::Skipped { reason } if reason == SKIP_NO_PLAIN_NAME),
+                    "{name}: {outcome:?}"
+                );
+                assert!(outcome.compaction_harvest_satisfied(), "{name}");
+            }
+        }
     }
 }

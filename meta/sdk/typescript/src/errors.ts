@@ -88,9 +88,11 @@ export class InitOutcomeUnknownError extends MetaError {
  * The transport's reader stopped, so no response can arrive any more.
  *
  * Rejects every request still waiting when the gateway closes its stdout,
- * and every later request on the same gateway process. `reason` names what
- * ended the reader. A request written before the reader stopped may still
- * have been executed by the gateway.
+ * and every later request on the same gateway process. A failed write to the
+ * gateway's stdin (the gateway closed its input or is gone) and a failed
+ * read of its stdout reject the same way: nothing can be asked of that
+ * process any more. `reason` names what ended the reader. A request written
+ * before the reader stopped may still have been executed by the gateway.
  */
 export class TransportReaderFailedError extends TransportError {
   constructor(readonly reason: string) {
@@ -163,16 +165,37 @@ export class GatewayStartupCleanupError extends TransportError {
     readonly cleanupError: unknown,
     readonly cleanup: GatewayCleanup,
   ) {
-    // A fixed message: formatting either failure can itself throw (an object
-    // without a prototype, a throwing `message` getter) and would lose the
-    // cleanup this error carries.
+    // A fixed message but for the startup failure's type name: formatting
+    // either failure can itself throw (an object without a prototype, a
+    // throwing `message` getter) and would lose the cleanup this error
+    // carries.
     super(
-      "gateway startup failed and the stop of its gateway transport was rejected " +
-        "(see startupError and cleanupError)",
+      `gateway startup failed (${failureTypeName(startupError)}) and the stop of its ` +
+        "gateway transport was rejected (see startupError and cleanupError)",
       { cause: startupError },
     );
     this.name = "GatewayStartupCleanupError";
   }
+}
+
+/**
+ * The name a failure carries, read without formatting the failure: an
+ * Error's `name` (its class's, or one the instance was given), and the
+ * `typeof` of any other value or of an Error whose `name` cannot be read.
+ */
+function failureTypeName(failure: unknown): string {
+  try {
+    if (failure instanceof Error) {
+      // Read once: an accessor may answer differently on each read.
+      const name: unknown = failure.name;
+      if (typeof name === "string" && name !== "") {
+        return name;
+      }
+    }
+  } catch {
+    // An unreadable name: the kind of value is named instead.
+  }
+  return typeof failure;
 }
 
 // -- RPC errors -----------------------------------------------------------

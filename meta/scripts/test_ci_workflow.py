@@ -1214,6 +1214,73 @@ class CiWorkflowTests(unittest.TestCase):
                 if said:
                     self.assertIn(said, errors[0])
 
+    def test_the_examples_build_takes_the_bin_tests_profile_on_a_pull_request(self):
+        """rust-examples builds every example with one wrapper line whose
+        Cargo profile follows the event: `test` exactly on a pull request,
+        where the same job then builds the bins' test harnesses in the test
+        profile, and `dev` on every other event, where the examples build is
+        the job's only build. The value is a variable of the step whose name
+        is not one the registry cache hashes, so the job's compile
+        environment stays the root CI's. The bin tests and
+        meta-extension-state's suite keep their two lines and their
+        pull-request-only condition."""
+        workflow = load(CI_WORKFLOW)
+        job = workflow["jobs"]["rust-examples"]
+        steps = steps_of(job)
+        names = [step.get("name") for step in steps]
+        build = steps[names.index("Build every example")]
+        variable = "EXAMPLES_PROFILE"
+        self.assertEqual(build["working-directory"], ".")
+        self.assertEqual(build["run"].strip(),
+                         f'./scripts/repo-cargo build -p meerkat-meta --examples --profile "${{{variable}}}"')
+        self.assertNotIn("if", build)
+        self.assertNotIn("continue-on-error", build)
+        selected = "${{ github.event_name == 'pull_request' && 'test' || 'dev' }}"
+        self.assertEqual(build["env"], {variable: selected})
+        self.assertIsNone(HASHED_ENV.fullmatch(variable))
+        self.assertNotIn(variable, job.get("env") or {})
+        self.assertNotIn(variable, workflow["env"])
+
+        # The expression, read as GitHub reads `a == 'x' && 'y' || 'z'` (the
+        # middle value is a non-empty string, so it is the result when the
+        # comparison holds), for each event this workflow runs on.
+        form = re.fullmatch(r"\$\{\{ github\.event_name == '([a-z_]+)' && '([a-z]+)' \|\| '([a-z]+)' \}\}", selected)
+        self.assertIsNotNone(form)
+        event, on_event, otherwise = form.groups()
+        events = set(triggers(workflow))
+        self.assertEqual(events, {"push", "pull_request", "workflow_dispatch"})
+        profiles = {name: on_event if name == event else otherwise for name in events}
+        self.assertEqual(profiles, {"pull_request": "test", "push": "dev", "workflow_dispatch": "dev"})
+
+        # One examples build in the job, and no profile flag elsewhere in it.
+        lines = [line for name, _, line in run_lines(workflow) if name == "rust-examples"]
+        self.assertEqual([line for line in lines if "--examples" in line], [build["run"].strip()])
+        self.assertEqual([line for line in lines if "--profile" in line or "--cargo-profile" in line],
+                         [build["run"].strip()])
+
+        # The pull request's second build and its tests, as they were: the
+        # bins' harnesses in Cargo's test profile (no profile flag), then
+        # meta-extension-state's suite, both only on a pull request.
+        tests = steps[names.index("Bin tests and meta-extension-state's suite")]
+        self.assertLess(names.index("Build every example"), names.index("Bin tests and meta-extension-state's suite"))
+        self.assertEqual(tests["run"].strip().splitlines(), [
+            "./scripts/repo-cargo nextest run -p meerkat-meta --bins --no-fail-fast",
+            "./scripts/repo-cargo nextest run -p meta-extension-state --no-fail-fast",
+        ])
+        self.assertEqual(tests["working-directory"], ".")
+        self.assertEqual(tests["env"], {"RUST_MIN_STACK": "16777216"})
+        only_on = f"github.event_name == '{event}'"
+        self.assertEqual(tests["if"], only_on)
+        self.assertEqual(steps[names.index("Install nextest")]["if"], only_on)
+        self.assertEqual(job["if"], "needs.changes.outputs.rust == 'true'")
+
+        # What the choice rests on: the two profiles' settings differ in the
+        # root manifest (the test profile sets its codegen units, dev does
+        # not), so a dev build and a test build share no target unit.
+        profile = tomllib.loads((MONOREPO / "Cargo.toml").read_text())["profile"]
+        self.assertIn("codegen-units", profile["test"])
+        self.assertNotIn("codegen-units", profile["dev"])
+
     def test_gate_requires_every_job_it_lists(self):
         """A job absent from `gate` can fail without failing the check suite.
 

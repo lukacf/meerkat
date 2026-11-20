@@ -81,6 +81,7 @@ pub(crate) mod mob_activation_retry;
 pub mod mob_announcements;
 pub mod mob_composition_manifest;
 pub mod mob_handle_runtime;
+pub(crate) mod mob_schedules_release;
 pub mod mobpack;
 pub mod mocks;
 pub(crate) mod native_realm;

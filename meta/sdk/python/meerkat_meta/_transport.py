@@ -252,8 +252,9 @@ class TransportTermination:
     #: ``"retained_until_exit"`` (cleanup completes only with the process
     #: exit), ``"refused"`` (an error or non-attesting answer),
     #: ``"unanswered"`` (no answer: a timeout, a failed reader or a gone
-    #: process), or ``"not_negotiated"`` (the gateway offered no shutdown
-    #: handshake, so the stop only closed its stdin).
+    #: process), or ``"not_negotiated"`` (no shutdown request was made, so the
+    #: stop only closed its stdin: the gateway offered no shutdown handshake,
+    #: or its init settled ``failed``).
     native_shutdown: Literal[
         "acknowledged", "retained_until_exit", "refused", "unanswered", "not_negotiated"
     ]
@@ -444,6 +445,16 @@ class PersistentTransport:
             if self._init_watch is watch:
                 self._init_watch = None
         watch._retire()
+
+    def init_settled_failed(self) -> None:
+        """The current child's ``meta/init`` settled ``failed``.
+
+        The gateway exits after that settlement without waiting for a
+        shutdown request, so its stop makes none: it ends the gateway's
+        input and reaps it, as for a gateway that offered no handshake.
+        """
+        with self._pending_lock:
+            self._supports_shutdown_handshake = False
 
     @property
     def request_timeout(self) -> float:

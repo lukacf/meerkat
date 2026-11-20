@@ -245,9 +245,10 @@ Since 0.8.4 (PR #912, the storage unification arc):
   resolved once at bootstrap, carried through composition; the
   `storage-ambient-gate` CI gate bans ambient root resolution (`dirs::*`,
   `HOME`/`XDG`) outside the bootstrap/layout modules. Realm state roots
-  resolve realm-id-first across the project-local and user-global
-  candidates (`RealmConfig::resolve_locator_dual_root`): explicit root wins,
-  a single existing candidate is used where it lies, both is a typed
+  resolve realm-id-first across every ancestor's project-local candidate
+  and the user-global root (`RealmConfig::resolve_locator_among_roots`):
+  explicit root wins, a single existing candidate is used where it lies
+  (also a farther ancestor's), more than one is a typed
   `RealmSplitBrain` refusal, neither goes to the surface default. Probing
   fails closed (typed `RootProbeFailed` / `RealmDirectoryCollision` /
   `ManifestUnreadable`); `DualRootResolution.candidate_roots` arms a

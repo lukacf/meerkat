@@ -2475,6 +2475,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeExternalPeerReciprocalTrustRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeExternalPeerReciprocalTrustRemovalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeExternalPeerReciprocalTrustRemovalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverExternalPeerWiringRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6777,6 +6783,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
 - `MemberDispatchAdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExternalPeerReciprocalTrustRemovalRequested`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

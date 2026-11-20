@@ -524,18 +524,28 @@ jobs:
   # Every example built and linked (Cargo's default test selection builds
   # them; the root CI only type-checks them), on every run that reaches the
   # rust lane. A pull request also runs the bin tests and
-  # meta-extension-state's suite, which the root CI runs on the push: the
-  # bins' test harnesses link against the library the examples built (Cargo
-  # shares it between the dev and test profiles while their settings agree),
-  # and meta-extension-state does not depend on meerkat-meta.
+  # meta-extension-state's suite, which the root CI runs on the push;
+  # meta-extension-state does not depend on meerkat-meta.
+  # The bins' test harnesses are built in Cargo's test profile. Cargo shares
+  # a unit between two builds only while its settings agree, and the dev and
+  # test profiles' do not ([profile.test] in the root Cargo.toml sets
+  # codegen-units, [profile.dev] does not). So on a pull request the examples
+  # are built in the test profile too, the profile the second build of the
+  # same job uses; on a push or a dispatch, where no bin test follows, they
+  # are built in dev as before. What this gives up: on a pull request the
+  # examples are no longer linked with dev's settings; they still are on the
+  # push of the merge. Which packages the second build then still compiles
+  # is for a hosted round to show (its `Compiling` lines); nothing is
+  # measured or claimed here.
   rust-examples:
     name: rust-examples
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
-    # A cold run of the monorepo layout compiles all of Core twice here: the
-    # examples build, then the test build of the bins (PR #2011's run was cut
-    # at 60 minutes in the second build). Compiling Core once is a follow-up.
+    # A cold pull request round compiled Core's crates twice here, once for
+    # the examples (dev) and once for the bins' tests (the test profile): PR
+    # #2011's run was cut at 60 minutes in the second build. The limit stays
+    # as it was: no cold round with one profile has been measured.
     timeout-minutes: 90
     permissions:
       contents: read
@@ -565,9 +575,14 @@ jobs:
           save-if: false
           shared-key: ci-registry
           cache-targets: "false"
+      # One build line; the event chooses the Cargo profile (see the job's
+      # comment). The variable is the step's own and is not one of the
+      # CARGO*/RUST* names the registry cache hashes.
       - name: Build every example
         working-directory: .
-        run: ./scripts/repo-cargo build -p meerkat-meta --examples
+        env:
+          EXAMPLES_PROFILE: ${{ github.event_name == 'pull_request' && 'test' || 'dev' }}
+        run: ./scripts/repo-cargo build -p meerkat-meta --examples --profile "${EXAMPLES_PROFILE}"
       - name: Install nextest
         if: github.event_name == 'pull_request'
         uses: ./.github/actions/setup-cargo-tool-ci

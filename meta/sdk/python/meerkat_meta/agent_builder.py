@@ -26,6 +26,14 @@ from .types import ErrorEvent
 _log = logging.getLogger("meerkat_meta")
 
 
+def _check_schedule_fire_registration(name: Any, handler: Any) -> None:
+    """Refuse a schedule-fire registration whose name or handler is unusable."""
+    if not isinstance(name, str) or not name.strip():
+        raise TypeError(f"runnable name must be a non-empty string, got {name!r}")
+    if not callable(handler):
+        raise TypeError(f"handler must be callable, got {type(handler).__name__}: {handler!r}")
+
+
 @dataclass
 class _RegisteredJobRunner:
     execution: DetachedJobExecution
@@ -146,10 +154,7 @@ class CallbackDispatcher:
         ``due_at``, optional ``payload``); raising marks the occurrence
         attempt failed in the durable schedule store.
         """
-        if not isinstance(name, str) or not name.strip():
-            raise TypeError(f"runnable name must be a non-empty string, got {name!r}")
-        if not callable(handler):
-            raise TypeError(f"handler must be callable, got {type(handler).__name__}: {handler!r}")
+        _check_schedule_fire_registration(name, handler)
         self._schedule_fire_handlers[name] = handler
 
     def register_job_rpc(self, rpc: DetachedJobRpc) -> None:

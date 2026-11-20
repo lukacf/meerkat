@@ -1093,6 +1093,34 @@ jobs:
             fi
           fi
 
+      # The readback runs the workflow's own copy of the verifier: this
+      # workflow file is always main's, while the checkout above is the
+      # released commit, whose copy can be older than the flags used here.
+      # It arrives after the publish steps, which build from the released
+      # commit's tree alone.
+      - name: Checkout immutable workflow tools
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+      # A registry accepts an upload before it serves the version (npm has
+      # taken from one to more than six minutes). This job ends only when
+      # PyPI and npm serve the exact packages, so the crate job's readback of
+      # every registry does not start against one that has not served yet.
+      # The verifier reads public URLs with no credential. It waits up to its
+      # own deadline for a version that is not served yet, and refuses one
+      # that is served wrong. Once npm serves the version, a rerun of this
+      # job publishes nothing again and passes here at the first read.
+      - name: Wait until PyPI and npm serve the exact SDK packages
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        env:
+          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 .release-tools/meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
+            --only-registry PyPI --only-registry npm
+
   # The crate bytes the publisher must upload. No verify build here:
   # floor_check compiled these crates' packaged sources against published
   # Core. Its own archives differ from these in Cargo.lock only (it
@@ -1208,10 +1236,22 @@ jobs:
           MEERKAT_CRATE_PUBLISH_PATCH: "false"
           MEERKAT_REGISTRY_DRY_RUN: ${{ needs.resolve_release.outputs.dry_run }}
         run: scripts/release-publish-rust-crates.sh
+      # The readback of every registry, by the workflow's own copy of the
+      # verifier (see publish_sdk_packages), checked out after the crates
+      # were packaged and published from the released commit's tree alone.
+      # It runs after a failed SDK job too, so it keeps the verifier's own
+      # wait: up to its deadline for each registry to serve the exact
+      # packages, then a failure that names the registries still failing.
+      - name: Checkout immutable workflow tools
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
       - name: Verify exact packages are public on every registry
         if: needs.resolve_release.outputs.dry_run == 'false'
         run: |
           set -euo pipefail
-          python3 meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
+          python3 .release-tools/meta/scripts/verify-published-registries.py --version "${RELEASE_VERSION}" \
             --crate-sha256 "meta-extension-state=${VERIFIED_EXTENSION_SHA256}" \
             --crate-sha256 "meerkat-meta=${VERIFIED_META_SHA256}"

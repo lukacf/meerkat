@@ -248,7 +248,7 @@ Defaults:
 - `--tools safe`
 - default model is OpenAI `gpt-6-astra` unless `-m`/`-p`, `--auth-binding` (the binding's `default_model`), `[agent] model` or `[models] <provider>` selects another; an Anthropic or Gemini env key alone does not change it. Catalog support does not imply access through Azure, Copilot, or custom backends
 - current default Gemini model is `gemini-4-argon` (paid Gemini API tiers only); `gemini-3.8-flash` is the recommended Flash model and the free-tier choice (`--model gemini-3.8-flash` or `[models] gemini = "gemini-3.8-flash"`), and `rkat auth login google` and Copilot Gemini route bindings start on it
-- CLI realm state is project-local by default: `<project-root>/.rkat/realms/<ws-...>/`, where the project root is the nearest ancestor containing `.rkat` and falls back to the context root outside a project; that head realm's config composes over its parent chain and the HOME-rooted `global` doc (`~/.rkat/config.toml`)
+- CLI realm state is project-local by default: `<project-root>/.rkat/realms/<ws-...>/`, where the project root is the nearest ancestor containing `.rkat` and falls back to the context root outside a project; a realm that already exists (has its manifest) under a farther ancestor's `.rkat/realms` is used where it lies (a nearer `.rkat` directory, for example after `rkat init` in a subdirectory, does not leave it behind), and a realm found under more than one root is refused with both realm directories and the two ways out (`--state-root`, or `rkat storage migrate` with both roots and `--adopt-root`); that head realm's config composes over its parent chain and the HOME-rooted `global` doc (`~/.rkat/config.toml`)
 - `--verbose` also prints the active realm root
 - provider-native web search is on for models that support it; `--no-web-search` turns it off
 - text output streams by default when stdout is a TTY; JSON/HTML output and pipes/scripts do not
@@ -359,9 +359,9 @@ Realm servers are literal: `${VAR}` expands only in `mcp.toml`, and
 Live mutation of an already-running session uses RPC/REST/MCP/SDK surfaces, not
 `rkat mcp reload`.
 
-`get` text output masks env and header values whose name contains key,
-secret, token or password; `--json` output is unmasked. Neither shows
-`access`, `tool_names` or `secret_env`.
+`get` text output masks every env and header value and shows a URL without
+its userinfo and query (so does the `list` table); `--json` output is
+unmasked. Neither shows `access`, `tool_names` or `secret_env`.
 
 `--allow-operation <OPERATION>` (repeatable) writes the server's access ceiling
 (`access = { allowed_operations = [...] }`): every other raw MCP operation is
@@ -632,12 +632,13 @@ rkat storage migrate [--apply] [--bridge-pre-0-8-10] [--json] [--root <PATH>]...
 rkat storage prune [--apply] [--older-than-days <DAYS>] [--json] [--root <PATH>]...
 ```
 
-Sweep roots (all three verbs): by default the invocation directory's
-context-local candidate (`<context-root>/.rkat/realms`) and the user-global
-data root. Note the runtime resolver additionally walks UP from the
-invocation context to the project root before forming its local candidate —
-run storage verbs from the project root (or pass `--root`) to sweep the
-same location the runtime resolves. When any explicit root is
+Sweep roots: `storage migrate` and `storage prune` act by default on the
+invocation directory's context-local candidate (`<context-root>/.rkat/realms`)
+and the user-global data root, and on an ancestor's root only when `--root`
+names it. `storage doctor`, which only reads, by default also reads the
+`.rkat/realms` of every ancestor of the context root that has a `.rkat`
+directory (the roots the runtime resolver probes for an existing realm) and
+reports a realm present under more than one of them. When any explicit root is
 given (the global `--state-root` or one or more repeatable `--root`), ONLY
 those roots are read. The global `-r/--realm` restricts the sweep to one realm
 id (split-brain twins for it are still detected across all swept roots).

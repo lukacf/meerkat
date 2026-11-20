@@ -78,8 +78,8 @@ use crate::runtime::MetaRuntimeHandle;
 use crate::runtime::{
     ConsoleAgentLiveSnapshot, ConsoleLiveSnapshot, ConsoleMember, ConsoleModelCapabilities,
     ConsoleRestJsonRequest, DeliveryHistoryRequest, GatingDecideRequest, GatingDecision,
-    RuntimeDecisionState, authorize_console_rest_json_route, extract_bearer_token_from_header,
-    render_console_rest_json_route,
+    RuntimeDecisionState, SnapshotRows, authorize_console_rest_json_route,
+    extract_bearer_token_from_header, render_console_rest_json_route,
 };
 use crate::runtime::{RuntimeMetadataTable, labels_to_json_value};
 use crate::unified_runtime::console_events::{
@@ -924,48 +924,126 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
         .and_then(Value::as_str)
 }
 
-/// Whether a caller may see a gating entry recorded with the origin
-/// `identity`: only a caller that may view that agent, and, for a caller the
+/// When each gating request an audit holds was made: the time of the row
+/// that opens its action, by action id. A request is its asking member's,
+/// so every row of an action, its pending entry and the delivery record of
+/// its approval notification are decided by who held the origin's name when
+/// the request was made, not when a later row (a decision, an escalation
+/// successor, a timeout) was written.
+///
+/// The opening row of an action is the first row an evaluation writes for
+/// it: one of the evaluation's own event types, and never the pending row
+/// of an escalation successor. Where the audit no longer retains it (the
+/// audit keeps its newest rows), the request's time is not known.
+pub(crate) struct GatingRequestTimes(BTreeMap<String, Option<u64>>);
+
+impl GatingRequestTimes {
+    /// The request times `audit`, the owner's retained audit rows in the
+    /// order they were written, holds.
+    pub(crate) fn of(audit: &[crate::runtime::GatingAuditEntry]) -> Self {
+        let mut times = BTreeMap::new();
+        for entry in audit {
+            times.entry(entry.action_id.clone()).or_insert_with(|| {
+                let opens = match entry.event_type.as_str() {
+                    "evaluated"
+                    | "conflict_blocked"
+                    | crate::runtime::MEMORY_CONFLICT_LOOKUP_FAILED_EVENT => true,
+                    "pending_created" => entry.detail.get("escalated_from_pending_id").is_none(),
+                    _ => false,
+                };
+                opens.then_some(entry.timestamp_ms)
+            });
+        }
+        Self(times)
+    }
+
+    /// When the request of the action `action_id` was made, if the audit
+    /// still holds the row that opens it.
+    pub(crate) fn made_at(&self, action_id: &str) -> Option<u64> {
+        self.0.get(action_id).copied().flatten()
+    }
+}
+
+/// The refusal of a gating door for a caller who cannot be told yet whose
+/// an entry is: a runtime the Console reads still owes the first read of
+/// who its members are private to, so who held a name when an entry was
+/// made is not known ([`AccessView::awaits_first_read`]). The door answers
+/// it to every request of such a caller, whatever its owner holds (an
+/// owner that holds nothing too): the caller asks again, is never answered
+/// a list that silently lacks an entry, and learns nothing from the refusal
+/// of what it may not see. Once that read has landed no request is answered
+/// it. It names no member. The documented retryable form of a history that
+/// cannot be read now.
+pub(crate) fn gating_origins_not_read_error() -> JsonRpcError {
+    JsonRpcError {
+        code: crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+        message: "who held a member's name when this was recorded is still being read; ask again"
+            .to_string(),
+        data: Some(json!({
+            "kind": "identity_history_unavailable",
+            "retryable": true,
+        })),
+    }
+}
+
+/// Whether `access_view`'s caller cannot be told yet whose an entry is
+/// ([`gating_origins_not_read_error`]).
+pub(crate) fn gating_origins_not_read(access_view: Option<&AccessView>) -> bool {
+    access_view.is_some_and(AccessView::awaits_first_read)
+}
+
+/// Whether a caller may see a record made under the name `identity` at
+/// `made_at_ms` (`None` when its time is not known): a gating entry
+/// recorded with that origin, or a question set that member asked. The one
+/// rule of every gating door ([`AccessView::sees_origin`]): only a caller
+/// that may view the agent that holds the name now; for a caller the
 /// console keeps apart from other people, only when the console knows the
 /// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
-/// know may have been private to a person. The pending list, the audit read,
-/// the question-set read and a decide by a request's id all ask it: a
-/// request withheld from a caller is not one the caller may decide.
-pub(crate) fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
-    access_view.is_none_or(|view| {
-        view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
-    })
+/// know may have been private to a person; and only a caller the member
+/// that held the name when the record was made lets through: what a member
+/// private to a person left under a name stays that person's. The pending
+/// list, the audit read, the question-set read, the decisions family and a
+/// decide by a request's id all ask it: a request withheld from a caller is
+/// not one the caller may decide.
+pub(crate) fn gating_origin_visible(
+    access_view: Option<&AccessView>,
+    identity: &str,
+    made_at_ms: Option<u64>,
+) -> bool {
+    access_view.is_none_or(|view| view.sees_origin(identity, made_at_ms))
 }
 
 /// Whether the caller of a decide is shown the request it decides, asked
 /// once, on the entry the gating owner holds when the decision is applied:
-/// a request with no origin is shown, and one with an origin is shown as the
-/// pending list shows it ([`gating_origin_visible`]). With an access
-/// controller the decision fence answers, by the same rule on the
-/// configuration and roster it holds
+/// a request with no origin is shown, and one with an origin (its name and
+/// the time the request was made) is shown as the pending list shows it
+/// ([`gating_origin_visible`]). With an access controller the decision
+/// fence answers, by the same rule on the configuration and roster it holds
 /// ([`crate::access::AccessDecisionFence::can_see_origin`]); the caller's
 /// view is asked only when there is no fence, since its reads take the lock
 /// a fence holds.
 pub(crate) fn gating_origin_shown_when_applied(
     fence: Option<&crate::access::AccessDecisionFence<'_>>,
     access_view: Option<&AccessView>,
-    origin: Option<&str>,
+    origin: Option<(&str, Option<u64>)>,
 ) -> bool {
-    origin.is_none_or(|identity| match fence {
-        Some(fence) => fence.can_see_origin(identity),
-        None => gating_origin_visible(access_view, identity),
+    origin.is_none_or(|(identity, made_at_ms)| match fence {
+        Some(fence) => fence.can_see_origin(identity, made_at_ms),
+        None => gating_origin_visible(access_view, identity, made_at_ms),
     })
 }
 
 /// Whether a caller may see an audit entry: entries recorded with an origin
-/// are visible only to callers that may see that origin
-/// ([`gating_origin_visible`]).
+/// are visible only to callers that may see that origin's record of the
+/// time the entry's request was made ([`gating_origin_visible`]).
 fn gating_audit_entry_visible(
     entry: &crate::runtime::GatingAuditEntry,
+    times: &GatingRequestTimes,
     access_view: Option<&AccessView>,
 ) -> bool {
-    gating_audit_entry_origin(entry)
-        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+    gating_audit_entry_origin(entry).is_none_or(|identity| {
+        gating_origin_visible(access_view, identity, times.made_at(&entry.action_id))
+    })
 }
 
 /// Whether a caller may see the delivery record of an approval notification
@@ -973,9 +1051,9 @@ fn gating_audit_entry_visible(
 /// request's id and action text, so the record is shown as the pending list
 /// shows the request: by [`gating_origin_visible`] on the request's origin,
 /// read from the pending entry or, once the request is settled, from its
-/// audit entries. A request the gating owner no longer holds is attributed
-/// by nothing: its notification is withheld from every caller the console
-/// keeps apart from other people
+/// audit entries, at the time the request was made. A request the gating
+/// owner no longer holds is attributed by nothing: its notification is
+/// withheld from every caller the console keeps apart from other people
 /// ([`AccessView::kept_apart_from_other_people`]). Every other delivery
 /// record is shown here and left to the caller's audience
 /// ([`admin_read_answer_for_audience`]).
@@ -983,6 +1061,7 @@ fn approval_notification_shown(
     record: &crate::runtime::DeliveryRecord,
     pending: &[crate::runtime::GatingPendingEntry],
     audit: &[crate::runtime::GatingAuditEntry],
+    times: &GatingRequestTimes,
     access_view: Option<&AccessView>,
 ) -> bool {
     if record.payload.get("kind").and_then(Value::as_str)
@@ -995,10 +1074,13 @@ fn approval_notification_shown(
         .iter()
         .find(|entry| Some(entry.pending_id.as_str()) == pending_id)
     {
-        return entry
-            .origin
-            .as_ref()
-            .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity));
+        return entry.origin.as_ref().is_none_or(|origin| {
+            gating_origin_visible(
+                access_view,
+                &origin.identity,
+                times.made_at(&entry.action_id),
+            )
+        });
     }
     let mut settled = audit
         .iter()
@@ -1008,8 +1090,10 @@ fn approval_notification_shown(
         return !access_view.is_some_and(AccessView::kept_apart_from_other_people);
     }
     settled
-        .find_map(gating_audit_entry_origin)
-        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+        .find_map(|entry| gating_audit_entry_origin(entry).map(|identity| (entry, identity)))
+        .is_none_or(|(entry, identity)| {
+            gating_origin_visible(access_view, identity, times.made_at(&entry.action_id))
+        })
 }
 
 /// An audit entry as the console serves it to a caller who may see it. The
@@ -1154,10 +1238,21 @@ async fn console_gating_stream_handler(
             if ended {
                 break;
             }
-            let page = owner.lock().await.gating_audit_after(cursor.as_deref());
+            // The new rows, and when each row's request was made (read from
+            // the whole retained audit, under the same hold of the owner).
+            let (page, times) = {
+                let mut owner = owner.lock().await;
+                let page = owner.gating_audit_after(cursor.as_deref());
+                let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
+                (page, times)
+            };
             if let Some(runtime) = &runtime {
                 let probe = audience.refreshed();
-                if (!page.entries.is_empty() && prime_age.due(Instant::now()))
+                // Rows held for a caller who could not be told yet whose
+                // they are are decided once that read has landed: read
+                // again whether it has.
+                if (!page.entries.is_empty()
+                    && (prime_age.due(Instant::now()) || probe.awaits_first_read()))
                     || page
                         .entries
                         .iter()
@@ -1180,6 +1275,16 @@ async fn console_gating_stream_handler(
                     .data("{}"));
                 break;
             }
+            // A caller who cannot be told yet whose a row is gets no frame
+            // now, whatever the rows are (a frame says "a row you may see
+            // was recorded"):
+            // the cursor stays, and the rows are read again at the next
+            // wake or periodic re-check, which decides them once that read
+            // has landed. The caller's reads answer meanwhile that it must
+            // ask again.
+            if view.awaits_first_read() {
+                continue;
+            }
             if page.gap {
                 cursor = page.entries.last().map(|entry| entry.audit_id.clone());
                 yield Ok(axum::response::sse::Event::default()
@@ -1193,7 +1298,7 @@ async fn console_gating_stream_handler(
             if page
                 .entries
                 .iter()
-                .any(|entry| gating_audit_entry_visible(entry, Some(&view)))
+                .any(|entry| gating_audit_entry_visible(entry, &times, Some(&view)))
             {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.changed")
@@ -1387,6 +1492,24 @@ pub async fn console_json_handler(
                 .iter()
                 .any(|runtime| runtime.runtime.workgraph_service().is_some())
         });
+    // A console with no runtime of its own built its rows from identity
+    // records, whoever asks. They are no access attributes: the caller's
+    // cache is primed from the runtimes, as on every other route of such
+    // a console, and the experience records nothing of its rows. With no
+    // caller resolved nothing is primed and no member row is shown.
+    let snapshot_rows = match (state.runtime.as_ref(), state.console_aggregator.as_ref()) {
+        (None, Some(aggregator)) => {
+            if let Some(caller) = caller.as_ref() {
+                Box::pin(prime_access_cache_from_aggregator(
+                    aggregator,
+                    &caller.audience.controller(),
+                ))
+                .await;
+            }
+            SnapshotRows::OfIdentityRecords
+        }
+        _ => SnapshotRows::OfRosters,
+    };
     let mut response = match authorized {
         Ok(resolved_auth) => render_console_rest_json_route(
             &state.decisions,
@@ -1394,6 +1517,7 @@ pub async fn console_json_handler(
             &request,
             resolved_auth.as_ref(),
             live_snapshot.as_ref(),
+            snapshot_rows,
             state.access.as_ref(),
             caller.as_ref().map(|caller| &caller.audience),
             memory_available,
@@ -1451,6 +1575,7 @@ pub async fn console_json_handler(
             &|name| changed_at_run_time.contains(name),
         );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
+        attach_console_bundle(&mut response.body);
         if let Some(runtimes) = panel_runtimes {
             response.body["panel_runtimes"] = json!(
                 runtimes
@@ -1493,6 +1618,33 @@ fn attach_console_send_dedupe(experience: &mut Value, aggregator: Option<&MetaCo
             json!({ "durable": aggregator.send_dedupe_durability().is_durable() }),
         );
     }
+}
+
+/// Name the console bundle this gateway serves: the version its page gives
+/// its app script (`console-app.js?v=`). A page that runs another bundle (a
+/// page opened before an upgrade, or an application that mounts another
+/// console than this gateway's) compares it with its own and says that it
+/// is out of date. Absent when the embedded page names no version.
+fn attach_console_bundle(experience: &mut Value) {
+    let Some(bundle) = console_bundle_of(CONSOLE_FRONTEND_INDEX_HTML) else {
+        return;
+    };
+    if let Some(object) = experience.as_object_mut() {
+        object.insert("console_bundle".to_string(), json!(bundle));
+    }
+}
+
+/// The version a console page gives its app script, if it names one. The
+/// console's build writes it in one form, lowercase hex digits, and fails
+/// otherwise (`console/build.cjs`), so this reader and the page's own
+/// (`console/src/lib/console-bundle.ts`) cut the same text.
+fn console_bundle_of(index_html: &str) -> Option<&str> {
+    const APP_SCRIPT: &str = "console-app.js?v=";
+    let version = &index_html[index_html.find(APP_SCRIPT)? + APP_SCRIPT.len()..];
+    let end = version
+        .find(|character: char| !character.is_ascii_alphanumeric())
+        .unwrap_or(version.len());
+    (end > 0).then(|| &version[..end])
 }
 
 /// `meta/console/whoami`: who the Console acts as for this request. Only
@@ -2219,16 +2371,24 @@ struct ReadinessAnswer {
 
 /// Start or join the readiness check and bound it by `budget`. On expiry
 /// the hold is dropped; the shared check is cancelled once nobody holds it.
-/// The caller owns the agents private to `private_owner_key`.
+/// The caller owns the agents private to `private_owner_key`. `identity` is
+/// the member as the caller spelled it, and `resolved` the name the voice
+/// host is asked under where the console resolved the member to another.
 async fn readiness_within_budget(
     controller: &crate::console_voice::ConsoleVoiceController,
     principal: &str,
     private_owner_key: Option<&str>,
     identity: &str,
+    resolved: Option<&str>,
     budget: Duration,
 ) -> ReadinessAnswer {
     let started = std::time::Instant::now();
-    let flight = match controller.readiness_flight(principal, private_owner_key, identity) {
+    let flight = match controller.readiness_flight_resolved(
+        principal,
+        private_owner_key,
+        identity,
+        resolved,
+    ) {
         Ok(flight) => flight,
         Err(failure) => {
             return ReadinessAnswer {
@@ -2391,6 +2551,7 @@ mod voice_readiness_budget_tests {
             "alice",
             None,
             "agent-a",
+            None,
             Duration::from_millis(50),
         )
         .await;
@@ -2440,6 +2601,7 @@ mod voice_readiness_budget_tests {
             "alice",
             None,
             "agent-a",
+            None,
             Duration::from_secs(5),
         )
         .await;
@@ -2514,8 +2676,9 @@ async fn handle_console_voice_rpc(
             }
         }
     };
-    let response = absent
-        .restore(handle_console_voice_rpc_inner(state, controller, auth, request, started).await);
+    let response = absent.restore(
+        handle_console_voice_rpc_inner(state, controller, auth, request, &absent, started).await,
+    );
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let ok = response.get("error").is_none_or(Value::is_null);
     let phase = response
@@ -2545,7 +2708,8 @@ async fn handle_console_voice_rpc_inner(
     state: &ConsoleJsonState,
     controller: Option<&crate::console_voice::ConsoleVoiceController>,
     auth: &ConsoleHttpAuthContext,
-    request: JsonRpcRequest,
+    mut request: JsonRpcRequest,
+    absent: &ConsoleAbsentNames,
     request_started: std::time::Instant,
 ) -> Value {
     use crate::console_voice::{
@@ -2584,6 +2748,21 @@ async fn handle_console_voice_rpc_inner(
             return response_value(id, None, Some(denial));
         }
     }
+    // A call's requests are kept under the name its caller spelled, which
+    // the call's teardown carries too: every verb below reads the caller's
+    // spelling. The name the member resolution left (for a member hidden
+    // from the caller, a name no member holds) is the one the voice host
+    // and the live voice path are asked under, by the two verbs that ask
+    // them: the readiness and the open.
+    let resolved_identity = request
+        .params
+        .get("identity")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    request.params = absent.restore(std::mem::take(&mut request.params));
+    let resolved_identity = resolved_identity.filter(|resolved| {
+        request.params.get("identity").and_then(Value::as_str) != Some(resolved.as_str())
+    });
     if request.method == VOICE_READINESS_METHOD {
         let parsed: VoiceReadiness = match serde_json::from_value(request.params) {
             Ok(parsed) => parsed,
@@ -2605,6 +2784,7 @@ async fn handle_console_voice_rpc_inner(
             principal,
             auth.audience.private_owner_key(),
             &parsed.identity,
+            resolved_identity.as_deref(),
             VOICE_READINESS_SERVER_BUDGET,
         )
         .await;
@@ -2700,10 +2880,11 @@ async fn handle_console_voice_rpc_inner(
     };
     match request.method.as_str() {
         VOICE_OPEN_METHOD => match controller
-            .open_while_authenticated(
+            .open_resolved_while_authenticated(
                 principal,
                 auth.audience.private_owner_key(),
                 parsed,
+                resolved_identity,
                 auth.verification
                     .clone()
                     .map(crate::http_sse::StreamAuthentication::new),
@@ -4190,12 +4371,20 @@ mod console_private_side_chat_tests;
 mod console_private_member_schedule_end_tests;
 
 #[cfg(test)]
+#[path = "console_gating_request_time_tests.rs"]
+mod console_gating_request_time_tests;
+
+#[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
 
 #[cfg(test)]
 #[path = "console_absent_answer_tests.rs"]
 mod console_absent_answer_tests;
+
+#[cfg(test)]
+#[path = "console_set_aside_memory_tests.rs"]
+mod console_set_aside_memory_tests;
 
 #[cfg(test)]
 #[path = "console_malformed_params_tests.rs"]
@@ -4206,12 +4395,27 @@ mod console_malformed_params_tests;
 mod console_frame_witness_tests;
 
 #[cfg(test)]
+#[path = "console_role_label_list_tests.rs"]
+mod console_role_label_list_tests;
+
+#[cfg(test)]
 #[path = "console_kept_apart_tests.rs"]
 mod console_kept_apart_tests;
 
 #[cfg(test)]
 #[path = "console_access_save_refusal_tests.rs"]
 mod console_access_save_refusal_tests;
+#[cfg(test)]
+#[path = "console_ended_member_access_tests.rs"]
+mod console_ended_member_access_tests;
+
+#[cfg(test)]
+#[path = "console_member_memory_scope_tests.rs"]
+mod console_member_memory_scope_tests;
+
+#[cfg(test)]
+#[path = "console_recorded_field_refusal_tests.rs"]
+mod console_recorded_field_refusal_tests;
 
 #[cfg(test)]
 #[path = "console_stored_session_seat_tests.rs"]
@@ -4264,6 +4468,10 @@ mod console_announcement_audience_tests;
 #[cfg(test)]
 #[path = "console_question_set_tests.rs"]
 mod console_question_set_tests;
+
+#[cfg(test)]
+#[path = "console_request_name_tests.rs"]
+mod console_request_name_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -6029,8 +6237,20 @@ fn timeline_event_visible_to(view: &AccessView, event: &ConsoleTimelineEvent) ->
 /// it. The lineage names each parent in `namespace`, the row's runtime
 /// namespace, as the row's own identity and the access attribute cache name
 /// it.
+///
+/// No list shows a caller what the caller's view refuses: a row whose
+/// identity the access attribute cache knows is listed only if `agent.view`
+/// on that identity, decided on the cache's entry as every agent-scoped
+/// check decides it, allows the caller too. A row carries what a list
+/// serializes of a member (an identity record carries the member's role
+/// under its `role` key, where a label of that name would sit), so a rule
+/// can read a row otherwise than it reads the member; the cache's entry
+/// holds the member's role and its own labels apart. `held` is the
+/// caller's view over the cache taken once for the whole list: each row
+/// costs one decision on its own attributes and, when that allows and the
+/// cache knows the identity, one more on the cache's entry.
 fn listed_member_visible(
-    view: &AccessView,
+    held: &crate::access::HeldAccessView<'_>,
     resource: &AccessResource<'_>,
     registered: Option<&BTreeMap<String, String>>,
     side_chat: Option<&crate::side_chat::SideChatLineage>,
@@ -6038,7 +6258,7 @@ fn listed_member_visible(
 ) -> bool {
     let Some(identity) = resource.identity else {
         // A row that names no agent has no lineage to follow.
-        return view.decide(ACTION_AGENT_VIEW, resource).is_allow();
+        return held.view().decide(ACTION_AGENT_VIEW, resource).is_allow();
     };
     let mut labels = resource.labels.cloned().unwrap_or_default();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
@@ -6051,7 +6271,7 @@ fn listed_member_visible(
             *parent = namespace_console_identity(parent, namespace);
         }
     }
-    view.decide_agent_with_attributes(
+    held.decide_agent_with_attributes(
         ACTION_AGENT_VIEW,
         &AgentResourceAttributes {
             identity: identity.to_string(),
@@ -6061,6 +6281,7 @@ fn listed_member_visible(
         },
     )
     .is_allow()
+        && !held.refuses_view_of_known_agent(identity)
 }
 
 /// The verified side chat lineage of each of `entries`, members of
@@ -6114,7 +6335,8 @@ async fn listed_side_chat_lineages(
 /// the roster rows the rows were serialized from
 /// ([`listed_side_chat_lineages`]). Field names cover both the meerkat
 /// roster entry shape and the console projection shape. A view that
-/// enforces nothing still hides the agents private to another person.
+/// enforces nothing still hides the agents private to another person, and
+/// no row is kept that the caller's view of its agent refuses.
 async fn retain_visible_member_rows(
     rows: &mut Vec<Value>,
     runtime: &MobRuntime,
@@ -6130,6 +6352,8 @@ async fn retain_visible_member_rows(
     let side_chats = listed_side_chat_lineages(runtime, entries).await;
     let handle = runtime.handle();
     let no_labels = std::collections::BTreeMap::new();
+    // The cache is taken once for the whole list; nothing below awaits.
+    let held = view.over_held_attributes();
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -6158,14 +6382,15 @@ async fn retain_visible_member_rows(
             side_chats.get(&*alias)
         });
         listed_member_visible(
-            view,
+            &held,
             &AccessResource {
                 identity,
                 agent_id,
                 role,
                 labels: labels.as_ref(),
             },
-            identity.and_then(|identity| registered.get(identity)),
+            identity
+                .and_then(|identity| registered.labels_of_row(handle.mob_id().as_str(), identity)),
             side_chat,
             "",
         )
@@ -6186,7 +6411,9 @@ fn console_identity_record_role(labels: &BTreeMap<String, String>) -> &str {
 /// [`listed_member_visible`] with the record's role, the spawn registry of
 /// the record's own runtime and the side chat lineage its roster's fork
 /// facts verify. A view that enforces nothing still hides the agents
-/// private to another person.
+/// private to another person. A record's `role` is its member's role in
+/// its mob and its labels are what the list serializes, so no record is
+/// listed that the caller's view of its agent refuses.
 async fn visible_identity_records(
     aggregator: &MetaConsoleAggregator,
     view: Option<&AccessView>,
@@ -6205,11 +6432,13 @@ async fn visible_identity_records(
     // In record order: `retain` visits each record once, in order.
     let mut registered = registered.into_iter();
     let mut side_chats = side_chats.into_iter();
+    // The cache is taken once for the whole list; nothing below awaits.
+    let held = view.over_held_attributes();
     identities.retain(|record| {
         let registry_labels = registered.next().flatten();
         let side_chat = side_chats.next().flatten();
         listed_member_visible(
-            view,
+            &held,
             &AccessResource {
                 identity: Some(record.identity.as_str()),
                 agent_id: Some(record.runtime_member_id.as_str()),
@@ -6223,6 +6452,7 @@ async fn visible_identity_records(
                 .map_or("", String::as_str),
         )
     });
+    drop(held);
     Ok(identities)
 }
 
@@ -6567,7 +6797,11 @@ pub(crate) enum ConsoleMemberFieldKind {
     /// The method creates the member, or records something under its name
     /// (a subscription, a goal, an edge). A name a member hidden from the
     /// caller holds is refused as an unknown member's: the name is taken,
-    /// and nothing may be recorded for the hidden member.
+    /// and nothing may be recorded for the hidden member. The refusal is
+    /// given once the access rules allowed the request (its access check,
+    /// or for a topology apply the handler's own), which judge the name
+    /// swapped for one no member holds: a caller the rules refuse reads
+    /// their refusal, as for a name no member holds.
     Recorded,
 }
 
@@ -6957,10 +7191,14 @@ fn absent_member_spelling(spelling: &str, nonce: &str) -> String {
 }
 
 /// The names [`console_rpc_resolve_members`] swapped in a request for the
-/// members hidden from its caller.
+/// members hidden from its caller, and the refusal it owes for one of them.
 #[derive(Debug, Default)]
 pub(crate) struct ConsoleAbsentNames {
     nonce: Option<String>,
+    /// The caller's spelling of the first name a hidden member holds in a
+    /// field the method creates or records under
+    /// ([`ConsoleMemberFieldKind::Recorded`]).
+    refused: Option<String>,
 }
 
 /// A fresh suffix for the names a request swaps: no member name holds it.
@@ -6976,7 +7214,26 @@ impl ConsoleAbsentNames {
     pub(crate) fn fresh() -> Self {
         Self {
             nonce: Some(absent_name_nonce()),
+            refused: None,
         }
+    }
+
+    /// The refusal owed to a request of `method` that names a hidden member
+    /// in a field the method creates or records under: the words the method
+    /// answers a name no member holds in
+    /// ([`hidden_recorded_member_refusal`]), with the name as the caller
+    /// spelled it. It is given once the access rules allowed the request,
+    /// which judged the swapped name as they judge a name no member holds:
+    /// right after the request's access check and before any handler, so
+    /// that no handler receives a request with such a name swapped. A
+    /// topology apply is the one exception: that check asks nothing of it
+    /// and its handler asks the rules itself, so the refusal is handed to
+    /// the handler, which gives it once the rules allowed the request and
+    /// applies nothing ([`crate::rpc::topology_methods::handle_apply`]).
+    pub(crate) fn recorded_refusal(&self, method: &str) -> Option<JsonRpcError> {
+        self.refused
+            .as_deref()
+            .map(|spelling| hidden_recorded_member_refusal(method, spelling))
     }
 
     /// The name no member holds that stands for `spelling`.
@@ -7074,6 +7331,20 @@ fn restore_absent_names(value: Value, suffix: &str) -> Value {
     }
 }
 
+/// The refusal of a request that names, in a field its method records, a
+/// member hidden from the caller: the words the method answers a name no
+/// member holds in. A topology apply answers an edge's end no member holds
+/// through the topology
+/// ([`crate::rpc::topology_methods::member_not_found_rpc_error`]); every
+/// other such method answers an unknown identity.
+fn hidden_recorded_member_refusal(method: &str, spelling: &str) -> JsonRpcError {
+    if method == crate::rpc::topology_methods::TOPOLOGY_APPLY_METHOD {
+        crate::rpc::topology_methods::member_not_found_rpc_error(spelling)
+    } else {
+        unknown_identity_rpc_error(spelling)
+    }
+}
+
 /// Resolve every member a console request names through `view`, the
 /// caller's audience, in one place, before any rule or handler reads it
 /// (the table of the member fields of each method is
@@ -7089,8 +7360,12 @@ fn restore_absent_names(value: Value, suffix: &str) -> Value {
 /// it is swapped for a name no member holds, so the method takes its own
 /// path for an absent member, and [`ConsoleAbsentNames::restore`] spells the
 /// answer back with the caller's name; in a field naming a member the
-/// method creates or records something for, the request is refused as one
-/// naming an unknown member.
+/// method creates or records something for, it is swapped the same way and
+/// the request is owed a refusal as one naming a name no member holds
+/// ([`ConsoleAbsentNames::recorded_refusal`], in the words of
+/// [`hidden_recorded_member_refusal`]), which the caller gives right after
+/// the request's access check and before any handler: every caller that
+/// dispatches such a method must give it.
 pub(crate) fn console_rpc_resolve_members(
     view: Option<&AccessView>,
     method: &str,
@@ -7121,6 +7396,7 @@ fn console_rpc_resolve_members_with(
         );
     let withholds_unknown = reads_memory_scope || schedules::acts_on_member_schedules(method);
     let mut nonce: Option<String> = None;
+    let mut refused: Option<String> = None;
     let fields = console_method_member_fields_or_subject(method);
     for field in fields {
         visit_member_field(params, field.path, &mut |slot| {
@@ -7133,27 +7409,26 @@ fn console_rpc_resolve_members_with(
             if !hidden {
                 return Ok(());
             }
-            match field.kind {
-                ConsoleMemberFieldKind::Recorded => Err(unknown_identity_rpc_error(spelling)),
-                ConsoleMemberFieldKind::Subject => {
-                    let nonce = nonce.get_or_insert_with(absent_name_nonce);
-                    let absent = absent_member_spelling(spelling, nonce);
-                    *slot = Value::String(absent);
-                    Ok(())
-                }
+            // A name in a field the method creates or records under is
+            // noted for the refusal the request is owed after its access
+            // check; it is swapped like any other, so that check judges a
+            // name no member holds.
+            if field.kind == ConsoleMemberFieldKind::Recorded && refused.is_none() {
+                refused = Some(spelling.to_string());
             }
+            let nonce = nonce.get_or_insert_with(absent_name_nonce);
+            let absent = absent_member_spelling(spelling, nonce);
+            *slot = Value::String(absent);
+            Ok(())
         })?;
     }
     // The access rules judge every subject spelling a request carries
     // ([`console_rpc_member_targets`]), one its method's entry does not
-    // list included. For a method that reads or acts on a member, a hidden
-    // member named under such a spelling is swapped too, under the same
-    // suffix, so the rules judge a name no member holds there as well. A
-    // value that is no string stays as it is.
-    if fields
-        .iter()
-        .any(|field| field.kind == ConsoleMemberFieldKind::Subject)
-    {
+    // list included. For a method that names a member in any field, a
+    // hidden member named under such a spelling is swapped too, under the
+    // same suffix, so the rules judge a name no member holds there as
+    // well. A value that is no string stays as it is.
+    if !fields.is_empty() {
         for spelling in SUBJECT_MEMBER {
             let [key] = spelling.path else { continue };
             if fields.iter().any(|field| field.path == spelling.path) {
@@ -7172,7 +7447,7 @@ fn console_rpc_resolve_members_with(
             }
         }
     }
-    Ok(ConsoleAbsentNames { nonce })
+    Ok(ConsoleAbsentNames { nonce, refused })
 }
 
 /// The present, non-empty subject spellings of a request
@@ -7359,9 +7634,10 @@ pub(crate) fn live_access_violation(
 /// Every mapped requirement must pass; the first failing one is reported.
 ///
 /// A member the caller may not know of ([`AccessView::hides_agent`]: it is
-/// private to another person) never reaches this check: the request's
-/// member resolution ([`console_rpc_resolve_members`]) answered it as a
-/// member that does not exist before.
+/// private to another person) never reaches this check under its own name:
+/// the request's member resolution ([`console_rpc_resolve_members`])
+/// swapped it for a name no member holds before, in every field, so the
+/// check judges that name as it judges any name no member holds.
 ///
 /// A read, a plan or a change of one long-term agent that names an agent
 /// the caller may not view is not judged here either
@@ -7824,8 +8100,51 @@ fn memory_panel_scope_visible(
 /// lineage ancestor cannot match, so such an identity is withheld while a
 /// deny of that kind applies to either action (fails closed). An agent
 /// private to another person is withheld, enforced access or not.
+///
+/// The key of an identity scope says what it names
+/// ([`crate::memory::records::IdentityScopeKey`]), and the rule above is the
+/// rule of a plain name. A scope kept under an owner and a member's name
+/// is that owner's member's memory whether or not the member still exists,
+/// whoever holds the name now and whatever this console has read of its
+/// members: it is shown to a caller who is that owner or an access
+/// administrator, and whom the access rules allow the read on that member
+/// ([`memory_panel_owned_member_allowed`]). Any other key that is no plain
+/// name is no member's memory and is shown to access administrators only.
+/// A caller of a console with no access view is kept apart from nobody.
 fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
-    !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+    use crate::memory::records::IdentityScopeKey;
+    match IdentityScopeKey::of(identity) {
+        IdentityScopeKey::Named(_) => {
+            !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+        }
+        IdentityScopeKey::PrivateMember { owner, member } => caller.view.is_none_or(|view| {
+            (view.is_admin() || view.private_owner_key() == Some(owner.as_str()))
+                && [ACTION_AGENT_MEMORY_READ, ACTION_AGENT_VIEW]
+                    .iter()
+                    .all(|action| {
+                        memory_panel_owned_member_allowed(caller, view, action, &owner, member)
+                    })
+        }),
+        IdentityScopeKey::Reserved => caller.view.is_none_or(AccessView::is_admin),
+    }
+}
+
+/// Whether the access rules allow the caller `action` on the member named
+/// `member` that is, or was, private to the person `owner`: the rules half
+/// of every read and decision on that member's memory, asked for the member
+/// as the console names it ([`AccessView::allows_owned_member`]).
+fn memory_panel_owned_member_allowed(
+    caller: MemoryPanelCaller<'_>,
+    view: &AccessView,
+    action: &str,
+    owner: &str,
+    member: &str,
+) -> bool {
+    view.allows_owned_member(
+        action,
+        &namespace_console_identity(member, caller.namespace),
+        owner,
+    )
 }
 
 /// The access rules' half of [`memory_panel_identity_visible`]: whether the
@@ -7974,7 +8293,9 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// is then among the realm's scopes, and quarantine evidence stays. Without
 /// enforced access every scope is readable. The identity scope of an agent
 /// private to another person ([`MemoryPanelCaller::hides_private_identity`])
-/// is left out of the count: no dream covers a member private to a person,
+/// is left out of the count, and so is every identity scope kept apart by
+/// its key (`MemoryScope::kept_apart_by_its_key`), for every caller: no
+/// dream covers a member private to a person,
 /// so its runs name nothing of it, and counting it would withhold every run
 /// from everyone else and tell them private memory exists. The scope of an
 /// agent the console withholds from the caller only because it does not
@@ -7996,11 +8317,16 @@ async fn memory_panel_realm_fully_readable(
         .await?
         .iter()
         .filter(|scope| {
-            !matches!(
-                scope,
-                crate::memory::records::MemoryScope::Identity { identity, .. }
-                    if caller.hides_private_identity(identity)
-            )
+            // No dream covers the memory of a member private to a person,
+            // under its plain name or kept apart by its key: counting such
+            // a scope would withhold every run from everyone else and tell
+            // them that private memory exists.
+            !scope.kept_apart_by_its_key()
+                && !matches!(
+                    scope,
+                    crate::memory::records::MemoryScope::Identity { identity, .. }
+                        if caller.hides_private_identity(identity)
+                )
         })
         .all(|scope| match scope {
             crate::memory::records::MemoryScope::Identity { identity, .. } => {
@@ -8158,9 +8484,23 @@ async fn handle_memory_panel_records(
     let identity = normalized_console_rpc_string_param(params, "identity")
         .filter(|identity| !identity.is_empty());
     let scope_kind = scope_kind.or_else(|| identity.as_ref().map(|_| "identity".to_string()));
-    let scope_key = normalized_console_rpc_string_param(params, "scope_key")
-        .filter(|key| !key.is_empty())
-        .or(identity);
+    let named_key =
+        normalized_console_rpc_string_param(params, "scope_key").filter(|key| !key.is_empty());
+    // A listing that names a member and no scope key also lists the
+    // caller's own private member of that name: its memory is kept under
+    // the caller and the name, not under the name alone.
+    let own_private_key = match (&named_key, &identity, scope_kind.as_deref()) {
+        (None, Some(name), Some("identity"))
+            if crate::memory::records::IdentityScopeKey::of(name).is_named() =>
+        {
+            caller
+                .view
+                .and_then(AccessView::private_owner_key)
+                .map(|owner| crate::memory::records::private_member_scope_key(owner, name))
+        }
+        _ => None,
+    };
+    let scope_key = named_key.or(identity);
     let status =
         normalized_console_rpc_string_param(params, "status").filter(|status| !status.is_empty());
     if let Some(status) = &status
@@ -8190,13 +8530,20 @@ async fn handle_memory_panel_records(
         Ok(realms) => realms,
         Err(err) => return memory_panel_store_error(response_id, err),
     };
-    // A caller who may read no row of this listing reads no realm.
-    if !memory_panel_listing_may_be_readable(
-        caller,
-        scope_kind.as_deref(),
-        scope_key.as_deref(),
-        status.as_deref(),
-    ) {
+    // A caller who may read no row of this listing reads no realm. The
+    // listing reads each scope key it names that can hold a row the caller
+    // may read.
+    let scope_keys: Vec<Option<&str>> = [
+        Some(scope_key.as_deref()),
+        own_private_key.as_deref().map(Some),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|key| {
+        memory_panel_listing_may_be_readable(caller, scope_kind.as_deref(), *key, status.as_deref())
+    })
+    .collect();
+    if scope_keys.is_empty() {
         return response_value(
             response_id,
             Some(json!({ "records": [], "next_cursor": null, "realms": realms })),
@@ -8209,10 +8556,16 @@ async fn handle_memory_panel_records(
     // `limit + 1` rows past the cursor that the caller may read: a realm holds
     // at most one row at a position, so that is enough to cut this page, keep
     // the rows that share its last position together, and tell whether a
-    // readable row follows it.
+    // readable row follows it. The same holds for each scope key of a realm.
     let wanted = limit + 1;
     let mut records = Vec::new();
+    let mut sources: Vec<(&String, Option<&str>)> = Vec::new();
     for realm in &realms {
+        for scope_key in &scope_keys {
+            sources.push((realm, *scope_key));
+        }
+    }
+    for (realm, scope_key) in sources {
         let mut realm_cursor = cursor.clone();
         let mut batch = wanted;
         let mut readable = Vec::new();
@@ -8221,7 +8574,7 @@ async fn handle_memory_panel_records(
                 .records_page(
                     realm,
                     scope_kind.as_deref(),
-                    scope_key.as_deref(),
+                    scope_key,
                     status.as_deref(),
                     batch,
                     realm_cursor.clone(),
@@ -8982,8 +9335,16 @@ fn console_memory_author(
 /// reviewer is the signed-in person the connection names, never a name the
 /// caller asserts: any other caller decides nothing
 /// (`approver_unauthenticated`).
+///
+/// The call names a member by its name. The quarantined record of a member
+/// private to a person lies in the scope of that owner and that name, and
+/// is decided there by its owner and by an access administrator
+/// ([`memory_quarantine_decision_scope`]); for everyone else, the holder of
+/// a later member of the name included, the decision is made in the named
+/// scope, where the record is not.
 async fn handle_memory_quarantine_decide(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
+    caller: MemoryPanelCaller<'_>,
     decider: Option<ConsoleApprovalDecider>,
     params: &Value,
     response_id: Value,
@@ -9014,15 +9375,16 @@ async fn handle_memory_quarantine_decide(
         return response_value(response_id, None, Some(error));
     }
     let realm = request.realm.clone();
+    let scope = match memory_quarantine_decision_scope(store, caller, &request).await {
+        Ok(scope) => scope,
+        Err(err) => return memory_panel_store_error(response_id, err),
+    };
     let reviewer = crate::memory::review::QuarantineReviewer::Operator {
         principal: Some(decider.principal.clone()),
     };
     let outcome = store
         .review_quarantined(crate::memory::review::QuarantineReviewRequest {
-            scope: crate::memory::records::MemoryScope::Identity {
-                realm: request.realm,
-                identity: request.identity.as_str().to_string(),
-            },
+            scope,
             memory_id: request.memory_id,
             decision: request.decision,
             expected_content_hash: request.expected_content_hash,
@@ -9047,6 +9409,53 @@ async fn handle_memory_quarantine_decide(
             Some(crate::rpc::agent_memory_rpc_error("quarantine review", err)),
         ),
     }
+}
+
+/// The scope a quarantine decision is made in: the identity scope of the
+/// name the call names, or, when the record lies in the scope kept under an
+/// owner and that same name, that scope, for a caller who may read it there
+/// ([`memory_panel_identity_visible`]: the owner or an access administrator,
+/// as the access rules decide the member) and whom the rules allow the
+/// verdict's effect on that member ([`memory_panel_owned_member_allowed`]).
+/// Every other caller decides in the named scope, where the record is not:
+/// the store answers as for a record that does not exist, and so never
+/// tells such a caller that the record exists.
+async fn memory_quarantine_decision_scope(
+    store: &dyn crate::memory::capabilities::MemoryPanelStore,
+    caller: MemoryPanelCaller<'_>,
+    request: &crate::rpc::memory_methods::MemoryQuarantineDecideRpcRequest,
+) -> Result<
+    crate::memory::records::MemoryScope,
+    crate::identity_first::agent_memory::AgentMemoryError,
+> {
+    use crate::memory::records::{IdentityScopeKey, MemoryScope};
+    let named = MemoryScope::Identity {
+        realm: request.realm.clone(),
+        identity: request.identity.as_str().to_string(),
+    };
+    let records = store
+        .records_by_ids(&request.realm, std::slice::from_ref(&request.memory_id))
+        .await?;
+    let Some(kept @ MemoryScope::Identity { identity: key, .. }) =
+        records.first().map(|record| &record.scope)
+    else {
+        return Ok(named);
+    };
+    let IdentityScopeKey::PrivateMember { owner, member } = IdentityScopeKey::of(key) else {
+        return Ok(named);
+    };
+    if member != request.identity.as_str() {
+        return Ok(named);
+    }
+    let effect = match request.decision {
+        crate::memory::review::QuarantineDecision::Release => ACTION_AGENT_MEMORY_WRITE,
+        crate::memory::review::QuarantineDecision::Tombstone => ACTION_AGENT_MEMORY_DELETE,
+    };
+    let decides = memory_panel_identity_visible(caller, key)
+        && caller.view.is_none_or(|view| {
+            memory_panel_owned_member_allowed(caller, view, effect, &owner, member)
+        });
+    Ok(if decides { kept.clone() } else { named })
 }
 
 /// Receipts for both records as they stand now, plus the committed
@@ -10819,7 +11228,13 @@ impl ConsoleViewerResolver {
         .map(|context| ConsoleViewerContext {
             principal: context.principal,
             service_identity: context.service_identity,
-            access_view: context.access_view,
+            // This resolver primes nothing: its caller's request read no
+            // roster, so an agent that exists may be unrecorded. The view
+            // it hands out judges an agent the records do not know by its
+            // bare name; one they know is decided by its entry.
+            access_view: context
+                .access_view
+                .map(AccessView::judging_unknown_agents_by_name),
             human: context.human,
         })
     }
@@ -12251,10 +12666,24 @@ pub(crate) async fn sse_member_authorization_projection(
     // restore `spawned_by` and related inheritance metadata, and only
     // Meerkat's fork record a side chat's source.
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-    if let Some(runtime) = runtime {
-        let registered = runtime.console_identity_labels().await;
-        if let Some(spawn_labels) = registered.get(&alias.identity) {
-            crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
+    if let Some(sink) = runtime.and_then(MobRuntime::console_spawn_sink) {
+        // The binding is in hand: what a spawn registered is this
+        // incarnation's, or cannot be told, and then the event's authority
+        // cannot be proven.
+        match sink
+            .labels_of_seated_row(
+                handle,
+                &alias.identity,
+                expected_runtime_id.identity.as_str(),
+                Some(expected_runtime_id.generation.get()),
+            )
+            .await
+        {
+            Ok(Some(spawn_labels)) => {
+                crate::console_spawn::merge_registered_labels(&mut labels, &spawn_labels);
+            }
+            Ok(None) => {}
+            Err(crate::console_spawn::SpawnEntryNotTold) => return None,
         }
     }
     // A side chat's source, as the roster's fork facts verify it: kept per
@@ -12281,6 +12710,13 @@ pub(crate) async fn sse_member_authorization_projection(
         }
     };
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
+    // Where the member sits, as the member rows say it: a member of the
+    // runtime's own mob names no mob and no host, a member of another mob
+    // names that mob. (Its host and the delegates' group are the member
+    // walk's to know; the stream names neither.)
+    let own_mob = runtime.is_none_or(|runtime| runtime.handle().mob_id() == handle.mob_id());
+    let source_mob_id = (!own_mob).then(|| handle.mob_id().to_string());
+    write_where_the_member_sits(&mut labels, None, source_mob_id.as_deref());
     let visible = runtime_alias_visible_to_console(handle, visibility_policy, &alias);
     Some(SseMemberAuthorizationProjection {
         identity: alias.identity.clone(),
@@ -12650,6 +13086,10 @@ fn console_identity_record_from_identity_status(
     status: &crate::identity_first::IdentityStatus,
 ) -> ConsoleIdentityRecord {
     let mut labels = status.labels.clone();
+    // A declaration does not say which mob the record is of: the record of
+    // an identity's status names none, as the aggregator's does
+    // (`identity_record_for_status`).
+    labels.remove("source_mob_id");
     if let Some(profile) = status.profile.as_ref() {
         labels
             .entry("role".to_string())
@@ -12803,6 +13243,10 @@ fn console_member_from_runtime_alias(
     handle: &MobHandle,
     alias: &ConsoleRuntimeIdentityAlias,
 ) -> ConsoleMember {
+    // An alias is read from a mob's own roster: its labels name no mob and
+    // no host, whatever the roster row holds.
+    let mut labels = alias.member.labels.clone();
+    write_where_the_member_sits(&mut labels, None, None);
     ConsoleMember {
         agent_identity: alias.runtime_member_id.clone(),
         role: alias.member.role.to_string(),
@@ -12816,7 +13260,7 @@ fn console_member_from_runtime_alias(
             .iter()
             .map(|peer| crate::member_comms_id::runtime_alias_str(peer.as_str()).into_owned())
             .collect(),
-        labels: alias.member.labels.clone(),
+        labels,
         progress: None,
     }
 }
@@ -12870,7 +13314,15 @@ fn console_identity_record_from_runtime_alias(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        labels: alias.member.labels.clone(),
+        labels: {
+            // Read from a mob's own roster, as the alias's member is.
+            let mut labels = record_labels_with_the_members_role(
+                &alias.member.labels,
+                alias.member.role.as_str(),
+            );
+            write_where_the_member_sits(&mut labels, None, None);
+            labels
+        },
     }
 }
 
@@ -13290,6 +13742,17 @@ async fn handle_console_aggregator_rpc(
     {
         // The refusal names the member as the caller spelled it.
         return absent.restore(response_value(response_id, None, Some(error)));
+    }
+    // A request the rules allow that names a hidden member where its method
+    // creates or records under a name is refused here, as naming an unknown
+    // member, before any handler ([`ConsoleAbsentNames::recorded_refusal`]).
+    // A topology apply is not: the check above asks nothing of it, and this
+    // console serves no such method, so it is answered below as any other
+    // request for it.
+    if request.method != crate::rpc::topology_methods::TOPOLOGY_APPLY_METHOD
+        && let Some(refusal) = absent.recorded_refusal(request.method.as_str())
+    {
+        return response_value(response_id, None, Some(refusal));
     }
     let response = Box::pin(async {
     // Each awaiting arm runs as its own boxed future, built in
@@ -13927,6 +14390,20 @@ async fn handle_console_runtime_rpc_with_visibility(
         // The refusal names the member as the caller spelled it.
         return absent.restore(response_value(response_id, None, Some(error)));
     }
+    // A request the rules allow that names a hidden member where its method
+    // creates or records under a name is refused here, as naming an unknown
+    // member, before any handler ([`ConsoleAbsentNames::recorded_refusal`]).
+    // A topology apply is not: the check above asks nothing of it and its
+    // handler asks the rules itself, so the refusal goes to its arm, which
+    // answers a console without topology control as for any other name and
+    // hands the refusal to the handler to give once the rules allowed the
+    // request.
+    let mut owed = absent.recorded_refusal(request.method.as_str());
+    if request.method != crate::rpc::topology_methods::TOPOLOGY_APPLY_METHOD
+        && let Some(refusal) = owed.take()
+    {
+        return response_value(response_id, None, Some(refusal));
+    }
     // The method arms answer in one boxed future, so the answer is spelled
     // back with the caller's names whichever arm answers.
     let response = Box::pin(async {
@@ -14437,6 +14914,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     access_view,
                     authenticated_principal,
                     topology_apply_scope,
+                    owed,
                 )
                 .await,
             )
@@ -14789,6 +15267,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/quarantine/decide" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_quarantine_decide(
                 memory_panel,
+                MemoryPanelCaller::own(access_view),
                 ConsoleApprovalDecider::of(governance, authenticated_principal, access_view),
                 &request.params,
                 response_id,
@@ -16379,9 +16858,14 @@ async fn handle_console_runtime_rpc_with_visibility(
                 )
             };
             // The record of an approval notification is shown as the pending
-            // list shows its request.
+            // list shows its request. A caller who cannot be told yet whose
+            // a request is asks again, whatever the history holds.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
+            let times = GatingRequestTimes::of(&audit);
             history.deliveries.retain(|record| {
-                approval_notification_shown(record, &pending, &audit, access_view)
+                approval_notification_shown(record, &pending, &audit, &times, access_view)
             });
             // Every delivery that names a member hidden from the caller, as
             // its recipient or in its payload, is left out.
@@ -16410,16 +16894,29 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }),
                 );
             };
-            let pending = module_runtime
-                .lock()
-                .await
-                .list_gating_pending()
+            // The pending entries, and when each one's request was made:
+            // its action's opening audit row, read under the same hold.
+            let (pending, times) = {
+                let mut owner = module_runtime.lock().await;
+                let pending = owner.list_gating_pending();
+                let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
+                (pending, times)
+            };
+            // A caller who cannot be told yet whose a request is asks again,
+            // whatever the owner holds.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
+            let pending = pending
                 .into_iter()
                 .filter(|entry| {
-                    entry
-                        .origin
-                        .as_ref()
-                        .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity))
+                    entry.origin.as_ref().is_none_or(|origin| {
+                        gating_origin_visible(
+                            access_view,
+                            &origin.identity,
+                            times.made_at(&entry.action_id),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>();
             response_value(response_id, Some(json!({ "pending": pending })), None)
@@ -16465,7 +16962,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             // With a cursor, the gap is computed on the owner's full audit;
             // the caller then sees only entries whose origin it may view, and
             // the next cursor never names an entry it cannot see.
-            let (entries, gap, retention) = {
+            let (entries, gap, retention, times) = {
                 let mut owner = module_runtime.lock().await;
                 let (entries, gap) = match after_audit_id {
                     Some(cursor) => {
@@ -16474,11 +16971,19 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }
                     None => (owner.gating_audit_entries(limit), false),
                 };
-                (entries, gap, owner.gating_retention())
+                // When each row's request was made, from the whole retained
+                // audit: a page need not hold the row that opens an action.
+                let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
+                (entries, gap, owner.gating_retention(), times)
             };
+            // A caller who cannot be told yet whose a row is asks again,
+            // whatever the audit holds.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
             let entries = entries
                 .into_iter()
-                .filter(|entry| gating_audit_entry_visible(entry, access_view))
+                .filter(|entry| gating_audit_entry_visible(entry, &times, access_view))
                 .take(limit)
                 .map(|entry| gating_audit_entry_served(entry, access_view))
                 .collect::<Vec<_>>();
@@ -16519,6 +17024,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             // The gating owner trims IDs. Authorize that same canonical value.
             let pending_id = pending_id.trim();
+            // A caller who cannot be told yet whose a request or a question
+            // set is asks again, whatever id the request names.
+            if gating_origins_not_read(access_view) {
+                return response_value(response_id, None, Some(gating_origins_not_read_error()));
+            }
             // The approver comes from the connection alone: a request that
             // names one is refused rather than decided as someone else.
             if request.params.get("approver_id").is_some() {
@@ -16601,6 +17111,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             // origin private to someone else, or one the console does not
             // know, is not one they may decide for). A request the person is
             // not shown is decided as an id that is not pending.
+            // When the request was made: its action's opening audit row,
+            // read while the owner is held, before the fence is taken.
+            let times = GatingRequestTimes::of(&owner.gating_audit_entries(usize::MAX));
             let fence = access.map(|controller| {
                 controller.decision_fence(
                     Some(&decider.principal),
@@ -16614,10 +17127,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                     gating_origin_shown_when_applied(
                         fence.as_ref(),
                         access_view,
-                        entry
-                            .origin
-                            .as_ref()
-                            .map(|origin| origin.identity.as_str()),
+                        entry.origin.as_ref().map(|origin| {
+                            (origin.identity.as_str(), times.made_at(&entry.action_id))
+                        }),
                     )
                 },
                 |_| {
@@ -16669,7 +17181,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }
                 },
             };
-            if let Err(message) = crate::member_comms_id::validate_member_creation_labels(&labels) {
+            // A person on the console is not the host: the stricter check,
+            // which also refuses a near miss of a label only Meta writes and
+            // the label keys Core reserves.
+            if let Err(message) =
+                crate::member_comms_id::validate_caller_member_creation_labels(&labels)
+            {
                 return invalid_params(response_id, message);
             }
             let context = request.params.get("context").cloned();
@@ -19516,6 +20033,7 @@ async fn walk_console_snapshot_read_model(
     state.primary_members = primary_members;
 
     let Some(mcp_state) = runtime.agent_mob_mcp_state() else {
+        withhold_spawn_labels_not_told(runtime, &registered_labels, &mut state).await;
         return state;
     };
     let primary_mob_id = handle.mob_id().to_string();
@@ -19559,6 +20077,7 @@ async fn walk_console_snapshot_read_model(
         }
     }
     state.delegate_member_groups = delegate_groups;
+    withhold_spawn_labels_not_told(runtime, &registered_labels, &mut state).await;
     state
 }
 
@@ -20474,8 +20993,20 @@ fn console_identity_record_from_console_member(member: &ConsoleMember) -> Consol
         addressable,
         health: member.state.clone(),
         topology_peers: member.wired_to.clone(),
-        labels: member.labels.clone(),
+        labels: record_labels_with_the_members_role(&member.labels, &member.role),
     }
+}
+
+/// The labels of the record the visibility policy is asked with for a
+/// member: the member's labels, with its role as the member itself says it.
+/// A `role` label on the row is a label, never the member's role.
+fn record_labels_with_the_members_role(
+    labels: &BTreeMap<String, String>,
+    role: &str,
+) -> BTreeMap<String, String> {
+    let mut labels = labels.clone();
+    labels.insert("role".to_string(), role.to_string());
+    labels
 }
 
 fn baseline_spec_visible_to_console(
@@ -20582,7 +21113,7 @@ pub(crate) async fn prime_current_runtime_aliases(
 }
 
 pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &AccessController) {
-    let registered = BTreeMap::new();
+    let registered = crate::console_spawn::SpawnRegistry::default();
     let mut roster_identities = BTreeSet::new();
     let members = live_member_access_attributes(
         handle,
@@ -20600,6 +21131,8 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         access,
         members,
         &registered,
+        // No spawn registry is read here: every entry it holds is told.
+        &BTreeSet::new(),
         &roster_identities,
         &BTreeMap::new(),
         "",
@@ -20850,6 +21383,22 @@ async fn prime_access_cache_from_runtime_in_namespace(
         access.record_private_owner_record(owners.record_id(), first_read_reader, true);
     }
     let mut known_members = owners.memory_members();
+    // Who held each member name over time, as the record reads its journals
+    // now: a gating entry and a question set are decided by who held their
+    // origin's name when they were made. Handed over when the record noted
+    // a journal row since the controller last took it.
+    let noted = owners.name_seatings_noted();
+    if access.name_seatings_noted(owners.record_id()) != Some(noted) {
+        access.record_name_seatings(
+            owners.record_id(),
+            noted,
+            owners
+                .name_seatings()
+                .into_iter()
+                .map(|(name, seatings)| (namespace_console_identity(&name, namespace), seatings))
+                .collect(),
+        );
+    }
     known_members.retain(|identity, _| !live_rows.contains(identity));
     let unseated = unseated_agent_access_attributes(
         &runtime.handle(),
@@ -20860,10 +21409,16 @@ async fn prime_access_cache_from_runtime_in_namespace(
     .await;
     #[cfg(test)]
     unseated_read_hold::wait(runtime.handle().mob_id().as_str()).await;
+    // The registry was taken before the rosters were read. It is settled
+    // once more now that they are: a name seated anew by no rotation in
+    // between has no entry any more, and what was read of it may be
+    // either member's.
+    let not_told = runtime.spawn_entries_not_told(&registered).await;
     let mut recorded = record_live_and_registered_attributes(
         access,
         members,
         &registered,
+        &not_told,
         &roster_identities,
         &known_members,
         namespace,
@@ -20933,7 +21488,7 @@ async fn live_member_access_attributes(
     handle: &MobHandle,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
-    registered: &BTreeMap<String, BTreeMap<String, String>>,
+    registered: &crate::console_spawn::SpawnRegistry,
     roster_identities: &mut BTreeSet<String>,
     lineage_cache: Option<&crate::side_chat::SideChatLineageCache>,
 ) -> Vec<AgentResourceAttributes> {
@@ -21017,54 +21572,118 @@ async fn live_member_access_attributes(
 
 /// Record `members` (primary members first) one final value per console
 /// identity, folded as the console experience folds them
-/// ([`crate::runtime::fold_console_member_attributes`]), then the spawn
-/// registry's attributes for each registered identity that neither a member
-/// nor a roster row in `roster_identities` names. Returns the recorded member
-/// identities, namespaced.
+/// ([`crate::runtime::fold_console_member_attributes`]), then, as an ended
+/// member, each identity the spawn registry or the record of who each member
+/// is private to names that neither a member nor a roster row in
+/// `roster_identities` names. Returns the recorded member identities,
+/// namespaced.
 fn record_live_and_registered_attributes(
     access: &AccessController,
     members: Vec<AgentResourceAttributes>,
-    registered: &BTreeMap<String, BTreeMap<String, String>>,
+    registered: &crate::console_spawn::SpawnRegistry,
+    not_told: &BTreeSet<String>,
     roster_identities: &BTreeSet<String>,
     known_members: &BTreeMap<String, Option<String>>,
     namespace: &str,
 ) -> BTreeSet<String> {
     let final_by_identity = crate::runtime::fold_console_member_attributes(members);
-    // An identity no live member names keeps what the spawn registry
-    // recorded for it and, for a member private to a person whose rows have
-    // ended (a closed side chat, a retired helper of one), its private owner
+    // An identity no live member names is known by its name and, for a
+    // member private to a person whose rows have ended (a closed side
+    // chat, a retired helper of one), its private owner
     // ([`crate::private_owners::PrivateOwners`]): it stays private after it
     // left the roster, after a restart too. An ended member the record knows
-    // as shared is recorded too, so the console knows it.
-    let ended: BTreeSet<&String> = registered
-        .keys()
-        .chain(known_members.keys())
+    // as shared is recorded too, so the console knows it. A member seated in
+    // a mob the console does not list (a temporary council's seat, a mob
+    // the host created beside the console's own) is among these identities
+    // too: no roster the console reads names it, so it is recorded like an
+    // ended member, with what is not known of it.
+    let ended: BTreeSet<String> = registered
+        .identities()
+        .map(str::to_string)
+        .chain(known_members.keys().cloned())
         .filter(|identity| {
-            !final_by_identity.contains_key(*identity) && !roster_identities.contains(*identity)
+            !final_by_identity.contains_key(identity) && !roster_identities.contains(identity)
         })
         .collect();
     for identity in ended {
-        let mut labels = registered.get(identity).cloned().unwrap_or_default();
-        if let Some(Some(owner)) = known_members.get(identity) {
+        // What cannot be of another member of the name. The spawn registry
+        // holds what the last spawn a tool made under the name carried (its
+        // labels, who made it), which need not be the member that ended:
+        // none of it decides an ended member. Who it was private to is the
+        // owner record's answer, which every spawn writes and which only
+        // ever hides.
+        let mut labels = BTreeMap::new();
+        if let Some(Some(owner)) = known_members.get(&identity) {
             labels.insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner.clone());
         }
-        access.record_agent_attributes(namespace_console_attributes(
+        // Its role, every other label and who spawned it are not known,
+        // the same before a restart and after one: a rule on any of them
+        // is decided closed for it. A label named `role` is a label its
+        // spawn chose, never its role.
+        access.record_ended_agent_attributes(namespace_console_attributes(
             AgentResourceAttributes {
-                identity: identity.clone(),
+                identity,
                 agent_id: None,
-                role: labels.get("role").cloned(),
+                role: None,
                 labels,
             },
             namespace,
         ));
     }
     let mut recorded = BTreeSet::new();
-    for attributes in final_by_identity.into_values() {
+    for mut attributes in final_by_identity.into_values() {
+        // What a spawn registered of this member cannot be told for this
+        // request (`not_told`): the member is recorded with its own row's
+        // role and labels, and nothing a registry entry of its name holds.
+        let told = !not_told.contains(&attributes.identity);
+        if !told {
+            for key in registered.label_keys_of(&attributes.identity) {
+                attributes.labels.remove(&key);
+            }
+            for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+                attributes.labels.remove(key);
+            }
+        }
         let attributes = namespace_console_attributes(attributes, namespace);
         recorded.insert(attributes.identity.clone());
-        access.record_agent_attributes(attributes);
+        if told {
+            access.record_agent_attributes(attributes);
+        } else {
+            access.record_agent_spawn_facts_not_known(attributes);
+        }
     }
     recorded
+}
+
+/// The snapshot walk took the spawn registry before it read the rosters. Now
+/// that they are read the registry is settled once more: a name seated anew
+/// by no rotation in between has no entry any more, and the row the walk
+/// read of it may be either member's. Such a row keeps its own roster labels
+/// and loses what an entry of its name holds, and its lineage.
+async fn withhold_spawn_labels_not_told(
+    runtime: &MobRuntime,
+    registered: &crate::console_spawn::SpawnRegistry,
+    state: &mut ConsoleSnapshotReadModelState,
+) {
+    #[cfg(test)]
+    unseated_read_hold::wait(&format!("walk:{}", runtime.handle().mob_id())).await;
+    let not_told = runtime.spawn_entries_not_told(registered).await;
+    if not_told.is_empty() {
+        return;
+    }
+    for member in state
+        .primary_members
+        .iter_mut()
+        .chain(state.delegate_member_groups.iter_mut().flatten())
+        .filter(|member| not_told.contains(&member.agent_identity))
+    {
+        for key in registered.label_keys_of(&member.agent_identity) {
+            member.labels.remove(&key);
+        }
+        for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+            member.labels.remove(key);
+        }
+    }
 }
 
 /// The agent-created sub-mobs the console shows as delegate groups, each
@@ -21113,10 +21732,13 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 /// the roster labels without unverified lineage, gaps filled from the spawn
 /// registry (looked up under the member's console identity), a side chat's
 /// verified source (`side_chat`, from the roster's fork record:
-/// [`crate::side_chat::project_side_chat_lineage`]), and, for a member of an
-/// agent-created sub-mob, its delegate host and source mob. Roster labels
-/// win, except lineage, which only the spawn registry and Meerkat's fork
-/// record may assert. The console's member rows and every route's access
+/// [`crate::side_chat::project_side_chat_lineage`]), and where the member
+/// sits: for a member of an agent-created sub-mob its delegate host, the
+/// delegates' group and its source mob, and for a member of the runtime's
+/// own mob neither host nor mob. Roster labels win, except lineage, which
+/// only the spawn registry and Meerkat's fork record may assert, and where
+/// the member sits, which the console writes from where it read the member.
+/// The console's member rows and every route's access
 /// priming use this projection, so all of them record one value per
 /// identity.
 fn projected_console_member_labels(
@@ -21125,7 +21747,7 @@ fn projected_console_member_labels(
     alias: &str,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
-    registered_labels: &BTreeMap<String, BTreeMap<String, String>>,
+    registered_labels: &crate::console_spawn::SpawnRegistry,
     side_chat: Option<&crate::side_chat::SideChatLineage>,
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
@@ -21136,24 +21758,50 @@ fn projected_console_member_labels(
         roster_labels,
     );
     let console_identity_key = console_identity.as_deref().unwrap_or(alias);
-    if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
+    // The registry's entry of this row: the one of the row's own mob.
+    if let Some(spawn_labels) =
+        registered_labels.labels_of_row(handle.mob_id().as_str(), console_identity_key)
+    {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
     crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
-    if let Some(host_identity) = host_identity {
-        labels
-            .entry("delegate_host_identity".to_string())
-            .or_insert_with(|| host_identity.to_string());
-        labels
-            .entry("group".to_string())
-            .or_insert_with(|| "Coordinators".to_string());
-    }
-    if let Some(source_mob_id) = source_mob_id {
-        labels
-            .entry("source_mob_id".to_string())
-            .or_insert_with(|| source_mob_id.to_string());
-    }
+    write_where_the_member_sits(&mut labels, host_identity, source_mob_id);
     labels
+}
+
+/// Write where a member sits onto its labels. That is the console's own
+/// fact, whatever the labels held: a member read for a delegate host names
+/// that host and the delegates' group, a member read from another mob names
+/// that mob, and a member read from a mob's own roster names neither host
+/// nor mob. Access rules, the visibility policy and the member controls
+/// read these keys, so every reader that hands a member's labels to one of
+/// them writes them here: the row builder, the record and the member of a
+/// runtime alias, and the event stream's projection.
+fn write_where_the_member_sits(
+    labels: &mut BTreeMap<String, String>,
+    host_identity: Option<&str>,
+    source_mob_id: Option<&str>,
+) {
+    match host_identity {
+        Some(host_identity) => {
+            labels.insert(
+                "delegate_host_identity".to_string(),
+                host_identity.to_string(),
+            );
+            labels.insert("group".to_string(), "Coordinators".to_string());
+        }
+        None => {
+            labels.remove("delegate_host_identity");
+        }
+    }
+    match source_mob_id {
+        Some(source_mob_id) => {
+            labels.insert("source_mob_id".to_string(), source_mob_id.to_string());
+        }
+        None => {
+            labels.remove("source_mob_id");
+        }
+    }
 }
 
 async fn project_console_members_from_handle(
@@ -21163,7 +21811,7 @@ async fn project_console_members_from_handle(
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
     read_model: &ConsoleSnapshotReadModelState,
-    registered_labels: &BTreeMap<String, BTreeMap<String, String>>,
+    registered_labels: &crate::console_spawn::SpawnRegistry,
 ) -> (Vec<ConsoleMember>, BTreeMap<String, String>) {
     // Meerkat 0.7: lifecycle status is machine-projected onto
     // `MobMemberListEntry`; the structural `list_all_members` roster no longer
@@ -29591,6 +30239,118 @@ message = "review"
         Ok(())
     }
 
+    /// The per-agent event stream answers an agent private to another
+    /// person exactly as it answers a name no member holds, status and
+    /// body: for a caller a deny by label applies to (the name alone cannot
+    /// rule the deny out, so both are refused) and for a caller no deny
+    /// applies to (both are a member the console does not hold).
+    #[tokio::test]
+    async fn agent_events_stream_answers_a_hidden_agent_as_a_name_no_member_holds()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        const PRIVATE: &str = "review:stream-private";
+        const FREE: &str = "review:stream-nobody";
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("agent-events-stream-hidden").await?;
+        runtime
+            .handle()
+            .spawn_spec(
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    crate::member_comms_id::mob_member_id_str(PRIVATE).into_owned(),
+                    None,
+                    None,
+                    None,
+                )
+                .with_labels(BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:aa".to_string(),
+                )])),
+            )
+            .await?;
+        let view_all = crate::access::AccessRule {
+            id: "view-all".to_string(),
+            actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+            agents: vec!["*".to_string()],
+            ..crate::access::AccessRule::default()
+        };
+        let deny_by_label = crate::access::AccessRule {
+            id: "deny-restricted".to_string(),
+            effect: crate::access::AccessEffect::Deny,
+            actions: vec![crate::access::ACTION_AGENT_VIEW.to_string()],
+            match_labels: BTreeMap::from([("org".to_string(), "restricted".to_string())]),
+            ..crate::access::AccessRule::default()
+        };
+        // The stream of a name no member holds does not open.
+        let subscribe: crate::http_sse::AgentEventReplaySubscribeFn =
+            Arc::new(move |agent_id, _cursor| {
+                Box::pin(async move {
+                    Err::<crate::http_sse::AgentEventReplay, _>(
+                        crate::mob_handle_runtime::MobRuntimeError::Mob(
+                            meerkat_mob::MobError::MemberNotFound(
+                                meerkat_mob::AgentIdentity::from(agent_id.as_str()),
+                            ),
+                        ),
+                    )
+                })
+            });
+        let mut answers = Vec::new();
+        for rules in [vec![view_all.clone(), deny_by_label], vec![view_all]] {
+            let controller =
+                crate::access::AccessController::new(crate::access::AccessControlConfig {
+                    enabled: true,
+                    admins: vec!["root@example.test".to_string()],
+                    rules,
+                    ..crate::access::AccessControlConfig::default()
+                })?;
+            let app = crate::http_sse::agent_events_sse_router_with_access_and_priming(
+                Arc::clone(&subscribe),
+                None,
+                Some(controller),
+                Some(runtime.clone()),
+                None,
+                Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
+                crate::auth::session_fence::ConsoleSessionFences::detached(),
+            );
+            let mut pair = Vec::new();
+            for agent_id in [PRIVATE, FREE] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/agents/{agent_id}/events"))
+                            .body(Body::empty())?,
+                    )
+                    .await?;
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+                pair.push((status, String::from_utf8(body.to_vec())?));
+            }
+            answers.push(pair);
+        }
+        for (caller, pair) in [
+            "a caller a deny by label applies to",
+            "a caller no deny applies to",
+        ]
+        .into_iter()
+        .zip(&answers)
+        {
+            assert_eq!(
+                pair[0], pair[1],
+                "{caller}: the hidden agent and the name no member holds"
+            );
+        }
+        assert_eq!(
+            answers.iter().map(|pair| pair[1].0).collect::<Vec<_>>(),
+            vec![StatusCode::FORBIDDEN, StatusCode::NOT_FOUND],
+            "the name no member holds, for each caller"
+        );
+        Ok(())
+    }
+
     /// The console access rules judge a member named by its runtime alias as
     /// the member it names, with that member's labels, as they judge its
     /// durable identity: a label-scoped deny holds for a member read and for a
@@ -32487,7 +33247,7 @@ comms = true
             None,
             None,
             &empty_read_model,
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
 
@@ -32506,7 +33266,7 @@ comms = true
             None,
             None,
             &refreshed_read_model,
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         assert_eq!(
@@ -33682,7 +34442,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         for member in &mut members {
@@ -33761,7 +34521,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         let entries = handle.list_members_including_retiring().await;
@@ -33843,7 +34603,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         let progress = console_progress_of(&members, "solo").expect("solo has progress");
@@ -33942,7 +34702,7 @@ comms = true
             None,
             None,
             &ConsoleSnapshotReadModelState::default(),
-            &BTreeMap::new(),
+            &crate::console_spawn::SpawnRegistry::default(),
         )
         .await;
         let awake = console_progress_of(&members, "awake").expect("awake has progress");
@@ -34234,6 +34994,65 @@ mod console_viewer_resolver_tests {
         format!("/host/status?auth_token={}", token(subject))
             .parse()
             .unwrap()
+    }
+
+    /// The view the public resolver hands out reads no roster on its
+    /// request. An agent the access records do not know is judged there
+    /// by its bare name, so a deny by role refuses no agent the records
+    /// merely have not read yet; an agent they know as ended is decided
+    /// closed there as on every door. A view of the console's own routes
+    /// refuses the unknown name to the same caller.
+    #[test]
+    fn the_resolvers_view_judges_an_agent_the_records_do_not_know_by_its_name() {
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "bob-drives-every-agent".to_string(),
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "bob-is-denied-the-workers".to_string(),
+                    effect: crate::access::AccessEffect::Deny,
+                    subjects: vec![BOB.to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    roles: vec!["worker".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("access controller");
+        let resolver = ConsoleViewerResolver::new(decisions(true), Some(controller.clone()));
+        let uri: Uri = "/host/status".parse().unwrap();
+        let resolved = resolver
+            .resolve(&bearer(BOB), &uri)
+            .expect("the resolver resolves the signed-in person")
+            .access_view
+            .expect("an access view");
+        let on_a_route = controller.view_for_subject(Some(BOB));
+        assert!(
+            resolved.can_view_agent("never-recorded"),
+            "the resolver's view judges a name the records do not know by the name"
+        );
+        assert!(
+            !on_a_route.can_view_agent("never-recorded"),
+            "a view of the console's own routes refuses it under the deny by role"
+        );
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
+            identity: "ended-worker".to_string(),
+            agent_id: None,
+            role: None,
+            labels: BTreeMap::new(),
+        });
+        assert!(
+            !resolved.can_view_agent("ended-worker") && !on_a_route.can_view_agent("ended-worker"),
+            "an agent the records know as ended is decided closed on both"
+        );
     }
 
     fn access(rule_subjects: &[&str]) -> AccessControlConfig {
@@ -35632,6 +36451,83 @@ mod console_identity_row_keys_tests {
             },
             None,
         ));
+    }
+
+    /// A declaration says nothing of the mob an identity's record is of: the
+    /// record the visibility policy is asked with keeps every declared label
+    /// except `source_mob_id`, and an identity that declares that label is
+    /// judged like one that does not, whatever role it declares.
+    #[test]
+    fn an_identity_status_is_judged_without_a_declared_mob() {
+        let status = |labels: Value| -> crate::identity_first::IdentityStatus {
+            serde_json::from_value(json!({
+                "identity": "console:declared",
+                "state": "dormant",
+                "addressability": "addressable",
+                "labels": labels,
+            }))
+            .expect("identity status")
+        };
+        let declared = status(json!({
+            "role": "delegate",
+            "team": "review",
+            "source_mob_id": "another-mob",
+        }));
+        let plain = status(json!({ "role": "delegate", "team": "review" }));
+        assert_eq!(
+            console_identity_record_from_identity_status(&declared).labels,
+            console_identity_record_from_identity_status(&plain).labels,
+            "the record names no declared mob and keeps the other labels"
+        );
+        let policy = HideImplicitDelegateMembersConsoleVisibilityPolicy;
+        assert_eq!(
+            identity_status_visible_to_console(&policy, &declared),
+            identity_status_visible_to_console(&policy, &plain),
+            "the same answer with and without the declared label"
+        );
+        assert!(identity_status_visible_to_console(&policy, &declared));
+    }
+
+    /// The record the visibility policy is asked with for a member's row
+    /// says the member's own role, whatever a `role` label on the row says:
+    /// a member that is no implicit delegate is shown, and one that is stays
+    /// left out.
+    #[test]
+    fn a_member_rows_record_takes_its_role_from_the_member() {
+        let member = |role: &str, labels: &[(&str, &str)]| ConsoleMember {
+            agent_identity: "alpha".to_string(),
+            role: role.to_string(),
+            state: MEMBER_STATE_ACTIVE.to_string(),
+            model_capabilities: Default::default(),
+            runtime_mode: None,
+            session_id: None,
+            wired_to: Vec::new(),
+            labels: labels
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+            progress: None,
+        };
+        let policy = HideImplicitDelegateMembersConsoleVisibilityPolicy;
+        let labelled = member(
+            "worker",
+            &[("role", "delegate"), ("source_mob_id", "a-child-mob")],
+        );
+        let record = console_identity_record_from_console_member(&labelled);
+        assert_eq!(
+            record.labels.get("role").map(String::as_str),
+            Some("worker"),
+            "the record says the member's role"
+        );
+        assert!(
+            policy.identity_visible(&record),
+            "a worker is shown whatever its role label says"
+        );
+        let delegate = member("delegate", &[("source_mob_id", "a-child-mob")]);
+        assert!(
+            !policy.identity_visible(&console_identity_record_from_console_member(&delegate)),
+            "an implicit delegate stays left out"
+        );
     }
 
     /// The marks of an identity's status that are written only when true:
@@ -38387,10 +39283,11 @@ mod console_access_priming_tests {
     }
 
     /// An identity known only to the spawn registry, with no live member on
-    /// any mob, keeps the registry's value on every route: no agent id, the
-    /// registered role and the registered labels.
+    /// any mob, has one value on every route: its name, with no agent id, no
+    /// role and nothing its spawn recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_registered_identity_without_a_live_member_keeps_the_registry_value() -> TestResult {
+    async fn a_registered_identity_without_a_live_member_has_one_value_on_every_route() -> TestResult
+    {
         let root = tempfile::tempdir()?;
         let runtime = runtime("access-priming-registry-only", root.path()).await?;
         turn_driven_member(&runtime, "lead", None).await?;
@@ -38411,32 +39308,32 @@ mod console_access_priming_tests {
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
-        let registered = runtime
-            .console_identity_labels()
-            .await
-            .get("departed")
-            .cloned()
-            .ok_or("the spawn registry knows the departed identity")?;
+        assert!(
+            runtime
+                .console_identity_labels()
+                .await
+                .holds_identity("departed"),
+            "the spawn registry knows the departed identity"
+        );
         let (controller, publication) = joined_controller()?;
         prime_access_cache_from_runtime(&runtime, &controller).await;
         let quiet = publication
             .observe(|| ())
             .map_err(|_| "a quiet publication")?
             .1;
-        // Recording the exact registry value changes nothing: the cache
-        // holds it.
-        controller.record_agent_attributes(AgentResourceAttributes {
+        // Recording that value again changes nothing: the cache holds it.
+        controller.record_ended_agent_attributes(AgentResourceAttributes {
             identity: "departed".to_string(),
             agent_id: None,
-            role: Some("worker".to_string()),
-            labels: registered,
+            role: None,
+            labels: BTreeMap::new(),
         });
         prime_access_cache_from_runtime(&runtime, &controller).await;
         console_experience(&runtime, &controller).await;
         prime_access_cache_from_runtime(&runtime, &controller).await;
         assert!(
             quiet.check_current().is_ok(),
-            "the registry value stays the identity's one value on every route"
+            "the identity keeps one value on every route"
         );
         Ok(())
     }

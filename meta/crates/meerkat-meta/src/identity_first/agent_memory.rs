@@ -265,6 +265,23 @@ pub trait AgentMemoryProvider: Send + Sync {
         request: AgentMemoryRecallRequest,
     ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError>;
 
+    /// [`Self::recall`] over the active records of `scope` instead of the
+    /// identity scope `request` names: the request's selection, query and
+    /// bound apply, and its `identity` and `realm` are not consulted. It is
+    /// the recall of a member whose memory is kept in a scope no
+    /// `AgentIdentity` names (a member private to a person). The default
+    /// answers unsupported and never falls back to [`Self::recall`]: the
+    /// identity a request names is not that scope.
+    async fn recall_in_scope(
+        &self,
+        _scope: &MemoryScope,
+        _request: AgentMemoryRecallRequest,
+    ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+        Err(AgentMemoryError::Unsupported(
+            "provider does not support a recall in a given scope".to_string(),
+        ))
+    }
+
     async fn remember(
         &self,
         _realm: &str,
@@ -505,6 +522,14 @@ pub trait AgentMemoryProvider: Send + Sync {
     /// §8.4 Distiller tombstone reads (recently tombstoned records per
     /// scope, for dedup against re-distillation).
     fn as_tombstone_source(&self) -> Option<Arc<dyn crate::memory::distiller::TombstoneSource>> {
+        None
+    }
+
+    /// Meta's bundled SQLite store, when this provider is that store. A
+    /// build asks a storage provider's agent memory for it, to run the
+    /// store's first start's step over it as it does over the store it
+    /// opens itself.
+    fn as_bundled_store(&self) -> Option<crate::memory::sqlite_store::SqliteAgentMemoryStore> {
         None
     }
 }
@@ -1026,7 +1051,12 @@ fn profile_enables_agent_memory(
     definition_profile_enables_agent_memory(handle.definition(), &spec.profile, explicit_policy)
 }
 
-fn definition_profile_enables_agent_memory(
+/// Whether an agent on `profile` gets agent memory: the host's explicit
+/// answer for the profile, else the mob definition's inline profile
+/// (`tools.memory`). A profile the definition only references fails closed.
+/// The one gate of an agent's own recorder, and of a side chat's
+/// ([`crate::memory::side_chat_memory`]).
+pub(crate) fn definition_profile_enables_agent_memory(
     definition: &meerkat_mob::MobDefinition,
     profile: &meerkat_mob::ProfileName,
     explicit_policy: &BTreeMap<meerkat_mob::ProfileName, bool>,
@@ -1104,15 +1134,15 @@ impl AgentCustomizer for AgentMemoryCustomizer {
                      agent_memory.recorder_tool"
                 );
             }
-            let recorder = MemoryRecorder {
+            let recorder = MemoryRecorder::new(
                 provider,
-                identity: context.identity.clone(),
-                mob: context
+                config,
+                context.identity.clone(),
+                context
                     .runtime_services
                     .mob_handle()
                     .map(|handle| handle.mob_id().as_str().to_string()),
-                config,
-            };
+            );
             let inner_tools = draft.local_external_tools.dispatcher();
             draft.local_external_tools = super::types::LocalExternalToolOverlay::new(Arc::new(
                 RecorderToolDispatcher::new(inner_tools, recorder),
@@ -1398,12 +1428,54 @@ pub(crate) struct MemoryRecorder {
     identity: AgentIdentity,
     /// Mob scope key for `propose_to_mob`, when the build ran inside a mob.
     mob: Option<String>,
+    /// Where the member's own records are kept.
+    keeping: RecorderKeeping,
 }
+
+/// Where a recorder keeps its member's own records. The author of every
+/// record stays the member's name, whichever it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberMemoryKept {
+    /// In the identity scope of the member's name.
+    UnderItsName,
+    /// In the identity scope of the person the member is private to and the
+    /// member's name
+    /// ([`crate::memory::records::IdentityScopeKey::PrivateMember`]). The
+    /// value is the member's private-owner label value.
+    UnderItsOwner(String),
+    /// Nowhere: every action of the member's `memory` tool answers this
+    /// text as a tool error.
+    Nowhere(&'static str),
+}
+
+/// What decides where a member's records are kept, asked at a `memory`
+/// call: `None` while it cannot tell yet.
+pub(crate) type MemberMemoryKeptLater = Arc<dyn Fn() -> Option<MemberMemoryKept> + Send + Sync>;
+
+/// [`MemberMemoryKept`], fixed at the build or decided at the member's
+/// first `memory` call that can be decided, and fixed from then on.
+enum RecorderKeeping {
+    Fixed(MemberMemoryKept),
+    Late {
+        decide: MemberMemoryKeptLater,
+        decided: std::sync::OnceLock<MemberMemoryKept>,
+    },
+}
+
+/// The answer of every `memory` action of a temporary council's participant
+/// that keeps no memory of its own.
+pub(crate) const COUNCIL_PARTICIPANT_KEEPS_NO_MEMORY: &str =
+    "a council participant keeps no memory of its own";
+
+/// The answer of every `memory` action while where the member's records are
+/// kept cannot be decided yet. Nothing is read or written.
+pub(crate) const MEMBER_MEMORY_NOT_READY: &str = "memory is not ready yet";
 
 impl MemoryRecorder {
     /// Shared constructor for the two recorder hosts: the identity-first
     /// `AgentMemoryCustomizer` and the classic-mob
-    /// `crate::memory::spawn_customizer::MemorySpawnCustomizer`.
+    /// `crate::memory::spawn_customizer::MemorySpawnCustomizer`. The
+    /// member's records are kept under its name.
     pub(crate) fn new(
         provider: Arc<dyn AgentMemoryProvider>,
         config: AgentMemoryConfig,
@@ -1415,14 +1487,51 @@ impl MemoryRecorder {
             config,
             identity,
             mob,
+            keeping: RecorderKeeping::Fixed(MemberMemoryKept::UnderItsName),
         }
     }
 
-    fn identity_scope(&self) -> MemoryScope {
-        MemoryScope::Identity {
+    /// This recorder, keeping its member's records as `kept` says.
+    pub(crate) fn kept(mut self, kept: MemberMemoryKept) -> Self {
+        self.keeping = RecorderKeeping::Fixed(kept);
+        self
+    }
+
+    /// This recorder, keeping its member's records as `decide` says at the
+    /// member's first `memory` call it can answer; until then every action
+    /// answers [`MEMBER_MEMORY_NOT_READY`].
+    pub(crate) fn kept_as_decided_later(mut self, decide: MemberMemoryKeptLater) -> Self {
+        self.keeping = RecorderKeeping::Late {
+            decide,
+            decided: std::sync::OnceLock::new(),
+        };
+        self
+    }
+
+    /// The scope the member's own records are kept in, or why no action
+    /// reaches one.
+    fn own_scope(&self) -> Result<MemoryScope, String> {
+        let kept = match &self.keeping {
+            RecorderKeeping::Fixed(kept) => kept.clone(),
+            RecorderKeeping::Late { decide, decided } => match decided.get() {
+                Some(kept) => kept.clone(),
+                None => {
+                    let kept = decide().ok_or_else(|| MEMBER_MEMORY_NOT_READY.to_string())?;
+                    decided.get_or_init(|| kept).clone()
+                }
+            },
+        };
+        let identity = match kept {
+            MemberMemoryKept::UnderItsName => self.identity.as_str().to_string(),
+            MemberMemoryKept::UnderItsOwner(owner) => {
+                crate::memory::records::private_member_scope_key(&owner, self.identity.as_str())
+            }
+            MemberMemoryKept::Nowhere(reason) => return Err(reason.to_string()),
+        };
+        Ok(MemoryScope::Identity {
             realm: self.config.realm.clone(),
-            identity: self.identity.as_str().to_string(),
-        }
+            identity,
+        })
     }
 
     fn mob_scope(&self) -> Option<MemoryScope> {
@@ -1433,14 +1542,16 @@ impl MemoryRecorder {
     }
 
     /// The typed memory operation a `memory` call with `action` performs:
-    /// that action on a scope this recorder pinned at build time (the
-    /// member's identity scope, or its mob scope for `propose_to_mob`),
-    /// never a scope named by the call's arguments.
+    /// that action on a scope this recorder pinned (the scope the member's
+    /// own records are kept in, or its mob scope for `propose_to_mob`),
+    /// never a scope named by the call's arguments. A member whose records
+    /// are kept nowhere performs none.
     fn operation_target(&self, action: &str) -> Result<meerkat_core::ToolOperationTarget, String> {
+        let own_scope = self.own_scope()?;
         let (scope, operation) = match action {
-            "remember" | "update" => (self.identity_scope(), meerkat_core::MemoryOperation::Write),
-            "forget" => (self.identity_scope(), meerkat_core::MemoryOperation::Delete),
-            "recall" => (self.identity_scope(), meerkat_core::MemoryOperation::Read),
+            "remember" | "update" => (own_scope, meerkat_core::MemoryOperation::Write),
+            "forget" => (own_scope, meerkat_core::MemoryOperation::Delete),
+            "recall" => (own_scope, meerkat_core::MemoryOperation::Read),
             "propose_to_mob" => (
                 self.mob_scope().ok_or_else(propose_outside_mob)?,
                 meerkat_core::MemoryOperation::Propose,
@@ -1595,6 +1706,9 @@ impl MemoryRecorder {
         args: MemoryToolArgs,
         operator_requester: Option<&meerkat_core::PrincipalRef>,
     ) -> Result<String, MemoryToolFailure> {
+        // Every action reads or writes the scope the member's own records
+        // are kept in, or answers why it reaches none.
+        let own_scope = self.own_scope()?;
         match args.action.as_str() {
             "remember" => {
                 let record = self.new_record(&args, "remember")?;
@@ -1603,7 +1717,7 @@ impl MemoryRecorder {
                 }
                 let receipt = self
                     .provider
-                    .remember_authored(&self.identity_scope(), record, self.author())
+                    .remember_authored(&own_scope, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 Ok(self.describe_receipt("Stored", &receipt))
@@ -1621,7 +1735,7 @@ impl MemoryRecorder {
                 let record = self.new_record(&args, "update")?;
                 let receipt = self
                     .provider
-                    .supersede_authored(&self.identity_scope(), prior, record, self.author())
+                    .supersede_authored(&own_scope, prior, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 let mut message = self.describe_receipt("Updated: new record", &receipt);
@@ -1642,7 +1756,7 @@ impl MemoryRecorder {
                     .ok_or_else(|| "`memory_id` is required for action \"forget\"".to_string())?;
                 let result = self
                     .provider
-                    .forget_authored(&self.identity_scope(), memory_id, self.author())
+                    .forget_authored(&own_scope, memory_id, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 if result.deleted {
@@ -1671,18 +1785,23 @@ impl MemoryRecorder {
                 } else {
                     AgentMemorySelection::Always
                 };
-                let records = self
-                    .provider
-                    .recall(AgentMemoryRecallRequest {
-                        identity: self.identity.clone(),
-                        realm: self.config.realm.clone(),
-                        query_text,
-                        query_terms: Vec::new(),
-                        selection,
-                        max_entries,
-                    })
-                    .await
-                    .map_err(|err| err.to_string())?;
+                let request = AgentMemoryRecallRequest {
+                    identity: self.identity.clone(),
+                    realm: self.config.realm.clone(),
+                    query_text,
+                    query_terms: Vec::new(),
+                    selection,
+                    max_entries,
+                };
+                // A scope kept under an owner is no identity's: it is
+                // recalled as a scope, never as the request's identity,
+                // which would be the member's bare name.
+                let recalled = if own_scope.kept_apart_by_its_key() {
+                    self.provider.recall_in_scope(&own_scope, request).await
+                } else {
+                    self.provider.recall(request).await
+                };
+                let records = recalled.map_err(|err| err.to_string())?;
                 // §9.2: an explicit pull is the strongest mechanical
                 // usefulness signal. Telemetry never fails the read.
                 if !records.is_empty() {
@@ -1763,24 +1882,103 @@ fn unknown_memory_action(action: &str) -> String {
 /// re-enter session semantic memory (§8.2).
 pub(crate) struct RecorderToolDispatcher {
     inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
-    tools: Arc<[Arc<meerkat_core::ToolDef>]>,
-    recorder: MemoryRecorder,
+    binding: RecorderBinding,
+    /// The `memory` tool this recorder serves.
+    memory_tool: Arc<meerkat_core::ToolDef>,
     /// The `memory` tool's execution owner: every plan this recorder
     /// resolves for it carries this key's witness with the call's typed
     /// memory operation target, and only such a plan dispatches.
     execution_authority_key: String,
 }
 
+/// The recorder a [`RecorderToolDispatcher`] serves its `memory` tool with.
+enum RecorderBinding {
+    /// A member's own recorder, composed again at each of the member's
+    /// builds: the tool list is the wrapped tools as they were then,
+    /// without a `memory` of theirs, then the recorder's.
+    Composed {
+        tools: Arc<[Arc<meerkat_core::ToolDef>]>,
+        recorder: Box<MemoryRecorder>,
+    },
+    /// A rebinding recorder, over tools another member's build publishes
+    /// into at any time: the tool list is the wrapped tools as they are at
+    /// each read, and what becomes of `memory` is asked at each read too.
+    Rebound(Arc<dyn ReboundRecorder>),
+}
+
+/// What a rebinding recorder ([`RecorderToolDispatcher::rebinding`]) does
+/// with the `memory` tool at one read of its member's tools.
+pub(crate) enum ReboundMemory<'a> {
+    /// The member's own `memory` tool, served with this recorder. A
+    /// `memory` tool of the wrapped tools is never listed or reached.
+    Own(&'a MemoryRecorder),
+    /// No `memory` tool. A `memory` tool of the wrapped tools is never
+    /// listed or reached.
+    Withheld,
+    /// The wrapped tools as they are, a `memory` tool of theirs included:
+    /// the composition binds no recorder, so that tool is a host's own.
+    Untouched,
+}
+
+/// Decides, at each read of a member's tools, what a rebinding recorder
+/// does with the `memory` tool: a recorder that is bound after the member
+/// was built is served from the read at which it can be built.
+pub(crate) trait ReboundRecorder: Send + Sync {
+    /// `inner_holds_memory`: whether the wrapped tools hold a `memory` tool
+    /// of their own now.
+    fn memory(&self, inner_holds_memory: bool) -> ReboundMemory<'_>;
+}
+
 static NEXT_RECORDER_EXECUTION_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
 
 impl RecorderToolDispatcher {
+    /// The wrapped tools' owner of `tool_name`: every name but `memory`,
+    /// and `memory` too where a rebinding recorder leaves the wrapped tools
+    /// untouched.
     fn wrapped_owner(
         &self,
         tool_name: &str,
     ) -> Option<&Arc<dyn meerkat_core::AgentToolDispatcher>> {
-        (tool_name != MEMORY_TOOL_NAME)
+        (tool_name != MEMORY_TOOL_NAME || self.untouched())
             .then_some(self.inner.as_ref())
             .flatten()
+    }
+
+    /// Whether the wrapped tools hold a `memory` tool of their own now.
+    fn inner_holds_memory(&self) -> bool {
+        self.inner.as_ref().is_some_and(|inner| {
+            inner
+                .tools()
+                .iter()
+                .any(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME)
+        })
+    }
+
+    /// Whether this is a rebinding recorder whose composition binds no
+    /// recorder: the wrapped tools are served as they are.
+    fn untouched(&self) -> bool {
+        match &self.binding {
+            RecorderBinding::Composed { .. } => false,
+            RecorderBinding::Rebound(late) => {
+                matches!(
+                    late.memory(self.inner_holds_memory()),
+                    ReboundMemory::Untouched
+                )
+            }
+        }
+    }
+
+    /// The recorder this dispatcher serves `memory` with now; `None` while
+    /// it offers no `memory` tool of its own. Only an offered tool is
+    /// listed, resolved or dispatched.
+    fn recorder_now(&self) -> Option<&MemoryRecorder> {
+        match &self.binding {
+            RecorderBinding::Composed { recorder, .. } => Some(recorder),
+            RecorderBinding::Rebound(late) => match late.memory(self.inner_holds_memory()) {
+                ReboundMemory::Own(recorder) => Some(recorder),
+                ReboundMemory::Withheld | ReboundMemory::Untouched => None,
+            },
+        }
     }
 
     /// The typed memory operation the `memory` call performs, from its
@@ -1790,7 +1988,9 @@ impl RecorderToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolOperationTarget, String> {
         let args: MemoryToolArgs = call.parse_args().map_err(|err| err.to_string())?;
-        self.recorder.operation_target(&args.action)
+        self.recorder_now()
+            .ok_or_else(|| format!("no `{MEMORY_TOOL_NAME}` tool is offered"))?
+            .operation_target(&args.action)
     }
 
     /// Whether this recorder resolved `plan` for exactly the `memory` call's
@@ -1818,46 +2018,62 @@ impl RecorderToolDispatcher {
         inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
         recorder: MemoryRecorder,
     ) -> Self {
-        Self::composed(inner, recorder, true)
-    }
-
-    /// The `memory` tool of `inner`, a build's tool overlay that already
-    /// carries one bound to another identity (a console side chat inherits
-    /// its source's overlay), bound to `recorder` instead: the inner `memory`
-    /// tool is replaced, and every other tool stays `inner`'s, in its order.
-    pub(crate) fn rebinding(
-        inner: Arc<dyn meerkat_core::agent::AgentToolDispatcher>,
-        recorder: MemoryRecorder,
-    ) -> Self {
-        Self::composed(Some(inner), recorder, false)
-    }
-
-    fn composed(
-        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
-        recorder: MemoryRecorder,
-        warn_on_shadow: bool,
-    ) -> Self {
         let mut tools: Vec<Arc<meerkat_core::ToolDef>> = Vec::new();
         if let Some(inner) = inner.as_ref() {
             for tool in inner.tools().iter() {
                 if tool.name.as_ref() == MEMORY_TOOL_NAME {
-                    if warn_on_shadow {
-                        tracing::warn!(
-                            "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
-                             memory recorder; rename the external tool or disable \
-                             agent_memory.recorder_tool"
-                        );
-                    }
+                    tracing::warn!(
+                        "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
+                         memory recorder; rename the external tool or disable \
+                         agent_memory.recorder_tool"
+                    );
                     continue;
                 }
                 tools.push(tool.clone());
             }
         }
-        tools.push(Arc::new(memory_tool_def()));
+        let memory_tool = Arc::new(memory_tool_def());
+        tools.push(Arc::clone(&memory_tool));
+        Self::composed(
+            inner,
+            RecorderBinding::Composed {
+                tools: tools.into(),
+                recorder: Box::new(recorder),
+            },
+            memory_tool,
+        )
+    }
+
+    /// The tools of `inner`, a build's tool overlay that another member's
+    /// build publishes into (a console side chat inherits its source's
+    /// overlay), with their `memory` tool bound as `late` says at each
+    /// read: the list is `inner`'s as it is then, in its order, without a
+    /// `memory` of `inner`'s, then the member's own while `late` answers a
+    /// recorder ([`ReboundMemory::Own`]). So a tool the other build
+    /// publishes later is served, and its `memory` never is; a recorder
+    /// that is bound after this member was built serves it from the read
+    /// at which `late` can build it. Where `late` leaves the tools
+    /// untouched ([`ReboundMemory::Untouched`]) the list is `inner`'s.
+    pub(crate) fn rebinding(
+        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+        late: Arc<dyn ReboundRecorder>,
+    ) -> Self {
+        Self::composed(
+            inner,
+            RecorderBinding::Rebound(late),
+            Arc::new(memory_tool_def()),
+        )
+    }
+
+    fn composed(
+        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+        binding: RecorderBinding,
+        memory_tool: Arc<meerkat_core::ToolDef>,
+    ) -> Self {
         Self {
             inner,
-            tools: tools.into(),
-            recorder,
+            binding,
+            memory_tool,
             execution_authority_key: format!(
                 "meta:agent-memory-recorder:{}",
                 NEXT_RECORDER_EXECUTION_AUTHORITY_ID.fetch_add(1, Ordering::Relaxed)
@@ -1896,6 +2112,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         if let meerkat_core::tool_application::ToolApplicationResolution::Call { name, .. } =
             &result
             && name == MEMORY_TOOL_NAME
+            && !self.untouched()
         {
             return Err(meerkat_core::ToolError::access_denied(name));
         }
@@ -2041,7 +2258,45 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
     }
 
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
-        self.tools.clone()
+        let late = match &self.binding {
+            RecorderBinding::Composed { tools, .. } => return tools.clone(),
+            RecorderBinding::Rebound(late) => late,
+        };
+        let Some(inner) = self.inner.as_ref() else {
+            return match late.memory(false) {
+                ReboundMemory::Own(_) => Arc::from([Arc::clone(&self.memory_tool)]),
+                ReboundMemory::Withheld | ReboundMemory::Untouched => Arc::from([]),
+            };
+        };
+        // One read of the wrapped tools decides the whole list.
+        let wrapped = inner.tools();
+        let holds_memory = wrapped
+            .iter()
+            .any(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME);
+        let own = match late.memory(holds_memory) {
+            ReboundMemory::Untouched => return wrapped,
+            ReboundMemory::Own(_) => true,
+            ReboundMemory::Withheld => false,
+        };
+        let mut tools: Vec<Arc<meerkat_core::ToolDef>> = wrapped
+            .iter()
+            .filter(|tool| tool.name.as_ref() != MEMORY_TOOL_NAME)
+            .cloned()
+            .collect();
+        if own {
+            tools.push(Arc::clone(&self.memory_tool));
+        }
+        tools.into()
+    }
+
+    /// A rebinding recorder wraps tools another member's build publishes
+    /// into: their pending sources are theirs to report. A member's own
+    /// recorder reports none, as before.
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        match (&self.binding, self.inner.as_ref()) {
+            (RecorderBinding::Rebound(_), Some(inner)) => inner.pending_catalog_sources(),
+            _ => Arc::from([]),
+        }
     }
 
     /// The recorder adds exactly one inline tool over the wrapped surface, so
@@ -2061,7 +2316,16 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
 
     /// Inner entries except a shadowed `memory`, then the recorder tool as a
     /// visible inline session entry - the same order `tools()` advertises.
+    /// Where a rebinding recorder leaves the wrapped tools untouched, the
+    /// catalog is theirs.
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        if self.untouched() {
+            return self
+                .inner
+                .as_ref()
+                .map(|inner| inner.tool_catalog())
+                .unwrap_or_else(|| Arc::from([]));
+        }
         let mut catalog: Vec<meerkat_core::ToolCatalogEntry> = self
             .inner
             .as_ref()
@@ -2074,13 +2338,9 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(memory) = self
-            .tools
-            .iter()
-            .find(|tool| tool.name.as_ref() == MEMORY_TOOL_NAME)
-        {
+        if self.recorder_now().is_some() {
             catalog.push(meerkat_core::ToolCatalogEntry::session_inline(
-                Arc::clone(memory),
+                Arc::clone(&self.memory_tool),
                 true,
             ));
         }
@@ -2100,7 +2360,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::agent::ToolDispatchContext,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
-        if call.name != MEMORY_TOOL_NAME {
+        if call.name != MEMORY_TOOL_NAME || self.untouched() {
             return match self.inner.as_ref() {
                 Some(inner) => inner.dispatch_with_context(call, context).await,
                 None => Err(meerkat_core::error::ToolError::NotFound {
@@ -2108,6 +2368,13 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
                 }),
             };
         }
+        // A `memory` tool this recorder does not offer now is no tool of
+        // its member: the wrapped tools' own `memory` is never reached.
+        let Some(recorder) = self.recorder_now() else {
+            return Err(meerkat_core::error::ToolError::NotFound {
+                name: call.name.to_string(),
+            });
+        };
         let args: MemoryToolArgs =
             call.parse_args()
                 .map_err(|err| meerkat_core::error::ToolError::InvalidArguments {
@@ -2119,7 +2386,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         // forwards this dispatch but resolved its own plan never writes.
         // Ungoverned dispatch is unchanged.
         context.require_authorized_operation_target(call, || {
-            self.recorder
+            recorder
                 .operation_target(&args.action)
                 .map_err(|reason| meerkat_core::ToolError::invalid_arguments(call.name, reason))
         })?;
@@ -2131,7 +2398,7 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         } else {
             context.direct_requester()
         };
-        let (text, is_error) = match self.recorder.handle(args, operator_requester).await {
+        let (text, is_error) = match recorder.handle(args, operator_requester).await {
             Ok(text) => (text, false),
             Err(MemoryToolFailure::Failed(text)) => (text, true),
             // A person's own fact this run cannot file: a typed tool error.

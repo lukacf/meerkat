@@ -967,6 +967,10 @@ pub struct MobNativeDelivery {
     sessions: Arc<dyn meerkat_mob::MobSessionService>,
     /// Hosted mob ids this store cannot hold, warned about once each.
     unusable_ids: std::sync::Mutex<BTreeSet<String>>,
+    /// The runtime's record of who its members are kept apart for, asked
+    /// beside an identity's registered row ([`Self::kept_apart`]). `None`:
+    /// a seam built without it reads the registered rows alone.
+    members_apart: Option<crate::private_owners::PrivateOwners>,
 }
 
 impl MobNativeDelivery {
@@ -984,7 +988,20 @@ impl MobNativeDelivery {
             runtime,
             sessions,
             unusable_ids: std::sync::Mutex::new(BTreeSet::new()),
+            members_apart: None,
         }
+    }
+
+    /// Ask the runtime's record of who its members are kept apart for too:
+    /// a build may keep a member apart that its registered row does not
+    /// say so of.
+    #[must_use]
+    pub(crate) fn with_members_apart(
+        mut self,
+        record: crate::private_owners::PrivateOwners,
+    ) -> Self {
+        self.members_apart = Some(record);
+        self
     }
 
     fn service(&self) -> Result<Arc<meerkat::ContinuationOwnerService>, NativeUnavailable> {
@@ -1011,6 +1028,36 @@ impl MobNativeDelivery {
     /// Whether this gateway's runtime refuses host continuations.
     pub fn governs_work_authority(&self) -> Result<bool, NativeUnavailable> {
         Ok(self.service()?.governs_work_authority())
+    }
+
+    /// Whether the identity is kept apart from other callers: its registered
+    /// row carries the label that keeps a member apart, or the runtime's
+    /// record of its members names a person it is kept apart for (a build
+    /// may say so of a member whose registered row does not). A peer
+    /// gateway's keyed delivery answers such an identity as one that is not
+    /// registered here; this gateway's own deliveries are not asked.
+    pub(crate) async fn kept_apart(
+        &self,
+        identity: &MemberIdentity,
+    ) -> Result<bool, NativeUnavailable> {
+        let identity = Self::agent_identity(identity)?;
+        if let Some(record) = &self.members_apart
+            && record
+                .owner_of(
+                    self.mob_id.as_str(),
+                    crate::member_comms_id::mob_member_id(identity.as_str()).as_str(),
+                )
+                .is_some()
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .identities
+            .registered_spec(&identity)
+            .await
+            .is_ok_and(|registered| {
+                crate::access::private_owner(&registered.spec.labels).is_some()
+            }))
     }
 
     /// Whether the identity is registered with this gateway, and if so

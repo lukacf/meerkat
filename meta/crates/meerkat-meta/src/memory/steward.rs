@@ -810,7 +810,9 @@ impl DreamPartition {
 
     /// Route a bare identity (harvest/ledger rows carry no scope).
     fn covers_identity(&self, identity: &str) -> bool {
-        if self.private.contains(identity) {
+        if self.private.contains(identity)
+            || !crate::memory::records::IdentityScopeKey::of(identity).is_named()
+        {
             return false;
         }
         match &self.slice {
@@ -823,9 +825,13 @@ impl DreamPartition {
     }
 
     /// Whether `scope` is the identity scope of a member private to a
-    /// person.
+    /// person: an identity scope kept apart by its key
+    /// ([`MemoryScope::kept_apart_by_its_key`]: the scope of a member's owner
+    /// and name, or a key no member is bound to), whatever this partition's
+    /// set holds, or the scope of a plain name the set holds.
     fn private_scope(&self, scope: &MemoryScope) -> bool {
-        matches!(scope, MemoryScope::Identity { identity, .. } if self.private.contains(identity))
+        scope.kept_apart_by_its_key()
+            || matches!(scope, MemoryScope::Identity { identity, .. } if self.private.contains(identity))
     }
 
     /// Whether `author` is a member private to a person.
@@ -1780,7 +1786,7 @@ impl StewardEngine {
             .await?;
 
         // Usage audit (§9.2).
-        let usage = self.usage_audit(&signals, run).await?;
+        let usage = self.usage_audit(&signals, partition, run).await?;
         let usage_text = render_usage_verdicts(&usage);
         // §16 Q6: dead-weight verdicts become the durable operator review
         // queue ("memories you might want to correct"). Best-effort — a
@@ -1966,7 +1972,12 @@ impl StewardEngine {
         {
             Ok(records) => records
                 .into_iter()
-                .filter(|record| record.status != RecordStatus::Tombstoned)
+                // A record of a scope kept apart by its key is ranked by no
+                // dream, by whatever id the model named it.
+                .filter(|record| {
+                    record.status != RecordStatus::Tombstoned
+                        && !record.scope.kept_apart_by_its_key()
+                })
                 .map(|record| record.id)
                 .collect(),
             Err(err) => {
@@ -2607,6 +2618,7 @@ impl StewardEngine {
     async fn usage_audit(
         &self,
         signals: &SignalPacket,
+        partition: &DreamPartition,
         run: &mut DreamRun,
     ) -> Result<Vec<(String, String, String)>, StewardError> {
         if signals.ledger.is_empty() {
@@ -2655,11 +2667,31 @@ impl StewardEngine {
             .iter()
             .map(|entry| entry.record_id.clone())
             .collect();
-        let records = self
+        let mut records = self
             .store
             .records_by_ids(&self.realm, &ids)
             .await
             .map_err(store_err)?;
+        // The ledger names a record by its id, as it was when it was put
+        // into a turn. A record that lies in a scope kept apart by its key
+        // is read by no dream, whoever was once given it. A record that was
+        // forgotten since, or that now lies in a scope this dream does not
+        // cover, is not judged either: nothing of it enters the prompt.
+        records.retain(|record| {
+            !record.scope.kept_apart_by_its_key()
+                && !matches!(
+                    record.status,
+                    crate::memory::records::RecordStatus::Tombstoned
+                )
+                && partition.covers(&record.scope)
+        });
+        if records.is_empty() {
+            run.phases.push((
+                "usage_audit".to_string(),
+                "no live record among the turn-injected ones, skipped".to_string(),
+            ));
+            return Ok(Vec::new());
+        }
         let mut sample_text = String::new();
         for record in &records {
             let injections = turn_ledger
@@ -2680,12 +2712,17 @@ impl StewardEngine {
         }
         // Bounded evidence windows around the most recent TURN injections
         // (a build-surface session key points at spawn assembly, not at a
-        // turn where the record could have proven useful).
+        // turn where the record could have proven useful), of the records
+        // that are judged.
+        let judged: HashSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
         let mut evidence_text = String::new();
         let mut sessions_seen = HashSet::new();
         for entry in turn_ledger.iter().copied() {
             if evidence_text.len() > MAX_GATHERED_TOTAL_BYTES / 2 {
                 break;
+            }
+            if !judged.contains(entry.record_id.as_str()) {
+                continue;
             }
             let Some(session) = entry.session_key.as_deref() else {
                 continue;
@@ -4077,6 +4114,10 @@ impl StewardEngine {
             realm: self.realm.clone(),
             identity: harvest.identity.clone(),
         };
+        // No harvest reads a scope kept apart by its key.
+        if scope.kept_apart_by_its_key() {
+            return Ok(());
+        }
         let manifest = self
             .store
             .manifest(std::slice::from_ref(&scope), ManifestTier::Full)
@@ -8393,6 +8434,171 @@ mod tests {
         }
     }
 
+    /// Notes that were set aside at the first start
+    /// ([`crate::memory::set_aside`]) feed no dream: neither their titles
+    /// nor their text reach a phase's prompt, as live notes or as recent
+    /// tombstones, and nothing of them reaches mob scope. A shared member's
+    /// memory is dreamed as before.
+    #[tokio::test]
+    async fn the_steward_dreams_over_no_set_aside_note() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        for (identity, title, body) in [
+            (
+                "identity:worker",
+                "Shared release note",
+                "SHARED-RELEASE-DETAIL",
+            ),
+            ("ledger", "Ledger salary note", "SET-ASIDE-DETAIL"),
+        ] {
+            fixture
+                .store
+                .remember_authored(
+                    &identity_scope(identity),
+                    new_record(title, body),
+                    MemoryAuthor::Operator { principal: None },
+                )
+                .await
+                .expect("seed identity record");
+        }
+        fixture
+            .store
+            .set_plain_names_aside(
+                REALM,
+                "mob:main",
+                BTreeSet::from(["ledger".to_string()]),
+                now_ms() + 1,
+            )
+            .await
+            .expect("the first start's step");
+
+        for _ in 0..2 {
+            let before = fixture.llm.prompts().len();
+            fixture.engine.note_session_completed();
+            let outcome = fixture.engine.dream_now().await;
+            assert!(matches!(outcome, DreamOutcome::Completed(_)), "{outcome:?}");
+            let prompts = fixture.llm.prompts()[before..].join("\n");
+            assert!(
+                prompts.contains("Shared release note"),
+                "a shared member's memory is dreamed"
+            );
+            for set_aside in ["Ledger salary note", "SET-ASIDE-DETAIL"] {
+                assert!(!prompts.contains(set_aside), "no prompt holds {set_aside}");
+            }
+        }
+        let mob_records = fixture
+            .store
+            .manifest(&[mob_scope()], ManifestTier::Full)
+            .await
+            .expect("mob manifest");
+        assert!(
+            mob_records.is_empty(),
+            "nothing of them reaches mob scope: {mob_records:?}"
+        );
+    }
+
+    /// The usage audit judges no note that was set aside at the first start
+    /// and no forgotten note. Such a note can still be in the injection
+    /// ledger (it was put into a turn of a member of the name before): the
+    /// audit's prompt holds neither its line nor its title. A live note of
+    /// a shared member with a turn row is judged as before.
+    #[tokio::test]
+    async fn the_usage_audit_judges_no_set_aside_and_no_forgotten_note() {
+        let fixture = build_fixture(
+            vec![
+                empty_gather(),
+                json_reply(serde_json::json!([])),
+                empty_consolidate(),
+            ],
+            vec![],
+        );
+        for (id, identity, title) in [
+            ("mem-shared", "identity:worker", "Shared turn note"),
+            ("mem-forgotten", "identity:worker", "Forgotten worker note"),
+            ("mem-ledger", "ledger", "Ledger salary note"),
+        ] {
+            seed_active(
+                &fixture.store,
+                id,
+                &identity_scope(identity),
+                title,
+                "went into a live turn once",
+            )
+            .await;
+        }
+        fixture
+            .store
+            .log_injections(
+                REALM,
+                &[
+                    ("mem-shared", "identity:worker", "sess-1"),
+                    ("mem-forgotten", "identity:worker", "sess-1"),
+                    ("mem-ledger", "ledger", "sess-2"),
+                ]
+                .map(|(record, identity, session)| InjectionLogEntry {
+                    record_id: record.to_string(),
+                    identity: identity.to_string(),
+                    session_key: Some(session.to_string()),
+                    surface: InjectionSurface::Turn,
+                    at_ms: 2,
+                }),
+            )
+            .await
+            .expect("ledger");
+        for session in ["sess-1", "sess-2"] {
+            fixture
+                .transcripts
+                .insert(session, vec!["do the thing", "done"]);
+        }
+        let token = fixture
+            .store
+            .stage(StagedMutationBatch {
+                kind: StagedBatchKind::FreshWrite,
+                realm: REALM.to_string(),
+                author: MemoryAuthor::Application,
+                ops: vec![StagedOp::Tombstone {
+                    id: "mem-forgotten".to_string(),
+                    rationale: None,
+                }],
+            })
+            .await
+            .expect("stage the forgetting");
+        fixture.store.commit(token).await.expect("forget the note");
+        fixture
+            .store
+            .set_plain_names_aside(
+                REALM,
+                "mob:main",
+                BTreeSet::from(["ledger".to_string()]),
+                now_ms() + 1,
+            )
+            .await
+            .expect("the first start's step");
+
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        assert!(
+            run.phases
+                .iter()
+                .any(|(phase, detail)| phase == "usage_audit" && detail.contains("judged")),
+            "the audit ran on the shared member's turn row: {:?}",
+            run.phases
+        );
+        let prompts = fixture.llm.prompts().join("\n");
+        assert!(
+            prompts.contains("- mem-shared ["),
+            "a shared member's live note is judged: {prompts}"
+        );
+        for withheld in ["mem-ledger", "Ledger salary note", "- mem-forgotten ["] {
+            assert!(
+                !prompts.contains(withheld),
+                "the audit's prompt holds {withheld}: {prompts}"
+            );
+        }
+    }
+
     /// A member private to a person feeds no dream, its person's operator
     /// memory included: an `operator_said` proposal that a private side
     /// chat files for the person who opened it reaches no prompt, an accept
@@ -9945,6 +10151,106 @@ mod tests {
         assert_eq!(queued[0].record_id, "mem-a");
     }
 
+    /// The usage audit loads the records its ledger rows name by id. A
+    /// record that lies in a scope kept apart by its key (under an owner, or
+    /// under a key no member is bound to) is not loaded: its title reaches
+    /// no prompt, and a verdict the model gives on its id is not queued,
+    /// whoever the ledger says was once given it.
+    #[tokio::test]
+    async fn the_stewards_loads_by_id_drop_a_record_under_a_reserved_key() {
+        let usage_reply = serde_json::json!([
+            {"record_id": "mem-a", "verdict": "dead_weight", "rationale": "never referenced"},
+            {"record_id": "mem-owned", "verdict": "dead_weight", "rationale": "never referenced"},
+            {"record_id": "mem-apart", "verdict": "dead_weight", "rationale": "never referenced"}
+        ]);
+        let fixture = build_fixture(
+            vec![empty_gather(), json_reply(usage_reply), empty_consolidate()],
+            vec![],
+        );
+        for (id, key, title) in [
+            ("mem-a", "identity:worker", "Turn-injected note"),
+            (
+                "mem-owned",
+                "private/console-caller:v1:aa/identity:worker",
+                "OWNED-NOTE-TITLE",
+            ),
+            ("mem-apart", "set-aside/identity:worker", "APART-NOTE-TITLE"),
+        ] {
+            seed_active(
+                &fixture.store,
+                id,
+                &identity_scope(key),
+                title,
+                "went into a live turn once",
+            )
+            .await;
+        }
+        fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("gate", "opens the dream"),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose");
+        let turn_injected = |record_id: &str, at_ms: u64| InjectionLogEntry {
+            record_id: record_id.to_string(),
+            identity: "identity:worker".to_string(),
+            session_key: Some("sess-1".to_string()),
+            surface: InjectionSurface::Turn,
+            at_ms,
+        };
+        fixture
+            .store
+            .log_injections(
+                REALM,
+                &[
+                    turn_injected("mem-a", 1),
+                    turn_injected("mem-owned", 2),
+                    turn_injected("mem-apart", 3),
+                ],
+            )
+            .await
+            .expect("ledger");
+        fixture
+            .transcripts
+            .insert("sess-1", vec!["do the thing", "done"]);
+
+        let outcome = fixture.engine.dream_now().await;
+        assert!(
+            matches!(outcome, DreamOutcome::Completed(_)),
+            "the dream completes: {outcome:?}"
+        );
+        let prompts = fixture.llm.prompts();
+        assert!(
+            prompts.iter().any(|prompt| prompt.contains("mem-a")),
+            "the audit judges the record under the plain name"
+        );
+        for kept in [
+            "OWNED-NOTE-TITLE",
+            "APART-NOTE-TITLE",
+            "mem-owned",
+            "mem-apart",
+        ] {
+            assert!(
+                prompts.iter().all(|prompt| !prompt.contains(kept)),
+                "no prompt holds '{kept}'"
+            );
+        }
+        let queued: Vec<String> = fixture
+            .store
+            .open_dream_audit_verdicts(REALM, 16)
+            .await
+            .expect("review queue")
+            .into_iter()
+            .map(|verdict| verdict.record_id)
+            .collect();
+        assert_eq!(queued, vec!["mem-a".to_string()]);
+    }
+
     #[tokio::test]
     async fn legacy_quarantined_records_older_than_prior_dreams_still_get_verdicted() {
         // Task #55(2) pin-down: there is NO "new since last dream" window on
@@ -10114,5 +10420,43 @@ mod tests {
             failure_row.detail
         );
         assert!(failure_row.completed_at_ms > 0);
+    }
+
+    /// No dream covers an identity scope kept under an owner
+    /// (`private/<owner>/<member>`) or under any other key that holds a
+    /// `/`, also when its set of private members is empty: such a scope is
+    /// private by its key. An identity scope under a plain name is covered
+    /// as before.
+    #[test]
+    fn the_steward_covers_no_scope_kept_under_an_owner() {
+        let scope = |key: &str| MemoryScope::Identity {
+            realm: "family".to_string(),
+            identity: key.to_string(),
+        };
+        for slice in [
+            DreamSlice::Realm,
+            DreamSlice::RealmRemainder {
+                covered_mobs: BTreeSet::new(),
+                covered_identities: BTreeSet::new(),
+            },
+        ] {
+            let partition = DreamPartition::new(slice);
+            for key in [
+                "private/console-caller:v1:aa/ledger-side",
+                "private/ledger-side",
+                "set-aside/ledger-side",
+            ] {
+                assert!(
+                    partition.private_scope(&scope(key)),
+                    "a scope keyed '{key}' is private for every dream"
+                );
+                assert!(
+                    !partition.covers(&scope(key)),
+                    "no dream covers a scope keyed '{key}'"
+                );
+            }
+            assert!(!partition.private_scope(&scope("ledger-side")));
+            assert!(partition.covers(&scope("ledger-side")));
+        }
     }
 }

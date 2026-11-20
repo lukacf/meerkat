@@ -4918,10 +4918,13 @@ export function workGraphCloseOptionsToDict(
 }
 
 /**
- * Attention/goal target — mirrors upstream `GoalAttentionTarget` plus the
- * `identity` convenience form (lowered server-side via
- * `lower_agent_identity_attention_target` using the runtime's mob id). Used
- * by both `workgraphGoalCreate` and `workgraphAttentionReassign`.
+ * Attention/goal target: three forms, each naming something different.
+ * `identity` takes an identity's name and names the member seated for it
+ * in the runtime's mob (the gateway stores that member's owner key; a name
+ * beginning with `mk--` is refused). `session` takes a session id. `owner`
+ * takes an owner key and stores it as written; a member's key is
+ * `mob/<mob_id>/agent/<member_id>`. Used by both `workgraphGoalCreate` and
+ * `workgraphAttentionReassign`.
  */
 export type WorkGraphGoalTarget =
   | { readonly kind: "session"; readonly sessionId: string }

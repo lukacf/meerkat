@@ -9,8 +9,11 @@
 //!   and `attention/reassign` is fetched server-side from `binding_id`;
 //!   wire-supplied witnesses are rejected (they are unforgeable by design).
 //! - Attention targets accept an additional `{kind:"identity", identity}`
-//!   form, lowered through `meerkat_mob::lower_agent_identity_attention_target`
-//!   with this runtime's mob id, and `{kind:"lowered_owner", owner_key}` as
+//!   form, which takes an identity's name: the name is mapped to its member
+//!   id and lowered through `meerkat_mob::lower_agent_identity_attention_target`
+//!   with this runtime's mob id, so the stored key is the member's own (a
+//!   name that begins with the marker of an encoded member id is refused),
+//!   and `{kind:"lowered_owner", owner_key}` as
 //!   an alias of `owner` — the spelling results serialize, so a result's
 //!   `attention.target` round-trips verbatim into params. Session targets
 //!   that resolve to a member (roster, or the shared session store's
@@ -323,6 +326,22 @@ fn reject_non_default_namespace(
 /// binding target is a `WorkAttentionTarget`, whose owner arm is
 /// `LoweredOwner`) — so a result's `attention.target` round-trips verbatim
 /// back into `goal/create`/`attention/reassign` params.
+///
+/// The identity form takes an identity's NAME. The name is mapped to its
+/// member id, the roster's spelling of the member seated for that name
+/// ([`crate::member_comms_id::roster_member_id_for_identity`]), before it is
+/// lowered, so the stored key is the member's own: the key the session form
+/// stores for that member and the one the member's own writes carry. A
+/// string that begins with the marker of an encoded member id is no name
+/// and is refused, as every top-level member field refuses it
+/// ([`crate::member_comms_id::validate_public_member_alias`]): encoded as a
+/// name it would name no member, and decoded it would be a second spelling
+/// of one. A name that holds a `/` is refused as it was before the name was
+/// mapped, with the same answer: the name is first put to the validation a
+/// member owner key gives its last segment
+/// ([`WorkOwnerKey::mob_agent`]), which is what refused it when the name
+/// itself was that segment. The `session` and `owner` forms are other forms:
+/// a session id, and an owner key taken as it is written.
 fn resolve_goal_target(
     mob_id: &meerkat_mob::MobId,
     value: &Value,
@@ -342,9 +361,15 @@ fn resolve_goal_target(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| invalid_params("target.identity must be a non-empty string"))?;
+            // What was refused when the name itself was the key's last
+            // segment stays refused, with the same answer: a name that
+            // holds a `/`, or a mob id that does.
+            WorkOwnerKey::mob_agent(mob_id.as_str(), identity).map_err(invalid_params)?;
+            crate::member_comms_id::validate_public_member_alias("target.identity", identity)
+                .map_err(invalid_params)?;
             meerkat_mob::lower_agent_identity_attention_target(
                 mob_id,
-                &meerkat_mob::AgentIdentity::from(identity),
+                &crate::member_comms_id::roster_member_id_for_identity(identity),
             )
             .map_err(invalid_params)
         }

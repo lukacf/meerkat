@@ -101,6 +101,7 @@
 // the failing command's status under --run, 1 when the change cannot be
 // planned, 2 for a usage error, 3 when regeneration changed the tree.
 
+import { EXAMPLE_035_COMMANDS } from "./ci-standalone-example.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -1031,6 +1032,10 @@ export function selectCommands({ paths, push, pr, ctx }) {
     } else {
       notes.push("TLC: no spec input changed yet; if regeneration changes specs/, run this script again");
     }
+  }
+
+  if (push.example_035) {
+    for (const line of EXAMPLE_035_COMMANDS) add("standalone example035", line);
   }
 
   // SDK suites (CI's sdk-host lane builds meerkat-rpc for their smoke tests).

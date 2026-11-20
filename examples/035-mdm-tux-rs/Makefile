@@ -1,25 +1,30 @@
 CARGO   ?= RUST_LANE_ID=examples-audit-H CARGO_BUILD_JOBS=2 ../../scripts/repo-cargo
 PROFILE ?= release
+# repo-cargo changes to the repository root before invoking Cargo.
+MANIFEST_PATH := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/Cargo.toml)
 TARGET_DIR = $(shell $(CARGO) --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/$(PROFILE)
 
 BINS := mdm-tux mdm-target mdm-kennel
 
-.PHONY: all build check test sign clean docker-smoke docker-tux docker-tmux docker-live-suite docker-architecture-suite docker-logs docker-down docker-clean
+.PHONY: all build check lint test sign clean docker-smoke docker-tux docker-tmux docker-live-suite docker-architecture-suite docker-logs docker-down docker-clean
 
 all: build sign
 
 build:
 ifeq ($(PROFILE),release)
-	$(CARGO) build --locked --release
+	$(CARGO) build --manifest-path "$(MANIFEST_PATH)" --locked --release
 else
-	$(CARGO) build --locked
+	$(CARGO) build --manifest-path "$(MANIFEST_PATH)" --locked
 endif
 
 check:
-	$(CARGO) check --locked --all-targets
+	$(CARGO) check --manifest-path "$(MANIFEST_PATH)" --locked --all-targets
+
+lint:
+	$(CARGO) clippy --manifest-path "$(MANIFEST_PATH)" --locked --all-targets --all-features -- -D warnings
 
 test:
-	$(CARGO) test --locked
+	$(CARGO) test --manifest-path "$(MANIFEST_PATH)" --locked
 	python3 scripts/test-scripts.py
 
 sign: build
@@ -29,7 +34,7 @@ sign: build
 	done
 
 clean:
-	$(CARGO) clean
+	$(CARGO) clean --manifest-path "$(MANIFEST_PATH)"
 
 docker-smoke:
 	./scripts/docker-smoke.sh smoke

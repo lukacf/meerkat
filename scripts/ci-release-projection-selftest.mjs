@@ -146,6 +146,8 @@ try {
   const projectionPlan = JSON.parse(reduced.stdout);
   assert.equal(projectionPlan.mode, "release-projection");
   assert.equal(projectionPlan.rust_changed, false);
+  assert.equal(projectionPlan.example_035, false, "a projection plans no standalone035 run");
+  assert.deepEqual(projectionPlan.example_035_commands, []);
   for (const field of [
     "packages", "closure", "shards", "unit_feature_shards", "main_unit_shards",
     "main_feature_unit_shards", "main_archive_builds", "main_archive_runs", "feature_check_jobs",
@@ -552,8 +554,9 @@ if (args[0] === "api") {
     MAIN_ARCHIVE_BUILD_COUNT: "0", MAIN_ARCHIVE_RUN_COUNT: "0",
     CLOSURE_CHECK_RESULT: "skipped", RUSTDOC_RESULT: "skipped", FEATURE_CHECK_RESULT: "skipped", FEATURE_CHECK_COUNT: "0",
     WASM: "false", WASM_CHECK_RESULT: "skipped", SDK_HOST_RESULT: "skipped", EXAMPLE_WEB_RESULT: "skipped",
+    EXAMPLE_035: "false", EXAMPLE_035_RESULT: "skipped", EXAMPLE_035_LINT: "false", EXAMPLE_035_LINT_RESULT: "skipped",
     WASM_TIMERS_RESULT: "skipped", BAZEL_GRAPH_RESULT: "success", RUST_CHANGED: "false", IS_MAIN_PUSH: "true",
-    IS_PULL_REQUEST: "false", PLAN_EVENT: "push", CLOSURE_CHECK: "false", RUSTDOC: "false", GOVERNED_JSONL: "false",
+    IS_PULL_REQUEST: "false", PLAN_EVENT: "push", ACTUAL_EVENT: "push", CLOSURE_CHECK: "false", RUSTDOC: "false", GOVERNED_JSONL: "false",
     MCP_CONFINEMENT_POSITIVE: "false", DEFERRED_TO_PUSH: "", READER_NOT_RUN: "",
     SDK_HOST: "false", BAZEL_GRAPH: "true", EXAMPLES_BROWSER: "false", EXAMPLE_WEB: "false", EXAMPLE_WEB_WASM: "false",
     MODE: "release-projection", REASON: "release projection", SHARD_COUNT: "0", UNIT_SHARD_COUNT: "6",
@@ -589,7 +592,7 @@ if (args[0] === "api") {
   };
   const gate = (change) => spawnSync("bash", ["-c", gateCheck], { env: { ...process.env, ...waveEnv({ ...gateEnv, ...change }) }, encoding: "utf8" });
   assert.equal(gate({}).status, 0, `the gate accepts a release-projection main push: ${gate({}).stdout}`);
-  assert.equal(gate({ IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true" }).status, 0, "and a release-projection pull request");
+  assert.equal(gate({ IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true", PLAN_EVENT: "pull_request", ACTUAL_EVENT: "pull_request" }).status, 0, "and a release-projection pull request");
   assert.equal(
     gate({ CLOSURE_TEST_COUNT: "13", CLOSURE_TESTS_RESULT: "success", INTEGRATION_COUNT: "1", INTEGRATION_RESULT: "success" }).status,
     0,
@@ -622,6 +625,9 @@ if (args[0] === "api") {
   const wasmProjection = gate({ EXAMPLE_WEB_WASM: "true", WASM_TIMERS_RESULT: "success" });
   assert.equal(wasmProjection.status, 1, "the gate refuses a projection plan that builds the web wasm");
   assert.match(wasmProjection.stdout, /an inconsistent release-projection plan \(.*example_web_wasm=true/);
+  const example035Projection = gate({ EXAMPLE_035: "true", EXAMPLE_035_RESULT: "success" });
+  assert.equal(example035Projection.status, 1, "the gate refuses a projection that runs standalone035");
+  assert.match(example035Projection.stdout, /an inconsistent release-projection plan \(.*example_035=true/);
   // An ordinary plan: a pull request passes without the lanes it left to
   // the push and names them; the push must run them, and the gate refuses a
   // push plan that left any.
@@ -634,7 +640,7 @@ if (args[0] === "api") {
     CORE_CHANGED: "true",
   };
   const pullRequestGate = {
-    ...rustGate, IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true", PLAN_EVENT: "pull_request",
+    ...rustGate, IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true", PLAN_EVENT: "pull_request", ACTUAL_EVENT: "pull_request",
     DEFERRED_TO_PUSH: "17 closure-tests rows; the closure check; governed JSONL; MCP confinement positive; the workspace rustdoc",
   };
   const pushGate = {
@@ -903,15 +909,15 @@ process.stdout.write(JSON.stringify(fixture[path]));
   // for byte, with its own job names, and names the jobs its lanes wait for
   // besides the classification (LANE_UPSTREAMS): such a lane's execution
   // path is its own run time plus the longest path among them, and its path
-  // queue that path's queue. This workflow sets no LANE_UPSTREAMS, so its
-  // paths are the classification's and the stagger job's, as above.
+  // queue that path's queue. CI also names the serial standalone example
+  // phases; ordinary lanes still have only classification/stagger paths.
   const metaWorkflow = readFileSync(resolve(root, ".github/workflows/meta-ci.yml"), "utf8");
   assert.equal(
     extractStepRun(metaWorkflow, "Enforce lane execution budget").trimEnd(),
     budgetStep.trimEnd(),
     "meta-ci.yml's gate runs ci.yml's budget step unchanged",
   );
-  assert.equal(budgetEnv.LANE_UPSTREAMS, undefined, "ci.yml's lanes wait for no other lane");
+  assert.equal(budgetEnv.LANE_UPSTREAMS, "Example035 standalone Rust + Python=Example035 standalone Clippy", "serial standalone phases count their whole execution path");
   const metaEnv = Object.fromEntries(
     Object.entries(extractStepLiteralEnv(metaWorkflow, "Enforce lane execution budget"))
       .map(([key, value]) => [key, value.replace(/^"(.*)"$/, "$1")]),

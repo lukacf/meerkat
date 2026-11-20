@@ -5,6 +5,7 @@
 // BuildBuddy mode violated: a build-relevant change always yields lanes.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EXAMPLE_035, EXAMPLE_035_COMMANDS, EXAMPLE_035_MANIFEST } from "./ci-standalone-example.mjs";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1196,6 +1197,10 @@ for (const path of [
   const unlike = [];
   for (const event of ["pull_request", "push"]) {
     const expected = planFor([reference], ["--event", event]);
+    const workspaceExampleReason = (path) => `${event === "pull_request" ? "deferred to push: " : ""}workspace plan: global build configuration changed: ${path}`;
+    const referenceExampleReason = workspaceExampleReason(reference);
+    assert.equal(expected.example_035_reasons.filter((reason) => reason === referenceExampleReason).length, 1,
+      `${reference} (${event}) identifies its exact workspace reason once`);
     for (const path of [
       ".github/actions/setup-sccache-ci/action.yml",
       ".github/actions/setup-mold-ci/action.yml",
@@ -1203,8 +1208,13 @@ for (const path of [
       "scripts/ci-release-asset-download",
     ]) {
       const plan = planFor([path], ["--event", event]);
+      // This explanation names the changed setup input. Validate that exact
+      // substitution before comparing every scheduling field unchanged.
+      assert.deepEqual(plan.example_035_reasons,
+        expected.example_035_reasons.map((reason) => reason === referenceExampleReason ? workspaceExampleReason(path) : reason),
+        `${path} (${event}) preserves all standalone explanations except its exact input path`);
       const differing = Object.keys({ ...expected, ...plan }).filter(
-        (key) => key !== "changed_paths" && key !== "reason" && !isDeepStrictEqual(expected[key], plan[key]),
+        (key) => !["changed_paths", "reason", "example_035_reasons"].includes(key) && !isDeepStrictEqual(expected[key], plan[key]),
       );
       if (plan.mode !== "workspace" || plan.reason !== `global build configuration changed: ${path}` || differing.length > 0) {
         unlike.push(`${path} (${event}): mode ${plan.mode}, reason "${plan.reason}", ${differing.length} other plan fields differ`);
@@ -1623,6 +1633,72 @@ for (const path of [
   assert.equal(plan.mode, "workspace");
   assert.deepEqual(plan.unmapped_rust_paths, ["examples/001-hello-meerkat-rs/main.rs"]);
   assertLanes(plan, "unmapped .rs");
+}
+
+// Standalone035 selection under real Cargo-resolved planner metadata. Normal
+// CI already runs this selftest. These explicit-path fixtures produce hosted
+// classification receipts at the candidate HEAD, NOT evidence of an actual
+// example-only event, native execution, gate duration or latency reduction.
+{
+  const own = [
+    "README.md", "scripts/test-scripts.py", "scripts/tmux-architecture-suite.sh",
+    "scripts/tmux-live-suite.sh", "scripts/tux-prompt-input.sh",
+    "src/bin/kennel.rs", "tests/suite_dispatch.rs",
+  ].map((path) => `${EXAMPLE_035}/${path}`);
+  const source = spawnSync("git", ["rev-parse", "HEAD", "HEAD^{tree}"], { cwd: root, encoding: "utf8" });
+  assert.equal(source.status, 0, source.stderr);
+  const [head, tree] = source.stdout.trim().split("\n");
+  assert.match(head, /^[0-9a-f]{40}$/); assert.match(tree, /^[0-9a-f]{40}$/);
+  const cases = [
+    ["exact PR2413 seven paths", "pull_request", own, true, "none"],
+    ["own scripts, Make and lock", "pull_request", ["scripts/test-scripts.py", "Makefile", "Cargo.lock"].map((p) => `${EXAMPLE_035}/${p}`), true, "none"],
+    ["dependency on PR", "pull_request", ["crates/meerkat-core/src/lib.rs"], false, "packages"],
+    ["dependency on push", "push", ["crates/meerkat-core/src/lib.rs"], true, "packages"],
+    ["global on PR", "pull_request", [".github/workflows/ci.yml"], false, "workspace"],
+    ["global on push", "push", [".github/workflows/ci.yml"], true, "workspace"],
+    ["unregistered Rust on PR", "pull_request", ["examples/001-hello-meerkat-rs/main.rs"], false, "workspace"],
+    ["own Rust on push preserves workspace", "push", [`${EXAMPLE_035}/src/bin/kennel.rs`], true, "workspace"],
+    ["mixed own and Core", "pull_request", [own[5], "crates/meerkat-core/src/lib.rs"], true, "packages"],
+    ["Markdown reader only", "pull_request", [`${EXAMPLE_035}/README.md`], false, "none"],
+  ];
+  for (const [label, event, paths, selected, mode] of cases) {
+    const plan = planFor(paths, ["--event", event]);
+    assert.equal(plan.event, event, label);
+    assert.equal(plan.example_035, selected, label);
+    assert.equal(plan.mode, mode, label);
+    assert.equal(plan.example_035_manifest, EXAMPLE_035_MANIFEST, label);
+    assert.equal(plan.example_035_lint, selected && event === "push", label);
+    assert.deepEqual(plan.example_035_commands, !selected ? [] : event === "push" ? EXAMPLE_035_COMMANDS : EXAMPLE_035_COMMANDS.slice(1), label);
+    assert.equal(Boolean(plan.deferred_to_push?.example_035_clippy), selected && event === "pull_request", label);
+    if (mode === "none") assert.deepEqual(plan.packages, [], `${label}: no artificial dependency seeds`);
+    if (label === "mixed own and Core") assert.deepEqual(plan.packages, ["meerkat-core"], label);
+    if (paths.some((path) => path.startsWith(`${EXAMPLE_035}/`))) {
+      assert(plan.reader_packages.includes("xtask"), `${label}: examples reader remains`);
+      const xtask = plan.integration_suites.find((suite) => suite.name === "xtask");
+      assert(xtask, `${label}: both live authority audits run in the xtask suite`);
+      assert.equal(xtask.package_flags, "-p xtask --features machine-authority");
+      assert.equal(xtask.test_flags, undefined, "the suite runs every tests/*.rs target");
+      assert(!plan.deferred_to_push?.reader_rows.some((row) => row.startsWith("xtask:") && row.includes("test targets")), `${label}: xtask test targets are not deferred`);
+      assert(!plan.deferred_to_push?.integration_suites.includes("xtask"), `${label}: xtask suite is not deferred`);
+      if (mode === "none") {
+        assert(plan.reader_rows.some((row) => row.packages.includes("xtask") && row.test_flags.split(/\s+/).includes("--lib")), `${label}: actual xtask lib reader runs`);
+      }
+    }
+    console.log("standalone035 planner fixture receipt " + JSON.stringify({
+      schema_version: 1,
+      kind: "explicit-path-classification-fixture-not-event-or-timing",
+      source_head: head, source_tree: tree,
+      workflow_run_id: process.env.GITHUB_RUN_ID ?? null,
+      workflow_run_attempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+      workflow_event: process.env.GITHUB_EVENT_NAME ?? null,
+      label, requested_event: event, planned_event: plan.event,
+      explicit_paths: paths, mode: plan.mode, packages: plan.packages,
+      example_035: plan.example_035, example_035_lint: plan.example_035_lint, reasons: plan.example_035_reasons,
+      manifest: plan.example_035_manifest, commands: plan.example_035_commands,
+      integration_suites: plan.integration_suites,
+      reader_rows: plan.reader_rows, deferred_to_push: plan.deferred_to_push,
+    }));
+  }
 }
 
 // A crate manifest selects its crate (and the closure through dependents).

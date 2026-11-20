@@ -57,6 +57,19 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 
 ## Unreleased
 
+### Gemini provider default: Argon to Neon
+
+A Gemini selection with no explicit model or configured default now uses
+`gemini-4-neon` instead of `gemini-4-argon`. Both require a paid Gemini API tier.
+To retain Argon, select `--model gemini-4-argon` or set
+`[models] gemini = "gemini-4-argon"`. Hydrogen remains recommended and selectable;
+`gemini-3.1-pro-preview` remains discoverable at the supported catalog tier.
+Explicit model selections, configured/binding defaults and existing sessions'
+recorded models are unchanged. Omitting both provider and model still uses the
+global default `gpt-6-astra`. Image-generation defaults are unchanged.
+The existing Google Code Assist and Copilot Gemini login defaults remain
+`gemini-3.8-flash`; catalog support does not establish access on those routes.
+
 ### A custom `gemini-4-neon` entry
 
 The catalog now includes `gemini-4-neon`. Model IDs must be unique across
@@ -65,7 +78,7 @@ built-in, custom and self-hosted entries. Remove any custom
 definitions before upgrading, or validation refuses the duplicate ID.
 The built-in row supports `low`, `medium` and `high`; Google's `xhigh` level
 is not yet expressible by Meerkat's Gemini tag. Neon requires a paid Gemini
-API tier and explicit selection; the Gemini default remains `gemini-4-argon`.
+API tier. Its provider default is separate from the global and image defaults.
 See [Providers](/concepts/providers) for the synchronous limits. If rolling
 back to 0.9.17, restore the custom entry where you still select Neon; that
 release has no built-in Neon row.

@@ -227,18 +227,18 @@ fn claude_fable_5_2_is_cataloged_without_changing_the_defaults() {
 }
 
 #[test]
-fn gemini_4_argon_owns_the_gemini_default() {
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
-    let entry = entry_for(Provider::Gemini, "gemini-4-argon")
-        .expect("gemini-4-argon must be in the catalog");
+fn gemini_4_neon_owns_the_gemini_default() {
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
+    let entry =
+        entry_for(Provider::Gemini, "gemini-4-neon").expect("gemini-4-neon must be in the catalog");
     assert_eq!(entry.provider, "gemini");
-    assert_eq!(entry.display_name, "Gemini 4 Argon");
+    assert_eq!(entry.display_name, "Gemini 4 Neon");
     assert_eq!(entry.tier, ModelTier::Recommended);
     let defaults = provider_defaults()
         .iter()
         .find(|defaults| defaults.provider == "gemini")
         .expect("gemini provider defaults");
-    assert_eq!(defaults.default_model_id, "gemini-4-argon");
+    assert_eq!(defaults.default_model_id, "gemini-4-neon");
     // The platform-wide default stays OpenAI-owned.
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
@@ -263,7 +263,7 @@ fn gemini_4_carbon_is_cataloged_without_changing_the_defaults() {
         "gemini-4-carbon must be in the Gemini allowlist"
     );
     assert_eq!(infer_provider(id), Some(Provider::Gemini));
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
@@ -288,13 +288,13 @@ fn gemini_4_hydrogen_is_cataloged_without_changing_the_defaults() {
         "gemini-4-hydrogen must be in the Gemini allowlist"
     );
     assert_eq!(infer_provider(id), Some(Provider::Gemini));
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
-/// Neon is opt-in on paid Gemini API tiers, with the synchronous output cap.
+/// Neon is the Gemini default on paid API tiers, with the synchronous output cap.
 #[test]
-fn gemini_4_neon_is_cataloged_without_changing_the_defaults() {
+fn gemini_4_neon_is_cataloged_without_changing_global_or_image_defaults() {
     let id = "gemini-4-neon";
     let entry = entry_for(Provider::Gemini, id).expect("gemini-4-neon must be in the catalog");
     assert_eq!(entry.provider, "gemini");
@@ -309,7 +309,7 @@ fn gemini_4_neon_is_cataloged_without_changing_the_defaults() {
         "gemini-4-neon must be in the Gemini allowlist"
     );
     assert_eq!(infer_provider(id), Some(Provider::Gemini));
-    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-neon"));
     assert_eq!(global_default_model(), "gpt-6-astra");
     let caps = capabilities_for(Provider::Gemini, id).expect("Neon capabilities");
     assert_eq!(caps.thinking, ThinkingSupport::GeminiThinkingLevel);
@@ -327,6 +327,49 @@ fn gemini_4_neon_is_cataloged_without_changing_the_defaults() {
     assert!(!caps.realtime && !caps.image_generation && !caps.supports_thinking_budget_legacy);
     assert_eq!(caps.call_timeout_secs, Some(900));
     assert_eq!(caps.stream_inactivity_timeout_secs, Some(900));
+}
+
+#[test]
+fn gemini_default_and_discovery_keep_hydrogen_and_supported_pro_available() {
+    let config = meerkat_core::Config::default();
+    assert!(config.models.gemini.is_empty());
+    let registry = config.model_registry(canonical()).expect("registry");
+    assert_eq!(
+        registry.default_model(Provider::Gemini),
+        Some("gemini-4-neon")
+    );
+    assert_eq!(
+        default_image_generation_model(Provider::Gemini).map(|profile| profile.model_id),
+        Some(IMAGE_DEFAULT_GEMINI)
+    );
+    assert_eq!(global_default_model(), "gpt-6-astra");
+
+    let grouped = provider_defaults()
+        .iter()
+        .find(|p| p.provider == "gemini")
+        .expect("Gemini discovery");
+    assert_eq!(grouped.default_model_id, "gemini-4-neon");
+    for (id, tier) in [
+        ("gemini-4-neon", ModelTier::Recommended),
+        ("gemini-4-hydrogen", ModelTier::Recommended),
+        ("gemini-4-argon", ModelTier::Recommended),
+        ("gemini-3.1-pro-preview", ModelTier::Supported),
+    ] {
+        let discovered = grouped
+            .models
+            .iter()
+            .find(|m| m.id == id)
+            .expect("discoverable model");
+        assert_eq!(discovered.tier, tier, "{id}");
+        assert!(allowed_models(Provider::Gemini).any(|model| model == id));
+        assert_eq!(
+            registry
+                .entry_for_provider(Provider::Gemini, id)
+                .expect("explicit selection")
+                .id,
+            id
+        );
+    }
 }
 
 #[test]

@@ -65,7 +65,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // its own identity: sampling parameters are not sent, max_output_tokens
     // is the synchronous cap, and call_timeout_secs and
     // stream_inactivity_timeout_secs are the same 900 s. Not a default
-    // model: the Gemini default stays gemini-4-argon.
+    // model: the provider default is selected separately in catalog.rs.
     ModelCapabilities {
         id: "gemini-4-carbon",
         provider: Provider::Gemini,
@@ -250,7 +250,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // documented; these are not called out separately): image_tool_results,
     // supports_forced_tool_choice.
     //
-    // Not a default model: the Gemini default stays gemini-4-argon.
+    // Not a default model: the provider default is selected in catalog.rs.
     ModelCapabilities {
         id: "gemini-4-hydrogen",
         provider: Provider::Gemini,
@@ -295,7 +295,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         stream_inactivity_timeout_secs: Some(900),
         supports_forced_tool_choice: true,
     },
-    // Gemini 4 Neon: stable, paid Gemini API tiers; opt in by model id.
+    // Gemini 4 Neon: stable, paid Gemini API tiers; the Gemini provider default.
     // First-party generateContent evidence checked 2026-11-20:
     // https://aistudio.google.com/docs/models/gemini-4-neon
     // https://aistudio.google.com/docs/whats-new-gemini-4-neon
@@ -317,7 +317,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // and the mixed-part generateContent schema; this is not a claim about
     // nested functionResponse.parts. Function-calling ANY mode and the
     // supported-model table establish forced tool choice for Neon.
-    // No default change: Gemini still defaults to gemini-4-argon.
+    // The provider default is selected separately in catalog.rs.
     ModelCapabilities {
         id: "gemini-4-neon",
         provider: Provider::Gemini,

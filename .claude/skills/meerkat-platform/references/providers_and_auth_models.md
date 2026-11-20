@@ -78,7 +78,7 @@ Rules:
 | No hints at all (global default) | `gpt-6-astra` |
 | Anthropic | `claude-opus-5-5` |
 | OpenAI | `gpt-6-astra` |
-| Gemini | `gemini-4-argon` (paid Gemini API tiers; on the free tier select `gemini-4-hydrogen` (0.9.15) or `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
+| Gemini | `gemini-4-neon` (paid Gemini API tiers; on the free tier select `gemini-4-hydrogen` (0.9.15) or `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
 | Self-hosted | `[self_hosted] default_model`, or the only configured alias |
 | Image generation (OpenAI / Gemini) | `gpt-image-2.6-sunburst` / `gemini-nano-banana-2.1` |
 
@@ -168,12 +168,12 @@ contains dots), it runs as a model id with no catalog row, without the
 Gemini (all 1,048,576 / 65,536 tokens, thinking via `thinking_level`):
 `gemini-4-carbon` (0.9.12, R; Google's strongest Gemini 4 reasoning model;
 paid Gemini API tiers only; levels `low`, `medium`, `high`, default
-`medium`), `gemini-4-argon` (default, R; paid Gemini API tiers only; levels
+`medium`), `gemini-4-argon` (R; paid Gemini API tiers only; levels
 `low`, `medium`, `high`, default `medium`), `gemini-4-hydrogen` (0.9.15, R;
 Google's fast Gemini 4 model, on the free tier and the paid Gemini API
 tiers; levels `low`, `medium`, `high`; Google's default for it is `high`,
-which applies when a request names no level), `gemini-4-neon` (R; stable,
-paid Gemini API tiers; low/medium/high, provider default high; opt-in), `gemini-3.8-flash` (R; the
+which applies when a request names no level), `gemini-4-neon` (default, R; stable,
+paid Gemini API tiers; low/medium/high, provider default high), `gemini-3.8-flash` (R; the
 recommended Flash model, also on the free tier), then `gemini-3.7-flash`,
 `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`,
 `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite` and

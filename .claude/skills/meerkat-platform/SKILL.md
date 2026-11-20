@@ -409,10 +409,10 @@ surface, not the old live-adapter/docs-refresh snapshot:
     EOF (with `--tcp`, connections drain first).
 - Default hosted text selections are OpenAI `gpt-6-astra` (backend availability
   remains independent; Azure, Copilot, and custom support are not implied),
-  Anthropic `claude-opus-5-5`, and Gemini `gemini-4-argon` (default; paid
+  Anthropic `claude-opus-5-5`, and Gemini `gemini-4-neon` (default; paid
   Gemini API tiers only; `gemini-4-hydrogen`, in the catalog from 0.9.15, is
   Google's fast Gemini 4 model and is also on the free tier;
-  `gemini-4-neon` is opt-in on paid Gemini API tiers, with low/medium/high
+  `gemini-4-neon` has low/medium/high
   thinking (provider default high; Meerkat does not yet send xhigh);
   `gemini-3.8-flash` is the recommended Flash model,
   the free-tier choice, and the `rkat auth login google` / Copilot Gemini route

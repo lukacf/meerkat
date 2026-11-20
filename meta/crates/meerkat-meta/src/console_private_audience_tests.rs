@@ -4433,9 +4433,15 @@ async fn a_workgraph_binding_on_a_private_side_chat_whose_name_is_not_its_member
                 .as_str()
                 .is_some_and(|message| message.contains("reserved encoded roster-id namespace"))
     };
-    let cases: [(&str, &dyn Fn(&Value) -> bool); 2] =
-        [(SIDE, &private_refusal), (SIDE_MEMBER_ID, &encoded_refusal)];
-    for (identity, refused) in cases {
+    // The side chat by its name, and by its encoded id.
+    for (identity, by_name) in [(SIDE, true), (SIDE_MEMBER_ID, false)] {
+        let refused = |answer: &Value| {
+            if by_name {
+                private_refusal(answer)
+            } else {
+                encoded_refusal(answer)
+            }
+        };
         let target = json!({ "kind": "identity", "identity": identity });
         let created = console_rpc_as(
             &app,

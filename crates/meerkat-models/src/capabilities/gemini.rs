@@ -136,7 +136,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // is the synchronous cap. Thinking budgets are not documented for this
     // model (thinking_level only). call_timeout_secs and
     // stream_inactivity_timeout_secs follow Google's 15-minute client-timeout
-    // guidance. Default Gemini model since 0.9.1
+    // guidance. Default Gemini model from 0.9.1 through 0.9.17
     // (paid Gemini API tier only; the Google OAuth login route keeps its own
     // default).
     ModelCapabilities {

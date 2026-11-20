@@ -37,18 +37,44 @@ them.
 
 ### Breaking
 
-- Gemini's catalog default changes from `gemini-4-argon` to the newly cataloged
-  `gemini-4-neon`. A Gemini selection without an explicit model or configured
-  default now uses Neon; existing session models, explicit Argon/Hydrogen pins,
-  the global default and image-generation defaults are unchanged. Hydrogen
+- **Behavior:** Core's Gemini catalog default changes from `gemini-4-argon`
+  to `gemini-4-neon`. A Gemini session without an explicit model or applicable
+  configured/binding default now uses Neon. With thinking unset, Meerkat sends
+  no thinking override and Google's documented default changes from Argon's
+  `medium` to Neon's `high`. Browser bootstrap also uses Neon when Gemini is the
+  highest-priority configured provider and has no explicit/configured model.
+  The Gemini fallback web-search helper selects Neon directly from the catalog;
+  main-session model, config and binding pins do not override that helper.
+  Existing session models and explicit/configured session pins retain their
+  precedence. The global and image defaults are unchanged. No wire/schema
+  break is introduced.
+
+### Added
+
+- `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
+  shared 1,048,576-token context and a 65,536-token synchronous output cap.
+  Meerkat supports thinking levels `low`/`medium`/`high`. Google's `xhigh` is
+  not expressible by Meerkat's Gemini tag and is refused by strict
+  `reasoning_effort` validation; an unsupported turn reasoning preference is
+  instead not applied, preserving the existing level or provider default.
+  Long decode is not added.
+
+### Changed
+
+- Core catalog presentation identifies Neon as the Gemini default. Hydrogen
   remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
-  Neon requires a paid Gemini API tier, has a shared 1,048,576-token context and
-  a 65,536-token synchronous output cap, and supports Meerkat thinking levels
-  `low`/`medium`/`high` (unset preserves Google's `high` default). Google's `xhigh`
-  is not expressible by Meerkat's Gemini tag and is refused by `reasoning_effort`;
-  long decode is not added. Pin Argon explicitly to retain the previous provider
-  default, and remove any custom `[models.gemini-4-neon]` entry before upgrading
-  because model IDs must be unique (see the upgrade guide).
+  Forge's local setup preset and separately pinned installer catalog are
+  unchanged; this does not establish Neon availability there.
+
+### Upgrade notes
+
+- For ordinary Gemini sessions, pin `--model gemini-4-argon` or
+  `[models] gemini = "gemini-4-argon"` to retain Argon, or set
+  `--reasoning-effort medium` to keep medium thinking on Neon. These session
+  overrides do not change the fallback web-search helper. Remove any custom
+  `[models.gemini-4-neon]` entry before upgrading because model IDs must be
+  unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
+  behavior and rollback notes.
 
 ## [0.9.17] - 2026-11-18
 

@@ -122,7 +122,10 @@ If distinct decisions matter, wait for an observed model boundary before you
 send the next steer: the first `turn_completed` of the run after the earlier
 steer's `boundary_append_applied`. It says the model has answered a request
 that carried that steer. The next steer then joins a later boundary, or the
-follow-up turn when the run ends first.
+follow-up turn when the run ends first. An earlier steer that itself takes
+the follow-up turn publishes no `boundary_append_applied`: read its
+`last_run_id` with `session/input_status` and wait for that run's first
+`turn_completed`.
 
 What stays per input, exactly once: the transcript rows, the input id, the
 delivery witness, the binding to the run's round commit and the
@@ -5444,8 +5447,8 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   by exactly one follow-up turn. 0.9.3 showed peer and text-only prompt
   steers to one model request and never stored them. History now holds their
   rows, `boundary_append_applied` reports them, and each incoming comms
-  notice publishes one `peer_content_ingested`. From 0.9.18 every steer
-  waiting at a boundary joins it: see
+  notice publishes one `peer_content_ingested`. From 0.9.18 every eligible
+  steer waiting at a boundary joins it: see
   [Steers join the next model request](#steers-join-the-next-model-request).
 - **Replies name what they answer:** the model's peer message notice gains a
   `Delivery ID: <id>` line and, for a reply, an `In reply to: <id>` line.

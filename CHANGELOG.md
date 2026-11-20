@@ -49,37 +49,16 @@ them.
   precedence. The global and image defaults are unchanged. No wire/schema
   break is introduced.
 
-### Added
-
-- `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
-  shared 1,048,576-token context and a 65,536-token synchronous output cap.
-  Meerkat supports thinking levels `low`/`medium`/`high`. Google's `xhigh` is
-  not expressible by Meerkat's Gemini tag and is refused by strict
-  `reasoning_effort` validation; an unsupported turn reasoning preference is
-  instead not applied, preserving the existing level or provider default.
-  Long decode is not added.
-
-- `meerkat-core`: `CoreBoundaryStageOutput::attach_durable_delivery` and
-  `CoreBoundaryStageOutput::withdraw_durable_delivery`. The holder of a
-  parked durable boundary preparation attaches the deliveries of other
-  inputs that join the same boundary, or takes one back, before its one
-  commit publishes them in attach order.
-
-### Changed
-
-- Core catalog presentation identifies Neon as the Gemini default. Hydrogen
-  remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
-  Forge's local setup preset and separately pinned installer catalog are
-  unchanged; this does not establish Neon availability there.
-
-- Steers into a running turn, a change of timing (behaviour only: no type,
-  wire or schema change): the durable content steers that wait in the steer lane now join a model
+- **Behavior:** (behaviour-only, not measured by the gate) steers into a
+  running turn, a change of timing with no type, wire or schema change: the
+  durable content steers that wait in the steer lane now join a model
   boundary together, in admission order, so the next model request is the
   first to carry all of them. In 0.9.17 one durable steer joined per model
   boundary, and a steer admitted while an earlier one waited joined the
   boundary after it (read from the source at tag `v0.9.17`:
   `DurableSteerOrder`, `crates/meerkat-runtime/src/driver/ephemeral.rs` lines
-  306-320, and `docs/reference/session-contracts.mdx` line 1403). The cutoff
+  306-320, and the Durable steer section of
+  `docs/reference/session-contracts.mdx` there). The cutoff
   of a request is the publication of the boundary's claim: one step under the
   session mutation gate, after every waiting steer is joined to the run and
   before the runner writes the rows and composes the request. Admission and
@@ -107,6 +86,29 @@ them.
   [Durable steer](docs/reference/session-contracts.mdx#durable-steer) and
   Upgrade notes.
 
+### Added
+
+- `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
+  shared 1,048,576-token context and a 65,536-token synchronous output cap.
+  Meerkat supports thinking levels `low`/`medium`/`high`. Google's `xhigh` is
+  not expressible by Meerkat's Gemini tag and is refused by strict
+  `reasoning_effort` validation; an unsupported turn reasoning preference is
+  instead not applied, preserving the existing level or provider default.
+  Long decode is not added.
+
+- `meerkat-core`: `CoreBoundaryStageOutput::attach_durable_delivery` and
+  `CoreBoundaryStageOutput::withdraw_durable_delivery`. The holder of a
+  parked durable boundary preparation attaches the deliveries of other
+  inputs that join the same boundary, or takes one back, before its one
+  commit publishes them in attach order.
+
+### Changed
+
+- Core catalog presentation identifies Neon as the Gemini default. Hydrogen
+  remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
+  Forge's local setup preset and separately pinned installer catalog are
+  unchanged; this does not establish Neon availability there.
+
 ### Fixed
 
 - `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary no longer delays the durable steers behind it. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Now the steers behind a recalled one join the request they would have joined, in admission order, whether the recall commits before or after the runner parks at the boundary: when the recalled steer held the boundary's claim, only its own delivery is withdrawn, and the steers behind it are joined and published at that boundary. The recalled steer is in no request and has no transcript row, and the recall's answers are unchanged.
@@ -126,9 +128,12 @@ them.
   matter, wait for an observed model boundary before sending the next
   steer: the first `turn_completed` of the run after the earlier steer's
   `boundary_append_applied`, which says the model has answered a request
-  that carried that steer. Each input keeps its own input id, delivery
-  witness, round-commit binding and `boundary_append_applied` (match a
-  delivery by its `input_id`); the changed contract is timing. See
+  that carried that steer. A steer that takes the follow-up turn publishes
+  no `boundary_append_applied`: read its `last_run_id` with
+  `session/input_status` and wait for that run's first `turn_completed`.
+  Each input keeps its own input id, delivery witness, round-commit
+  binding and `boundary_append_applied` (match a delivery by its
+  `input_id`); the changed contract is timing. See
   [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
 
 ## [0.9.17] - 2026-11-18

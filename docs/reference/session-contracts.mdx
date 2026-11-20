@@ -1424,8 +1424,7 @@ The joins follow the lane and stop at the first durable steer that cannot
 join this run: a steer of another requester than the run's, one the run's
 bound of 256 contributors refuses, one whose rows cannot be written in-turn,
 or one whose join could not be made durable. That steer keeps its place and
-no steer behind it overtakes it; they join a later boundary or the follow-up
-turn.
+no steer behind it overtakes it.
 
 What changed is timing. Each input still has its own input id, its own
 delivery witness, its own binding to the run's round commit and its own
@@ -1446,19 +1445,25 @@ So no model decision is guaranteed between consecutive eligible steers. A
 caller that needs a separate decision for each waits for an observed model
 boundary before it sends the next steer. `boundary_append_applied` is
 published after the runner has written the steer's rows, before the request
-that first carries them is sent. `turn_completed` is published for each
-model call after its response; for a call that returned tool calls, after
-their results are written. The first `turn_completed` of the run after the
-earlier steer's `boundary_append_applied` therefore says that the model has
-answered a request that carried that steer.
+that first carries them is sent. `turn_completed` is published after the
+response of each model call that succeeds, and for a call that returned
+tool calls after their results are written; it is not published for a call
+that fails, nor for a round replayed after a restart. The first
+`turn_completed` of the run after the earlier steer's
+`boundary_append_applied` therefore says that the model has answered a
+request that carried that steer. A steer that takes the follow-up turn
+publishes no `boundary_append_applied`: it is part of the input that turn
+starts with. For it, `session/input_status` names the follow-up run in the
+input's `last_run_id`, and that run's first `turn_completed` is the observed
+boundary.
 
 Baseline: 0.9.17 joined one durable steer per model boundary, and a steer
 admitted while an earlier one waited joined the boundary after it (read from
 the source at tag `v0.9.17`: `DurableSteerOrder`,
-`crates/meerkat-runtime/src/driver/ephemeral.rs` lines 306-320, and line 1403
-of this page). In our held-tool test, 0.9.3 put the first steer in the next
-request and the rest in a follow-up turn; 0.9.4 and the tested revision of
-`main` delivered one per request. Other releases were not measured.
+`crates/meerkat-runtime/src/driver/ephemeral.rs` lines 306-320). In our
+held-tool test, 0.9.3 put the first steer in the next request and the rest
+in a follow-up turn; 0.9.4 and the tested revision of `main` delivered one
+per request. Other releases were not measured.
 
 When the run ends first, or the boundary refuses Session writes (for example
 a structured-output extraction boundary), the waiting steers keep their place

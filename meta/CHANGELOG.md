@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   upgrading alone supplies neither declaration nor handler. Registering
   only after `build()` returns leaves a startup gap for stored schedules.
 
+### Changed
+
+- Meta Python SDK: `DispatchInput.connector()` accepts `correlation_id` and `idempotency_key` together, or neither. Supplying only one is rejected by the helper. This lets callers construct a keyed connector dispatch without using the full `DispatchInput` constructor; the gateway rule is unchanged.
+
 ## [0.9.17] - 2026-11-18
 
 ### Breaking

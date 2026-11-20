@@ -1427,8 +1427,9 @@ or one whose join could not be made durable. That steer keeps its place and
 no steer behind it overtakes it; they join a later boundary or the follow-up
 turn.
 
-What changed is timing. Identity, durability and receipts are per input as
-before, and three facts are kept apart:
+What changed is timing. Each input still has its own input id, its own
+delivery witness, its own binding to the run's round commit and its own
+`boundary_append_applied`. Three facts are kept apart:
 
 - Delivery, once per steer: its own join to the run, its own delivery
   witness, its own transcript rows, its own binding to the run's round commit
@@ -1443,17 +1444,21 @@ before, and three facts are kept apart:
 
 So no model decision is guaranteed between consecutive eligible steers. A
 caller that needs a separate decision for each waits for an observed model
-boundary before it sends the next steer: the `turn_completed` that follows
-the earlier steer's `boundary_append_applied`.
+boundary before it sends the next steer. `boundary_append_applied` is
+published after the runner has written the steer's rows, before the request
+that first carries them is sent. `turn_completed` is published for each
+model call after its response; for a call that returned tool calls, after
+their results are written. The first `turn_completed` of the run after the
+earlier steer's `boundary_append_applied` therefore says that the model has
+answered a request that carried that steer.
 
 Baseline: 0.9.17 joined one durable steer per model boundary, and a steer
 admitted while an earlier one waited joined the boundary after it (read from
 the source at tag `v0.9.17`: `DurableSteerOrder`,
 `crates/meerkat-runtime/src/driver/ephemeral.rs` lines 306-320, and line 1403
-of this page). Executed, in one test that holds a tool call while steers are
-admitted: 0.9.3 put the first steer in the next request and the rest in a
-follow-up turn; 0.9.4 and `main` as tested before this change delivered one
-steer per request. No other release was run.
+of this page). In our held-tool test, 0.9.3 put the first steer in the next
+request and the rest in a follow-up turn; 0.9.4 and the tested revision of
+`main` delivered one per request. Other releases were not measured.
 
 When the run ends first, or the boundary refuses Session writes (for example
 a structured-output extraction boundary), the waiting steers keep their place

@@ -119,12 +119,14 @@ steers that wait in the steer lane join a boundary together, in admission
 order, and the next model request is the first to carry all of them.
 
 If distinct decisions matter, wait for an observed model boundary before you
-send the next steer: the `turn_completed` that follows the earlier steer's
-`boundary_append_applied`. The next steer then joins a later boundary, or the
+send the next steer: the first `turn_completed` of the run after the earlier
+steer's `boundary_append_applied`. It says the model has answered a request
+that carried that steer. The next steer then joins a later boundary, or the
 follow-up turn when the run ends first.
 
 What stays per input, exactly once: the transcript rows, the input id, the
-receipt and the `boundary_append_applied`. Several of those events can now
+delivery witness, the binding to the run's round commit and the
+`boundary_append_applied`. Several of those events can now
 precede one model request, so match a delivery by `input_id`, not by one
 event or one new transcript row per request. Later requests carry the rows as
 transcript history, which is not another delivery.

@@ -99,12 +99,11 @@ them.
   not be made durable): it keeps its place and no steer behind it overtakes
   it. Unchanged: no model request in flight is cancelled, steers still
   waiting when the run ends take the follow-up turn in arrival order, and an
-  input that only a fresh turn applies never joins a running turn. What was
-  run, in one test that holds a tool call while steers are admitted: 0.9.3
-  put the first steer in the next request and the rest in a follow-up turn;
-  0.9.4 and `main` as tested before this change delivered one steer per
-  request; with this change the waiting steers are in the next request
-  together. No other release was run. See
+  input that only a fresh turn applies never joins a running turn. In our
+  held-tool test, 0.9.3 put the first steer in the next request and the
+  rest in a follow-up turn; 0.9.4 and the tested revision of `main`
+  delivered one per request; this change delivers all eligible waiting
+  steers together. Other releases were not measured. See
   [Durable steer](docs/reference/session-contracts.mdx#durable-steer) and
   Upgrade notes.
 
@@ -125,10 +124,12 @@ them.
   steers. Steers that wait together now reach the model in one request,
   where 0.9.17 delivered one per model boundary. If distinct decisions
   matter, wait for an observed model boundary before sending the next
-  steer: the `turn_completed` that follows the earlier steer's
-  `boundary_append_applied`. Identity, durability and receipts stay per
-  input (match a delivery by its `input_id`); the changed contract is
-  timing. See [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
+  steer: the first `turn_completed` of the run after the earlier steer's
+  `boundary_append_applied`, which says the model has answered a request
+  that carried that steer. Each input keeps its own input id, delivery
+  witness, round-commit binding and `boundary_append_applied` (match a
+  delivery by its `input_id`); the changed contract is timing. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
 
 ## [0.9.17] - 2026-11-18
 
@@ -22870,14 +22871,14 @@ them.
   per boundary, in arrival order: a steer admitted while an earlier one still
   waits joins the boundary after it, in the same run, instead of falling back
   to the follow-up turn; steers still waiting when the run ends take the
-  follow-up turn in arrival order. Before, in a test that holds a tool call
-  while steers are admitted, 0.9.3 put the first steer in the next model
-  request and the rest in a follow-up turn; now one durable steer
+  follow-up turn in arrival order. Before, in our held-tool test, 0.9.3 put
+  the first steer in the next model request and the rest in a follow-up
+  turn; now one durable steer
   joins per boundary, and the later ones land at later boundaries of the run
   or in the follow-up turn. (Corrected with 0.9.18: this entry said that
   before, every peer or text steer admitted during one boundary reached the
-  next model request. The test run on 0.9.3 does not show that; no other
-  hold was run.)
+  next model request. Our held-tool test on 0.9.3 does not show that; other
+  releases were not measured.)
 - `meerkat-core`: `SystemNoticeBlock::Comms` and
   `AgentEvent::PeerContentIngested` gain the field
   `delivery_id: Option<InteractionId>`: the delivery id of an incoming peer

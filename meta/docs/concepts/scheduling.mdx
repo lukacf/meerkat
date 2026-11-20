@@ -90,16 +90,27 @@ earlier fires as before.
 Python applications register deterministic host runnables with
 `MetaBuilder.host_runnables(...)` and handle
 `callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
+TypeScript applications use `MetaBuilder.hostRunnables(...)` and
+`MetaBuilder.onScheduleFire(...)`, or `MetaRuntime.onScheduleFire(...)` on a
+runtime they already have; see [Host runnables](/sdks/typescript#host-runnables).
 The callback is delivery for a durable occurrence, not a substitute scheduler.
 A handler for a schedule that can be due when the gateway starts belongs on
-the builder, `MetaBuilder.on_schedule_fire(name, handler)`: the gateway can
+the builder: `MetaBuilder.on_schedule_fire(name, handler)` in Python or
+`MetaBuilder.onScheduleFire(name, handler)` in TypeScript. The gateway can
 fire such a schedule before `build()` returns the runtime, and a fire that
 finds no handler ends that occurrence as `delivery_failed`. A handler given
 to the builder can run before `build()` returns, so it must not need the
-runtime object. Releases 0.7.32 to 0.9.16 have no handler on the builder: a
-program that uses `build()` there cannot have its handler in place for such
+runtime object. Python releases 0.7.32 to 0.9.16 have no handler on the builder:
+a program that uses `build()` there cannot have its handler in place for such
 a fire, see
 [Schedule callbacks that arrive during startup](/sdks/python#schedule-callbacks-that-arrive-during-startup).
+
+Every member that holds the schedule tools and is not private to a person
+can create a schedule that fires any runnable the host registers, with
+parameters of its choosing (the handler reads them as the occurrence's
+`payload`). The fire does not tell the handler who wrote the schedule.
+Register only runnables that any such member may fire, and check the payload
+in the handler.
 
 ## Console schedules
 

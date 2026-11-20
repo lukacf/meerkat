@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The TypeScript SDK exposes the existing gateway host-runnable path:
+  hosts declare deterministic schedule targets with
+  `MetaBuilder.hostRunnables(names)` and handle their fires with
+  `MetaRuntime.onScheduleFire(name, handler)`, matching Python SDK dispatch.
+  Chainable `MetaBuilder.onScheduleFire(name, handler)` installs host-local
+  handlers before `build()` connects, including for schedules already stored
+  at startup. Each runtime copies the handlers; its later replacements
+  survive reconnect without reinstalling builder defaults.
+  `build()` refuses builder handlers for undeclared names, naming them before
+  any gateway transport starts. Registration may precede declaration;
+  declared names without handlers and later runtime registration remain allowed.
+  Sync and async handlers receive the raw occurrence; errors fail the
+  occurrence attempt, and returning nothing acknowledges completion. The
+  SDK includes a runnable source collector example. Against the published
+  Meta 0.9.15 Linux x86_64 gateway, the example succeeds, and a stored
+  occurrence due while stopped completes on a fresh-process restart with
+  builder registration. A declared runnable
+  without a handler records `delivery_failed` / `runtime_rejected`, while
+  an undeclared source-runner target records `misfired` / `target_missing`
+  under the default policy without an SDK callback. These occurrences are
+  terminal with no next retry action and are not delivered later when a
+  handler is registered; later interval occurrences remain pending. Older
+  gateways have not been checked.
+
+### Upgrade
+
+- TypeScript host runnables are opt-in access to the existing gateway
+  contract. Existing callers, defaults, wire schemas and stored forms are
+  unchanged. Declare stored schedules' runnable names and register their
+  handlers on the builder on every boot before `build()` connects;
+  upgrading alone supplies neither declaration nor handler. Registering
+  only after `build()` returns leaves a startup gap for stored schedules.
+
 ## [0.9.17] - 2026-11-18
 
 ### Breaking

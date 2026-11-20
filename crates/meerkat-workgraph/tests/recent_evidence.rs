@@ -11,7 +11,7 @@ use meerkat_core::{AgentToolDispatcher, types::ToolCallView};
 use meerkat_workgraph::{
     AttentionProjectionRequest, GoalCreateRequest, MemoryWorkGraphStore, WorkGraphService,
     WorkGraphToolErrorCode, WorkGraphToolSurface, WorkNamespace,
-    handle_unscoped_workgraph_tools_call,
+    handle_unscoped_workgraph_tools_call, workgraph_tools_list,
 };
 use serde_json::{Value, json};
 
@@ -65,6 +65,68 @@ fn cursor(page: &Value) -> &str {
         .as_str()
         .filter(|value| !value.is_empty())
         .expect("a truncated evidence page supplies an opaque continuation")
+}
+
+#[test]
+fn get_recent_evidence_schema_requires_explicit_opt_in() {
+    let tools = workgraph_tools_list();
+    let get = tools
+        .iter()
+        .find(|tool| tool["name"] == "workgraph_get")
+        .expect("get tool");
+    let schema = &get["inputSchema"];
+    assert_eq!(schema["required"], json!(["id"]));
+    assert_eq!(schema["properties"]["evidence_limit"]["minimum"], 1);
+    assert_eq!(schema["properties"]["evidence_limit"]["maximum"], 20);
+    assert!(
+        schema["properties"]["evidence_limit"]
+            .get("default")
+            .is_none()
+    );
+    assert_eq!(schema["properties"]["cursor"]["type"], "string");
+    assert!(
+        tools
+            .iter()
+            .filter(|tool| tool["name"] != "workgraph_get")
+            .all(|tool| {
+                tool["inputSchema"]["properties"]
+                    .get("evidence_limit")
+                    .is_none()
+            })
+    );
+}
+
+#[tokio::test]
+async fn get_recent_evidence_empty_and_final_pages_end_without_cursor() {
+    let service = service();
+    for count in [0, 1, 20] {
+        let item = create(
+            &service,
+            Value::Array(
+                (0..count)
+                    .map(|n| json!({"kind": "note", "id": format!("e-{n}")}))
+                    .collect(),
+            ),
+        )
+        .await;
+        let page = get(&service, json!({"id": item["id"], "evidence_limit": 20})).await;
+        assert_eq!(
+            page["evidence_page"]["entries"]
+                .as_array()
+                .expect("entries")
+                .len(),
+            count
+        );
+        assert_eq!(page["evidence_page"]["total"], count);
+        assert_eq!(page["evidence_page"]["returned"], count);
+        assert_eq!(page["evidence_page"]["truncated"], false);
+        assert!(page["evidence_page"]["next_cursor"].is_null());
+        assert!(page["item"].get("evidence_refs").is_none());
+        assert_eq!(
+            get(&service, json!({"id": item["id"]})).await,
+            json!({"item": item})
+        );
+    }
 }
 
 #[tokio::test]

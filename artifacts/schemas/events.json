@@ -4363,8 +4363,15 @@
         ]
       },
       "ReasoningEffortRefusal": {
-        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields and the optional `cause` and `not_before` diagnostics\nare serialized only when present. The `Display` text is for people and is\nnot a contract; read the fields.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
         "properties": {
+          "cause": {
+            "description": "An optional typed account-state cause for unavailable levels.\n`token_exchange_unavailable` describes a held transient exchange outage;\n`new_sign_in_required` means device-mode lease admission requires a new sign-in,\nwithout claiming that a token was refused. Absent cause means cause unknown;\nunknown strings are retained. No built-in provider reports a cause yet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "conflicting_level": {
             "anyOf": [
               {
@@ -4397,6 +4404,13 @@
           "model": {
             "description": "The model the request would use.",
             "type": "string"
+          },
+          "not_before": {
+            "description": "Absolute RFC3339 UTC eligibility time from a stored account deadline.\nAbsence states no deadline. This is neither a countdown nor a promise\nthat retrying then will recover the model list.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider": {
             "$ref": "#/$defs/Provider",
@@ -14968,8 +14982,15 @@
         ]
       },
       "ReasoningEffortRefusal": {
-        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields and the optional `cause` and `not_before` diagnostics\nare serialized only when present. The `Display` text is for people and is\nnot a contract; read the fields.\n\nNon-exhaustive: a later release can add a field, so code outside this\ncrate reads the fields and does not build the value with a struct\nliteral (a value is read from its wire form).",
         "properties": {
+          "cause": {
+            "description": "An optional typed account-state cause for unavailable levels.\n`token_exchange_unavailable` describes a held transient exchange outage;\n`new_sign_in_required` means device-mode lease admission requires a new sign-in,\nwithout claiming that a token was refused. Absent cause means cause unknown;\nunknown strings are retained. No built-in provider reports a cause yet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "conflicting_level": {
             "anyOf": [
               {
@@ -15002,6 +15023,13 @@
           "model": {
             "description": "The model the request would use.",
             "type": "string"
+          },
+          "not_before": {
+            "description": "Absolute RFC3339 UTC eligibility time from a stored account deadline.\nAbsence states no deadline. This is neither a countdown nor a promise\nthat retrying then will recover the model list.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider": {
             "$ref": "#/$defs/Provider",

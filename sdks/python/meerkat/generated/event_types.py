@@ -307,17 +307,20 @@ class ReasoningEffortRefusal(TypedDict, total=False):
 
     `route`, `supported` and `facts` are always serialized, as `null` when
     absent (`facts` is absent exactly when `supported` is). The two
-    `conflicting_*` fields are serialized only when present. The `Display`
-    text is for people and is not a contract; read the fields.
+    `conflicting_*` fields and the optional `cause` and `not_before` diagnostics
+    are serialized only when present. The `Display` text is for people and is
+    not a contract; read the fields.
 
     Non-exhaustive: a later release can add a field, so code outside this
     crate reads the fields and does not build the value with a struct
     literal (a value is read from its wire form).
     """
+    cause: NotRequired[Optional[str]]
     conflicting_level: NotRequired[Optional[EffortLevel]]
     conflicting_param: NotRequired[Optional[str]]
     facts: Required[Optional[ReasoningFactsSource]]
     model: Required[str]
+    not_before: NotRequired[Optional[str]]
     provider: Required[Provider]
     reason: Required[ReasoningEffortRefusalReason]
     requested: Required[EffortLevel]

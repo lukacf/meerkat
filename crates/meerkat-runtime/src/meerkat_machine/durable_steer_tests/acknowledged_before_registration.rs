@@ -159,6 +159,10 @@ async fn lagging_rig(adapter: Arc<MeerkatMachine>) -> (DurableSteerRig, Arc<Regi
         .await
         .expect("prepare generated runtime bindings");
     let state = meerkat_core::TransientTurnContextStateHandle::new();
+    // As the agent builder does for the coordinator it creates.
+    if let Some(admissions) = bindings.turn_state().pending_boundary_admissions() {
+        state.bind_pending_boundary_admissions(admissions);
+    }
     let script = RunnerScript::new();
     let lag = Arc::new(RegistrationLag::default());
     adapter

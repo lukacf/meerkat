@@ -127,6 +127,8 @@ pub mod unified_runtime;
 pub mod unobserved;
 pub mod workgraph_admission;
 pub mod workgraph_events;
+#[cfg(feature = "workgraph-pursuit-test-vehicle")]
+pub(crate) mod workgraph_pursuit_test_vehicle;
 pub mod workgraph_realm;
 pub(crate) mod workgraph_resume_gate;
 pub mod workgraph_wiring;

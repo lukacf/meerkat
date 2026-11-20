@@ -17,7 +17,7 @@
  */
 
 import { existsSync, lstatSync } from "node:fs";
-import type { SessionAgentBuilder, ErrorCallback } from "./agent-builder.js";
+import type { SessionAgentBuilder, ErrorCallback, ScheduleFireHandler } from "./agent-builder.js";
 import { GatewayStartupCleanupError, isRpcError } from "./errors.js";
 import {
   validateAuthBindingRef,
@@ -156,6 +156,10 @@ export interface MetaBuilderConfig {
   memberCommsAddress: string | null;
   gatingConfigPath: string | null;
   routingConfigPath: string | null;
+  /** Named deterministic schedule targets; an empty or absent list sends nothing. */
+  hostRunnables?: string[];
+  /** Host-local handlers copied into each runtime before its initial connect. */
+  scheduleFireHandlers?: ReadonlyMap<string, ScheduleFireHandler>;
   workgraphEnabled: boolean | string | null;
   /** `runtime_options.mob_announcements`, sent as given; absent or `null` sends nothing. */
   mobAnnouncements?: Record<string, unknown> | null;
@@ -222,6 +226,7 @@ function defaultConfig(): MetaBuilderConfig {
     memberCommsAddress: null,
     gatingConfigPath: null,
     routingConfigPath: null,
+    hostRunnables: [],
     workgraphEnabled: null,
     forkInstructionPolicy: null,
     memberRestore: null,
@@ -723,6 +728,47 @@ export class MetaBuilder {
 
   routing(configPath: string): this {
     this._config.routingConfigPath = configPath;
+    return this;
+  }
+
+  /**
+   * Declare deterministic (non-LLM) schedule targets, replacing the list.
+   * Sent as `runtime_options.host_runnables`. A durable schedule targeting
+   * `{target_kind: "host_runnable", runnable: "name"}` calls the handler
+   * registered with `onScheduleFire`. Requires a persistent
+   * gateway with its schedule host running. The gateway validates duplicate
+   * and reserved names.
+   */
+  hostRunnables(names: readonly string[]): this {
+    const declared = [...names];
+    for (const name of declared) {
+      if (typeof name !== "string" || !name.trim()) {
+        throw new TypeError("host runnable names must be non-empty strings");
+      }
+    }
+    this._config.hostRunnables = declared;
+    return this;
+  }
+
+  /**
+   * Register or replace a host-local schedule handler before `build()`
+   * connects. Each runtime gets its own handler map; later registrations on
+   * this builder do not change an existing runtime. Declare gateway targets
+   * separately with `hostRunnables`, in either order before `build()`, which
+   * refuses handlers for undeclared names before starting the gateway.
+   * Use this when stored schedules may fire
+   * during startup; `MetaRuntime.onScheduleFire` can replace a handler later.
+   */
+  onScheduleFire(name: string, handler: ScheduleFireHandler): this {
+    if (typeof name !== "string" || !name.trim()) {
+      throw new TypeError("runnable name must be a non-empty string");
+    }
+    if (typeof handler !== "function") {
+      throw new TypeError("handler must be callable");
+    }
+    const handlers = new Map(this._config.scheduleFireHandlers);
+    handlers.set(name, handler);
+    this._config.scheduleFireHandlers = handlers;
     return this;
   }
 
@@ -1252,6 +1298,12 @@ export class MetaBuilder {
   }
 
   private _validateConfig(): void {
+    const declaredRunnables = new Set(this._config.hostRunnables ?? []);
+    for (const name of this._config.scheduleFireHandlers?.keys() ?? []) {
+      if (!declaredRunnables.has(name)) {
+        throw new Error(`host runnable handler is not declared: ${JSON.stringify(name)}`);
+      }
+    }
     if (this._config.preparedApplication && this._config.mobConfigPath) {
       throw new Error("preparedApplication() and mob() are mutually exclusive");
     }

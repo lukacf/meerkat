@@ -227,6 +227,7 @@ export type {
   SessionAgentBuilder,
   ErrorCallback,
   DecisionNoticeHandler,
+  ScheduleFireHandler,
 } from "./agent-builder.js";
 export { CallbackDispatcher } from "./agent-builder.js";
 

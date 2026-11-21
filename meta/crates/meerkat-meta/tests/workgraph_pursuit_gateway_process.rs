@@ -2000,8 +2000,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     // The turn ends after that one write: its next request, the one that
     // carries the tool's answer, is answered "ok". Its own write must start
     // no further turn, and no stored input may be left open: a second
-    // continuation that the restart had queued behind the first would be
-    // one, whether it later takes a turn or is abandoned.
+    // continuation that still waited for a turn would be one.
     gateway.settle(SETTLE);
     let after_write = scene.print_requests("boot-2", requests_at_kill);
     gateway.print_stderr("after the continuation's write");
@@ -2019,6 +2018,48 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     gateway.say(format!(
         "stored inputs still open after the continuation's turn ended: {}",
         open_after_turn.map_or_else(|| "store not read".to_string(), |open| open.to_string())
+    ));
+    // An input that was abandoned or superseded is not open, so the count
+    // above does not see a second continuation that was stored and then set
+    // aside. The store's rows do: after the turn it must hold the very
+    // inputs it held while the turn waited, and the continuation that
+    // waited must have ended consumed, by taking its turn.
+    let ids = |inputs: &Option<Vec<StoredInput>>| {
+        inputs.as_ref().map(|inputs| {
+            let mut ids = inputs
+                .iter()
+                .map(|input| input.input_id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        })
+    };
+    let ids_at_hold = ids(&store_at_hold);
+    let ids_after_turn = ids(&store_after_turn);
+    let continuation_id = store_at_hold.as_ref().and_then(|inputs| {
+        inputs
+            .iter()
+            .find(|input| input.is_open() && input.carries_notice)
+            .map(|input| input.input_id.clone())
+    });
+    let continuation_end = store_after_turn.as_ref().and_then(|inputs| {
+        inputs
+            .iter()
+            .find(|input| Some(&input.input_id) == continuation_id.as_ref())
+            .map(|input| input.current_state.clone())
+    });
+    let no_other_input = ids_at_hold.is_some() && ids_at_hold == ids_after_turn;
+    gateway.say(format!(
+        "stored inputs while the turn waited: {}; after the turn ended: {}; the same inputs, \
+         none added: {no_other_input}; the continuation that waited ({}) ended in state: {}",
+        ids_at_hold
+            .as_ref()
+            .map_or_else(|| "store not read".to_string(), |ids| ids.len().to_string()),
+        ids_after_turn
+            .as_ref()
+            .map_or_else(|| "store not read".to_string(), |ids| ids.len().to_string()),
+        continuation_id.as_deref().unwrap_or("none found"),
+        continuation_end.as_deref().unwrap_or("not found")
     ));
 
     // The tail: one more revision starts one more turn.
@@ -2124,6 +2165,16 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         open_after_turn,
         Some(0),
         "(a) after the continuation's turn ended, no stored input may be left open"
+    );
+    assert!(
+        no_other_input,
+        "(a) after the continuation's turn ended, the store must hold the inputs it held while \
+         the turn waited and no other, in any state: {ids_at_hold:?} against {ids_after_turn:?}"
+    );
+    assert_eq!(
+        continuation_end.as_deref(),
+        Some("consumed"),
+        "(a) the continuation that waited must have ended by taking its turn"
     );
     assert_eq!(
         tail_starts.len(),

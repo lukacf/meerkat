@@ -18525,6 +18525,75 @@ mod tests {
         }
     }
 
+    /// [`MockLlmClient`] on an account route whose model list is loaded
+    /// (it states `high`) or not loaded, and which reports a cause and a
+    /// fixed time when it is asked about a list that is not loaded. It
+    /// counts how often it is asked and how many requests it serves.
+    struct CauseReportingMockLlmClient {
+        list_loaded: AtomicBool,
+        cause: Option<&'static str>,
+        asks: AtomicUsize,
+        requests: AtomicUsize,
+    }
+
+    impl CauseReportingMockLlmClient {
+        const NOT_BEFORE: &'static str = "2020-01-02T03:04:05Z";
+
+        fn new(cause: Option<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                list_loaded: AtomicBool::new(true),
+                cause,
+                asks: AtomicUsize::new(0),
+                requests: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for CauseReportingMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            let mut route = HighStatingMockLlmClient.reasoning_route()?;
+            if !self.list_loaded.load(AtomicOrdering::SeqCst) {
+                route.account = meerkat_core::AccountLevelStatement::ListUnavailable;
+            }
+            Some(route)
+        }
+
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.asks.fetch_add(1, AtomicOrdering::SeqCst);
+            let mut held = meerkat_core::ReasoningEffortUnavailable::default();
+            held.cause = self.cause.map(str::to_string);
+            held.not_before = Self::NOT_BEFORE.parse().ok();
+            held
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            self.requests.fetch_add(1, AtomicOrdering::SeqCst);
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     /// [`MockLlmClient`] that reports no route and counts how often its
     /// route is read and how many requests it serves.
     struct CountingNoRouteMockLlmClient {
@@ -44358,6 +44427,158 @@ mod tests {
         assert_eq!(live_identity().await, identity_before);
     }
 
+    /// A level refused because the account's model list is not loaded
+    /// carries what the session's client reports when it is asked, and its
+    /// `retryable` is the refusal's own: `false` when the client reports
+    /// that a new sign-in is required, `true` for an exchange outage and for
+    /// no cause. In three scenes: the first turn of a session created with
+    /// the level (its first build), a turn that sets the level on a live
+    /// session (the judgment before admission), and the same turn on a
+    /// stored session that is not live (its recovery build). The client
+    /// serves no request for the refused level, and a live session keeps its
+    /// identity. How often the client is asked is pinned per scene: once,
+    /// except for the stored session that is not live, where it is asked
+    /// three times: the judgment before admission runs twice for a turn
+    /// that names a level (before and under the registration lock), leaves
+    /// the unavailable reason to the build each time, and the build asks
+    /// again.
+    #[tokio::test]
+    async fn a_level_refused_for_a_list_that_is_not_loaded_answers_the_clients_cause() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for (cause, retryable) in [
+            (
+                Some(meerkat_core::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED),
+                false,
+            ),
+            (
+                Some(meerkat_core::REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE),
+                true,
+            ),
+            (None, true),
+        ] {
+            let mut asked = Vec::new();
+            for kind in ["never built", "live", "stored, not live"] {
+                let scene = format!("cause {cause:?}, session {kind}");
+                let never_built = kind == "never built";
+                let live = kind == "live";
+                let temp = tempfile::tempdir().unwrap();
+                let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+                let client = CauseReportingMockLlmClient::new(cause);
+                let session_client: Arc<dyn LlmClient> = client.clone();
+                runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+                // Never built: the session is created with the level while
+                // the list is not loaded, and its first turn builds it. The
+                // two others: a session without a level runs a turn, the
+                // list stops being loaded (and the session stops being
+                // live), and a turn sets the level.
+                client
+                    .list_loaded
+                    .store(!never_built, AtomicOrdering::SeqCst);
+                let session_id = runtime
+                    .create_session(
+                        AgentBuildConfig {
+                            llm_client_override: Some(session_client),
+                            provider_params: never_built.then(|| ProviderParamsOverride {
+                                reasoning_effort: Some(EffortLevel::High),
+                                ..Default::default()
+                            }),
+                            ..AgentBuildConfig::new("claude-sonnet-4-5")
+                        },
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap();
+                let live_identity = || {
+                    let runtime = Arc::clone(&runtime);
+                    let session_id = session_id.clone();
+                    async move {
+                        runtime
+                            .service
+                            .export_live_session(&session_id)
+                            .await
+                            .ok()
+                            .and_then(|session| session.session_metadata())
+                            .map(|metadata| metadata.llm_identity())
+                    }
+                };
+                let overrides = if never_built {
+                    None
+                } else {
+                    spawn_runtime_turn(&runtime, &session_id, "first", None)
+                        .await
+                        .unwrap()
+                        .expect("a turn without a level runs");
+                    client.list_loaded.store(false, AtomicOrdering::SeqCst);
+                    if !live {
+                        runtime
+                            .service
+                            .discard_live_session(&session_id)
+                            .await
+                            .expect("the session is stored and no longer live");
+                    }
+                    Some(level_overrides(TurnMetadataOverride::Set(
+                        EffortLevel::High,
+                    )))
+                };
+                let identity_before = live_identity().await;
+                assert_eq!(identity_before.is_some(), live, "{scene}");
+                let asks_before = client.asks.load(AtomicOrdering::SeqCst);
+                let requests_before = client.requests.load(AtomicOrdering::SeqCst);
+
+                let refused = spawn_runtime_turn(&runtime, &session_id, "refused", overrides)
+                    .await
+                    .unwrap()
+                    .expect_err("a level whose list is not loaded is refused");
+                assert_eq!(
+                    refusal_answer_shape(&refused),
+                    (
+                        error::INVALID_PARAMS,
+                        Some(serde_json::json!("reasoning_effort_refused")),
+                        Some(serde_json::json!("supported_levels_unavailable")),
+                    ),
+                    "{scene}: {refused:?}"
+                );
+                let data = refused.data.as_ref().expect("the typed refusal");
+                let refusal = &data["reasoning_effort_refusal"];
+                assert_eq!(data["retryable"], retryable, "{scene}: {refused:?}");
+                assert_eq!(
+                    refusal.get("cause").and_then(serde_json::Value::as_str),
+                    cause,
+                    "{scene}: {refused:?}"
+                );
+                assert_eq!(
+                    refusal["not_before"],
+                    CauseReportingMockLlmClient::NOT_BEFORE,
+                    "{scene}: {refused:?}"
+                );
+                // The witness: the cause is the answer of this session's
+                // client, asked for this refusal, and no request was sent.
+                let asks = client.asks.load(AtomicOrdering::SeqCst) - asks_before;
+                println!("data {scene}: asks {asks}, answer {}", refused.message);
+                asked.push((kind, asks));
+                assert_eq!(
+                    client.requests.load(AtomicOrdering::SeqCst),
+                    requests_before,
+                    "{scene}: no provider request for a refused level"
+                );
+                if live {
+                    assert_eq!(live_identity().await, identity_before, "{scene}");
+                }
+            }
+            assert_eq!(
+                asked,
+                [("never built", 1), ("live", 1), ("stored, not live", 3)],
+                "cause {cause:?}: how often the client was asked per scene"
+            );
+        }
+    }
+
     /// A turn that names the level the session already holds changes
     /// nothing, so it is no reconfiguration: the client's route is read
     /// exactly as often as for a turn that names no level (no judgement, no
@@ -48167,6 +48388,103 @@ mod tests {
                 serde_json::to_string(&swap_answer).expect("serialize"),
                 build_bytes,
                 "a refused live reconfiguration answers the build refusal's bytes"
+            );
+        }
+    }
+
+    /// A refusal that carries a cause answers its own retryability, not its
+    /// reason's class, at every checkpoint: the session error path, a turn
+    /// that failed for the refusal (an apply failure, a failed run) and a
+    /// refused live reconfiguration answer the same bytes. A cause that says
+    /// a new sign-in is required answers `retryable: false`; an exchange
+    /// outage and no cause answer `true`. The cause and the time arrive in
+    /// the refusal as they were given.
+    #[test]
+    fn a_refusal_with_a_cause_answers_its_instance_retryability_at_every_checkpoint() {
+        let session_id = SessionId::new();
+        for (cause, retryable) in [
+            (
+                Some(meerkat_core::REASONING_CAUSE_NEW_SIGN_IN_REQUIRED),
+                false,
+            ),
+            (
+                Some(meerkat_core::REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE),
+                true,
+            ),
+            (None, true),
+        ] {
+            let mut document = serde_json::json!({
+                "requested": "high", "provider": "openai", "model": "account-model-1",
+                "route": {"backend": "copilot", "api": "responses"},
+                "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+            });
+            if let Some(cause) = cause {
+                document["cause"] = serde_json::json!(cause);
+                document["not_before"] = serde_json::json!("2020-01-02T03:04:05Z");
+            }
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            // The witness: the refusal read holds the cause the document
+            // names, so `false` below comes from the cause and not from a
+            // document whose cause was dropped at the read.
+            assert_eq!(refusal.cause.as_deref(), cause);
+            assert_eq!(refusal.not_before.is_some(), cause.is_some());
+
+            let build_answer = session_error_to_rpc(SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+            ));
+            assert_eq!(build_answer.code, error::INVALID_PARAMS, "{build_answer:?}");
+            assert_eq!(
+                build_answer.data,
+                Some(serde_json::json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                })),
+                "cause {cause:?}"
+            );
+            let build_bytes = serde_json::to_string(&build_answer).expect("serialize");
+
+            let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(refusal.clone()),
+            };
+            let detail = format!("agent error: {refusal}");
+            let mut apply_failure =
+                meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+            apply_failure.reason = Some(reason.clone());
+            let mut failed_run = meerkat_core::TurnErrorMetadata::terminal(
+                meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                meerkat_core::TurnTerminalOutcome::Failed,
+                detail.clone(),
+            );
+            failed_run.reason = Some(reason);
+            for turn_error in [apply_failure, failed_run] {
+                for outcome in [
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: detail.clone(),
+                        error: turn_error.clone(),
+                    },
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: detail.clone(),
+                        error: turn_error.clone(),
+                    },
+                ] {
+                    let answer = completion_outcome_to_rpc_result(outcome, &session_id)
+                        .expect_err("a refused level is an RPC error");
+                    assert_eq!(
+                        serde_json::to_string(&answer).expect("serialize"),
+                        build_bytes,
+                        "cause {cause:?}: a refused turn answers the build refusal's bytes"
+                    );
+                }
+            }
+            let swap_answer = runtime_driver_error_to_rpc(
+                meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(refusal)),
+            );
+            assert_eq!(
+                serde_json::to_string(&swap_answer).expect("serialize"),
+                build_bytes,
+                "cause {cause:?}: a refused live reconfiguration answers the build refusal's bytes"
             );
         }
     }

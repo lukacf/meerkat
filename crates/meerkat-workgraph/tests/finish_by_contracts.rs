@@ -237,7 +237,7 @@ async fn sqlite_finish_by_survives_projection_rebuild_and_reopen() {
 }
 
 // The WorkItem carrier exactly as it stood before the field. It deliberately
-// does not retain unknown keys: this pins the disclosed old-writer limitation,
+// does not retain unknown keys: this pins the stated old-writer limitation,
 // rather than promising a version fence for ordinary item data.
 mod old_writer {
     use chrono::{DateTime, Utc};

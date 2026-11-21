@@ -339,6 +339,17 @@ gateway, so a host whose definition already differs from the stored one
 reads the revision at its last ordinary start, or from the refusal's
 message. Run with both SDKs on 0.9.15.
 
+On an ordinary restart, compare the parsed definitions, not the spelling or
+order of the original TOML. In `profiles.<name>.tools.grant_gated`, the
+`families`, `tools` and `mcp_servers` lists are sets of names. Their stored
+form lists each name once in sorted order; changing only their order does
+not change the gate. `unconfigured_mcp_servers` is a boolean, not a list.
+Do not sort every list: for example, `profiles.<name>.tools.deny` is compared
+in order. If the canonical definitions match, omit the one-shot declaration.
+Declaring an update at the current revision when nothing changed is refused;
+it does not advance the revision. This is distinct from an exact retry of an
+already committed update using its original expected revision.
+
 Python hosts use the supported builder ceremony on the single activation
 authorized to change the durable definition:
 

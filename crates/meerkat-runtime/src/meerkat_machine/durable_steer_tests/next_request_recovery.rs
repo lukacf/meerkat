@@ -1138,15 +1138,7 @@ mod stop_arms {
     /// delivery; the row itself does not lower into a user message, so no
     /// boundary can write it.
     fn steer_whose_row_does_not_lower(detail: &str) -> Input {
-        let mut prompt = crate::input::PromptInput::new(
-            "",
-            Some(
-                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
-                    ..Default::default()
-                },
-            ),
-        );
+        let mut prompt = crate::input::PromptInput::new("", Some(steer_metadata()));
         prompt.typed_turn_appends = vec![ConversationAppend {
             runtime_source: None,
             role: ConversationAppendRole::User,

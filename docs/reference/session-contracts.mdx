@@ -1414,12 +1414,17 @@ parked, joins this request. A steer admitted after it is retained, registers
 for the next boundary of the run and joins the request after this one. No
 model request in flight is cancelled for a steer.
 
-With no durable steer at the boundary, the request's input is fixed when the
-runner finds none registered and none acknowledged and still on its way,
-and closes the boundary; it awaits nothing between that and composing the
-request. A steer whose admission was acknowledged before then is in the
-request: the runner keeps the boundary open until that steer has registered,
-also when it is parked there on request-only context alone.
+The request's input is fixed in one of two ways. At a boundary with no
+durable steer (none has registered with it, or the runner is parked there on
+request-only context alone), it is fixed at the one check in which the
+runner finds that every delivery it is parked on is resolved, that no
+durable steer has registered, and that no acknowledged steer is still on
+its way; the runner then closes the boundary and awaits nothing before it
+composes the request. A steer whose admission was acknowledged before that
+check is in the request: the runner keeps the boundary open until that
+steer has registered. Once a durable steer has entered the boundary, the
+cutoff is that steer's publication under the session mutation gate, as at
+any boundary.
 
 The joins follow the lane and stop at the first durable steer that cannot
 join this run: a steer of another requester than the run's, one the run's

@@ -64,12 +64,14 @@ them.
   before the runner writes the rows and composes the request. Admission and
   recall take the same gate: a steer admitted before the cutoff, also one
   admitted after the runner parked at the boundary, joins that request, and
-  a steer admitted after it joins the request after it. With no durable
-  steer at the boundary, the input is fixed when the runner finds none
-  registered and none acknowledged and still on its way, and closes the
-  boundary: a steer whose admission was acknowledged before that is in the
-  request, also when the runner is parked on request-only context alone.
-  Per input and exactly
+  a steer admitted after it joins the request after it. At a boundary
+  with no durable steer (none registered, or a park on request-only
+  context alone) the input is fixed at the one check in which the runner
+  finds every delivery it is parked on resolved, no durable steer
+  registered and no acknowledged steer still on its way: a steer whose
+  admission was acknowledged before that check is in the request. Once a
+  durable steer has entered the boundary, the cutoff is its publication
+  under the session mutation gate, as at any boundary. Per input and exactly
   once, as before: its join, its delivery witness, its transcript rows, its
   binding to the run's round commit and its `boundary_append_applied`;
   steers that join one boundary have adjacent rows and publish their events

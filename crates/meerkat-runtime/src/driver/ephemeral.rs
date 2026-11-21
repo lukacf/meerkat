@@ -3400,6 +3400,7 @@ impl EphemeralRuntimeDriver {
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
                 is_prompt,
+                live_boundary_delivery: None,
             },
             "RecoverInputLifecycle",
         )
@@ -10729,6 +10730,7 @@ mod tests {
                     runtime_execution_kind: None,
                     runtime_peer_response_terminal_apply_intent: None,
                     is_prompt: false,
+                    live_boundary_delivery: None,
                 },
                 "RecoverInputLifecycle(test)",
             )

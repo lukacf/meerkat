@@ -1930,8 +1930,18 @@ impl MeerkatMachine {
                     reason
                 }
                 // The driver restored the Queued checkpoint or requires a
-                // reload from the store, where the row is still Queued.
-                Err(error) => error.to_string(),
+                // reload from the store, where the row is still Queued. A
+                // store failure is not a guard refusal: it is reported.
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        run_id = %run_id,
+                        input_id = %candidate,
+                        %error,
+                        "durable live-boundary join behind the claim could not be persisted; the input stays queued"
+                    );
+                    error.to_string()
+                }
             };
             if let Err(error) = prepared.withdraw_durable_delivery(&delivery_witness) {
                 tracing::warn!(

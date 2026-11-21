@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
+*Mirrored from Meerkat Meta main at [27e860fe99ce](https://github.com/lukacf/meerkat/commit/27e860fe99ce370b676a301ba2d77b9b0a760c62) on 2026-11-21; Meta version 0.9.17 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -340,6 +340,17 @@ typed read of the revision is planned to replace it. It needs a started
 gateway, so a host whose definition already differs from the stored one
 reads the revision at its last ordinary start, or from the refusal's
 message. Run with both SDKs on 0.9.15.
+
+On an ordinary restart, compare the parsed definitions, not the spelling or
+order of the original TOML. In `profiles.<name>.tools.grant_gated`, the
+`families`, `tools` and `mcp_servers` lists are sets of names. Their stored
+form lists each name once in sorted order; changing only their order does
+not change the gate. `unconfigured_mcp_servers` is a boolean, not a list.
+Do not sort every list: for example, `profiles.<name>.tools.deny` is compared
+in order. If the canonical definitions match, omit the one-shot declaration.
+Declaring an update at the current revision when nothing changed is refused;
+it does not advance the revision. This is distinct from an exact retry of an
+already committed update using its original expected revision.
 
 Python hosts use the supported builder ceremony on the single activation
 authorized to change the durable definition:

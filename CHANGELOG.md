@@ -140,6 +140,11 @@ them.
   that carried that steer. A steer that takes the follow-up turn publishes
   no `boundary_append_applied`: read its `last_run_id` with
   `session/input_status` and wait for that run's first `turn_completed`.
+  A steer admitted after a request's input is fixed waits for the next
+  boundary, even when its admission was acknowledged before the request
+  was composed or sent: a caller cannot tell the two instants apart, so
+  an admission acknowledged before the request left does not mean the
+  steer is in that request.
   Each input keeps its own input id, delivery witness, round-commit
   binding and `boundary_append_applied` (match a delivery by its
   `input_id`); the changed contract is timing. See

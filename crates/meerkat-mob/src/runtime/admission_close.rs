@@ -262,6 +262,19 @@ impl MobOwnership {
         CloseDecision::Closed { reason, busy }
     }
 
+    /// Read what a close is decided on, and decide nothing: `busy` with the
+    /// foreground leases, and why admission is closed when it is, both under
+    /// the ownership lock. The root owner is not a busy term, as it is none
+    /// for an idle close. Nothing is written.
+    pub(super) fn observe(&self, mut busy: MobBusy) -> MobIdleObservation {
+        let state = self.lock();
+        busy.foreground_owners = state.leases;
+        MobIdleObservation {
+            busy,
+            admission_closed: state.closed,
+        }
+    }
+
     fn release(&self, kind: OwnerKind) {
         let mut state = self.lock();
         match kind {

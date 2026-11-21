@@ -22426,6 +22426,18 @@ impl MobActor {
         0
     }
 
+    /// What is in flight, for a close and for an observation alike: the
+    /// actor's own busy counts and, only when those are idle, the members'
+    /// native accepted work. One computation, so an observation reads what
+    /// a close is decided on.
+    async fn admission_in_flight(&self, deferred_commands: &VecDeque<RoutedMobCommand>) -> MobBusy {
+        let mut busy = self.admission_busy(deferred_commands);
+        if busy.is_idle() {
+            busy.runs = self.native_accepted_work().await;
+        }
+        busy
+    }
+
     /// Decide one close on the serialized admission path. Mob-admitted work
     /// only enters through this actor, so nothing is admitted between the
     /// native observation and the decision; owner acquisition and the close
@@ -22435,16 +22447,26 @@ impl MobActor {
         request: super::admission_close::CloseRequest,
         deferred_commands: &VecDeque<RoutedMobCommand>,
     ) -> super::admission_close::CloseDecision {
-        let mut busy = self.admission_busy(deferred_commands);
-        if busy.is_idle() {
-            busy.runs = self.native_accepted_work().await;
-        }
+        let busy = self.admission_in_flight(deferred_commands).await;
         let ownership = Arc::clone(&self.ownership);
         let decision = ownership.decide(request, || busy);
         if let super::admission_close::CloseDecision::Closed { reason, .. } = decision {
             self.enter_admission_closed(reason);
         }
         decision
+    }
+
+    /// Observe, on the serialized admission path, the facts a close is
+    /// decided on, and decide nothing: the actor's own busy counts, the
+    /// members' native accepted work when those are idle, the foreground
+    /// leases and why admission is closed when it is. Nothing is closed,
+    /// and no owner is taken.
+    async fn observe_admission_idle(
+        &self,
+        deferred_commands: &VecDeque<RoutedMobCommand>,
+    ) -> super::admission_close::MobIdleObservation {
+        let busy = self.admission_in_flight(deferred_commands).await;
+        self.ownership.observe(busy)
     }
 
     /// Close admission if the mob is idle and no foreground owner holds a
@@ -33950,6 +33972,9 @@ impl MobActor {
                 #[cfg(feature = "runtime-adapter")]
                 MobCommand::DrainRunsSnapshot { reply_tx } => {
                     let _ = reply_tx.send(self.drain_runs_snapshot().await);
+                }
+                MobCommand::ObserveIdle { reply_tx } => {
+                    let _ = reply_tx.send(Ok(self.observe_admission_idle(deferred_commands).await));
                 }
                 MobCommand::CloseIfIdle { reply_tx } => {
                     let outcome = self.close_admission_if_idle(deferred_commands).await;

@@ -6862,12 +6862,8 @@ impl MobHandle {
     pub async fn observe_idle(
         &self,
     ) -> Result<super::admission_close::MobIdleObservation, MobError> {
-        // Nothing is observed yet: every mob answers that nothing is in
-        // flight and that its admission is open.
-        Ok(super::admission_close::MobIdleObservation {
-            busy: super::admission_close::MobBusy::default(),
-            admission_closed: None,
-        })
+        self.send_actor_command(|reply_tx| MobCommand::ObserveIdle { reply_tx })
+            .await?
     }
 
     /// Close admission if the mob is idle (D67). The actor decides on its

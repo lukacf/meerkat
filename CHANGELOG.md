@@ -59,6 +59,27 @@ them.
   instead not applied, preserving the existing level or provider default.
   Long decode is not added.
 
+- `meerkat-mob`: `MobHandle::observe_idle()` reads whether a mob is idle
+  and acts on nothing. It answers a `MobIdleObservation`: `busy`, the
+  `MobBusy` counts that `close_if_idle()` decides on, and
+  `admission_closed`, the reason the mob's admission is closed when it
+  is. `is_idle()` is true when nothing is in flight and admission is
+  open, the state in which an idle close would have closed the mob. The
+  mob's actor takes the reading on its serialized admission path with
+  the close's own computation. It closes nothing, takes no owner lease
+  and waits for nothing, and a command admitted after the reading is
+  admitted as before. The call needs the `List` control scope and is
+  answered while admission is closed.
+  Its limits. The reading covers the mob's own admission: a schedule
+  that is due, a delivery another owner holds for one of the mob's
+  members, and the mobs its members created are outside it. The counts
+  are diagnostic. The accepted work of the members' sessions (inputs
+  that are queued, held or running) is read only when the actor's own
+  counts are idle, and only for members with a bridge session in this
+  process. The reading is of one instant: the mob may be busy, or
+  closed, when the caller next acts, and no wait and no notification
+  come with it.
+
 ### Changed
 
 - Core catalog presentation identifies Neon as the Gemini default. Hydrogen

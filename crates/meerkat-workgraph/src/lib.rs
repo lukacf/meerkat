@@ -347,4 +347,29 @@ mod workgraph_workflow_skill_tests {
             "skill must say how a withdrawal reads"
         );
     }
+
+    #[test]
+    fn skill_scopes_reload_and_chaining_to_turns_without_an_attention_binding() {
+        let text = skill_text();
+        assert!(
+            text.contains("The two rules above are for ordinary tool use."),
+            "skill must keep reload and chaining for ordinary tool use"
+        );
+        assert!(
+            text.contains(
+                "every later WorkGraph call of the same turn is refused with \"stale or inactive WorkGraph attention projection\", `workgraph_get` included"
+            ),
+            "skill must say that a bound turn's first write ends its WorkGraph calls"
+        );
+        assert!(
+            text.contains("That is not a revision conflict"),
+            "skill must tell a stale projection from a revision conflict"
+        );
+        assert!(
+            text.contains(
+                "Nothing starts that turn for you: it starts when another input reaches you."
+            ),
+            "skill must not promise that a later turn starts by itself"
+        );
+    }
 }

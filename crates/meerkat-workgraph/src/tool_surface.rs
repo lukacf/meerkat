@@ -391,10 +391,17 @@ async fn validate_attention_projection_current(
         .await
         .map_err(|error| ToolError::ExecutionFailed {
             message: format!(
-                "{name} cannot use stale or inactive WorkGraph attention projection: {error}"
+                "{name} cannot use stale or inactive WorkGraph attention projection: {error}. {STALE_ATTENTION_PROJECTION_GUIDANCE}"
             ),
         })
 }
+
+/// What a model is told with the refusal of a WorkGraph call under an
+/// attention binding whose projection is no longer the current one. The
+/// projection is given to a turn once, so the refusal holds for the rest of
+/// that turn, and it is not the `expected_revision` conflict a model may take
+/// it for.
+const STALE_ATTENTION_PROJECTION_GUIDANCE: &str = "This turn runs under an attention binding, and the WorkGraph attention projection it was given when it started is no longer current: the bound item, its binding or its parent context changed after that, and a write of this turn to the bound item is such a change. This is not a revision conflict: reading the item or passing another expected_revision does not help, and no further WorkGraph call of this turn can succeed. Stop calling WorkGraph tools in this turn and say in your reply what is left to do. A later turn is given the current projection; it starts only when another input arrives.";
 
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
     tool_defs_from_values(workgraph_tools_list())
@@ -1545,6 +1552,16 @@ mod tests {
         assert!(matches!(
             second,
             ToolError::ExecutionFailed { ref message } if message.contains("item revision")
+        ));
+        // The refusal tells the model what happened and what it can do: the
+        // cause is the turn's projection, not the revision it passed.
+        assert!(matches!(
+            second,
+            ToolError::ExecutionFailed { ref message }
+                if message.contains("stale or inactive WorkGraph attention projection")
+                    && message.contains("This is not a revision conflict")
+                    && message.contains("no further WorkGraph call of this turn can succeed")
+                    && message.contains("it starts only when another input arrives")
         ));
     }
 

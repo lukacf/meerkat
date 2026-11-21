@@ -516,3 +516,150 @@ mod refused_join {
         );
     }
 }
+
+/// OBSERVATION rows. Each asserts what happens today, so that a change of it
+/// is seen; none states a requirement. The open choice is named in each
+/// row's comment.
+mod observed_today {
+    use super::*;
+
+    /// Wait until the boundary's refusal has taken the registered delivery
+    /// away.
+    async fn wait_for_no_waiting_delivery(rig: &DurableSteerRig) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while rig.state.has_waiting_delivery_for_test() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the boundary refuses the durable delivery");
+    }
+
+    /// ORDINARY ACCEPTING REQUEST AFTER A REFUSAL, as the agent loop can
+    /// produce it.
+    ///
+    /// An extraction boundary refuses steer E, and steer F is admitted after
+    /// that. In the agent loop a run that has entered extraction makes only
+    /// extraction requests until it ends (`extraction_active` is set once and
+    /// cleared at the run's terminal), so no ordinary accepting boundary
+    /// follows in that run. OBSERVED TODAY: the run's next boundary, again an
+    /// extraction boundary, takes neither; the run ends; exactly one
+    /// follow-up turn starts with E and then F.
+    ///
+    /// Open choice: whether a steer admitted after an earlier one was
+    /// refused may be delivered ahead of it. Here it has nowhere to go: the
+    /// run has no accepting boundary left.
+    #[tokio::test]
+    async fn observed_a_steer_admitted_after_an_extraction_refusal_follows_the_refused_one_into_one_follow_up()
+     {
+        let rig = DurableSteerRig::ephemeral().await;
+        let batch = rig.start_busy_turn().await;
+        let refused = peer_steer("extraction refused payload E");
+        let e_id = refused.id().clone();
+        rig.admit(refused).await;
+        rig.wait_for_waiting_delivery().await;
+        rig.script.step(RunnerStep::ExtractionBoundary);
+        wait_for_no_waiting_delivery(&rig).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rig.script.applied_durable().is_empty());
+        assert_eq!(rig.phase(&e_id).await, Some(InputLifecycleState::Queued));
+
+        let later = peer_steer("admitted after the refusal payload F");
+        let f_id = later.id().clone();
+        rig.admit(later).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.steer_queue().await,
+            vec![e_id.clone(), f_id.clone()],
+            "both wait in the steer lane, in admission order"
+        );
+
+        // The run's next request is an extraction request too.
+        rig.script.step_and_wait(RunnerStep::OpenNextBoundary).await;
+        rig.script
+            .step_and_wait(RunnerStep::ExtractionBoundary)
+            .await;
+        assert!(
+            rig.script.applied_durable().is_empty(),
+            "no request of the run carries E or F"
+        );
+
+        rig.script.step(RunnerStep::Finish);
+        rig.wait_for_apply_calls(2).await;
+        rig.script.step(RunnerStep::Finish);
+        for input_id in [&batch, &e_id, &f_id] {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        assert_eq!(
+            rig.script.primitives()[1],
+            vec![e_id.clone(), f_id.clone()],
+            "one follow-up turn starts with E and then F"
+        );
+        assert!(rig.script.applied_durable().is_empty());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            2,
+            "exactly one follow-up turn ran"
+        );
+    }
+
+    /// The same refusal with an accepting boundary scripted after it. The
+    /// agent loop cannot produce this order (see the row above); the
+    /// simulated runner can, and the row reads the runtime's own rule for a
+    /// steer that waits behind a refused one.
+    ///
+    /// OBSERVED TODAY: the accepting boundary carries neither E nor F. F
+    /// takes the follow-up turn behind E; nothing overtakes E.
+    ///
+    /// Open choice: the same as above. If F is to be delivered at an
+    /// accepting boundary while E waits for the follow-up, this row changes.
+    #[tokio::test]
+    async fn observed_an_accepting_boundary_scripted_after_an_extraction_refusal_carries_neither_steer()
+     {
+        let rig = DurableSteerRig::ephemeral().await;
+        let batch = rig.start_busy_turn().await;
+        let refused = peer_steer("scripted refusal payload E");
+        let e_id = refused.id().clone();
+        rig.admit(refused).await;
+        rig.wait_for_waiting_delivery().await;
+        rig.script.step(RunnerStep::ExtractionBoundary);
+        wait_for_no_waiting_delivery(&rig).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let later = peer_steer("scripted refusal payload F");
+        let f_id = later.id().clone();
+        rig.admit(later).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        rig.script.step_and_wait(RunnerStep::OpenNextBoundary).await;
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(&rig),
+            Vec::<InputId>::new(),
+            "the accepting boundary carries neither E nor F"
+        );
+        assert_eq!(
+            rig.steer_queue().await,
+            vec![e_id.clone(), f_id.clone()],
+            "both keep their steer-lane place, in admission order"
+        );
+
+        rig.script.step(RunnerStep::Finish);
+        rig.wait_for_apply_calls(2).await;
+        rig.script.step(RunnerStep::Finish);
+        for input_id in [&batch, &e_id, &f_id] {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        assert_eq!(
+            rig.script.primitives()[1],
+            vec![e_id.clone(), f_id.clone()],
+            "one follow-up turn starts with E and then F"
+        );
+        assert!(rig.script.applied_durable().is_empty());
+    }
+}

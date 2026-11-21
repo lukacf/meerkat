@@ -1879,7 +1879,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         "id": goal.item_id,
         "expected_revision": item_after["revision"],
         "evidence": {
-            "kind": "finding",
+            "kind": "note",
             "id": "continuation-after-restart",
             "summary": "written by the continuation's turn after the second boot"
         }

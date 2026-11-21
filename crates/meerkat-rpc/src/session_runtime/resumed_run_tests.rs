@@ -1084,10 +1084,16 @@ impl meerkat_runtime::ResumedRunAdmission for HeldResumeAdmission {
 /// and the two that waited come ahead of the late one, in admission order,
 /// in the transcript and in the first request that carries each.
 ///
-/// Read and printed, not asserted (the contract does not state it): which
-/// path served the late steer, as the line `LATE_ADMISSION_PATH`: the
-/// resumed run's first request, a later request of the resumed run, or a
-/// follow-up run.
+/// Asserted too, the path that serves the late steer: the new process makes
+/// exactly one model request, the resumed run's first; that request carries
+/// the first waiting steer, the second waiting steer and the late steer, in
+/// that order; all three rows are consumed by the resumed run; and no second
+/// run starts with any of them. The row also prints what it read, as the
+/// line `LATE_ADMISSION_PATH`.
+///
+/// Bound: the window this row places the late steer in is "executor
+/// attached, resumed run not begun". A steer admitted once the waiting
+/// steers' work is already running is another scene.
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_run_killed_while_two_steers_wait_then_a_third_admitted_before_the_resume_is_delivered_after_them()
  {
@@ -1252,7 +1258,8 @@ async fn rpc_run_killed_while_two_steers_wait_then_a_third_admitted_before_the_r
         transcript.push(at[0]);
     }
 
-    // The path that served the late steer: read and printed, not asserted.
+    // The path that served the late steer, printed before it is asserted so
+    // that a failing run still says what it read.
     let (late_request, _) = first_carried[2];
     let late_run = rows[2].1.clone();
     let path = if late_run.as_ref() == Some(&open_run) && late_request == 0 {
@@ -1267,6 +1274,31 @@ async fn rpc_run_killed_while_two_steers_wait_then_a_third_admitted_before_the_r
         requests.len(),
         rows.iter().map(|(_, run)| run.clone()).collect::<Vec<_>>()
     );
+
+    // The path: one model request in the new process, the resumed run's
+    // first, carrying the two that waited and then the late one; every row
+    // consumed by the resumed run; no second run starts with any of them.
+    assert_eq!(
+        requests.len(),
+        1,
+        "the new process makes exactly one model request, the resumed run's first: a steer \
+         left for a follow-up run would ask the model again"
+    );
+    assert!(
+        first_carried.iter().all(|(request, _)| *request == 0),
+        "the resumed run's first request carries all three steers: {first_carried:?}"
+    );
+    assert!(
+        first_carried.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "that request carries waiting one, waiting two, then the late steer: {first_carried:?}"
+    );
+    for (token, (phase, run)) in tokens.iter().zip(&rows) {
+        assert_eq!(
+            (phase.as_str(), run.as_ref()),
+            ("Consumed", Some(&open_run)),
+            "{token} is consumed by the resumed run, not by a second run"
+        );
+    }
 
     // The two that waited come ahead of the late one, in admission order.
     assert!(

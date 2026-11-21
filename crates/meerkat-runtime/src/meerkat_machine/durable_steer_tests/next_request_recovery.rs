@@ -523,8 +523,11 @@ mod refused_join {
 }
 
 /// OBSERVATION rows. Each asserts what happens today, so that a change of it
-/// is seen; none states a requirement. The open choice is named in each
-/// row's comment.
+/// is seen. The two rows after an extraction refusal state no requirement;
+/// the open choice is named in each row's comment. The two rows beside a
+/// resumed run state requirements: a steer admitted while a resumed run
+/// runs joins its next request, and a steer that waited at the restart
+/// joins it too, as the session contract says.
 pub(super) mod observed_today {
     use super::*;
 

@@ -58,6 +58,46 @@ them.
   `reasoning_effort` validation; an unsupported turn reasoning preference is
   instead not applied, preserving the existing level or provider default.
   Long decode is not added.
+- `meerkat-workgraph`: a host can be told of each committed WorkGraph write.
+  `WorkGraphService::with_commit_observer` installs a
+  `WorkGraphCommitObserver`. The service calls it after the store answered a
+  write that advanced an item's revision or made or advanced an attention
+  binding, with a `WorkGraphCommitNotice`: the realm, the namespace, the
+  item, the binding when the write is a binding's, and the origin of the
+  write. `WorkGraphService::with_commit_origin` names the member a copy of
+  the service writes for (`WorkGraphCommitOrigin`); the copies of a service
+  share its observer. A refused write and a read tell nothing. `meerkat`
+  re-exports the three types. Additive: new items; a service with no
+  observer behaves as before.
+- `meerkat-runtime`: `ContinuationInput::workgraph_attention` builds the
+  continuation that gives a session one turn of its own under a WorkGraph
+  attention projection, and `meerkat::surface::workgraph_attention_continuation`
+  builds it from a binding's projection. Additive: new functions.
+- `meerkat-runtime`: when a WorkGraph attention continuation is admitted
+  while an earlier one of the same binding still waits, the earlier one ends
+  superseded and takes no turn; an input that was staged or runs keeps its
+  turn. The completion waiters of an input that ends superseded are answered
+  `CompletionWaitError::Superseded { superseded_by }`, read with
+  `is_superseded()` and `superseded_by()`; they were left waiting before.
+  Additive: a new variant of a non-exhaustive enum and two methods.
+- `meerkat-mob`: `WorkGraphPursuit`, with `WorkGraphPursuitPredicate`, starts
+  a member's turn when WorkGraph work its attention is bound to is written.
+  A host makes one from its WorkGraph service and a predicate that says
+  which bindings are pursued, builds its mobs with the service
+  `WorkGraphPursuit::workgraph_service` returns, writes through it, and
+  attaches each mob with `WorkGraphPursuit::attach`. A write that a pursuing
+  member makes through its own WorkGraph tools starts no turn. Native
+  targets with the `runtime-adapter` feature. Additive: new items; a host
+  that makes no pursuit has none.
+- `meerkat-mob`: `MobProvisioner::admit_attention_continuation` admits a
+  WorkGraph attention continuation to a member's session (with the
+  `runtime-adapter` feature). Additive: a provided method whose default
+  refuses, so an implementor of the trait compiles unchanged; the
+  session-backed provisioner implements it.
+- `meerkat`: `meerkat::surface::validate_workgraph_attention_turn_overlay`
+  refuses a turn whose stored WorkGraph attention projection is no longer
+  current. Additive: a new function; the runtime-backed surfaces and the CLI
+  call it for the check they already made.
 
 ### Changed
 

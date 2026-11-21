@@ -364,13 +364,13 @@ AuditRecoverRow ==
        \/ /\ audit_recovery[i] = "Lifecycle"
           /\ RecoverInputLifecycleIdle(i, "Queued", None, None, None, None, 0,
                 r.attempts, None, None, Some(r.seq), None, Some(r.lane),
-                Some(r.lane), Some(r.boundary), Some(r.exec), None, r.is_prompt)
+                Some(r.lane), Some(r.boundary), Some(r.exec), None, r.is_prompt, None)
           /\ RecoveryStep(i, IF r.key = "" THEN "Recovered" ELSE "Key")
        \* A row the marked run binds stays Staged, associated with its run.
        \/ /\ audit_recovery[i] = "LifecycleBound"
           /\ RecoverInputLifecycleIdle(i, "Staged", None, None, None, None, 0,
                 r.attempts, Some(AuditRun), None, Some(r.seq), None, Some(r.lane),
-                None, None, None, None, FALSE)
+                None, None, None, None, FALSE, None)
           /\ RecoveryStep(i, IF r.key = "" THEN "Recovered" ELSE "Key")
        \/ /\ audit_recovery[i] = "Key"
           /\ RegisterAcceptedIdempotencyIdle(i, r.key)

@@ -139,7 +139,7 @@ AuditPrefix ==
     \/ model_step_count = 4
        /\ RecoverInputLifecycleIdle(AuditQueued, "Queued", None, None, None, None, 0, 0,
              None, None, Some(1), None, Some("Queue"), Some("Queue"), Some("RunStart"),
-             Some("ContentTurn"), None, TRUE)
+             Some("ContentTurn"), None, TRUE, None)
        /\ KeepHistory
     \/ model_step_count = 5
        /\ RecoverAdmittedInputIdle(AuditBound, "Prompt", "RunStart", "ContentTurn", None, "Queue")
@@ -147,7 +147,7 @@ AuditPrefix ==
     \/ model_step_count = 6
        /\ RecoverInputLifecycleIdle(AuditBound, "Staged", None, None, None, None, 0, 1,
              Some(AuditRunKept), None, Some(2), None, Some("Queue"), None, None, None, None,
-             FALSE)
+             FALSE, None)
        /\ KeepHistory
 
 SettleAccepted(o) ==

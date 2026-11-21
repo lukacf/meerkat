@@ -205,6 +205,21 @@ if [[ ! -x "${durable_steer_audit}" ]]; then
   exit 1
 fi
 
+# The same audit's recovery scene, as a block of its own (the audit's main
+# runs fill most of their shard): a start over the same store recovers the
+# run's batch input bound to the run it resumes and the late Steer input from
+# one stored row, and resumes the run. A row that never left the Steer lane
+# must join the resumed run; a row with a stage attempt, a row that still
+# names a run, a row in the Queue lane, a row that stores no class and a
+# governed row must hold no delivery class after recovery and never join. Four
+# seeded defects (a recovery that ignores the attempts, the run or the lane,
+# and a binding that keeps the class) must each be refused. Four runs and
+# four mutant runs, four free steps after the scene's prefix.
+if run_part audits-d; then
+  echo "running bounded durable in-turn steer recovery scene TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}" --recovery-scene --mutants
+fi
+
 # The live-context outbox invariants (no closed channel leaves a queued row;
 # no queued row is one a channel's provider session already carries) are
 # model-checked by a second bounded audit over the same generated model: one
@@ -1701,7 +1716,11 @@ run_machine_verify() {
 # 25-29 s): about 600-700 s;
 # audits-d = durable-tail recovery ownership with --mutants 143-238,
 # live-context outbox 100-146, peer request maps with --mutants 87-134,
-# live-context result barrier with --mutants 25-39: 383-555 s;
+# live-context result barrier with --mutants 25-39: 383-555 s, and the
+# durable in-turn steer audit's recovery scene with --mutants (eight runs,
+# 60 s locally with 4 TLC workers, not yet measured on a hosted runner,
+# about 70-230 s at the 1.2-3.8x below): about 455-785 s, whose upper end
+# is past the 720 s target below;
 # audits-e = member lifecycle with --mutants 441-522, empty-resume residency
 # with --mutants 52-64, durable-tail classification with --mutants 36-48, the
 # MobMachine arm coverage gate under 1: 558-646 s;

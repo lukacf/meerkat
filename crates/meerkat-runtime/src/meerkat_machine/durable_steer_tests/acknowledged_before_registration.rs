@@ -939,6 +939,11 @@ async fn acknowledged_steer_still_unregistered_when_the_run_ends_takes_one_follo
         steps_before,
         "the boundary is still open when the held preparation is let go"
     );
+    assert_eq!(
+        rig.script.boundary_takes().len(),
+        takes_before,
+        "the open boundary has written no take"
+    );
 
     // Let go, the preparation names a run that is no longer active: the
     // coordinator refuses it at once, its work ends, and the boundary
@@ -947,6 +952,11 @@ async fn acknowledged_steer_still_unregistered_when_the_run_ends_takes_one_follo
     assert!(
         wait_for_steps_done(&rig, steps_before + 1).await,
         "the follow-up turn's boundary ends once the ended run's preparation returned"
+    );
+    assert_eq!(
+        lag.forwarded.load(Ordering::SeqCst),
+        1,
+        "the boundary ended after the preparation went on to the coordinator, not before"
     );
     assert!(rig.script.boundary_takes()[takes_before].is_empty());
     assert!(

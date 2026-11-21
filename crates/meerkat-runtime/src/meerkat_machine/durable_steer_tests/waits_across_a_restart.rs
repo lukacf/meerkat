@@ -537,16 +537,20 @@ async fn steer_work_is_running(rig: &DurableSteerRig, input_id: &InputId) -> boo
         .is_working(input_id)
 }
 
-/// Steer F is admitted after the restart and before the work of steer E,
-/// which waited across it, has begun: the row holds the loop before the
-/// executor starts the resumed run, so E's work still waits for that start.
-/// F's own work finds E ahead of it with no work running and ends without a
-/// preparation; F keeps its place in the steer lane behind E. Once the
-/// executor starts the run, E's work takes the boundary and joins F behind
-/// it: one request of the resumed run carries E and then F, each once, and
-/// no follow-up turn runs.
+/// Steer F is admitted after the restart, while the row holds the loop
+/// before the executor starts the resumed run; steer E waited across the
+/// restart. At that point the row reads that no live-boundary work is
+/// running for either steer, that nothing has registered for a boundary,
+/// and that both wait in the steer lane, E ahead of F. Once the executor
+/// starts the run, one request of the resumed run carries E and then F,
+/// each once, and no follow-up turn runs.
+///
+/// The row does not read whose work put F in that request. A change under
+/// which the waiting steer's walk joins no later steer of the lane makes
+/// this row fail with E alone in the request.
 #[tokio::test]
-async fn steer_admitted_before_the_waiting_steers_work_began_joins_the_same_request_behind_it() {
+async fn steer_admitted_before_the_executor_starts_the_resumed_run_is_in_its_next_request_behind_the_waiting_one()
+ {
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());
     let abandoned =
@@ -565,25 +569,25 @@ async fn steer_admitted_before_the_waiting_steers_work_began_joins_the_same_requ
         .expect("the loop's hook is alive");
     assert!(
         !steer_work_is_running(&rig, &e_id).await,
-        "the waiting steer's work has not begun: the executor has not started the run"
+        "no work is running for the waiting steer: the executor has not started the run"
     );
 
-    let later = peer_steer("admitted before the waiting steer's work began F");
+    let later = peer_steer("admitted before the executor starts the resumed run F");
     let f_id = later.id().clone();
     rig.admit(later).await;
-    // The later steer's own work has all the time it needs to end.
+    // Time for any work the admission started to settle.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !steer_work_is_running(&rig, &f_id).await,
-        "the later steer's own work ended: an older steer waits ahead of it with no work running"
+        "no work is running for the later steer"
     );
     assert!(
         !steer_work_is_running(&rig, &e_id).await,
-        "the waiting steer's work has still not begun"
+        "no work is running for the waiting steer"
     );
     assert!(
         !rig.state.has_waiting_delivery_for_test(),
-        "the later steer's own work prepared nothing"
+        "nothing has registered for a boundary"
     );
     assert_eq!(
         rig.steer_queue().await,
@@ -605,8 +609,6 @@ async fn steer_admitted_before_the_waiting_steers_work_began_joins_the_same_requ
         crashed_run: abandoned.crashed_run,
         waiting: abandoned.waiting,
     };
-    // The later steer's own work is over, so only the walk of the waiting
-    // steer's work can put it in this request.
     assert_the_resumed_runs_next_request_carries(&restarted, &[e_id, f_id]).await;
 }
 

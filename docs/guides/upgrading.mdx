@@ -114,19 +114,32 @@ that send more than one `steer` input into a running turn.
 
 Do not rely on a model decision between consecutive eligible steers. In
 0.9.17 one durable steer joined a running turn per model boundary, so steers
-that waited together reached the model one request apart. Now the durable
-steers that wait in the steer lane join a boundary together, in admission
-order, and the next model request is the first to carry all of them. No
-setting keeps one steer per model boundary.
+that waited together reached the model one request apart. Now, at a
+boundary where a durable steer has registered its claim, the eligible prefix
+of the durable steers that wait in the steer lane joins, in admission order,
+and the next model request is the first to carry them. An acknowledged
+admission is not inclusion in a request. No setting keeps one steer per
+model boundary.
 
-If distinct decisions matter, wait for an observed model boundary before you
-send the next steer: the first `turn_completed` of the run after the earlier
-steer's `boundary_append_applied`. It says the model has answered a request
-that carried that steer. The next steer then joins a later boundary, or the
+If distinct decisions matter, match the earlier steer to a model decision
+before you send the next one. Its `boundary_append_applied` names the
+`input_id` and the `run_id` of the turn that applied it, and that run's next
+successful `turn_completed` says the model has answered a request that
+carried it. The match is by stream order: `turn_completed` carries no run id
+and no success flag, so take the next one on the session's stream after the
+applied event and before that run ends (`run_completed` or `run_failed`).
+The applied event alone is neither a response nor the durable
+consumption of the input. The next steer then joins a later boundary, or the
 follow-up turn when the run ends first. An earlier steer that itself takes
 the follow-up turn publishes no `boundary_append_applied`: read its
-`last_run_id` with `session/input_status` and wait for that run's first
-`turn_completed`.
+`last_run_id` with `session/input_status` and take that run's first
+successful `turn_completed`.
+
+When that `turn_completed` does not come (the call failed, the run discarded
+what it applied, or the run reached its terminal or was replayed without
+it), do not wait without a limit and do not resend the steer on your own.
+Reconcile with `session/input_status` (the input's state and its
+`last_run_id`), `boundary_appends_discarded` and retained history.
 
 A steer admitted after a request's input is fixed waits for the next
 boundary, even when its admission was acknowledged before the request was
@@ -134,16 +147,20 @@ composed or sent. A caller cannot tell the two instants apart, so an
 admission acknowledged before the request left does not mean the steer is in
 that request.
 
-What stays per input, exactly once: the transcript rows, the input id, the
-delivery witness, the binding to the run's round commit and the
-`boundary_append_applied`. Several of those events can now
+Each input keeps its own input id. A successful in-turn application that the
+run retains is exactly once per input: its transcript rows, its delivery
+witness and its `boundary_append_applied`. Several of those events can now
 precede one model request, so match a delivery by `input_id`, not by one
 event or one new transcript row per request. Later requests carry the rows as
 transcript history, which is not another delivery.
 
 A steer withdrawn with `session/recall_input` (or
-`MeerkatMachine::recall_queued_input`) before its request's cutoff is in no
-request and has no row, and the steers behind it are not delayed.
+`MeerkatMachine::recall_queued_input`) before it joins a run joins no
+request and gets no row from then on, and the steers behind it are not
+delayed. The recall withdraws the queued delivery; it does not undo what a
+model saw of the steer in an earlier turn that applied it and returned it to
+the queue. After the join a recall answers `not_queued` while the run holds
+the steer, and `already_terminal` once the input has ended.
 
 Unchanged: no model request in flight is cancelled; steers still waiting when
 the run ends take the follow-up turn in arrival order; an input that only a
@@ -5454,8 +5471,9 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   by exactly one follow-up turn. 0.9.3 showed peer and text-only prompt
   steers to one model request and never stored them. History now holds their
   rows, `boundary_append_applied` reports them, and each incoming comms
-  notice publishes one `peer_content_ingested`. From 0.9.18 every eligible
-  steer waiting at a boundary joins it: see
+  notice publishes one `peer_content_ingested`. In the unreleased line after
+  0.9.17 the eligible steers waiting at a boundary with a registered claim
+  join it together: see
   [Steers join the next model request](#steers-join-the-next-model-request).
 - **Replies name what they answer:** the model's peer message notice gains a
   `Delivery ID: <id>` line and, for a reply, an `In reply to: <id>` line.

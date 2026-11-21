@@ -662,4 +662,419 @@ mod observed_today {
         );
         assert!(rig.script.applied_durable().is_empty());
     }
+
+    // -----------------------------------------------------------------
+    // PROVEN RESUMABILITY: a restart beside a run that RESUMES.
+    // -----------------------------------------------------------------
+
+    /// Leave in `store` what a durable run's round commit leaves from its
+    /// first round on: a committed base of the session and, on it, the run's
+    /// provisional tail whose run cursor binds `bound` to `run_id`. A restart
+    /// that finds such a tail keeps the run open and resumes it. The scripted
+    /// runner writes no session document, so the row stands the tail itself;
+    /// everything else in these rows goes through the ordinary admission and
+    /// the ordinary registration.
+    async fn stand_continuable_run_tail(
+        store: &Arc<dyn crate::store::RuntimeStore>,
+        session_id: &SessionId,
+        run_id: &RunId,
+        bound: &[InputId],
+    ) {
+        let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(
+                "batch prompt keeps the runtime busy".to_string(),
+            ),
+        ));
+        store
+            .commit_session_snapshot(
+                &runtime_id,
+                crate::store::SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                },
+            )
+            .await
+            .expect("the session's committed base");
+        let base = store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .expect("read the committed base")
+            .expect("a committed base");
+        session
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                bound.to_vec(),
+                0,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            ))
+            .expect("the run cursor is recorded");
+        let candidate = crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            base,
+            run_id.clone(),
+            1,
+            &session,
+        )
+        .expect("the round's candidate");
+        store
+            .write_prepared_whole_blob_provisional_tail(&runtime_id, candidate)
+            .await
+            .expect("the round commit's tail");
+    }
+
+    /// What three places hold of one input: the machine's delivery for it,
+    /// the class the runtime's ingress keeps, and the persisted row.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Held {
+        machine_delivery: Option<String>,
+        runtime_class: Option<String>,
+        row_class: Option<String>,
+        row_phase: InputLifecycleState,
+    }
+
+    fn held(
+        machine_delivery: Option<&str>,
+        runtime_class: Option<&str>,
+        row_class: Option<&str>,
+        row_phase: InputLifecycleState,
+    ) -> Held {
+        Held {
+            machine_delivery: machine_delivery.map(str::to_string),
+            runtime_class: runtime_class.map(str::to_string),
+            row_class: row_class.map(str::to_string),
+            row_phase,
+        }
+    }
+
+    async fn read_held(
+        rig: &DurableSteerRig,
+        store: &Arc<dyn crate::store::RuntimeStore>,
+        input_id: &InputId,
+    ) -> Held {
+        let driver = {
+            let sessions = rig.adapter.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&rig.session_id)
+                    .expect("registered session")
+                    .driver,
+            )
+        };
+        let (machine_delivery, runtime_class) = {
+            let entry = driver.lock().await;
+            let machine_delivery = entry
+                .shared_dsl_authority()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                .input_live_boundary_delivery
+                .get(&input_id.to_string())
+                .map(|delivery| format!("{delivery:?}"));
+            let runtime_class = entry
+                .driver_ingress()
+                .runtime_semantics(input_id)
+                .and_then(|semantics| semantics.live_boundary_delivery())
+                .map(|class| format!("{class:?}"));
+            (machine_delivery, runtime_class)
+        };
+        let row = store
+            .load_input_state(
+                &MeerkatMachine::logical_runtime_id(&rig.session_id),
+                input_id,
+            )
+            .await
+            .expect("load the input's row")
+            .expect("the input's row is stored");
+        Held {
+            machine_delivery,
+            runtime_class,
+            row_class: row
+                .state
+                .runtime_semantics
+                .as_ref()
+                .and_then(|semantics| semantics.live_boundary_delivery())
+                .map(|class| format!("{class:?}")),
+            row_phase: row.seed.phase,
+        }
+    }
+
+    struct Resumed {
+        rig: DurableSteerRig,
+        store: Arc<dyn crate::store::RuntimeStore>,
+        batch: InputId,
+        run_id: RunId,
+        /// The steer admitted before the restart, when the scene has one.
+        waiting: Option<InputId>,
+    }
+
+    /// A persistent run made a round commit and its tools are running; with
+    /// `with_waiting_steer`, a steer E is then admitted and waits for the
+    /// run's next boundary. The process dies. A fresh runtime registers the
+    /// session over the same store, and the SAME run resumes.
+    async fn restart_beside_a_resumed_run(with_waiting_steer: bool) -> Resumed {
+        let store: Arc<dyn crate::store::RuntimeStore> =
+            Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let crashed = DurableSteerRig::persistent(Arc::clone(&store)).await;
+        let session_id = crashed.session_id.clone();
+        let batch = crashed.start_busy_turn().await;
+        let run_id = crashed
+            .script
+            .active_run
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("active run");
+        stand_continuable_run_tail(&store, &session_id, &run_id, std::slice::from_ref(&batch))
+            .await;
+        let mut waiting = None;
+        if with_waiting_steer {
+            let steer = peer_steer("resumed run payload E");
+            let e_id = steer.id().clone();
+            crashed.admit(steer).await;
+            crashed.wait_for_waiting_delivery().await;
+            assert_eq!(
+                read_held(&crashed, &store, &e_id).await,
+                held(
+                    Some("DurableAppend"),
+                    Some("DurableAppend"),
+                    Some("DurableAppend"),
+                    InputLifecycleState::Queued
+                ),
+                "before the restart E is a durable in-turn delivery in all three places"
+            );
+            waiting = Some(e_id);
+        }
+        // The process dies with the run open. The first runtime is never
+        // driven again.
+        std::mem::forget(crashed);
+
+        let rig = DurableSteerRig::with_adapter_for_session(
+            Arc::new(
+                MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                    .expect("persistent machine"),
+            ),
+            session_id,
+        )
+        .await;
+        rig.wait_for_apply_calls(1).await;
+        assert_eq!(
+            rig.script.applied_runs.lock().unwrap().clone(),
+            vec![run_id.clone()],
+            "the restart resumes the SAME run, under its own id"
+        );
+        assert_eq!(
+            rig.script.primitives(),
+            vec![vec![batch.clone()]],
+            "the resumed run carries its own bound input"
+        );
+        Resumed {
+            rig,
+            store,
+            batch,
+            run_id,
+            waiting,
+        }
+    }
+
+    /// The scripted runner commits no session document, so the hand-stood
+    /// tail leaves the store before the run's terminal, as in the rows that
+    /// stand a tail beside a running run.
+    async fn discard_the_stood_tail(resumed: &Resumed) {
+        let runtime_id = MeerkatMachine::logical_runtime_id(&resumed.rig.session_id);
+        let tail = resumed
+            .store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .expect("the run's tail stands")
+            .authority()
+            .clone();
+        assert!(
+            resumed
+                .store
+                .discard_whole_blob_provisional_tail(&runtime_id, &tail)
+                .await
+                .expect("discard the tail")
+        );
+    }
+
+    /// PROVEN RESUMABILITY, the control: no steer waits at the restart.
+    ///
+    /// OBSERVED TODAY: a steer F admitted while the resumed run runs is a
+    /// durable in-turn delivery in the machine, in the runtime and in its
+    /// row; it registers for the run's next boundary and that boundary
+    /// carries it. No follow-up turn runs.
+    #[tokio::test]
+    async fn observed_a_steer_admitted_during_a_resumed_run_joins_its_next_request() {
+        let resumed = restart_beside_a_resumed_run(false).await;
+        let rig = &resumed.rig;
+        let steer = peer_steer("resumed run payload F");
+        let f_id = steer.id().clone();
+        rig.admit(steer).await;
+        rig.wait_for_waiting_delivery().await;
+        assert_eq!(
+            read_held(rig, &resumed.store, &f_id).await,
+            held(
+                Some("DurableAppend"),
+                Some("DurableAppend"),
+                Some("DurableAppend"),
+                InputLifecycleState::Queued
+            )
+        );
+
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(rig),
+            vec![f_id.clone()],
+            "the resumed run's next request carries F"
+        );
+        let row = resumed
+            .store
+            .load_input_state(&MeerkatMachine::logical_runtime_id(&rig.session_id), &f_id)
+            .await
+            .expect("load F's row")
+            .expect("F's row is stored");
+        assert_eq!(row.seed.phase, InputLifecycleState::Staged);
+        assert_eq!(
+            row.seed.last_run_id.as_ref(),
+            Some(&resumed.run_id),
+            "F is bound to the resumed run"
+        );
+
+        discard_the_stood_tail(&resumed).await;
+        rig.script.step(RunnerStep::Finish);
+        for input_id in [&resumed.batch, &f_id] {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        assert_eq!(rig.script.applied_durable(), vec![f_id]);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            1,
+            "no follow-up turn ran"
+        );
+    }
+
+    /// PROVEN RESUMABILITY, the witness: steer E waits for a boundary when
+    /// the process dies, the same run resumes, and steer F is admitted while
+    /// it runs.
+    ///
+    /// OBSERVED TODAY, at the cutoff of the resumed run's next request: E is
+    /// back in the steer lane with its `Queued` row; the runtime and the row
+    /// still class it a durable in-turn delivery, but the new machine holds
+    /// NO delivery for it (only an admission writes one). F holds its
+    /// delivery in all three places. No delivery registers, the request
+    /// carries NEITHER E nor F, and after the run ends exactly one follow-up
+    /// turn starts with E and then F. Each is delivered exactly once, and E's
+    /// payload is the one it was admitted with.
+    ///
+    /// Open choice, not asserted here. If E is still eligible in a run that
+    /// resumed, both belong in that request, E before F. If a restart ends
+    /// E's eligibility for it, F belongs in that request and E in the
+    /// follow-up. A stale class or the machine's missing delivery alone does
+    /// not decide which.
+    #[tokio::test]
+    async fn observed_a_steer_waiting_at_a_restart_keeps_itself_and_a_later_one_out_of_the_resumed_run()
+     {
+        let resumed = restart_beside_a_resumed_run(true).await;
+        let rig = &resumed.rig;
+        let e_id = resumed
+            .waiting
+            .clone()
+            .expect("the scene has a waiting steer");
+        assert_eq!(rig.steer_queue().await, vec![e_id.clone()]);
+
+        let steer = peer_steer("resumed run payload F");
+        let f_id = steer.id().clone();
+        rig.admit(steer).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The cutoff: what the three places hold of E and of F.
+        assert_eq!(
+            read_held(rig, &resumed.store, &e_id).await,
+            held(
+                None,
+                Some("DurableAppend"),
+                Some("DurableAppend"),
+                InputLifecycleState::Queued
+            ),
+            "E: no machine delivery, the class kept by the runtime and by the row"
+        );
+        assert_eq!(
+            read_held(rig, &resumed.store, &f_id).await,
+            held(
+                Some("DurableAppend"),
+                Some("DurableAppend"),
+                Some("DurableAppend"),
+                InputLifecycleState::Queued
+            ),
+            "F: a durable in-turn delivery in all three places"
+        );
+        let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+        let e_row = resumed
+            .store
+            .load_input_state(&runtime_id, &e_id)
+            .await
+            .expect("load E's row")
+            .expect("E's row is stored");
+        assert!(
+            format!("{:?}", e_row.state.persisted_input).contains("resumed run payload E"),
+            "E's row keeps the payload it was admitted with"
+        );
+        assert!(
+            !rig.state.has_waiting_delivery_for_test(),
+            "no delivery registers for the resumed run's next boundary"
+        );
+        assert_eq!(
+            rig.steer_queue().await,
+            vec![e_id.clone(), f_id.clone()],
+            "both wait in the steer lane, in admission order"
+        );
+
+        // The resumed run's next request.
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(rig),
+            Vec::<InputId>::new(),
+            "the resumed run's next request carries neither E nor F"
+        );
+
+        // The run ends; the follow-up turn.
+        discard_the_stood_tail(&resumed).await;
+        rig.script.step(RunnerStep::Finish);
+        rig.wait_for_apply_calls(2).await;
+        rig.script.step(RunnerStep::Finish);
+        for input_id in [&resumed.batch, &e_id, &f_id] {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        let primitives = rig.script.primitives();
+        assert_eq!(
+            primitives[1],
+            vec![e_id.clone(), f_id.clone()],
+            "one follow-up turn starts with E and then F"
+        );
+        for input_id in [&e_id, &f_id] {
+            assert_eq!(
+                contributions(&primitives, input_id),
+                1,
+                "{input_id} is delivered exactly once"
+            );
+        }
+        assert!(
+            rig.script.applied_durable().is_empty(),
+            "no boundary applied E or F"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            2,
+            "exactly one follow-up turn ran"
+        );
+    }
 }

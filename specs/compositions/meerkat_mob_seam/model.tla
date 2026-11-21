@@ -26854,7 +26854,7 @@ meerkat_BindInputAuthorityIdle(arg_input_id, arg_authority_binding, arg_authorit
        /\ meerkat_phase' = "Idle"
        /\ meerkat_input_authority_bindings' = MapSet(meerkat_input_authority_bindings, packet.payload.input_id, packet.payload.authority_binding)
        /\ meerkat_input_authority_batch_keys' = MapSet(meerkat_input_authority_batch_keys, packet.payload.input_id, packet.payload.authority_batch_key)
-       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = IF (packet.payload.input_id \in meerkat_recovered_admitted_inputs) THEN MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id) ELSE meerkat_input_live_boundary_delivery
        /\ UnchangedFrame_d3c8fb269da47c48
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -26882,7 +26882,7 @@ meerkat_BindInputAuthorityAttached(arg_input_id, arg_authority_binding, arg_auth
        /\ meerkat_phase' = "Attached"
        /\ meerkat_input_authority_bindings' = MapSet(meerkat_input_authority_bindings, packet.payload.input_id, packet.payload.authority_binding)
        /\ meerkat_input_authority_batch_keys' = MapSet(meerkat_input_authority_batch_keys, packet.payload.input_id, packet.payload.authority_batch_key)
-       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = IF (packet.payload.input_id \in meerkat_recovered_admitted_inputs) THEN MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id) ELSE meerkat_input_live_boundary_delivery
        /\ UnchangedFrame_d3c8fb269da47c48
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -26910,7 +26910,7 @@ meerkat_BindInputAuthorityRunning(arg_input_id, arg_authority_binding, arg_autho
        /\ meerkat_phase' = "Running"
        /\ meerkat_input_authority_bindings' = MapSet(meerkat_input_authority_bindings, packet.payload.input_id, packet.payload.authority_binding)
        /\ meerkat_input_authority_batch_keys' = MapSet(meerkat_input_authority_batch_keys, packet.payload.input_id, packet.payload.authority_batch_key)
-       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = IF (packet.payload.input_id \in meerkat_recovered_admitted_inputs) THEN MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id) ELSE meerkat_input_live_boundary_delivery
        /\ UnchangedFrame_d3c8fb269da47c48
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -26938,7 +26938,7 @@ meerkat_BindInputAuthorityRetired(arg_input_id, arg_authority_binding, arg_autho
        /\ meerkat_phase' = "Retired"
        /\ meerkat_input_authority_bindings' = MapSet(meerkat_input_authority_bindings, packet.payload.input_id, packet.payload.authority_binding)
        /\ meerkat_input_authority_batch_keys' = MapSet(meerkat_input_authority_batch_keys, packet.payload.input_id, packet.payload.authority_batch_key)
-       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = IF (packet.payload.input_id \in meerkat_recovered_admitted_inputs) THEN MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id) ELSE meerkat_input_live_boundary_delivery
        /\ UnchangedFrame_d3c8fb269da47c48
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -26966,7 +26966,7 @@ meerkat_BindInputAuthorityStopped(arg_input_id, arg_authority_binding, arg_autho
        /\ meerkat_phase' = "Stopped"
        /\ meerkat_input_authority_bindings' = MapSet(meerkat_input_authority_bindings, packet.payload.input_id, packet.payload.authority_binding)
        /\ meerkat_input_authority_batch_keys' = MapSet(meerkat_input_authority_batch_keys, packet.payload.input_id, packet.payload.authority_batch_key)
-       /\ meerkat_input_live_boundary_delivery' = MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id)
+       /\ meerkat_input_live_boundary_delivery' = IF (packet.payload.input_id \in meerkat_recovered_admitted_inputs) THEN MapRemove(meerkat_input_live_boundary_delivery, packet.payload.input_id) ELSE meerkat_input_live_boundary_delivery
        /\ UnchangedFrame_d3c8fb269da47c48
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs

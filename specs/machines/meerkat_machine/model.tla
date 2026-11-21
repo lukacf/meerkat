@@ -12017,7 +12017,7 @@ BindInputAuthorityIdle(input_id, authority_binding, authority_batch_key) ==
     /\ model_step_count' = model_step_count + 1
     /\ input_authority_bindings' = MapSet(input_authority_bindings, input_id, authority_binding)
     /\ input_authority_batch_keys' = MapSet(input_authority_batch_keys, input_id, authority_batch_key)
-    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_delivery' = IF (input_id \in recovered_admitted_inputs) THEN MapRemove(input_live_boundary_delivery, input_id) ELSE input_live_boundary_delivery
     /\ UnchangedFrame_885a1c721e99f3d0
 
 
@@ -12031,7 +12031,7 @@ BindInputAuthorityAttached(input_id, authority_binding, authority_batch_key) ==
     /\ model_step_count' = model_step_count + 1
     /\ input_authority_bindings' = MapSet(input_authority_bindings, input_id, authority_binding)
     /\ input_authority_batch_keys' = MapSet(input_authority_batch_keys, input_id, authority_batch_key)
-    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_delivery' = IF (input_id \in recovered_admitted_inputs) THEN MapRemove(input_live_boundary_delivery, input_id) ELSE input_live_boundary_delivery
     /\ UnchangedFrame_885a1c721e99f3d0
 
 
@@ -12045,7 +12045,7 @@ BindInputAuthorityRunning(input_id, authority_binding, authority_batch_key) ==
     /\ model_step_count' = model_step_count + 1
     /\ input_authority_bindings' = MapSet(input_authority_bindings, input_id, authority_binding)
     /\ input_authority_batch_keys' = MapSet(input_authority_batch_keys, input_id, authority_batch_key)
-    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_delivery' = IF (input_id \in recovered_admitted_inputs) THEN MapRemove(input_live_boundary_delivery, input_id) ELSE input_live_boundary_delivery
     /\ UnchangedFrame_885a1c721e99f3d0
 
 
@@ -12059,7 +12059,7 @@ BindInputAuthorityRetired(input_id, authority_binding, authority_batch_key) ==
     /\ model_step_count' = model_step_count + 1
     /\ input_authority_bindings' = MapSet(input_authority_bindings, input_id, authority_binding)
     /\ input_authority_batch_keys' = MapSet(input_authority_batch_keys, input_id, authority_batch_key)
-    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_delivery' = IF (input_id \in recovered_admitted_inputs) THEN MapRemove(input_live_boundary_delivery, input_id) ELSE input_live_boundary_delivery
     /\ UnchangedFrame_885a1c721e99f3d0
 
 
@@ -12073,7 +12073,7 @@ BindInputAuthorityStopped(input_id, authority_binding, authority_batch_key) ==
     /\ model_step_count' = model_step_count + 1
     /\ input_authority_bindings' = MapSet(input_authority_bindings, input_id, authority_binding)
     /\ input_authority_batch_keys' = MapSet(input_authority_batch_keys, input_id, authority_batch_key)
-    /\ input_live_boundary_delivery' = MapRemove(input_live_boundary_delivery, input_id)
+    /\ input_live_boundary_delivery' = IF (input_id \in recovered_admitted_inputs) THEN MapRemove(input_live_boundary_delivery, input_id) ELSE input_live_boundary_delivery
     /\ UnchangedFrame_885a1c721e99f3d0
 
 

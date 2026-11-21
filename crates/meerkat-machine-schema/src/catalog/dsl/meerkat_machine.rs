@@ -19977,8 +19977,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // A governed input never joins a running run
                 // (`live_join_input_is_ungoverned`), so a recovered governed
                 // row keeps no live-boundary delivery, and its controller
-                // hold stays available (`HoldInputController`).
-                self.input_live_boundary_delivery.remove(input_id);
+                // hold, which only a recovered input can take, stays
+                // available (`HoldInputController`). An input admitted live
+                // is left as its admission classed it.
+                if self.recovered_admitted_inputs.contains(input_id) {
+                    self.input_live_boundary_delivery.remove(input_id);
+                }
             }
             to Idle
         }

@@ -85,9 +85,7 @@ const ORDERED_PEER_TOKENS: [&str; 3] = [
     "DURABLE-PEER-THIRD-6E",
 ];
 const WAIT: Duration = Duration::from_secs(60);
-/// How long each `probe_step` tool call takes in the three-steer scenario,
-/// so a durable steer that prepares after the previous one joined usually
-/// catches the following boundary. The assertions hold either way.
+/// Keep later boundaries observable when a queued steer misses the next one.
 const ORDERED_STEP_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,20 +99,44 @@ enum Gate {
     /// Hold the turn inside the second model request; the model then answers,
     /// so the run ends without another boundary.
     ModelThenAnswer,
+    /// Hold request 2 after its boundary join and message snapshot. Inputs
+    /// admitted here belong to the following boundary, not this request.
+    ModelAfterBoundaryJoin,
 }
 
 #[derive(Default)]
 struct Hold {
     reached: AtomicBool,
     released: AtomicBool,
+    completed: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+struct HeldCall<'a> {
+    hold: &'a Hold,
+    completed: bool,
+}
+
+impl Drop for HeldCall<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.hold.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Hold {
     async fn hold(&self) {
+        let mut call = HeldCall {
+            hold: self,
+            completed: false,
+        };
         self.reached.store(true, Ordering::SeqCst);
         while !self.released.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        call.completed = true;
+        self.completed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -309,7 +331,12 @@ impl LlmClient for ScriptedProvider {
                     1 => text_events(&model, FOLLOW_UP_ACK),
                     2 => text_events(&model, FINAL_TEXT),
                     3 => tool_events(&model, "toolu_p3", "probe_step"),
-                    4 => reply.unwrap_or_else(|| tool_events(&model, "toolu_p2", "probe_step")),
+                    4 => {
+                        if gate == Gate::ModelAfterBoundaryJoin {
+                            hold.hold().await;
+                        }
+                        reply.unwrap_or_else(|| tool_events(&model, "toolu_p2", "probe_step"))
+                    }
                     5 => match gate {
                         Gate::Tool => tool_events(&model, "toolu_p1", "probe_block"),
                         Gate::ModelThenTools => {
@@ -319,6 +346,9 @@ impl LlmClient for ScriptedProvider {
                         Gate::ModelThenAnswer => {
                             hold.hold().await;
                             text_events(&model, FINAL_TEXT)
+                        }
+                        Gate::ModelAfterBoundaryJoin => {
+                            tool_events(&model, "toolu_p1", "probe_step")
                         }
                     },
                     _ => tool_events(&model, "toolu_p0", "probe_step"),
@@ -660,6 +690,8 @@ struct Outcome {
     /// The input of each `boundary_append_applied` event the target session
     /// published, in publication order.
     boundary_appends: Vec<String>,
+    held_call_completed: bool,
+    held_call_cancelled: bool,
 }
 
 async fn run_scenario(gate: Gate, steers: Vec<meerkat_runtime::Input>) -> Outcome {
@@ -758,6 +790,8 @@ async fn run_scenario_with(
         history,
         peer_ingested,
         boundary_appends,
+        held_call_completed: hold.completed.load(Ordering::SeqCst),
+        held_call_cancelled: hold.cancelled.load(Ordering::SeqCst),
     }
 }
 
@@ -1037,11 +1071,8 @@ async fn e2e_fast_peer_steer_without_a_later_boundary_takes_exactly_one_follow_u
     assert_eq!(outcome.peer_ingested, 1, "peer_content_ingested events");
 }
 
-/// Three peer steers admitted inside one gated boundary each land exactly
-/// once, in arrival order, all in the first model request after the gate,
-/// and every later request carries each once. The runtime test
-/// `three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order`
-/// pins the same at the boundary.
+/// Three peer steers admitted before the boundary join all reach the next
+/// request, in admission order, and remain in later requests exactly once.
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_three_peer_steers_in_one_gated_boundary_land_once_each_in_arrival_order() {
     let outcome = run_scenario_with(
@@ -1085,8 +1116,8 @@ async fn e2e_fast_three_peer_steers_in_one_gated_boundary_land_once_each_in_arri
     );
     assert_eq!(
         first_requests,
-        vec![outcome.first_after_gate; 3],
-        "all three first reach the model in the next request after the gate"
+        vec![outcome.first_after_gate; ORDERED_PEER_TOKENS.len()],
+        "every waiting steer first reaches the same next request"
     );
     assert_eq!(outcome.peer_ingested, 3, "peer_content_ingested events");
     assert_eq!(
@@ -1200,6 +1231,198 @@ async fn e2e_fast_two_peer_steers_admitted_while_a_request_is_in_flight_both_joi
         history.contains("toolu_p1"),
         "the in-flight request completed with its tool call; it was not cancelled"
     );
+}
+
+/// Print the captured request before asserting, so expected-red runs retain
+/// the actual model input as well as each steer's first request index.
+fn assert_waiting_steers_join_next_request(outcome: &Outcome, tokens: &[&str], scene: &str) {
+    let first_requests: Vec<_> = tokens
+        .iter()
+        .map(|token| {
+            outcome
+                .requests
+                .iter()
+                .position(|request| token_rows(&request.messages, token) > 0)
+        })
+        .collect();
+    let next = &outcome.requests[outcome.first_after_gate];
+    println!(
+        "STEER_REQUEST_CAPTURE {}",
+        json!({
+            "scene": scene,
+            "index_base": 0,
+            "next_request_index": outcome.first_after_gate,
+            "first_request_indices": first_requests,
+            "total_model_requests": outcome.requests.len(),
+            "messages": next.messages,
+        })
+    );
+    assert!(outcome.held_call_completed, "the held call completes");
+    assert!(
+        !outcome.held_call_cancelled,
+        "steering must not cancel the held call"
+    );
+    assert!(
+        outcome.requests.iter().all(|request| request.in_turn),
+        "no follow-up turn is needed for the waiting steers"
+    );
+    assert_eq!(
+        outcome.requests.len(),
+        5,
+        "the original scripted turn is not restarted"
+    );
+    assert_eq!(
+        first_requests,
+        vec![Some(outcome.first_after_gate); tokens.len()],
+        "{scene}: every steer admitted before the join cutoff must reach the next outbound request"
+    );
+    let mut request_positions = Vec::new();
+    let mut history_positions = Vec::new();
+    for token in tokens {
+        for request in &outcome.requests[..outcome.first_after_gate] {
+            assert_eq!(
+                token_rows(&request.messages, token),
+                0,
+                "{token}: earlier snapshot is unchanged"
+            );
+        }
+        for request in &outcome.requests[outcome.first_after_gate..] {
+            assert_eq!(
+                token_rows(&request.messages, token),
+                1,
+                "{token}: one row in every later request"
+            );
+        }
+        request_positions.push(
+            next.messages
+                .iter()
+                .position(|row| token_rows(std::slice::from_ref(row), token) == 1)
+                .unwrap(),
+        );
+        let positions = history_token_positions(&outcome.history, token);
+        assert_eq!(
+            positions.len(),
+            1,
+            "{token}: exactly one final transcript row"
+        );
+        history_positions.push(positions[0]);
+    }
+    assert!(
+        request_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "request rows preserve admission order"
+    );
+    assert!(
+        history_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "transcript rows preserve admission order"
+    );
+    assert_eq!(
+        assistant_run_ids(&outcome.history).len(),
+        1,
+        "the same run completes"
+    );
+}
+
+fn waiting_peer_steers() -> Vec<meerkat_runtime::Input> {
+    ORDERED_PEER_TOKENS
+        .iter()
+        .map(|token| {
+            let mut input = peer_message_steer(token);
+            if let meerkat_runtime::Input::Peer(peer) = &mut input {
+                peer.header.source = meerkat_runtime::InputOrigin::Peer {
+                    peer_id: "849b0ec6-214c-4c79-8765-300000000001".into(),
+                    display_identity: None,
+                    runtime_id: None,
+                };
+            }
+            input
+        })
+        .collect()
+}
+
+// Observable cutoff in T/M/X: every admission answers before the held call
+// is released and the next request is composed. The late-steer control below
+// admits only after that request is captured. These gates do not expose the
+// interval between parking and the boundary take.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_peer_steers_waiting_on_tools_join_next_request() {
+    let outcome = run_scenario_with(Gate::Tool, waiting_peer_steers(), ORDERED_STEP_DELAY).await;
+    assert_waiting_steers_join_next_request(&outcome, &ORDERED_PEER_TOKENS, "T");
+    assert_eq!(
+        outcome.peer_ingested, 3,
+        "one ingestion event per peer input"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_peer_steers_waiting_on_model_join_next_request() {
+    let outcome = run_scenario_with(
+        Gate::ModelThenTools,
+        waiting_peer_steers(),
+        ORDERED_STEP_DELAY,
+    )
+    .await;
+    assert_waiting_steers_join_next_request(&outcome, &ORDERED_PEER_TOKENS, "M");
+    assert_eq!(
+        outcome.peer_ingested, 3,
+        "one ingestion event per peer input"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_text_steers_waiting_on_tools_join_next_request() {
+    let tokens = &ORDERED_PEER_TOKENS[..2];
+    let outcome = run_scenario_with(
+        Gate::Tool,
+        tokens
+            .iter()
+            .map(|token| text_prompt_steer(token))
+            .collect(),
+        ORDERED_STEP_DELAY,
+    )
+    .await;
+    assert_waiting_steers_join_next_request(&outcome, tokens, "X");
+    assert_eq!(outcome.peer_ingested, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_mixed_kind_steers_waiting_on_tools_join_next_request_in_admission_order() {
+    let tokens = [TEXT_PROMPT_TOKEN, PEER_MESSAGE_TOKEN, EXTERNAL_EVENT_TOKEN];
+    // Admission answers while probe_block holds the turn; the existing
+    // preparation interval precedes release. Later tools add no delay.
+    let outcome = run_scenario_with(
+        Gate::Tool,
+        vec![
+            text_prompt_steer(tokens[0]),
+            peer_message_steer(tokens[1]),
+            external_event_steer(tokens[2]),
+        ],
+        Duration::ZERO,
+    )
+    .await;
+    assert_waiting_steers_join_next_request(&outcome, &tokens, "mixed-kinds");
+    assert_eq!(
+        outcome.peer_ingested, 1,
+        "only the peer input emits peer_content_ingested"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_steer_after_request_snapshot_waits_for_next_boundary() {
+    // The provider already received request 2, which proves that its join
+    // commit and snapshot are complete. This covers admission after that
+    // cutoff; it does not instrument the join-to-snapshot interval itself.
+    let outcome = run_scenario_with(
+        Gate::ModelAfterBoundaryJoin,
+        vec![peer_message_steer(LATE_PEER_TOKEN)],
+        ORDERED_STEP_DELAY,
+    )
+    .await;
+    assert_eq!(
+        outcome.first_after_gate, 3,
+        "request 2 was already captured before admission"
+    );
+    assert_waiting_steers_join_next_request(&outcome, &[LATE_PEER_TOKEN], "after-snapshot");
+    assert_eq!(outcome.peer_ingested, 1);
 }
 
 /// The one history row that carries `token`, with its position.

@@ -23,8 +23,12 @@
 //! - Row 2, across a kill: a continuation that waits behind a running turn
 //!   when the gateway process is killed takes one turn after a second boot
 //!   on the same state directory, under the item as last revised, with no
-//!   write and no prompt after the kill. One more revision then starts one
-//!   more turn. The kill also leaves a run in flight, which is recovery work
+//!   write and no prompt after the kill. That turn waits at the model while
+//!   the claim, the binding and the session are read as the restart left
+//!   them, and is then answered with one scripted call of the member's own
+//!   `workgraph_release`: the one write of its turn that the item admits only
+//!   while a claim is present. One more revision then starts one more turn.
+//!   The kill also leaves a run in flight, which is recovery work
 //!   by itself, so this row does not show that a waiting input alone brings
 //!   its member up.
 //!
@@ -97,9 +101,13 @@ const VEHICLE_LINE: &str = "workgraph pursuit test vehicle:";
 const NOTICE_PHRASE: &str = "Continue from the WorkGraph attention projection.";
 /// The log filter every boot of both arms runs under: the gateway's own
 /// default, with the pursuit's module at debug so that a write it weighs and
-/// starts no turn for says why on stderr. It changes what is logged only.
-const GATEWAY_LOG_FILTER: &str =
-    "warn,meerkat_meta=info,rpc_gateway=info,meerkat_mob::runtime::workgraph_pursuit=debug";
+/// starts no turn for says why on stderr, and the resume gate's module at
+/// debug so that a run it lets resume says so. It changes what is logged
+/// only.
+const GATEWAY_LOG_FILTER: &str = "warn,meerkat_meta=info,rpc_gateway=info,\
+     meerkat_mob::runtime::workgraph_pursuit=debug,meerkat_meta::workgraph_resume_gate=debug";
+/// What every line of the resume gate's verdicts holds.
+const RESUME_GATE_LINE: &str = "durable resume gate:";
 
 const ORIGINAL: &str = "ORIGINAL-DESCRIPTION-7f3a91";
 const REVISED: &str = "REVISED-DESCRIPTION-c41d08";
@@ -211,8 +219,9 @@ fn roster_spec() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Loopback model: records every request, answers "ok", and holds the
-// requests that carry a marker until the test releases them
+// Loopback model: records every request, answers "ok", holds the requests
+// that carry a marker until the test releases them, and answers one request
+// a row scripts with one tool call
 // ---------------------------------------------------------------------------
 
 const REPLY: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
@@ -220,11 +229,34 @@ const REPLY: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
      \"usage\":{\"prompt_tokens\":50,\"completion_tokens\":1}}\n\n\
      data: [DONE]\n\n";
 
+/// The answer that makes one call of `tool` with `arguments` and ends there.
+fn tool_call_reply(tool: &str, arguments: &Value) -> String {
+    let call = json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-scripted-1",
+                    "type": "function",
+                    "function": { "name": tool, "arguments": arguments.to_string() }
+                }]
+            }
+        }]
+    });
+    let done = json!({
+        "choices": [{ "finish_reason": "tool_calls" }],
+        "usage": { "prompt_tokens": 50, "completion_tokens": 1 }
+    });
+    format!("data: {call}\n\ndata: {done}\n\ndata: [DONE]\n\n")
+}
+
 struct Model {
     base_url: String,
     requests: Arc<Mutex<Vec<Value>>>,
     hold: Arc<Mutex<Option<String>>>,
     release: tokio::sync::watch::Sender<bool>,
+    scripted: Arc<Mutex<Option<String>>>,
+    scripted_reply: tokio::sync::watch::Sender<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -232,6 +264,8 @@ struct ModelState {
     requests: Arc<Mutex<Vec<Value>>>,
     hold: Arc<Mutex<Option<String>>>,
     released: tokio::sync::watch::Receiver<bool>,
+    scripted: Arc<Mutex<Option<String>>>,
+    scripted_reply: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 fn message_text(message: &Value) -> String {
@@ -288,6 +322,19 @@ fn tool_names(request: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The first request from `from` on whose newest message is a tool's result,
+/// with that result's text: the request a turn makes after its tool call.
+fn tool_result(requests: &[Value], from: usize) -> Option<(usize, String)> {
+    requests
+        .iter()
+        .enumerate()
+        .skip(from)
+        .find_map(|(index, request)| {
+            let last = messages(request).last()?;
+            (last["role"] == "tool").then(|| (index, message_text(last)))
+        })
+}
+
 /// One line for a request: what it carries and what it starts from.
 fn digest(index: usize, request: &Value) -> String {
     let text = transcript(request);
@@ -339,12 +386,35 @@ async fn chat_completions(
         .unwrap()
         .as_ref()
         .is_some_and(|marker| transcript(&request).contains(marker.as_str()));
+    // The scripted call is made once: the first request that starts from a
+    // notice carrying the marker takes it.
+    let scripted = {
+        let mut marker = state.scripted.lock().unwrap();
+        let taken = marker.as_ref().is_some_and(|marker| {
+            starts_from_notice(&request) && last_message(&request).contains(marker.as_str())
+        });
+        if taken {
+            *marker = None;
+        }
+        taken
+    };
     state.requests.lock().unwrap().push(request);
     if held {
         let mut released = state.released.clone();
         let _ = released.wait_for(|released| *released).await;
     }
-    ([("content-type", "text/event-stream")], REPLY)
+    let body = if scripted {
+        let mut reply = state.scripted_reply.clone();
+        reply
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|reply| reply.clone())
+            .unwrap_or_else(|| REPLY.to_string())
+    } else {
+        REPLY.to_string()
+    };
+    ([("content-type", "text/event-stream")], body)
 }
 
 async fn models() -> impl axum::response::IntoResponse {
@@ -356,10 +426,14 @@ impl Model {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let hold = Arc::new(Mutex::new(None));
         let (release, released) = tokio::sync::watch::channel(false);
+        let scripted = Arc::new(Mutex::new(None));
+        let (scripted_reply, scripted_answer) = tokio::sync::watch::channel(None);
         let state = ModelState {
             requests: Arc::clone(&requests),
             hold: Arc::clone(&hold),
             released,
+            scripted: Arc::clone(&scripted),
+            scripted_reply: scripted_answer,
         };
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -396,6 +470,8 @@ impl Model {
             requests,
             hold,
             release,
+            scripted,
+            scripted_reply,
         }
     }
 
@@ -416,6 +492,21 @@ impl Model {
 
     fn release(&self) {
         self.release.send(true).expect("release the model");
+    }
+
+    /// From now on the first request whose newest message is a notice that
+    /// carries `marker` waits at the model until the test names the tool
+    /// call it is answered with. Every other request is answered as before.
+    fn script_call_on_notice(&self, marker: &str) {
+        *self.scripted.lock().unwrap() = Some(marker.to_string());
+    }
+
+    /// Answer the request that waits for the scripted call with one call of
+    /// `tool`.
+    fn answer_scripted_call(&self, tool: &str, arguments: &Value) {
+        self.scripted_reply
+            .send(Some(tool_call_reply(tool, arguments)))
+            .expect("answer the scripted call");
     }
 }
 
@@ -521,6 +612,28 @@ impl Gateway {
         ));
         for line in &lines {
             self.say(format!("{when}: stderr: {}", head(line, 600)));
+        }
+    }
+
+    /// Print every line of this boot's stderr in which the resume gate
+    /// states a verdict.
+    fn say_resume_gate_lines(&self, when: &str) {
+        let lines = self
+            .stderr
+            .lock()
+            .map(|sink| {
+                sink.iter()
+                    .filter(|line| line.contains(RESUME_GATE_LINE))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.say(format!(
+            "{when}: resume gate verdict lines on this boot's stderr: {}",
+            lines.len()
+        ));
+        for line in &lines {
+            self.say(format!("{when}: resume gate: {}", head(line, 600)));
         }
     }
 
@@ -1388,7 +1501,9 @@ fn a_host_goal_wakes_a_never_prompted_member_and_starts_no_turn_without_the_valu
 /// Row 2. A continuation that waits behind a running turn when the gateway
 /// process is killed takes exactly one turn after a second boot on the same
 /// state directory, under the item as last revised, with no write and no
-/// prompt after the kill; one more revision then starts exactly one more.
+/// prompt after the kill. That turn then makes one write of its own, the
+/// release of the claim the restart kept, which starts no further turn; one
+/// more revision then starts exactly one more.
 #[test]
 fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     let row = "row2";
@@ -1534,6 +1649,9 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     ));
     drop(gateway);
     scene.model.release();
+    // The continuation's turn after the second boot waits at the model, so
+    // that the claim is read as the restart left it before that turn writes.
+    scene.model.script_call_on_notice(REVISED);
     read_store(row, "between", &scene.state, "after the kill, no process");
     scene.say_turns("between", "after the kill, no process");
 
@@ -1597,8 +1715,13 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         );
     }
 
-    // Readings after the second boot.
+    // Readings after the second boot. The continuation's turn waits at the
+    // model for its scripted answer, so they are taken before it writes.
     gateway.settle(SETTLE);
+    gateway.say(
+        "the readings after the second boot are taken while the continuation's turn waits at \
+         the model for its answer: before that turn writes anything",
+    );
     scene.say_turns("boot-2", "after the second boot settled");
     let after_restart = scene.print_requests("boot-2", requests_at_kill);
     let recovered_starts = notice_starts(&after_restart, requests_at_kill);
@@ -1629,6 +1752,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     let bindings_after = gateway.read_bindings("after the second boot");
     read_store(row, "boot-2", &scene.state, "after the second boot");
     gateway.print_stderr("after the second boot");
+    gateway.say_resume_gate_lines("after the second boot");
     gateway.say(format!(
         "session before the kill={} after the second boot={} unchanged={}",
         status_before["session_id"],
@@ -1692,6 +1816,63 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
             "READING (c) the same claim, binding and session after the restart with exactly one \
              continuation turn: {}",
             verdict(claim_same && claim_valid && binding_same && session_same && one_continuation)
+        ),
+    );
+
+    // The continuation's own write. Its turn has waited at the model since
+    // the second boot; it is now answered with one call of the member's own
+    // `workgraph_release`. The item's lifecycle admits a release only while
+    // a claim is present, so the tool's answer and the item afterwards say
+    // whether the claim the restart kept is one that turn can act on. The
+    // call names the item and its revision only: whose claim it is, is no
+    // part of it.
+    let before_call = scene.model.seen();
+    let call = json!({ "id": goal.item_id, "expected_revision": item_after["revision"] });
+    scene.model.answer_scripted_call("workgraph_release", &call);
+    gateway.say(format!(
+        "the continuation's turn, which waited at the model since the second boot, is answered \
+         with one tool call: workgraph_release {call}"
+    ));
+    let call_answered = gateway.eventually(WAKE_WAIT, || {
+        tool_result(&scene.model.requests(), before_call).is_some()
+    });
+    gateway.settle(SETTLE);
+    let after_call = scene.print_requests("boot-2", requests_at_kill);
+    let call_result = tool_result(&after_call, before_call);
+    gateway.say(format!(
+        "the turn's next request carries the tool's result as its newest message within \
+         {WAKE_WAIT:?}: {call_answered}; {}",
+        call_result.as_ref().map_or_else(
+            || "no such request".to_string(),
+            |(index, text)| format!("request #{index}, the result: {}", head(text, 900))
+        )
+    ));
+    let item_written = gateway.read_item(&goal.item_id, "after the continuation's write");
+    gateway.say_claim("claim after the continuation's write", &item_written);
+    gateway.say_claim_events();
+    gateway.print_stderr("after the continuation's write");
+    scene.say_turns("boot-2", "after the continuation's write");
+    let starts_after_call = notice_starts(&after_call, requests_at_kill);
+    let claim_released = !item_after["claim"].is_null()
+        && item_written["claim"].is_null()
+        && item_written["revision"].as_u64()
+            == item_after["revision"].as_u64().map(|revision| revision + 1);
+    gateway.say(format!(
+        "the continuation's write: a claim was held before it: {}; none is held after it: {}; \
+         item revision before={} after={}; requests after the second boot that start from a \
+         notice, counted after the write: {} (indexes {starts_after_call:?})",
+        !item_after["claim"].is_null(),
+        item_written["claim"].is_null(),
+        item_after["revision"],
+        item_written["revision"],
+        starts_after_call.len()
+    ));
+    say(
+        row,
+        format!(
+            "READING (d) the continuation's turn released the claim the restart kept, by its \
+             own tool call, and that write started no further turn: {}",
+            verdict(call_answered && claim_released && starts_after_call.len() == 1)
         ),
     );
 
@@ -1768,6 +1949,25 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
             && !last_message(first_recovered).contains(ORIGINAL),
         "(b) that turn must run under the item as revised: {}",
         digest(recovered_starts[0], first_recovered)
+    );
+    assert!(
+        call_answered,
+        "(d) the continuation's turn must make its one tool call and read the tool's result"
+    );
+    assert!(
+        claim_released,
+        "(d) the continuation's turn must release the claim the restart kept: claim before the \
+         call {}, after it {}; item revision before {} and after {}",
+        item_after["claim"],
+        item_written["claim"],
+        item_after["revision"],
+        item_written["revision"]
+    );
+    assert_eq!(
+        starts_after_call.len(),
+        1,
+        "(a) through the end of the continuation's turn and its own write, still exactly one \
+         turn must have started from the notice after the second boot"
     );
     assert_eq!(
         tail_starts.len(),

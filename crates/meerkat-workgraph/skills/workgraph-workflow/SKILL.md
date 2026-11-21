@@ -43,11 +43,14 @@ scratch space and not semantic memory.
 - Every successful mutation advances the item revision. Use the returned item,
   not an older cached revision, for the next claim, update, evidence, release,
   block, or close operation.
-- The two rules above are for ordinary tool use. A turn that carries a
-  `WorkGraph attention projection` block runs under an attention binding, and
-  there they do not hold. Every WorkGraph call of such a turn, a read included,
-  is served only while that projection is still current, and the projection is
-  fixed for the turn. Your own first write to the bound item changes the item,
+- The two rules above are for ordinary tool use. They do not hold in a turn
+  that runs under an attention binding, that is, a turn of a member a goal is
+  bound to: such a turn is offered only the WorkGraph tools of the binding's
+  mode and none of your other tools, and it may also carry a
+  `WorkGraph attention projection` block. Every WorkGraph call of such a turn,
+  a read included, is served only while the turn's projection is still
+  current, and the projection is fixed for the turn. Your own first write to
+  the bound item changes the item,
   so every later WorkGraph call of the same turn is refused with "stale or
   inactive WorkGraph attention projection", `workgraph_get` included. That is
   not a revision conflict: reloading, or passing another `expected_revision`,

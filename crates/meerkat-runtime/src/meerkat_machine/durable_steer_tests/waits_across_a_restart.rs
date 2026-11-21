@@ -467,6 +467,58 @@ async fn restart_without_a_resumed_run_starts_the_next_run_with_the_waiting_stee
     assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
 }
 
+/// The runtime loop begins the resumed run in the machine before the
+/// executor has opened the run's first boundary. The row holds the loop
+/// between the two, long enough for the waiting steer's boundary work to
+/// run: a preparation made then would be refused, as for a run that ended,
+/// and the steer would be left to the follow-up turn. The steer must still
+/// be in the resumed run's next request.
+#[tokio::test]
+async fn steer_waiting_at_a_restart_joins_when_the_executor_starts_the_resumed_run_late() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let abandoned = abandon_with_waiting_steers(
+        &store,
+        &["waited for an executor that started late E"],
+        true,
+    )
+    .await;
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine"),
+    );
+    let (loop_before_apply, release_apply) =
+        adapter.arm_runtime_loop_before_executor_apply_test_hook(abandoned.session_id.clone());
+    let rig =
+        DurableSteerRig::with_adapter_for_session(adapter, abandoned.session_id.clone()).await;
+    tokio::time::timeout(Duration::from_secs(5), loop_before_apply)
+        .await
+        .expect("the loop reaches the executor's apply")
+        .expect("the loop's hook is alive");
+    // The resumed run is begun in the machine and the executor has not
+    // started it. The waiting steer's work has all the time it needs.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !rig.state.has_waiting_delivery_for_test(),
+        "nothing can register before the executor opens the run's boundary"
+    );
+    release_apply.send(()).expect("the loop is still held");
+    rig.wait_for_apply_calls(1).await;
+    assert_eq!(
+        rig.script.applied_runs.lock().unwrap().clone(),
+        vec![abandoned.crashed_run.clone()],
+        "the restart resumes the SAME run"
+    );
+    let restarted = Restarted {
+        rig,
+        store,
+        batch: abandoned.batch,
+        crashed_run: abandoned.crashed_run,
+        waiting: abandoned.waiting,
+    };
+    let expected = restarted.waiting.clone();
+    assert_the_resumed_runs_next_request_carries(&restarted, &expected).await;
+}
+
 /// Two steers wait at the restart and the first is recalled once its
 /// delivery has registered for the resumed run's boundary. The recalled one
 /// reaches no request; the one behind it and a later one join the resumed

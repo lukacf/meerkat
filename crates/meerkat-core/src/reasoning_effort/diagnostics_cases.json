@@ -229,6 +229,117 @@
           "cause": "future_cause"
         }
       }
+    },
+    {
+      "name": "new-sign-in-no-time",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": false,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "new_sign_in_required"
+        }
+      },
+      "transient": false,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "new_sign_in_required"
+        }
+      }
+    },
+    {
+      "name": "outage-no-time",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "token_exchange_unavailable"
+        }
+      },
+      "transient": true,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "cause": "token_exchange_unavailable"
+        }
+      }
+    },
+    {
+      "name": "time-only",
+      "data": {
+        "kind": "reasoning_effort_refused",
+        "retryable": true,
+        "reasoning_effort_refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      },
+      "transient": true,
+      "event_reason": {
+        "reason_type": "reasoning_effort_refused",
+        "refusal": {
+          "requested": "high",
+          "provider": "openai",
+          "model": "scripted-model",
+          "route": {
+            "backend": "copilot",
+            "api": "responses"
+          },
+          "reason": "supported_levels_unavailable",
+          "supported": null,
+          "facts": null,
+          "not_before": "2020-01-02T03:04:05Z"
+        }
+      }
     }
   ],
   "compatibility_cases": [

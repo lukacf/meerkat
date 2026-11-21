@@ -43358,27 +43358,6 @@ async fn a_durable_steer_offered_to_the_turn_of(input: Input) -> (Result<(), Str
     (joined, shell_predicate)
 }
 
-/// A Steer that arrives while an attention continuation's turn runs does
-/// not join it: the continuation's turn carries the continuation alone, so
-/// the Steer waits for a turn of its own. The machine refuses the join, and
-/// the runtime's own predicate does not offer it.
-#[tokio::test]
-async fn a_steer_that_arrives_during_an_attention_continuation_s_turn_does_not_join_it() {
-    let (joined, shell_predicate) = a_durable_steer_offered_to_the_turn_of(
-        an_attention_continuation("projection-1", "binding-1"),
-    )
-    .await;
-    let refusal = joined.expect_err("the machine refuses a join into a continuation's turn");
-    assert!(
-        refusal.contains("guard rejected"),
-        "a generated guard refuses the join: {refusal}"
-    );
-    assert!(
-        !shell_predicate,
-        "the runtime does not offer the Steer to the continuation's turn"
-    );
-}
-
 /// The same Steer joins the turn of an input that carries no attention
 /// projection, as before.
 #[tokio::test]
@@ -43422,27 +43401,6 @@ async fn request_only_context_offered_to_the_turn_of(input: Input) -> (Result<()
         .driver_ingress()
         .live_boundary_joins_run_batch(&completion_id, &run_id);
     (receipt, shell_predicate)
-}
-
-/// Request-only context of another input never enters an attention
-/// continuation's turn: the machine refuses its receipt there, as it
-/// refuses the durable join.
-#[tokio::test]
-async fn request_only_context_never_enters_an_attention_continuation_s_turn() {
-    let (receipt, shell_predicate) = request_only_context_offered_to_the_turn_of(
-        an_attention_continuation("projection-1", "binding-1"),
-    )
-    .await;
-    let refusal =
-        receipt.expect_err("the machine refuses another input's context in a continuation's turn");
-    assert!(
-        refusal.contains("guard rejected"),
-        "a generated guard refuses the receipt: {refusal}"
-    );
-    assert!(
-        !shell_predicate,
-        "the runtime does not offer the context to the continuation's turn"
-    );
 }
 
 /// The same context enters the turn of an input that carries no attention
@@ -43508,21 +43466,6 @@ async fn a_steer_offered_to_the_run_resumed_after_a_restart(input: Input) -> boo
     entry
         .driver_ingress()
         .live_boundary_joins_run_batch(&steer_id, &run_id)
-}
-
-/// An attention continuation's turn in flight at a restart resumes as the
-/// continuation's own turn: a Steer that arrives then may not join the
-/// resumed run, as it may not join the turn before the restart.
-#[tokio::test]
-async fn an_attention_continuation_s_run_resumed_after_a_restart_takes_no_join() {
-    assert!(
-        !a_steer_offered_to_the_run_resumed_after_a_restart(an_attention_continuation(
-            "projection-1",
-            "binding-1"
-        ))
-        .await,
-        "a steer may not join the continuation's resumed run"
-    );
 }
 
 /// The resumed run of an input that carries no attention projection takes

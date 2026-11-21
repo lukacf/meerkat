@@ -4906,10 +4906,15 @@ reason-based answer.
 
 An absent cause means **cause unknown**, not that sign-in is required or
 that sign-in is usable. Absent or unknown causes retain the released
-reason-based retryability. Compaction's level checks do not call the
-diagnostic hook and can therefore report a refusal without a cause. The
-optional `not_before` is an absolute RFC3339 UTC eligibility time held by the
-account, not a retry interval or a recovery promise.
+reason-based retryability. Compaction's level check does not call the
+diagnostic hook, and a level refused there is not delivered as this error:
+that compaction fails (`compaction_failed`, with a class and a message) and
+the run goes on. The optional `not_before` is an absolute RFC3339 eligibility
+time held by the account, written in UTC, not a retry interval or a recovery
+promise. An absent `not_before` means no time was reported, not that no
+deadline applies. A value that is not an RFC3339 timestamp is outside this
+shape: the server writes none, and neither the typed reader nor an SDK
+parser reads a refusal that carries one.
 
 Meerkat does not retry a refused level for the caller.
 

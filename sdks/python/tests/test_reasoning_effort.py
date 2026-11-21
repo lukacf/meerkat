@@ -755,6 +755,25 @@ def test_diagnostic_fields_reject_non_strings_without_losing_raw_error(diagnosti
     assert error.details["reasoning_effort_refusal"]["cause"] == "future_cause"
 
 
+def test_not_before_is_a_timestamp_or_the_refusal_is_not_parsed(diagnostic_cases: dict[str, Any]) -> None:
+    times = diagnostic_cases["times"]
+    assert times["readable"] and times["unreadable"]
+    for value in times["readable"]:
+        result = reasoning_effort_refusal(refused(with_refusal(not_before=value)))
+        assert result is not None, value
+        assert result.not_before == value
+    for value in times["unreadable"]:
+        data = with_refusal(not_before=value)
+        error = refused(data)
+        assert reasoning_effort_refusal(error) is None, value
+        assert error.details == data
+        wire = data["reasoning_effort_refusal"]
+        reason = run_failed({"reason_type": "reasoning_effort_refused", "refusal": wire}).error_report.reason
+        assert reason.reason_type == "unknown", value
+        assert reason.reasoning_effort_refusal is None
+        assert reason.raw["refusal"] == wire
+
+
 def test_run_failed_preserves_optional_diagnostics(diagnostic_cases: dict[str, Any]) -> None:
     for case in diagnostic_cases["typed_cases"]:
         event = run_failed(case["event_reason"])

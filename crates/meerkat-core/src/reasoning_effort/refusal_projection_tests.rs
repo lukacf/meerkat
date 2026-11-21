@@ -299,8 +299,10 @@ fn a_refused_level_keeps_its_typed_reason_at_the_executor_boundary() {
     );
 }
 
-/// The shared SDK expectations are checked against actual typed producer
-/// serialization. The JSON is expected data, not a recorded execution log.
+/// The shared SDK expectations are checked against the typed owner: the
+/// typed cases against actual producer serialization, the compatibility
+/// cases and the times against the typed reader. The JSON is expected data,
+/// not a recorded execution log.
 #[test]
 fn refusal_diagnostics_match_the_shared_sdk_cases() {
     let fixture: serde_json::Value =
@@ -333,5 +335,43 @@ fn refusal_diagnostics_match_the_shared_sdk_cases() {
             "{}",
             case["name"]
         );
+        assert_eq!(
+            serde_json::Value::Bool(refusal.is_retryable()),
+            case["transient"],
+            "{}",
+            case["name"]
+        );
+    }
+    // The compatibility cases are documents no typed producer writes (an
+    // outer mark that differs, a null member). The typed reader takes each,
+    // and its own class is the one the SDKs are held to.
+    for case in fixture["compatibility_cases"]
+        .as_array()
+        .expect("compatibility cases")
+    {
+        let refusal = SessionError::reasoning_effort_refusal_from_data(&case["data"])
+            .unwrap_or_else(|| panic!("the typed reader takes {}", case["name"]));
+        assert_eq!(
+            serde_json::Value::Bool(refusal.is_retryable()),
+            case["transient"],
+            "{}",
+            case["name"]
+        );
+    }
+    // One rule for `not_before` in every reader: the listed timestamps are
+    // taken, and a refusal that carries any other string is not read.
+    let document = &fixture["typed_cases"][0]["data"];
+    for (member, taken) in [("readable", true), ("unreadable", false)] {
+        let times = fixture["times"][member].as_array().expect("times");
+        assert!(!times.is_empty(), "{member}");
+        for time in times {
+            let mut data = document.clone();
+            data["reasoning_effort_refusal"]["not_before"] = time.clone();
+            assert_eq!(
+                SessionError::reasoning_effort_refusal_from_data(&data).is_some(),
+                taken,
+                "{member}: {time}"
+            );
+        }
     }
 }

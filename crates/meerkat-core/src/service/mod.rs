@@ -936,7 +936,8 @@ impl SessionError {
     /// Read a refused `reasoning_effort` level back off the wire: the typed
     /// refusal of the [`Self::REASONING_EFFORT_REFUSED_KIND`] projection
     /// [`Self::structured_data`] gives. The advisory `retryable` member is
-    /// not read: the refusal's reason states it. Other or malformed
+    /// not read: the refusal read back states it
+    /// ([`crate::ReasoningEffortRefusal::is_retryable`]). Other or malformed
     /// structured data fails closed as `None`.
     pub fn reasoning_effort_refusal_from_data(
         data: &serde_json::Value,

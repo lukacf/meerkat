@@ -739,8 +739,9 @@ Read `details.kind` and `reasoning_effort_refusal.reason`, never the message.
 `supported_levels_unavailable` can be retryable; a known
 `new_sign_in_required` cause makes it false. An absent cause means **cause
 unknown** and keeps the released reason-based answer; it says nothing about
-sign-in. Unknown cause strings also keep that answer. An optional
-`not_before` is an absolute eligibility time, not a recovery promise. The
+sign-in. Unknown cause strings also keep that answer. No built-in provider
+reports a cause yet. An optional `not_before` is an absolute eligibility
+time, not a recovery promise; without it no time was reported. The
 exit status is 2 for these refusals too. A word that is not a level
 (`--reasoning-effort x_high`) is an argument error: exit status 2 with the
 argument parser's text on stderr and nothing on stdout.

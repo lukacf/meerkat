@@ -451,50 +451,25 @@
         }
       },
       "transient": true
-    },
-    {
-      "name": "opaque-time",
-      "data": {
-        "kind": "reasoning_effort_refused",
-        "reasoning_effort_refusal": {
-          "requested": "high",
-          "provider": "openai",
-          "model": "scripted-model",
-          "route": {
-            "backend": "copilot",
-            "api": "responses"
-          },
-          "reason": "supported_levels_unavailable",
-          "supported": null,
-          "facts": null,
-          "cause": "future_cause",
-          "not_before": "not-a-timestamp"
-        }
-      },
-      "transient": true
-    },
-    {
-      "name": "empty-time",
-      "data": {
-        "kind": "reasoning_effort_refused",
-        "reasoning_effort_refusal": {
-          "requested": "high",
-          "provider": "openai",
-          "model": "scripted-model",
-          "route": {
-            "backend": "copilot",
-            "api": "responses"
-          },
-          "reason": "supported_levels_unavailable",
-          "supported": null,
-          "facts": null,
-          "cause": "future_cause",
-          "not_before": ""
-        }
-      },
-      "transient": true
     }
   ],
+  "times": {
+    "readable": [
+      "2020-01-02T03:04:05Z",
+      "2020-01-02T05:04:05+02:00",
+      "2020-01-02T03:04:05.123456789Z",
+      "2020-02-29T23:59:59-08:00"
+    ],
+    "unreadable": [
+      "not-a-timestamp",
+      "",
+      "2020-01-02",
+      "2020-01-02T03:04:05",
+      "2021-02-29T03:04:05Z",
+      "2020-13-02T03:04:05Z",
+      "2020-01-02T24:00:00Z"
+    ]
+  },
   "invalid_values": [
     7,
     false,

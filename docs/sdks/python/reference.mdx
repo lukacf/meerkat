@@ -418,10 +418,12 @@ except MeerkatError as error:
 instance: it is true only for `supported_levels_unavailable` without the
 known `new_sign_in_required` cause. Other reasons remain false. An absent
 `cause` means **cause unknown**: it says nothing about sign-in and retains
-the released reason-based answer, as an unknown cause string does. This
-also applies to refusals from compaction, which does not call the diagnostic
-hook. `cause` is an open string; `not_before` is an optional absolute RFC3339
-UTC string, not a countdown or recovery promise.
+the released reason-based answer, as an unknown cause string does. No
+built-in provider reports a cause yet. `cause` is an open string;
+`not_before` is an optional absolute RFC3339 timestamp kept as sent, not a
+countdown or recovery promise. `None` means no time was reported, not that
+no deadline applies; a refusal whose `not_before` is not an RFC3339
+timestamp is not parsed (`None`).
 
 `retryable` preserves the server's outer value when present, independently
 of `transient`. Older SDKs ignore these new diagnostic fields and can report

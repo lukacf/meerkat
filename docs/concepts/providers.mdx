@@ -517,16 +517,22 @@ A refusal can carry two optional diagnostics:
   transient token-exchange outage. `new_sign_in_required` identifies a device
   sign-in lease that requires a new sign-in; a provider does not report it for
   an operator-token source or infer it from an absent lease. Keep unknown values.
-- `not_before` is an absolute RFC3339 UTC eligibility time already held by the
-  account. It is not a countdown or a promise that retrying then will succeed.
+- `not_before` is an absolute RFC3339 eligibility time already held by the
+  account, written in UTC. It is not a countdown or a promise that retrying
+  then will succeed. Absent means no time was reported, not that no deadline
+  applies. A refusal whose `not_before` is not an RFC3339 timestamp is
+  outside the documented shape: neither the typed reader nor an SDK parser
+  reads it.
 
 No built-in provider reports a cause yet: until one does, every refusal
 arrives without `cause` and `not_before`, and `retryable` keeps the released
 reason-based answer.
 
-An absent `cause` means **cause unknown**, including a refusal raised at
-compaction, which does not call the diagnostic hook. Absence says nothing
-about whether sign-in is required. With an absent or unknown cause,
+An absent `cause` means **cause unknown**. Absence says nothing about
+whether sign-in is required. Compaction's level check does not call the
+diagnostic hook, and a level refused there is not delivered as a typed
+refusal: that compaction fails with a class and a message, and the run goes
+on. With an absent or unknown cause,
 retryability retains the released answer from `reason`; a known
 `new_sign_in_required` cause makes it false. Other reasons remain
 non-retryable. Read the server's `retryable` value as sent; Meerkat does not

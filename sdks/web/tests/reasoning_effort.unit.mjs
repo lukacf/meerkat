@@ -238,3 +238,19 @@ test("known diagnostic constants retain the shared open wire values", () => {
   assert.equal(webSdk.REASONING_CAUSE_NEW_SIGN_IN_REQUIRED, diagnosticCases.known_causes.new_sign_in_required);
   assert.equal(webSdk.REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE, diagnosticCases.known_causes.token_exchange_unavailable);
 });
+
+test("not_before is a timestamp or the refusal is not parsed", () => {
+  const { times } = readDiagnosticCases();
+  assert.ok(times.readable.length > 0 && times.unreadable.length > 0);
+  for (const value of times.readable) {
+    const result = reasoningEffortRefusal(refused(withRefusal({ not_before: value })));
+    assert.ok(result, value);
+    assert.equal(result.notBefore, value);
+  }
+  for (const value of times.unreadable) {
+    const data = withRefusal({ not_before: value });
+    const error = refused(data);
+    assert.equal(reasoningEffortRefusal(error), undefined, value);
+    assert.deepEqual(error.data, data);
+  }
+});

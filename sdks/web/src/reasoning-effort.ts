@@ -99,8 +99,10 @@ export interface ReasoningEffortRefusal {
    */
   readonly cause?: string;
   /**
-   * Absolute eligibility-time string retained as sent, not a countdown or
-   * recovery promise. The typed server validates time; this parser keeps strings.
+   * Absolute eligibility time, an RFC 3339 timestamp kept as sent; not a
+   * countdown or recovery promise. Absent when no time was reported, which
+   * does not say that none applies. A refusal whose `not_before` is not a
+   * timestamp is not parsed, as in the typed server.
    */
   readonly notBefore?: string;
   /**
@@ -140,6 +142,27 @@ function parseRoute(value: unknown): ReasoningRoute | null | undefined {
   return { backend: value.backend, api: value.api };
 }
 
+const TIMESTAMP =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(?:Z|[+-]([0-9]{2}):([0-9]{2}))$/;
+
+/**
+ * Whether a value is an RFC 3339 timestamp: a calendar date, `T`, a time of
+ * day, and `Z` or a numeric offset.
+ */
+function isTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const match = TIMESTAMP.exec(value);
+  if (match === null) return false;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const offsetHour = Number(match[7] ?? 0);
+  const offsetMinute = Number(match[8] ?? 0);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 60) return false;
+  if (offsetHour > 23 || offsetMinute > 59) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day >= 1 && day <= days;
+}
+
 /**
  * Parse a refusal object (the wire `reasoning_effort_refusal`). `undefined`
  * when it does not have the documented shape, a reason or level this SDK
@@ -170,7 +193,7 @@ export function parseReasoningEffortRefusal(
   const cause = value.cause;
   const notBefore = value.not_before;
   if (cause !== undefined && cause !== null && typeof cause !== 'string') return undefined;
-  if (notBefore !== undefined && notBefore !== null && typeof notBefore !== 'string') return undefined;
+  if (notBefore !== undefined && notBefore !== null && !isTimestamp(notBefore)) return undefined;
   const conflictingParam = value.conflicting_param;
   const conflictingLevel = value.conflicting_level;
   if (conflictingParam !== undefined && conflictingParam !== null && typeof conflictingParam !== 'string') {
@@ -190,7 +213,7 @@ export function parseReasoningEffortRefusal(
     ...(typeof conflictingParam === 'string' ? { conflictingParam } : {}),
     ...(isLevel(conflictingLevel) ? { conflictingLevel } : {}),
     ...(typeof cause === 'string' ? { cause } : {}),
-    ...(typeof notBefore === 'string' ? { notBefore } : {}),
+    ...(isTimestamp(notBefore) ? { notBefore } : {}),
     transient: reason === 'supported_levels_unavailable' && cause !== REASONING_CAUSE_NEW_SIGN_IN_REQUIRED,
     ...(typeof retryable === 'boolean' ? { retryable } : {}),
   };

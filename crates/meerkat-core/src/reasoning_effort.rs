@@ -386,16 +386,22 @@ pub struct ReasoningEffortRefusal {
     pub conflicting_level: Option<EffortLevel>,
     /// An optional typed account-state cause for unavailable levels.
     /// `token_exchange_unavailable` describes a held transient exchange outage;
-    /// `new_sign_in_required` means device-mode lease admission requires a new sign-in,
+    /// `new_sign_in_required` means a device sign-in lease requires a new sign-in,
     /// without claiming that a token was refused. Absent cause means cause unknown;
     /// unknown strings are retained. No built-in provider reports a cause yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
-    /// Absolute RFC3339 UTC eligibility time from a stored account deadline.
-    /// Absence states no deadline. This is neither a countdown nor a promise
-    /// that retrying then will recover the model list.
+    /// Absolute RFC3339 eligibility time from a stored account deadline,
+    /// written in UTC. Absent when no time was reported: absence does not say
+    /// that no deadline applies. This is neither a countdown nor a promise
+    /// that retrying then will recover the model list. A value that is not
+    /// an RFC3339 timestamp is outside the documented shape: neither this
+    /// type nor an SDK parser reads a refusal that carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "nullable_timestamp_schema")
+    )]
     pub not_before: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -425,6 +431,13 @@ fn nullable_levels_schema(generator: &mut schemars::SchemaGenerator) -> schemars
 #[cfg(feature = "schema")]
 fn nullable_facts_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     generator.subschema_for::<Option<ReasoningFactsSource>>()
+}
+
+// A refusal's `not_before` is a timestamp for every reader: the schema states
+// the format the typed reader requires.
+#[cfg(feature = "schema")]
+fn nullable_timestamp_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": ["string", "null"], "format": "date-time" })
 }
 
 /// ` on <backend>/<api>` in a refusal's text, or nothing for a refusal that

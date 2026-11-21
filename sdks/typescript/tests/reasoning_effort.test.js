@@ -623,6 +623,31 @@ it("known diagnostic constants retain the shared open wire values", () => {
   assert.equal(sdk.REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE, diagnosticCases.known_causes.token_exchange_unavailable);
 });
 
+it("not_before is a timestamp or the refusal is not parsed", () => {
+  const { times } = readDiagnosticCases();
+  assert.ok(times.readable.length > 0 && times.unreadable.length > 0);
+  for (const value of times.readable) {
+    const result = reasoningEffortRefusal(refused(withRefusal({ not_before: value })));
+    assert.ok(result, value);
+    assert.equal(result.notBefore, value);
+  }
+  for (const value of times.unreadable) {
+    const data = withRefusal({ not_before: value });
+    const error = refused(data);
+    assert.equal(reasoningEffortRefusal(error), undefined, value);
+    assert.deepEqual(error.details, data);
+    const wire = data.reasoning_effort_refusal;
+    const reason = parseCoreEvent({
+      type: "run_failed", session_id: "s1",
+      error_report: { class: "config", message: "refused", reason: {
+        reason_type: "reasoning_effort_refused", refusal: wire,
+      } },
+    }).errorReport.reason;
+    assert.equal(reason.reasonType, "unknown", value);
+    assert.deepEqual(reason.raw.refusal, wire);
+  }
+});
+
 it("RunFailed preserves optional diagnostics", () => {
   const diagnosticCases = readDiagnosticCases();
   for (const item of diagnosticCases.typed_cases) {

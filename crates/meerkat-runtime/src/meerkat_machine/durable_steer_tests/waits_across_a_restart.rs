@@ -519,6 +519,97 @@ async fn steer_waiting_at_a_restart_joins_when_the_executor_starts_the_resumed_r
     assert_the_resumed_runs_next_request_carries(&restarted, &expected).await;
 }
 
+/// Whether the live-boundary work of `input_id` is running.
+async fn steer_work_is_running(rig: &DurableSteerRig, input_id: &InputId) -> bool {
+    let driver = {
+        let sessions = rig.adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&rig.session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let entry = driver.lock().await;
+    entry
+        .driver_ingress()
+        .durable_steer_order()
+        .is_working(input_id)
+}
+
+/// Steer F is admitted after the restart and before the work of steer E,
+/// which waited across it, has begun: the row holds the loop before the
+/// executor starts the resumed run, so E's work still waits for that start.
+/// F's own work finds E ahead of it with no work running and ends without a
+/// preparation; F keeps its place in the steer lane behind E. Once the
+/// executor starts the run, E's work takes the boundary and joins F behind
+/// it: one request of the resumed run carries E and then F, each once, and
+/// no follow-up turn runs.
+#[tokio::test]
+async fn steer_admitted_before_the_waiting_steers_work_began_joins_the_same_request_behind_it() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let abandoned =
+        abandon_with_waiting_steers(&store, &["waited across the restart E"], true).await;
+    let e_id = abandoned.waiting[0].clone();
+    let adapter = Arc::new(
+        MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine"),
+    );
+    let (loop_before_apply, release_apply) =
+        adapter.arm_runtime_loop_before_executor_apply_test_hook(abandoned.session_id.clone());
+    let rig =
+        DurableSteerRig::with_adapter_for_session(adapter, abandoned.session_id.clone()).await;
+    tokio::time::timeout(Duration::from_secs(5), loop_before_apply)
+        .await
+        .expect("the loop reaches the executor's apply")
+        .expect("the loop's hook is alive");
+    assert!(
+        !steer_work_is_running(&rig, &e_id).await,
+        "the waiting steer's work has not begun: the executor has not started the run"
+    );
+
+    let later = peer_steer("admitted before the waiting steer's work began F");
+    let f_id = later.id().clone();
+    rig.admit(later).await;
+    // The later steer's own work has all the time it needs to end.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !steer_work_is_running(&rig, &f_id).await,
+        "the later steer's own work ended: an older steer waits ahead of it with no work running"
+    );
+    assert!(
+        !steer_work_is_running(&rig, &e_id).await,
+        "the waiting steer's work has still not begun"
+    );
+    assert!(
+        !rig.state.has_waiting_delivery_for_test(),
+        "the later steer's own work prepared nothing"
+    );
+    assert_eq!(
+        rig.steer_queue().await,
+        vec![e_id.clone(), f_id.clone()],
+        "both steers wait in the steer lane, in admission order"
+    );
+
+    release_apply.send(()).expect("the loop is still held");
+    rig.wait_for_apply_calls(1).await;
+    assert_eq!(
+        rig.script.applied_runs.lock().unwrap().clone(),
+        vec![abandoned.crashed_run.clone()],
+        "the restart resumes the SAME run"
+    );
+    let restarted = Restarted {
+        rig,
+        store,
+        batch: abandoned.batch,
+        crashed_run: abandoned.crashed_run,
+        waiting: abandoned.waiting,
+    };
+    // The later steer's own work is over, so only the walk of the waiting
+    // steer's work can put it in this request.
+    assert_the_resumed_runs_next_request_carries(&restarted, &[e_id, f_id]).await;
+}
+
 /// Two steers wait at the restart and the first is recalled once its
 /// delivery has registered for the resumed run's boundary. The recalled one
 /// reaches no request; the one behind it and a later one join the resumed

@@ -1513,6 +1513,9 @@ A durable steer that was admitted and still waits for its run's next
 boundary when its session is loaded again from the store is not left to a
 follow-up turn when that run resumes. It joins the resumed run's next model
 request, once, and the steers that waited with it join in admission order.
+A durable steer admitted after the session is loaded again and before the
+work of the steers that waited has begun joins the same request behind
+them, in admission order, once, with no follow-up turn.
 A recalled steer reaches no request, and the steers that waited behind it
 join the resumed run's request.
 The limits of a live boundary hold here too: when the resumed run's boundary

@@ -165,6 +165,8 @@ the steer, and `already_terminal` once the input has ended.
 A durable steer that was admitted and still waits when its session is loaded
 again from the store joins the resumed run's next model request when that
 run resumes, once, with the steers that waited beside it in admission order.
+A durable steer admitted after the load and before their work has begun
+joins that request behind them.
 It does not wait for a follow-up turn. With no run to resume it starts the
 next run as its own input. The limits are in
 [Durable steer](/reference/session-contracts#durable-steer).

@@ -107,7 +107,8 @@ require_peer_auth = true                     # default true
   steer that finds no boundary before the run ends, and a directed delivery,
   are taken by exactly one follow-up turn. A steer that still waits when its
   session is loaded again from the store joins the resumed run's next
-  request when that run resumes.
+  request when that run resumes, and a steer admitted after the load and
+  before the waiting steer's work has begun joins that request behind it.
   Prompts, lifecycle notices,
   external events and flow steps steered into a run behave the same. 0.9.3
   and earlier showed a peer or text-only steer to one model request, then

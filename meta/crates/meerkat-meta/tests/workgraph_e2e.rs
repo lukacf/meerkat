@@ -51,12 +51,45 @@ workgraph = true
 #[derive(Clone, Default)]
 struct CaptureClient {
     requests: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    /// The messages of each request as debug text, in the order of
+    /// `requests`, so a test can tell whose turn a request was by a text it
+    /// sent to one member only.
+    transcripts: Arc<std::sync::Mutex<Vec<String>>>,
     notify: Arc<tokio::sync::Notify>,
 }
 
 impl CaptureClient {
     fn captured(&self) -> Vec<Vec<String>> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// The tool names of the first request whose messages hold `text`: the
+    /// turn that took a message sent to one member only. A request is told
+    /// by what it carries, not by its place in the order of requests, so a
+    /// member's turn at its spawn, or two messages taken in one turn, do not
+    /// move the answer.
+    async fn wait_for_turn_holding(&self, text: &str) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                // Created before the lists are read: a request pushed after
+                // the read still wakes this wait.
+                let pushed = self.notify.notified();
+                let found = {
+                    let requests = self.requests.lock().unwrap();
+                    let transcripts = self.transcripts.lock().unwrap();
+                    transcripts
+                        .iter()
+                        .position(|transcript| transcript.contains(text))
+                        .map(|index| requests[index].clone())
+                };
+                if let Some(tools) = found {
+                    return tools;
+                }
+                pushed.await;
+            }
+        })
+        .await
+        .expect("the message should reach a turn of its member")
     }
 
     async fn wait_for_request(&self, minimum: usize) -> Vec<Vec<String>> {
@@ -93,7 +126,15 @@ impl LlmClient for CaptureClient {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        self.requests.lock().unwrap().push(tool_names);
+        {
+            // One lock over both pushes keeps the two lists index for index.
+            let mut requests = self.requests.lock().unwrap();
+            self.transcripts
+                .lock()
+                .unwrap()
+                .push(format!("{:?}", request.messages));
+            requests.push(tool_names);
+        }
         self.notify.notify_waiters();
         // meerkat 0.8.22 rejects a turn whose stream carried no normalized
         // provider accounting, so the terminal `Done` never travels alone.
@@ -376,7 +417,8 @@ async fn an_identity_goal_reaches_the_turns_of_a_member_whose_name_is_not_its_me
         .await
         .expect("spawn a member whose name is not its own member id");
 
-    // Turn 1, no binding: the whole WorkGraph surface.
+    // The member's first request, made before any binding exists: the whole
+    // surface. (It may be the turn the member takes at its spawn.)
     meerkat_meta::send_message_on_mob(&runtime.mob_handle(), NAME, "hello".to_string())
         .await
         .expect("first send");
@@ -398,22 +440,77 @@ async fn an_identity_goal_reaches_the_turns_of_a_member_whose_name_is_not_its_me
     .await;
     assert!(response["error"].is_null(), "{response:#?}");
 
-    // Turn 2: under the binding (the pursue allow-set).
+    // The turn that takes a message sent after the goal was created runs
+    // under the binding (the pursue allow-set).
     meerkat_meta::send_message_on_mob(&runtime.mob_handle(), NAME, "how is the queue?".to_string())
         .await
         .expect("second send");
-    let captured = client.wait_for_request(2).await;
-    let bound_tools = &captured[1];
+    let bound_tools = client.wait_for_turn_holding("how is the queue?").await;
     assert!(
-        has_tool(bound_tools, "workgraph_get"),
+        has_tool(&bound_tools, "workgraph_get"),
         "the turn has the binding's tools: {bound_tools:?}"
     );
-    for blocked in ["workgraph_create", "workgraph_claim", "send_message"] {
+    for blocked in [
+        "workgraph_create",
+        "workgraph_claim",
+        "workgraph_attention_reassign",
+        "send_message",
+    ] {
         assert!(
-            !has_tool(bound_tools, blocked),
+            !has_tool(&bound_tools, blocked),
             "a turn under the binding does not offer {blocked}: {bound_tools:?}"
         );
     }
+
+    // A member of the same profile whose name is its own member id, with a
+    // goal of its own in the same form: its bound turn is offered the same
+    // tools. What a bound turn is offered does not depend on the name.
+    runtime
+        .spawn_many(vec![SpawnMemberSpec::from_wire(
+            "worker".to_string(),
+            "helper".to_string(),
+            None,
+            None,
+            None,
+        )])
+        .await
+        .expect("spawn a member whose name is its own member id");
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "watch the other queue",
+            "target": { "kind": "identity", "identity": "helper" },
+        }),
+    )
+    .await;
+    assert!(response["error"].is_null(), "{response:#?}");
+    meerkat_meta::send_message_on_mob(
+        &runtime.mob_handle(),
+        "helper",
+        "how is the other queue?".to_string(),
+    )
+    .await
+    .expect("third send");
+    let twin_bound_tools = client
+        .wait_for_turn_holding("how is the other queue?")
+        .await;
+    let sorted = |tools: &[String]| {
+        let mut names = tools.to_vec();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        sorted(&bound_tools),
+        sorted(&twin_bound_tools),
+        "the two members' bound turns are offered the same tools"
+    );
+    assert!(
+        twin_bound_tools.len() < unbound_tools.len(),
+        "a bound turn is offered fewer tools than an unbound one: {} against {}",
+        twin_bound_tools.len(),
+        unbound_tools.len()
+    );
 
     let teardown = runtime.stop_mob_for_teardown().await;
     assert!(

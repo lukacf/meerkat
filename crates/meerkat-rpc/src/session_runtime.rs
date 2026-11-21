@@ -44436,12 +44436,16 @@ mod tests {
     /// session (the judgment before admission), and the same turn on a
     /// stored session that is not live (its recovery build). The client
     /// serves no request for the refused level, and a live session keeps its
-    /// identity. How often the client is asked is pinned per scene: once,
-    /// except for the stored session that is not live, where it is asked
-    /// three times: the judgment before admission runs twice for a turn
-    /// that names a level (before and under the registration lock), leaves
-    /// the unavailable reason to the build each time, and the build asks
-    /// again.
+    /// identity and admits no input. How often the client is asked is pinned
+    /// per scene: once, except for the stored session that is not live,
+    /// where it is asked three times: the judgment before admission runs
+    /// twice for a turn that names a level (before and under the
+    /// registration lock), leaves the unavailable reason to the build each
+    /// time, and the build asks again. For the sign-in cause that count of
+    /// three records a decision not yet made: the judgment before admission
+    /// reads the reason's class, not the refusal's own retryability, so a
+    /// refusal that cannot succeed is let through to the build like one
+    /// that can. The count changes with that decision.
     #[tokio::test]
     async fn a_level_refused_for_a_list_that_is_not_loaded_answers_the_clients_cause() {
         use meerkat_core::lifecycle::run_primitive::{
@@ -44528,6 +44532,25 @@ mod tests {
                 };
                 let identity_before = live_identity().await;
                 assert_eq!(identity_before.is_some(), live, "{scene}");
+                let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+                let stored_inputs = || {
+                    let runtime = Arc::clone(&runtime);
+                    let runtime_id = runtime_id.clone();
+                    async move {
+                        runtime
+                            .service
+                            .runtime_store()
+                            .load_input_states_strict(&runtime_id)
+                            .await
+                            .expect("the stored input rows are readable")
+                            .len()
+                    }
+                };
+                let inputs_before = if live {
+                    Some(stored_inputs().await)
+                } else {
+                    None
+                };
                 let asks_before = client.asks.load(AtomicOrdering::SeqCst);
                 let requests_before = client.requests.load(AtomicOrdering::SeqCst);
 
@@ -44560,7 +44583,6 @@ mod tests {
                 // The witness: the cause is the answer of this session's
                 // client, asked for this refusal, and no request was sent.
                 let asks = client.asks.load(AtomicOrdering::SeqCst) - asks_before;
-                println!("data {scene}: asks {asks}, answer {}", refused.message);
                 asked.push((kind, asks));
                 assert_eq!(
                     client.requests.load(AtomicOrdering::SeqCst),
@@ -44569,6 +44591,13 @@ mod tests {
                 );
                 if live {
                     assert_eq!(live_identity().await, identity_before, "{scene}");
+                    // Refused by the judgment before admission, not at the
+                    // turn's apply: no input was stored for the turn.
+                    assert_eq!(
+                        Some(stored_inputs().await),
+                        inputs_before,
+                        "{scene}: no input was admitted"
+                    );
                 }
             }
             assert_eq!(

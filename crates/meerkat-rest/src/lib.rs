@@ -21690,8 +21690,8 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     /// list is not loaded answers HTTP 400 with what the client reports when
     /// it is asked: `retryable` is `false` when the client reports that a new
     /// sign-in is required, and `true` for an exchange outage and for no
-    /// cause. The client is asked, serves no request, and no session is
-    /// created.
+    /// cause. The client is asked once, serves no request, and no session is
+    /// created: the error names none and the store holds none.
     #[tokio::test]
     async fn a_create_refused_with_a_cause_answers_http_400_with_its_own_retryable() {
         use axum::body::Body;
@@ -21721,7 +21721,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             state.llm_client_override = Some(client.clone());
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                router(state).oneshot(
+                router(state.clone()).oneshot(
                     axum::http::Request::builder()
                         .method("POST")
                         .uri("/sessions")
@@ -21779,10 +21779,23 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             );
             // The witness: the cause is the answer of the request's client,
             // asked once for this refusal, and no request was sent.
-            let asks = client.asks.load(AtomicOrdering::SeqCst);
-            println!("data cause {cause:?}: asks {asks}, answer {payload}");
-            assert_eq!(asks, 1, "cause {cause:?}");
+            assert_eq!(
+                client.asks.load(AtomicOrdering::SeqCst),
+                1,
+                "cause {cause:?}"
+            );
             assert_eq!(client.requests.load(AtomicOrdering::SeqCst), 0);
+            // No session was created: the store holds none.
+            let stored = state
+                .session_service
+                .list(meerkat_core::service::SessionQuery::default())
+                .await
+                .expect("list the sessions the service holds");
+            assert!(
+                stored.is_empty(),
+                "cause {cause:?}: a create refused for its level leaves no session: {} left",
+                stored.len()
+            );
         }
     }
 

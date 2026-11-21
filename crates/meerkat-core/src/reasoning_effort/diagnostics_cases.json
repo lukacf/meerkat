@@ -454,11 +454,14 @@
     }
   ],
   "times": {
+    "form": "An RFC 3339 date-time and nothing else: a four-digit year, a two-digit month and day, T or t, a two-digit hour, minute and second, an optional fraction of one or more digits, then Z, z or a signed offset of a two-digit hour and minute with a colon. The date must exist; the hour, the minute, the second (up to 60) and the offset must be in range. Every reader takes each readable value and no reader takes a refusal that carries an unreadable one.",
     "readable": [
       "2020-01-02T03:04:05Z",
       "2020-01-02T05:04:05+02:00",
       "2020-01-02T03:04:05.123456789Z",
-      "2020-02-29T23:59:59-08:00"
+      "2020-02-29T23:59:59-08:00",
+      "2020-01-02t03:04:05z",
+      "2016-12-31T23:59:60Z"
     ],
     "unreadable": [
       "not-a-timestamp",
@@ -467,7 +470,13 @@
       "2020-01-02T03:04:05",
       "2021-02-29T03:04:05Z",
       "2020-13-02T03:04:05Z",
-      "2020-01-02T24:00:00Z"
+      "2020-01-02T24:00:00Z",
+      "2020-01-02 03:04:05Z",
+      "2020-1-2T3:4:5Z",
+      "2020-01-02T03:04:05 Z",
+      "2020-01-02T03:04:05UTC",
+      "2020-01-02T03:04:05+0000",
+      "+12020-01-02T03:04:05Z"
     ]
   },
   "invalid_values": [

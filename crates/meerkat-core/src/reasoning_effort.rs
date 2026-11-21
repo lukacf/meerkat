@@ -392,17 +392,104 @@ pub struct ReasoningEffortRefusal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
     /// Absolute RFC3339 eligibility time from a stored account deadline,
-    /// written in UTC. Absent when no time was reported: absence does not say
-    /// that no deadline applies. This is neither a countdown nor a promise
-    /// that retrying then will recover the model list. A value that is not
-    /// an RFC3339 timestamp is outside the documented shape: neither this
-    /// type nor an SDK parser reads a refusal that carries one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// written in UTC. This is neither a countdown nor a promise that
+    /// retrying then will recover the model list. Presence is tolerant:
+    /// absent when no time was reported, and absence does not say that no
+    /// deadline applies. The form is closed: a value that is not an RFC3339
+    /// timestamp is outside the documented shape, and neither this type nor
+    /// an SDK parser reads a refusal that carries one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_rfc3339_timestamp"
+    )]
     #[cfg_attr(
         feature = "schema",
         schemars(schema_with = "nullable_timestamp_schema")
     )]
     pub not_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Read a refusal's `not_before`: absent or `null` is no time, and a present
+/// value is an RFC 3339 date-time and nothing else.
+fn deserialize_rfc3339_timestamp<'de, D>(
+    deserializer: D,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_rfc3339_timestamp(&value)
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("not_before is not an RFC 3339 date-time"))
+}
+
+/// An RFC 3339 date-time, by its form first: a four-digit year, a two-digit
+/// month and day, `T` or `t`, a two-digit hour, minute and second, an
+/// optional fraction, then `Z`, `z` or a signed offset of a two-digit hour
+/// and minute with a colon. The time library's own reader also takes
+/// spellings outside that form (a space as the separator, numbers without
+/// padding, `UTC`, an offset without its colon), which the SDK parsers
+/// refuse; checking the form here makes every reader take the same values.
+/// The library then checks the calendar and the ranges.
+fn parse_rfc3339_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let [
+        y1,
+        y2,
+        y3,
+        y4,
+        b'-',
+        mo1,
+        mo2,
+        b'-',
+        d1,
+        d2,
+        b'T' | b't',
+        h1,
+        h2,
+        b':',
+        mi1,
+        mi2,
+        b':',
+        s1,
+        s2,
+        rest @ ..,
+    ] = value.as_bytes()
+    else {
+        return None;
+    };
+    let all_digits = |bytes: &[&u8]| bytes.iter().all(|byte| byte.is_ascii_digit());
+    if !all_digits(&[y1, y2, y3, y4, mo1, mo2, d1, d2, h1, h2, mi1, mi2, s1, s2]) {
+        return None;
+    }
+    let zone = match rest {
+        [b'.', fraction @ ..] => {
+            let digits = fraction
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits == 0 {
+                return None;
+            }
+            fraction.get(digits..)?
+        }
+        zone => zone,
+    };
+    let zone_holds = match zone {
+        [b'Z' | b'z'] => true,
+        [b'+' | b'-', oh1, oh2, b':', om1, om2] => all_digits(&[oh1, oh2, om1, om2]),
+        _ => false,
+    };
+    if !zone_holds {
+        return None;
+    }
+    // The library is given the upper-case letters it writes itself.
+    let canonical = value.replace('t', "T").replace('z', "Z");
+    chrono::DateTime::parse_from_rfc3339(&canonical)
+        .ok()
+        .map(|time| time.with_timezone(&chrono::Utc))
 }
 
 impl ReasoningEffortRefusal {

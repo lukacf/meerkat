@@ -48,6 +48,7 @@ them.
   Existing session models and explicit/configured session pins retain their
   precedence. The global and image defaults are unchanged. No wire/schema
   break is introduced.
+- `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::RecoverInputLifecycle` gains the public field `live_boundary_delivery: Option<LiveBoundaryDelivery>`. `meerkat-runtime`: the variant `RecoverInputLifecycle` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; `None` keeps the earlier behaviour. No variant is added and no enum order moves. No wire form and no stored form changes.
 
 ### Added
 
@@ -68,6 +69,7 @@ them.
 
 ### Fixed
 
+- `meerkat-runtime`: a durable steer that was admitted and was still waiting for its run's next boundary when its session was loaded again from the store now joins that run when the run resumes. Before, no request of the resumed run carried that steer or any durable steer admitted behind it while the run ran, and one follow-up turn delivered them after the run ended. Now the resumed run's next boundary that accepts durable deliveries carries the steer that waited and the durable steers admitted behind it, in admission order, each once, and no follow-up turn runs for them. Admission order survives the reload. A recall of the steer that waited leaves the steers behind it in that request. When that boundary refuses durable deliveries, or the run ends before a boundary, one follow-up turn delivers them in admission order, as for steers admitted while the run ran. A steer whose row counts a stage attempt, or that had already joined the run before the reload, takes the follow-up turn, exactly once. A join write the store refuses is not published and fences the runtime until a reload, as before. With no run to resume nothing changes: the steer that waited starts the next run. The rows that show this reload the session inside one test process, over the in-memory store and over SQLite; none restarts a process.
 - `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary gives that boundary back. The next durable steer in the steer lane now joins the very boundary the recalled one waited for. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Each boundary still takes one durable delivery, in arrival order, and the recall's answers are unchanged. The boundary is freed while the recalled steer still waits for it; a recall that commits after the runner has already parked at that boundary with the steer frees nothing, and that boundary delivers nothing, as before.
 
 ### Upgrade notes

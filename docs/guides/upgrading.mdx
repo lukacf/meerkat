@@ -127,6 +127,12 @@ the follow-up turn publishes no `boundary_append_applied`: read its
 `last_run_id` with `session/input_status` and wait for that run's first
 `turn_completed`.
 
+A steer admitted after a request's input is fixed waits for the next
+boundary, even when its admission was acknowledged before the request was
+composed or sent. A caller cannot tell the two instants apart, so an
+admission acknowledged before the request left does not mean the steer is in
+that request.
+
 What stays per input, exactly once: the transcript rows, the input id, the
 delivery witness, the binding to the run's round commit and the
 `boundary_append_applied`. Several of those events can now

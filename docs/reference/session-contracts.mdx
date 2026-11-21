@@ -1426,6 +1426,13 @@ steer has registered. Once a durable steer has entered the boundary, the
 cutoff is that steer's publication under the session mutation gate, as at
 any boundary.
 
+The cutoff is the instant the request's input is fixed, not the later
+composing or sending of the request. A steer admitted after it waits for
+the next boundary, even when its admission was acknowledged before the
+request was composed or sent. A caller cannot tell the two instants apart,
+so an admission acknowledged before the request left does not mean the
+steer is in that request.
+
 The joins follow the lane and stop at the first durable steer that cannot
 join this run: a steer of another requester than the run's, one the run's
 bound of 256 contributors refuses, one whose rows cannot be written in-turn,

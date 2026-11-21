@@ -1521,9 +1521,10 @@ join the resumed run's request.
 The limits of a live boundary hold here too: when the resumed run's boundary
 refuses Session writes, or the run ends before a boundary, one follow-up turn
 delivers them in admission order. A steer whose stored row counts a stage
-attempt takes the follow-up turn. A steer that joined the resumed run and
-whose session is loaded once more before a round commit held its rows takes
-one follow-up turn after the run, once. With no run to resume, the steer
+attempt takes the follow-up turn. A steer whose join to the resumed run is
+still open when its session is loaded once more, before a round commit held
+its rows, takes one follow-up turn after the run, once. With no run to
+resume, the steer
 that waited starts the next run as its own input.
 
 Arrival order holds within each delivery class: a

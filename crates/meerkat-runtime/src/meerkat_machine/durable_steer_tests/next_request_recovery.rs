@@ -1156,6 +1156,10 @@ mod stop_arms {
     /// a's turn, and a's third steer, admitted behind it, is in no request
     /// of this turn: after it, b's steer runs first and a's third after it,
     /// each in a run of its own.
+    ///
+    /// This row reads the outcome only. The machine's order of the steer
+    /// lane across requesters keeps a's third steer behind b's as well, so
+    /// the row does not tell which of the two ended the joins.
     #[tokio::test]
     async fn another_requester_s_steer_ends_the_joins_and_the_steer_behind_it_waits() {
         let rig = DurableSteerRig::ephemeral().await;
@@ -1240,6 +1244,10 @@ mod stop_arms {
     /// written; it and the fourth keep their places, no later boundary of
     /// this run takes them, and one follow-up turn starts with both, in
     /// order. Nothing leaves the registration reload-required.
+    ///
+    /// This row reads the outcome only. The bound would refuse the fourth
+    /// steer as well, so the row does not tell whether the joins ended at
+    /// the third.
     #[tokio::test]
     async fn the_contributor_bound_reached_between_steers_ends_the_joins_and_keeps_the_rest_in_order()
      {
@@ -1371,9 +1379,13 @@ mod stop_arms {
     /// request of this turn: one follow-up turn starts with the third and
     /// then the fourth.
     ///
-    /// The scripted runner of these rows does not lower rows, so what a real
-    /// runner makes of the third steer in that follow-up turn is not shown
-    /// here.
+    /// The follow-up turn read here is the scripted runner's, which does not
+    /// lower rows. A real runner refuses the third steer's row when that
+    /// turn starts (`push_transcript_append` in meerkat-core's
+    /// `agent/runner.rs` returns a configuration error for a `User` row
+    /// that is neither text nor content blocks), and that run fails. So
+    /// this row does not show that the third and fourth steers are
+    /// delivered.
     #[tokio::test]
     async fn a_steer_no_boundary_can_write_ends_the_joins_and_the_steer_behind_it_follows_it() {
         let unwritable = steer_whose_row_does_not_lower("no boundary can write this row");

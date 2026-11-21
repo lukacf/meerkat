@@ -1547,9 +1547,18 @@ export function parseAnnouncementRpcError(
 }
 
 export class ContractMismatchError extends MetaError {
-  constructor(message: string) {
+  /** Read this item with workgraphGet before repeating a possibly committed create. */
+  readonly returnedItemId?: string;
+  readonly returnedItemRevision?: number;
+
+  constructor(message: string, context?: {
+    readonly returnedItemId?: string;
+    readonly returnedItemRevision?: number;
+  }) {
     super(message);
     this.name = "ContractMismatchError";
+    this.returnedItemId = context?.returnedItemId;
+    this.returnedItemRevision = context?.returnedItemRevision;
   }
 }
 

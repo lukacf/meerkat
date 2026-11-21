@@ -243,8 +243,9 @@ readiness, claim admission, ordering, attention authority or automatic waking.
 On update, an omitted or null `finish_by` keeps the existing value;
 `{"op":"set","value":"2030-01-02T03:04:05Z"}` replaces it and
 `{"op":"clear"}` clears it. Clear accepts no `value` key, including null.
-Malformed operations return the existing typed invalid-arguments outcome
-without a write. Successful updates use the ordinary item revision CAS and
+Malformed operations return JSON-RPC invalid params on the Meta methods, or
+the typed invalid-arguments outcome on the tool surface, without a write.
+Successful updates use the ordinary item revision CAS and
 Updated event. The three existing dates cannot be cleared today.
 
 A successful Set or Clear advances the item revision, so an attention projection
@@ -267,6 +268,12 @@ compare at Chrono's nanosecond precision. Omitted/null updates are Keep and do
 not assert a target. A mismatch never causes an automatic retry; the mutation
 may already have committed. The SDK comparison is conservative: an unrecognized
 timestamp spelling can raise a mismatch even if the gateway accepted the write.
+When the response contains a valid item id and revision, the error preserves
+them as `returned_item_id` / `returned_item_revision` (Python) or
+`returnedItemId` / `returnedItemRevision` (TypeScript). Read the returned id
+with `workgraph_get` / `workgraphGet` to inspect the committed state instead
+of blindly repeating create or goal-create. Malformed identity or revision
+data leaves both context fields absent; no id or revision is coerced or invented.
 Realm migration and current typed readers carry the field. This compatibility
 limit does not grant a future operational meaning to finish-by: making it a
 lifecycle gate would require a separate machine and migration review.

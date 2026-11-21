@@ -521,14 +521,22 @@ function finishByInstant(value: string): string | null {
   return `${whole}:${fraction.slice(0, 9).replace(/0+$/, "")}:${second === 60}`;
 }
 
-function verifyFinishBy(requested: unknown, returned: unknown, update = false): void {
+function verifyFinishBy(requested: unknown, returnedItem: unknown, update = false): void {
   if (requested === undefined || (update && requested === null)) return;
+  const item = asWireRecord(returnedItem);
+  const returned = item.finish_by;
+  const revision = item.revision;
+  // Preserve only an intact identity pair, without coercion or precision loss.
+  const context = typeof item.id === "string" && item.id.trim().length > 0
+    && typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0
+    ? { returnedItemId: item.id, returnedItemRevision: revision }
+    : undefined;
   let expected: unknown = requested;
   if (update) {
     const operation = asWireRecord(requested);
     if (operation.op === "clear" && Object.keys(operation).length === 1) expected = null;
     else if (operation.op === "set" && Object.keys(operation).length === 2 && "value" in operation) expected = operation.value;
-    else throw new ContractMismatchError("WorkGraph finish_by response cannot confirm the requested operation; the operation may already have committed");
+    else throw new ContractMismatchError("WorkGraph finish_by response cannot confirm the requested operation; the operation may already have committed", context);
   }
   let matches = expected === null && (returned === undefined || returned === null);
   if (typeof expected === "string" && typeof returned === "string") {
@@ -538,6 +546,7 @@ function verifyFinishBy(requested: unknown, returned: unknown, update = false): 
   if (!matches) {
     throw new ContractMismatchError(
       "WorkGraph finish_by was not confirmed by the gateway response; the operation may already have committed",
+      context,
     );
   }
 }
@@ -5108,6 +5117,8 @@ export class MobHandle {
     );
   }
 
+  /** On finish-by mismatch, read the error's returnedItemId with workgraphGet;
+   * the create may already have committed and must not be blindly repeated. */
   async workgraphCreate(
     title: string,
     options?: WorkGraphCreateOptions,
@@ -5116,10 +5127,13 @@ export class MobHandle {
     params.title = title;
     const raw = await this._runtime._rpc("meta/workgraph/create", params);
     const item = asWireRecord(raw).item;
-    verifyFinishBy(params.finish_by, asWireRecord(item).finish_by);
+    verifyFinishBy(params.finish_by, item);
     return parseWorkGraphItem(item);
   }
 
+  /** A finish-by mismatch preserves a valid returned item id/revision on the
+   * error; use workgraphGet to inspect the possibly committed update.
+   * The gateway refuses updates to terminal items before this comparison. */
   async workgraphUpdate(
     id: string,
     expectedRevision: number,
@@ -5130,7 +5144,7 @@ export class MobHandle {
     params.expected_revision = expectedRevision;
     const raw = await this._runtime._rpc("meta/workgraph/update", params);
     const item = asWireRecord(raw).item;
-    verifyFinishBy(params.finish_by, asWireRecord(item).finish_by, true);
+    verifyFinishBy(params.finish_by, item, true);
     return parseWorkGraphItem(item);
   }
 
@@ -5244,6 +5258,8 @@ export class MobHandle {
     return parseWorkGraphItem(asWireRecord(raw).item);
   }
 
+  /** On finish-by mismatch, read the error's returnedItemId with workgraphGet;
+   * the item and attention binding may already exist, so do not repeat create. */
   async workgraphGoalCreate(
     title: string,
     target: WorkGraphGoalTarget,
@@ -5253,7 +5269,7 @@ export class MobHandle {
     params.title = title;
     params.target = workGraphGoalTargetToDict(target);
     const raw = await this._runtime._rpc("meta/workgraph/goal/create", params);
-    verifyFinishBy(params.finish_by, asWireRecord(asWireRecord(raw).item).finish_by);
+    verifyFinishBy(params.finish_by, asWireRecord(raw).item);
     return parseWorkGraphGoalResult(raw);
   }
 

@@ -377,9 +377,20 @@ def _finish_by_instant(value: str) -> tuple[int, str, bool] | None:
     return (whole, (fraction or "")[:9].rstrip("0"), second == 60)
 
 
-def _verify_finish_by(requested: Any, returned: Any, *, update: bool = False) -> None:
+def _verify_finish_by(requested: Any, returned_item: Any, *, update: bool = False) -> None:
     if update and requested is None:
         return  # null is Keep, not Clear.
+    item = returned_item if isinstance(returned_item, dict) else {}
+    returned = item.get("finish_by")
+    item_id, revision = item.get("id"), item.get("revision")
+    # Keep only an intact, exact identity pair; never turn malformed response
+    # data into an id/revision that a caller might use for recovery.
+    context = (
+        {"returned_item_id": item_id, "returned_item_revision": revision}
+        if isinstance(item_id, str) and item_id.strip()
+        and type(revision) is int and 0 <= revision <= 2**64 - 1
+        else {}
+    )
     expected = requested
     if update:
         if isinstance(requested, dict) and requested == {"op": "clear"}:
@@ -387,7 +398,10 @@ def _verify_finish_by(requested: Any, returned: Any, *, update: bool = False) ->
         elif isinstance(requested, dict) and set(requested) == {"op", "value"} and requested.get("op") == "set":
             expected = requested["value"]
         else:
-            raise ContractMismatchError("WorkGraph finish_by response cannot confirm the requested operation; the operation may already have committed")
+            raise ContractMismatchError(
+                "WorkGraph finish_by response cannot confirm the requested operation; "
+                "the operation may already have committed", **context
+            )
     matches = expected is None and returned is None
     if isinstance(expected, str) and isinstance(returned, str):
         instant = _finish_by_instant(expected)
@@ -395,7 +409,7 @@ def _verify_finish_by(requested: Any, returned: Any, *, update: bool = False) ->
     if not matches:
         raise ContractMismatchError(
             "WorkGraph finish_by was not confirmed by the gateway response; "
-            "the operation may already have committed"
+            "the operation may already have committed", **context
         )
 
 
@@ -5371,12 +5385,17 @@ class MobHandle:
         return WorkGraphGoalResult.from_dict(raw)
 
     async def workgraph_create(self, title: str, **kwargs: Any) -> WorkGraphItem:
-        """Create a new WorkGraph item."""
+        """Create a new WorkGraph item.
+
+        On a finish-by ``ContractMismatchError``, use ``returned_item_id``
+        with ``workgraph_get`` to inspect the possibly committed item instead
+        of repeating create. The error preserves a valid returned revision too.
+        """
         params: dict[str, Any] = {"title": title, **kwargs}
         raw = await self._runtime._rpc("meta/workgraph/create", params)
         item_data = raw.get("item", raw) if isinstance(raw, dict) else raw
         if "finish_by" in params:
-            _verify_finish_by(params["finish_by"], item_data.get("finish_by") if isinstance(item_data, dict) else None)
+            _verify_finish_by(params["finish_by"], item_data)
         return WorkGraphItem.from_dict(item_data)
 
     async def workgraph_update(
@@ -5389,6 +5408,8 @@ class MobHandle:
         target, or ``{"op": "clear"}`` to clear it. The helper compares only
         the returned target and raises ``ContractMismatchError`` if the gateway
         did not apply it. The mutation may already have committed; it is not retried.
+        Read the error's ``returned_item_id`` with ``workgraph_get`` when present.
+        Terminal items are refused by the gateway before this comparison.
         """
         params: dict[str, Any] = {
             "id": id,
@@ -5398,7 +5419,7 @@ class MobHandle:
         raw = await self._runtime._rpc("meta/workgraph/update", params)
         item_data = raw.get("item", raw) if isinstance(raw, dict) else raw
         if "finish_by" in params:
-            _verify_finish_by(params["finish_by"], item_data.get("finish_by") if isinstance(item_data, dict) else None, update=True)
+            _verify_finish_by(params["finish_by"], item_data, update=True)
         return WorkGraphItem.from_dict(item_data)
 
     async def workgraph_claim(
@@ -5523,12 +5544,15 @@ class MobHandle:
         ``{"kind": "identity", "identity": ...}`` (lowered server-side to an
         owner key against the runtime's mob id), or
         ``{"kind": "owner", "owner_key": {"kind": ..., "id": ...}}``.
+        On a finish-by ``ContractMismatchError``, read ``returned_item_id``
+        with ``workgraph_get`` when present instead of repeating goal creation;
+        the item and its attention binding may already have committed.
         """
         params: dict[str, Any] = {"title": title, "target": target, **kwargs}
         raw = await self._runtime._rpc("meta/workgraph/goal/create", params)
         if "finish_by" in params:
             item_data = raw.get("item") if isinstance(raw, dict) else None
-            _verify_finish_by(params["finish_by"], item_data.get("finish_by") if isinstance(item_data, dict) else None)
+            _verify_finish_by(params["finish_by"], item_data)
         return WorkGraphGoalResult.from_dict(raw)
 
     async def workgraph_goal_confirm(

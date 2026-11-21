@@ -82,3 +82,50 @@ async def test_finish_by_helper_accepts_chrono_normalized_response(requested, re
     handle, calls = make_mock_mob_handle({"meta/workgraph/update": {"item": {"id": "work_test", "finish_by": returned}}})
     assert (await handle.workgraph_update("work_test", 1, finish_by={"op": "set", "value": requested})).finish_by == returned
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "goal_create", "set", "clear", "malformed", "unrecognized_timestamp"])
+async def test_finish_by_mismatch_preserves_committed_item_for_read_recovery(operation):
+    value = "2030-01-02T03:04:05Z"
+    method = {"create": "create", "goal_create": "goal/create", "unrecognized_timestamp": "create"}.get(operation, "update")
+    returned = {"id": "work_returned", "revision": 9, "finish_by": value if operation in ("clear", "unrecognized_timestamp") else None}
+    handle, calls = make_mock_mob_handle({
+        f"meta/workgraph/{method}": {"item": returned, "attention": {}},
+        "meta/workgraph/get": {"item": returned},
+    })
+    with pytest.raises(ContractMismatchError, match="may already have committed") as caught:
+        if operation in ("create", "unrecognized_timestamp"):
+            requested = value if operation == "create" else "server-accepted-spelling-outside-comparator"
+            await handle.workgraph_create("Target", finish_by=requested)
+        elif operation == "goal_create":
+            await handle.workgraph_goal_create("Target", {"kind": "session", "session_id": "session_1"}, finish_by=value)
+        else:
+            update = {"op": "set", "value": value} if operation == "set" else {"op": "clear"}
+            if operation == "malformed":
+                update["value"] = None  # An old gateway might accept an unknown/malformed field.
+            await handle.workgraph_update("work_requested", 1, finish_by=update)
+    error = caught.value
+    assert error.returned_item_id == "work_returned"
+    assert error.returned_item_revision == 9
+    assert len(calls) == 1  # No automatic retry of the mutation.
+    recovered = await handle.workgraph_get(error.returned_item_id)
+    assert recovered.id == error.returned_item_id
+    assert recovered.revision == error.returned_item_revision
+    assert [name for name, _ in calls] == [f"meta/workgraph/{method}", "meta/workgraph/get"]
+    assert calls[-1][1] == {"id": "work_returned"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("item", [
+    None, [], {},
+    {"id": 42, "revision": 9}, {"id": "", "revision": 9}, {"id": " ", "revision": 9},
+    *({"id": "work_returned", "revision": revision} for revision in [None, "9", True, 1.5, -1, 2**64]),
+])
+async def test_finish_by_mismatch_does_not_invent_recovery_identity(item):
+    handle, calls = make_mock_mob_handle({"meta/workgraph/create": {"item": item}})
+    with pytest.raises(ContractMismatchError) as caught:
+        await handle.workgraph_create("Target", finish_by="2030-01-02T03:04:05Z")
+    assert caught.value.returned_item_id is None
+    assert caught.value.returned_item_revision is None
+    assert len(calls) == 1

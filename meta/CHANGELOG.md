@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   updates use explicit set/clear operations, with omission or null keeping
   the target. TypeScript's `WorkGraphItem.finishBy` remains optional for
   consumer-created items; decoding supplies a string or null. The Console
-  shows the target as “Finish by” and the existing availability date as
-  “Available from” / “From”. Finish-by changes no readiness, claim, ordering,
+  shows the target's UTC day as "Finish by" and the existing availability date as
+  "Available from" / "From". The Ready hover now describes the loaded items
+  reported ready by the runtime with no recorded blockers, and says panel
+  filters do not change that count. Finish-by changes no readiness, claim, ordering,
   attention-authority, wake, or close rule.
 
 - The TypeScript SDK exposes the existing gateway host-runnable path:
@@ -47,7 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Finish-by mutation helpers compare the returned target and raise the
   existing `ContractMismatchError` when it is not confirmed, including when
   an older gateway ignores the field. The write may already have committed;
-  the helpers do not retry. Older readers accept an absent target, but older
+  the helpers do not retry. When the returned item has a valid id and revision,
+  the error carries `returned_item_id` / `returned_item_revision` in Python and
+  `returnedItemId` / `returnedItemRevision` in TypeScript. Read that id with
+  `workgraph_get` / `workgraphGet` to inspect the possibly committed resource
+  instead of repeating create or goal-create. Malformed responses leave the
+  pair absent. Older readers accept an absent target, but older
   writers can drop it when rewriting an item.
 
 - TypeScript host runnables are opt-in access to the existing gateway

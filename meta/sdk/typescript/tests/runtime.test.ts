@@ -3266,6 +3266,55 @@ describe("MobHandle.workgraphUpdate()", () => {
 });
 
 describe("MobHandle finish-by verification", () => {
+  for (const operation of ["create", "goal-create", "set", "clear", "malformed", "unrecognized-timestamp"] as const) {
+    it(`finish-by ${operation} mismatch preserves the returned item for read recovery`, async () => {
+      const { handle, calls, setResponse } = createMockRuntime();
+      const value = "2030-01-02T03:04:05Z";
+      const returned = { ...WG_ITEM_WIRE, id: "work_returned", revision: 9, finish_by: ["clear", "unrecognized-timestamp"].includes(operation) ? value : null };
+      setResponse(() => ({ item: returned, attention: WG_ATTENTION_WIRE }));
+      const result = operation === "create" || operation === "unrecognized-timestamp"
+        ? handle.workgraphCreate("Target", { finishBy: operation === "create" ? value : "server-accepted-spelling-outside-comparator" })
+        : operation === "goal-create"
+          ? handle.workgraphGoalCreate("Target", { kind: "session", sessionId: "session_1" }, { finishBy: value })
+          : handle.workgraphUpdate("work_requested", 1, { finishBy: operation === "set" ? { op: "set", value } : operation === "clear" ? { op: "clear" } : { op: "clear", value: null } as never });
+      let mismatch: unknown;
+      await assert.rejects(result, (error: unknown) => {
+        assert.ok(error instanceof ContractMismatchError);
+        assert.match(error.message, /may already have committed/);
+        mismatch = error;
+        return true;
+      });
+      assert.ok(mismatch instanceof ContractMismatchError);
+      assert.equal(mismatch.returnedItemId, "work_returned");
+      assert.equal(mismatch.returnedItemRevision, 9);
+      assert.equal(calls.length, 1);
+      const recovered = await handle.workgraphGet(mismatch.returnedItemId!);
+      assert.equal(recovered.id, mismatch.returnedItemId);
+      assert.equal(recovered.revision, mismatch.returnedItemRevision);
+      const method = operation === "goal-create" ? "goal/create" : operation === "create" || operation === "unrecognized-timestamp" ? "create" : "update";
+      assert.deepEqual(calls.map((call) => call.method), [`meta/workgraph/${method}`, "meta/workgraph/get"]);
+      assert.deepEqual(calls[1].params, { id: "work_returned" });
+    });
+  }
+
+  it("finish-by mismatch never invents or coerces a recovery identity", async () => {
+    for (const item of [
+      null, [], {}, { id: 42, revision: 9 }, { id: "", revision: 9 }, { id: " ", revision: 9 },
+      ...[null, "9", true, 1.5, -1, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]
+        .map((revision) => ({ id: "work_returned", revision })),
+    ]) {
+      const { handle, calls, setResponse } = createMockRuntime();
+      setResponse(() => ({ item }));
+      await assert.rejects(handle.workgraphCreate("Target", { finishBy: "2030-01-02T03:04:05Z" }), (error: unknown) => {
+        assert.ok(error instanceof ContractMismatchError);
+        assert.equal(error.returnedItemId, undefined);
+        assert.equal(error.returnedItemRevision, undefined);
+        return true;
+      });
+      assert.equal(calls.length, 1);
+    }
+  });
+
   for (const operation of ["create", "goal-create", "set", "clear"] as const) {
     it(`finish-by ${operation} raises when the gateway ignores it`, async () => {
       const { handle, calls, setResponse } = createMockRuntime();

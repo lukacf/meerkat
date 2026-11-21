@@ -1404,6 +1404,15 @@ impl TurnStateScalars {
 
 /// Turn-execution DSL handle.
 pub trait TurnStateHandle: Send + Sync {
+    /// Where the runtime behind this handle announces a durable delivery it
+    /// acknowledged before that delivery's boundary preparation registered
+    /// ([`crate::PendingBoundaryAdmissions`]). The agent binds it into its
+    /// boundary coordinator. `None`, the default, for a turn authority no
+    /// runtime admits inputs through.
+    fn pending_boundary_admissions(&self) -> Option<crate::PendingBoundaryAdmissions> {
+        None
+    }
+
     /// Mint a fresh process-local authority for one noncommitting live bridge
     /// execution. The default fails closed because an ordinary turn handle
     /// must never be reused as bridge authority.

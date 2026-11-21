@@ -6858,7 +6858,9 @@ impl MobHandle {
     /// (accepted inputs that are queued, held or running) is read only
     /// when the actor's own counts are idle, for the members that have a
     /// bridge session in this process, and reads as none in a build
-    /// without the runtime adapter.
+    /// without the runtime adapter. The step between the actor's delivery
+    /// of a peer message and the member's accepted input is not traced for
+    /// it.
     pub async fn observe_idle(
         &self,
     ) -> Result<super::admission_close::MobIdleObservation, MobError> {

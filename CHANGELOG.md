@@ -76,9 +76,10 @@ them.
   are diagnostic. The accepted work of the members' sessions (inputs
   that are queued, held or running) is read only when the actor's own
   counts are idle, and only for members with a bridge session in this
-  process. The reading is of one instant: the mob may be busy, or
-  closed, when the caller next acts, and no wait and no notification
-  come with it.
+  process. The step between the actor's delivery of a peer message and
+  the member's accepted input is not traced for it. The reading is of
+  one instant: the mob may be busy, or closed, when the caller next
+  acts, and no wait and no notification come with it.
 
 ### Changed
 

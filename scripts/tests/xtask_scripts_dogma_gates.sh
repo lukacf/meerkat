@@ -450,6 +450,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # AuditLateNeverInBatchRun or AuditRunsShareOneKey violated for each seeded
 # requester defect and the action property AuditSteerLaneFifo violated for
 # each seeded order defect.
+# durable_multi_steer_audit.sh requires the success line for its two safety
+# runs, its six witnesses (AuditEarlyNeverAllRetainedAtFirstBoundary twice,
+# AuditHeadNeverRecalledWithOthersRetained,
+# AuditMiddleNeverRecalledWithOthersRetained,
+# AuditNeverMixedOutcomesAtFirstBoundary,
+# AuditAfterNeverJoinsTheNextBoundary) violated, and with --mutants
+# AuditJoinNotBeforeItsBoundary, AuditRecalledNeverJoined and the action
+# property AuditRecallKeepsTheOthers violated, one for each seeded defect.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -463,6 +471,14 @@ printf '%s\n' \
   'echo "Error: Invariant AuditLateNeverInBatchRun is violated."' \
   'echo "Error: Invariant AuditEarlyNeverRunsAlone is violated."' \
   'echo "Error: Action property AuditSteerLaneFifo is violated."' \
+  'echo "Error: Invariant AuditEarlyNeverAllRetainedAtFirstBoundary is violated."' \
+  'echo "Error: Invariant AuditHeadNeverRecalledWithOthersRetained is violated."' \
+  'echo "Error: Invariant AuditMiddleNeverRecalledWithOthersRetained is violated."' \
+  'echo "Error: Invariant AuditNeverMixedOutcomesAtFirstBoundary is violated."' \
+  'echo "Error: Invariant AuditAfterNeverJoinsTheNextBoundary is violated."' \
+  'echo "Error: Invariant AuditJoinNotBeforeItsBoundary is violated."' \
+  'echo "Error: Invariant AuditRecalledNeverJoined is violated."' \
+  'echo "Error: Action property AuditRecallKeepsTheOthers is violated."' \
   'echo "Error: Invariant AuditCapacityRefusalNeverReached is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \

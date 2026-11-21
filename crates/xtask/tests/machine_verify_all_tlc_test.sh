@@ -785,6 +785,38 @@ if run_part audits-s; then
   TLC_WORKERS="${tlc_workers}" "${requester_batch_audit}" "${REQUESTER_BATCH_AUDIT_MAX_STEPS:-14}" --mutants
 fi
 
+# Several durable Steer inputs of one requester at one model boundary. The
+# durable in-turn steer audit above explores one late Steer input and the
+# requester batch audit pairs Steer inputs of different requesters, so
+# neither takes two inputs of one requester through one boundary. A
+# hand-written audit over the same generated model admits two or three Steer
+# inputs of the run's own requester, in order, at the run's first model
+# boundary, and explores for each the durable join, its three resolutions and
+# normalization, a tool round that leaves the boundary and returns to it, a
+# recall of any of them and one more Steer input admitted later, under every
+# generated invariant plus six safety invariants (the three exactly-once
+# invariants over every joined input; a retained join is never undone or
+# joined again; a recalled input holds no join and was never retained; no
+# input joins a stay at the boundary earlier than the first it may join) and
+# two action properties (a recalled input stays abandoned; a recall changes
+# no other input's place, delivery or join). It requires six witnesses
+# reached (two and three inputs all joined in the first stay and retained;
+# the first of three recalled, and the middle one, with the other two
+# retained; three joins of one stay each resolved on its own; a later input
+# joined in the next stay) and refuses three seeded defects (--mutants): the
+# join without its model-boundary guard, the recall without its Queued guard
+# and a recall that drops every delivery. 20 steps reach every witness and
+# mutant; deeper bounds run by hand.
+durable_multi_steer_audit="${workspace_root}/specs/machines/meerkat_machine/durable_multi_steer_audit.sh"
+if [[ ! -x "${durable_multi_steer_audit}" ]]; then
+  echo "error: durable multi-steer audit runner is missing from workspace runfiles: ${durable_multi_steer_audit}" >&2
+  exit 1
+fi
+if run_part audits-k; then
+  echo "running bounded durable multi-steer TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_multi_steer_audit}" "${DURABLE_MULTI_STEER_AUDIT_MAX_STEPS:-20}" --mutants
+fi
+
 # The AuthMachine source-credential publication (a publisher that re-reads
 # its credential value from a source asks ResolveSourceCredentialPublication
 # with the value's fingerprint and fires Acquire naming it only on Publish)
@@ -1766,7 +1798,11 @@ run_machine_verify() {
 # removal run, from audits-s: about 454-497 s, and its downgrade cycle run
 # (0.9.11; 97 s locally with 4 TLC workers, about 110-160 s at that
 # factor): about 565-660 s;
-# audits-v = its reseat and names runs: 500-665, the shard 525-690 s.
+# audits-v = its reseat and names runs: 500-665, the shard 525-690 s;
+# audits-k also runs the durable multi-steer audit with --mutants (eleven
+# runs of the MeerkatMachine model: 77 s locally with 4 TLC workers, beside
+# the apply part's 339 s in the same local run; not yet measured on a hosted
+# runner).
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these

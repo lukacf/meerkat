@@ -72,6 +72,8 @@ struct ScriptedModel {
     requests: AtomicUsize,
     /// The model each request named, in order.
     models: StdMutex<Vec<String>>,
+    /// The messages each request carried, in order.
+    request_messages: StdMutex<Vec<Vec<meerkat_core::Message>>>,
     kill_marker: Option<PathBuf>,
     /// Set once a [`Step::HeldTool`] request is in flight.
     hold_reached: AtomicBool,
@@ -85,10 +87,18 @@ impl ScriptedModel {
             steps: StdMutex::new(steps.into_iter().collect()),
             requests: AtomicUsize::new(0),
             models: StdMutex::new(Vec::new()),
+            request_messages: StdMutex::new(Vec::new()),
             kill_marker,
             hold_reached: AtomicBool::new(false),
             hold_released: AtomicBool::new(false),
         })
+    }
+
+    fn request_messages(&self) -> Vec<Vec<meerkat_core::Message>> {
+        self.request_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn models(&self) -> Vec<String> {
@@ -121,6 +131,10 @@ impl LlmClient for ScriptedModel {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request.model.clone());
+        self.request_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.messages.clone());
         let step = self
             .steps
             .lock()
@@ -515,7 +529,8 @@ async fn rpc_run_with_a_model_override_resumed_after_a_kill_completes_on_that_mo
 
 /// The child incarnation of the joined-steers row. Its second turn's first
 /// model request is held in flight while three text steers are admitted, in
-/// order. Released, the request returns a tool call: the round commits, and
+/// order, at the runtime adapter (`accept_input_with_completion`, the method
+/// the RPC handlers call), not through a JSON-RPC request. Released, the request returns a tool call: the round commits, and
 /// the boundary before the next request joins the three steers. The next
 /// request returns a tool call too, so the run commits one more round, the
 /// first whose document holds the steers' rows. The request after it is the
@@ -589,27 +604,31 @@ async fn rpc_resumed_run_with_joined_steers_child_incarnation() {
     std::future::pending::<()>().await;
 }
 
-/// How many transcript messages of `session` carry `token`.
-fn rows_carrying(session: &meerkat_core::Session, token: &str) -> usize {
-    session
-        .messages()
+/// The positions of the messages of `messages` that carry `token`.
+fn rows_carrying(messages: &[meerkat_core::Message], token: &str) -> Vec<usize> {
+    messages
         .iter()
-        .filter(|message| format!("{message:?}").contains(token))
-        .count()
+        .enumerate()
+        .filter(|(_, message)| format!("{message:?}").contains(token))
+        .map(|(index, _)| index)
+        .collect()
 }
 
-/// JSON-RPC, the actual round commit of the real agent loop and a real
-/// kill: a run joins three steers at one boundary, commits one more round and
-/// is killed. Actual process kill and restart; scripted model. The store is
-/// the HeadCanonical SQLite realm. The round commit's cursor binds the input
-/// that started the run
+/// The JSON-RPC session runtime, the actual round commit of the real agent
+/// loop and a real kill. The three steers are admitted at the runtime adapter
+/// (`accept_input_with_completion`, the method the RPC handlers call), not
+/// through a JSON-RPC request. Actual process kill and restart; scripted
+/// model. The store is the HeadCanonical SQLite realm.
+///
+/// A run joins three steers at one boundary, commits one more round and is
+/// killed. The round commit's cursor binds the input that started the run
 /// and then the three steers, in admission order, and each steer's stored row
 /// is bound to the run. A new runtime over the realm resumes that run; it
 /// completes and commits. No joined steer is delivered twice and none is
-/// lost: the committed transcript holds each steer's row exactly once, in
-/// admission order; the resumed runtime asks the model exactly once (no
-/// follow-up turn starts with a steer); and each steer's row ends consumed
-/// by the resumed run.
+/// lost: the one request the resumed runtime makes carries each steer's row
+/// exactly once, in admission order (no follow-up turn starts with a steer);
+/// the committed transcript holds each steer's row exactly once, in
+/// admission order; and each steer's row ends consumed by the resumed run.
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_run_killed_after_a_round_commit_holds_three_joined_steers_resumes_and_delivers_none_twice()
  {
@@ -727,6 +746,24 @@ async fn rpc_run_killed_after_a_round_commit_holds_three_joined_steers_resumes_a
         1,
         "the resumed runtime asks the model once: no follow-up turn starts with a steer"
     );
+    // What the resumed run's one request carried: each steer's row once, in
+    // admission order.
+    let requests = model.request_messages();
+    assert_eq!(requests.len(), 1);
+    let mut in_request = Vec::new();
+    for token in JOINED_STEER_TOKENS {
+        let rows = rows_carrying(&requests[0], token);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the resumed run's request carries {token} exactly once: {rows:?}"
+        );
+        in_request.push(rows[0]);
+    }
+    assert!(
+        in_request.windows(2).all(|pair| pair[0] < pair[1]),
+        "the request carries the steers' rows in admission order: {in_request:?}"
+    );
     let session = runtime
         .service
         .load_authoritative_session(&session_id)
@@ -735,18 +772,13 @@ async fn rpc_run_killed_after_a_round_commit_holds_three_joined_steers_resumes_a
         .expect("the session is committed");
     let mut positions = Vec::new();
     for token in JOINED_STEER_TOKENS {
+        let rows = rows_carrying(session.messages(), token);
         assert_eq!(
-            rows_carrying(&session, token),
+            rows.len(),
             1,
-            "{token} is in the committed transcript exactly once"
+            "{token} is in the committed transcript exactly once: {rows:?}"
         );
-        positions.push(
-            session
-                .messages()
-                .iter()
-                .position(|message| format!("{message:?}").contains(token))
-                .expect("the steer's row"),
-        );
+        positions.push(rows[0]);
     }
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),

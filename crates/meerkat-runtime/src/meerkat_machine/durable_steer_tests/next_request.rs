@@ -906,3 +906,231 @@ async fn fresh_turn_only_steer_between_two_durable_steers_takes_the_follow_up() 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
 }
+
+/// Leave in `store` what a durable run's round commit leaves: a committed
+/// base of the session and, on it, the run's provisional tail, whose session
+/// document holds `rows` and whose run cursor binds `bound` to `run_id`. A
+/// restart that finds such a tail keeps the run open and resumes it. The
+/// scripted runner writes no session document, so the row stands the tail.
+async fn stand_round_commit_tail(
+    store: &Arc<dyn crate::store::RuntimeStore>,
+    session_id: &SessionId,
+    run_id: &RunId,
+    bound: &[InputId],
+    rows: &[&str],
+) {
+    let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
+    let mut session = meerkat_core::Session::with_id(session_id.clone());
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("batch prompt keeps the runtime busy".to_string()),
+    ));
+    store
+        .commit_session_snapshot(
+            &runtime_id,
+            crate::store::SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+            },
+        )
+        .await
+        .expect("the session's committed base");
+    let base = store
+        .load_whole_blob_store_authority(&runtime_id)
+        .await
+        .expect("read the committed base")
+        .expect("a committed base");
+    for row in rows {
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text((*row).to_string()),
+        ));
+    }
+    session
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            bound.to_vec(),
+            0,
+            meerkat_core::RunResumePoint::AwaitingModel,
+        ))
+        .expect("the run cursor is recorded");
+    let candidate = crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+        base,
+        run_id.clone(),
+        1,
+        &session,
+    )
+    .expect("the round's candidate");
+    store
+        .write_prepared_whole_blob_provisional_tail(&runtime_id, candidate)
+        .await
+        .expect("the round commit's tail");
+}
+
+/// The process dies after the run's round commit already holds the rows of
+/// three steers that one boundary joined: the run is resumable and its
+/// stored cursor binds the batch and the three steers.
+///
+/// A fresh runtime over the same store resumes the SAME run. The three
+/// steers stay bound to it, in admission order: they are its bound inputs
+/// (a resumed run re-enters from its cursor and appends none of them
+/// again), none returns to a lane, none registers a delivery, the resumed
+/// run's next boundary carries nothing, no follow-up turn starts with any of
+/// them, and each stored row ends Consumed by that run. So no joined steer
+/// is delivered twice and none is lost.
+///
+/// The scripted runner writes no session document, so the row stands the
+/// round commit's tail itself (with one row per steer) and takes it out
+/// again before the run's terminal, as the other rows that stand a tail do.
+#[tokio::test]
+async fn persistent_crash_after_a_round_commit_holds_three_joined_steers_resumes_the_run_and_delivers_none_twice()
+ {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let crashed = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let session_id = crashed.session_id.clone();
+    let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+    let batch = crashed.start_busy_turn().await;
+    let run_id = crashed
+        .script
+        .active_run
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("active run");
+    crashed
+        .script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let payloads = [
+        "round commit payload one",
+        "round commit payload two",
+        "round commit payload three",
+    ];
+    let steers = admit_in_order(&crashed, payloads.into_iter().map(peer_steer).collect()).await;
+    crashed
+        .script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert_eq!(
+        crashed.script.applied_durable(),
+        steers,
+        "one boundary joined the three and the runner applied them"
+    );
+    for input_id in &steers {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load joined row")
+            .expect("joined row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Staged);
+        assert_eq!(row.seed.last_run_id.as_ref(), Some(&run_id));
+    }
+
+    // The run's next round commit: its tail holds the three rows and its
+    // cursor binds the batch and the three steers, in admission order.
+    let mut bound = vec![batch.clone()];
+    bound.extend(steers.iter().cloned());
+    stand_round_commit_tail(&store, &session_id, &run_id, &bound, &payloads).await;
+
+    // The process dies before the run's terminal.
+    std::mem::forget(crashed);
+
+    let recovered = DurableSteerRig::with_adapter_for_session(
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        ),
+        session_id,
+    )
+    .await;
+    recovered.wait_for_apply_calls(1).await;
+    assert_eq!(
+        recovered.script.applied_runs.lock().unwrap().clone(),
+        vec![run_id.clone()],
+        "the restart resumes the SAME run, under its own id"
+    );
+    let metadata = recovered.script.primitive_metadata();
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(
+        metadata[0].0, bound,
+        "the resumed run's bound inputs are the batch and the three joined steers, in admission order"
+    );
+    assert_eq!(
+        metadata[0].1.as_ref().and_then(|turn| turn.execution_kind),
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun),
+        "the run is resumed from its cursor, not started again: no bound input is appended a second time"
+    );
+
+    // None of the three is back in a lane or waits for a boundary, and each
+    // row is still bound to the run.
+    assert!(recovered.steer_queue().await.is_empty());
+    assert!(recovered.queue().await.is_empty());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !recovered.state.has_waiting_delivery_for_test(),
+        "a steer the round commit holds registers no second delivery"
+    );
+    for input_id in &steers {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load bound row")
+            .expect("bound row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Staged);
+        assert_eq!(row.seed.last_run_id.as_ref(), Some(&run_id));
+    }
+
+    // The resumed run's next request: its boundary applies nothing.
+    recovered
+        .script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert!(
+        last_take(&recovered).is_empty(),
+        "the resumed run's next boundary writes no steer again"
+    );
+
+    // The scripted runner commits no session document, so the hand-stood
+    // tail leaves the store before the run's terminal.
+    let tail = store
+        .load_whole_blob_provisional_tail(&runtime_id)
+        .await
+        .expect("read the provisional tail")
+        .expect("the run's tail stands")
+        .authority()
+        .clone();
+    assert!(
+        store
+            .discard_whole_blob_provisional_tail(&runtime_id, &tail)
+            .await
+            .expect("discard the tail")
+    );
+    recovered.script.step(RunnerStep::Finish);
+    for input_id in &bound {
+        recovered
+            .wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        recovered.script.apply_calls.load(Ordering::SeqCst),
+        1,
+        "only the resumed run ran: no follow-up turn delivered a steer again"
+    );
+    assert!(
+        recovered.script.applied_durable().is_empty(),
+        "no boundary of the recovered runtime applied a steer again"
+    );
+    assert_eq!(recovered.script.primitives(), vec![bound.clone()]);
+    for input_id in &steers {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load consumed row")
+            .expect("consumed row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(
+            row.seed.last_run_id.as_ref(),
+            Some(&run_id),
+            "the resumed run consumed {input_id}"
+        );
+    }
+}

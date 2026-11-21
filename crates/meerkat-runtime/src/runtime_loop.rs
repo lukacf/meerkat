@@ -5575,11 +5575,12 @@ impl Drop for RunSettlementPublication {
 
 impl RuntimeLoopAuthorityBinding {
     /// Start the boundary work of a durable steer that waits beside the run
-    /// this loop has just resumed. `queue_authority` is the loop's queue
-    /// authority, which is the session mutation gate.
+    /// `run_id` this loop has just resumed. `queue_authority` is the loop's
+    /// queue authority, which is the session mutation gate.
     async fn start_waiting_steer_boundary_work(
         &self,
         driver: &crate::meerkat_machine::SharedDriver,
+        run_id: &RunId,
         queue_authority: &crate::tokio::sync::OwnedMutexGuard<()>,
     ) {
         #[cfg(test)]
@@ -5588,7 +5589,12 @@ impl RuntimeLoopAuthorityBinding {
         }
         if let Some(machine) = self.machine.upgrade() {
             machine
-                .start_waiting_steer_boundary_work(&self.session_id, driver, queue_authority)
+                .start_waiting_steer_boundary_work(
+                    &self.session_id,
+                    driver,
+                    run_id,
+                    queue_authority,
+                )
                 .await;
         }
     }
@@ -9520,7 +9526,7 @@ async fn process_queue(
                 // resumed run is dispatched.
                 if resumed_run_id.is_some() {
                     authority_binding
-                        .start_waiting_steer_boundary_work(driver, &queue_authority_guard)
+                        .start_waiting_steer_boundary_work(driver, &run_id, &queue_authority_guard)
                         .await;
                 }
                 drop(queue_authority_guard);

@@ -10019,7 +10019,10 @@ impl MeerkatMachine {
     /// the session mutation gate (`_held_mutation_gate`), before the run is
     /// dispatched. As an admission does, it announces the pending boundary
     /// admission under that gate, so the runner keeps its first boundary
-    /// open, and hands the rest to a task. The task takes the gate, reads
+    /// open, and hands the rest to a task. The task waits until the machine
+    /// shows the run's primitive applied (the executor starts the run after
+    /// this call, and the actor opens the run's first boundary before it
+    /// signals that), takes the gate, reads
     /// the lane's first waiting durable steer again and runs for it the
     /// accepted-input boundary work an admission runs. That work holds the
     /// boundary's one claim and joins every durable steer behind it in lane
@@ -10029,6 +10032,7 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         driver: &SharedDriver,
+        run_id: &RunId,
         _held_mutation_gate: &crate::tokio::sync::OwnedMutexGuard<()>,
     ) {
         let captured = {
@@ -10083,9 +10087,26 @@ impl MeerkatMachine {
         let driver = Arc::clone(driver);
         let work_session_id = session_id.clone();
         let session_id = session_id.clone();
+        let resumed_run_id = dsl::RunId::from_domain(run_id);
         let work = cleanup_spawner.spawn(async move {
             // Held until this work is over, as an admission's announcement is.
             let pending_admission = pending_admission;
+            // The loop has begun the run in the machine and dispatches it
+            // after this task was spawned. Until the executor applies the
+            // run's primitive the actor has not opened the run's first
+            // boundary, and a preparation for it would be refused as for a
+            // run that ended.
+            if !machine
+                .resumed_run_primitive_applied(
+                    &work_session_id,
+                    &driver,
+                    &dsl_authority,
+                    &resumed_run_id,
+                )
+                .await
+            {
+                return;
+            }
             let Ok(held_mutation_gate) = machine
                 .lock_live_session_mutation_gate(&work_session_id, &mutation_gate)
                 .await
@@ -10143,6 +10164,55 @@ impl MeerkatMachine {
                 );
             }
         });
+    }
+
+    /// Wait until the executor has applied the primitive of the resumed run
+    /// `run_id`: the machine's turn has left `ApplyingPrimitive`, which the
+    /// actor signals after it opened the run's first boundary. Answers
+    /// `false` when the run is no longer the session's current run or the
+    /// session's registration changed, so the caller starts nothing.
+    ///
+    /// The run's own start is bounded (a run whose executor never applies
+    /// its primitive is torn down), so this wait ends with the run.
+    async fn resumed_run_primitive_applied(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+        dsl_authority: &Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
+        run_id: &dsl::RunId,
+    ) -> bool {
+        const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+        loop {
+            let (run_is_current, primitive_pending) = {
+                let authority = dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let state = authority.state();
+                (
+                    state.current_run_id.as_ref() == Some(run_id),
+                    matches!(
+                        state.turn_phase,
+                        dsl::TurnPhase::Ready | dsl::TurnPhase::ApplyingPrimitive
+                    ),
+                )
+            };
+            if !run_is_current {
+                return false;
+            }
+            if !primitive_pending {
+                return true;
+            }
+            let registered = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(session_id)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.driver, driver))
+            };
+            if !registered {
+                return false;
+            }
+            crate::tokio::time::sleep(POLL).await;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

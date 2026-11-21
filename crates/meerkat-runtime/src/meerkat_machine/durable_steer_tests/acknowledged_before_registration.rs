@@ -890,8 +890,9 @@ async fn acknowledged_steer_beside_registered_request_only_context_is_in_that_re
 
 /// A steer is acknowledged while the model streams its last response, and
 /// its preparation is still held when the run ends with no further boundary.
-/// Nothing hangs: the steer starts one follow-up turn, and that turn's first
-/// boundary ends once the held preparation of the ended run returns.
+/// Nothing hangs: the steer starts one follow-up turn; that turn's first
+/// boundary is kept open for the ended run's preparation, and ends once
+/// that preparation returns.
 #[tokio::test]
 async fn acknowledged_steer_still_unregistered_when_the_run_ends_takes_one_follow_up() {
     let (rig, lag) = ephemeral_lagging_rig().await;
@@ -915,19 +916,43 @@ async fn acknowledged_steer_still_unregistered_when_the_run_ends_takes_one_follo
     );
 
     // The follow-up turn reaches its first boundary while the ended run's
-    // preparation is still held, then that preparation is let go: it
-    // belongs to no active run and returns at once.
+    // preparation is still held. The announcement of that preparation still
+    // stands (it is counted for the session, not for a run), so this
+    // boundary is kept open for it: read here, before the preparation is
+    // let go.
     let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
     let takes_before = rig.script.boundary_takes().len();
     let waits_before = rig.state.pending_admission_waits_entered_for_test();
     rig.script.step(RunnerStep::BoundaryThenToolCalls);
-    let _ = runner_decides_at_the_boundary(&rig, steps_before, waits_before).await;
+    assert!(
+        runner_decides_at_the_boundary(&rig, steps_before, waits_before).await,
+        "the follow-up turn's first boundary is held open while the ended run's \
+         preparation has not returned"
+    );
+    assert_eq!(
+        (lag.held(), lag.forwarded.load(Ordering::SeqCst)),
+        (1, 0),
+        "the ended run's preparation is still held and has reached no coordinator"
+    );
+    assert_eq!(
+        rig.script.steps_done.load(Ordering::SeqCst),
+        steps_before,
+        "the boundary is still open when the held preparation is let go"
+    );
+
+    // Let go, the preparation names a run that is no longer active: the
+    // coordinator refuses it at once, its work ends, and the boundary
+    // closes with nothing.
     lag.release_through(1);
     assert!(
         wait_for_steps_done(&rig, steps_before + 1).await,
         "the follow-up turn's boundary ends once the ended run's preparation returned"
     );
     assert!(rig.script.boundary_takes()[takes_before].is_empty());
+    assert!(
+        !rig.state.has_waiting_delivery_for_test(),
+        "the ended run's preparation registered nothing"
+    );
 
     rig.script.step(RunnerStep::Finish);
     rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)

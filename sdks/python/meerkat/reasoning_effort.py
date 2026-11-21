@@ -140,14 +140,14 @@ def _is_level(value: Any) -> bool:
 
 
 _TIMESTAMP = re.compile(
-    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?"
-    r"(?:Z|[+-]([0-9]{2}):([0-9]{2}))"
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?"
+    r"(?:[Zz]|[+-]([0-9]{2}):([0-9]{2}))"
 )
 
 
 def _is_timestamp(value: Any) -> bool:
-    """Whether a value is an RFC 3339 timestamp: a calendar date, ``T``, a
-    time of day, and ``Z`` or a numeric offset."""
+    """Whether a value is an RFC 3339 date-time: a calendar date, ``T`` or
+    ``t``, a time of day, and ``Z``, ``z`` or a numeric offset with a colon."""
     if not isinstance(value, str):
         return False
     match = _TIMESTAMP.fullmatch(value)

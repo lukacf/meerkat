@@ -154,11 +154,11 @@ function parseRoute(value: unknown): ReasoningRoute | null | undefined {
 }
 
 const TIMESTAMP =
-  /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(?:Z|[+-]([0-9]{2}):([0-9]{2}))$/;
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?(?:[Zz]|[+-]([0-9]{2}):([0-9]{2}))$/;
 
 /**
- * Whether a value is an RFC 3339 timestamp: a calendar date, `T`, a time of
- * day, and `Z` or a numeric offset.
+ * Whether a value is an RFC 3339 date-time: a calendar date, `T` or `t`, a
+ * time of day, and `Z`, `z` or a numeric offset with a colon.
  */
 function isTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;

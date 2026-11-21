@@ -4,7 +4,7 @@ description: "Understand Meta's lightweight roster projection, deep member statu
 icon: "users"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -296,6 +296,10 @@ answers the check from that WorkGraph:
 - When the WorkGraph cannot be read, or the run's attention projection does
   not decode, the check answers unavailable. Meerkat asks again, up to three
   attempts, then settles the run the same way.
+
+A mob runtime composed without a WorkGraph service has no check, and
+neither has one whose storage provider has no WorkGraph: there is no item
+and no claim to check, and its durable workers continue unchecked.
 
 The check knows the worker by its member owner key
 (`agent:mob/<mob_id>/agent/<identity>`) and by its session (`session:<id>`);

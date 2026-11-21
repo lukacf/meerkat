@@ -630,6 +630,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::AuthorizeMemberEndpointMigrationTrustCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeRetiringMemberTrustCleanupObserved { .. }
             | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrustRemoval { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
             | mob_dsl::MobMachineInput::CleanupRetiringExternalPeer { .. }
             | mob_dsl::MobMachineInput::RestoreRetiringExternalPeer { .. }
@@ -1949,6 +1950,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::AuthorizeMemberEndpointMigrationTrustCleanup { .. }
             | mob_dsl::MobMachineInput::AuthorizeRetiringMemberTrustCleanupObserved { .. }
             | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrust { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExternalPeerReciprocalTrustRemoval { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
             | mob_dsl::MobMachineInput::CleanupRetiringExternalPeer { .. }
             | mob_dsl::MobMachineInput::RestoreRetiringExternalPeer { .. }

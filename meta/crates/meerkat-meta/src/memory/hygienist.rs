@@ -674,15 +674,20 @@ impl SpanReferenceSource for StoreSpanReferenceSource {
                 }
             }
         }
-        let scopes = vec![
-            MemoryScope::Identity {
+        // The identity scope of the member's name, when the name is a plain
+        // identity scope key: a name that holds a `/` is the key of no
+        // member's memory (`crate::memory::records::IdentityScopeKey`), and
+        // no scope is built from it.
+        let mut scopes = Vec::with_capacity(2);
+        if crate::memory::records::IdentityScopeKey::of(identity).is_named() {
+            scopes.push(MemoryScope::Identity {
                 realm: self.realm.clone(),
                 identity: identity.to_string(),
-            },
-            MemoryScope::Realm {
-                realm: self.realm.clone(),
-            },
-        ];
+            });
+        }
+        scopes.push(MemoryScope::Realm {
+            realm: self.realm.clone(),
+        });
         let manifest = self
             .store
             .manifest(&scopes, ManifestTier::Full)
@@ -2794,5 +2799,82 @@ mod tests {
             .with_max_output_tokens(32_768)
             .expect("nonzero budget accepted");
         assert_eq!(raised.params.max_output_tokens, 32_768);
+    }
+
+    /// The span references of a member's session are read from the identity
+    /// scope of the member's name when the name is a plain identity scope
+    /// key, and from no identity scope when it holds a `/`: such a name is
+    /// the key of no member's memory, so a record that lies under that key
+    /// is not read on its member's name.
+    #[tokio::test]
+    async fn the_span_references_of_a_member_named_as_a_reserved_key_read_no_identity_scope() {
+        use crate::identity_first::agent_memory::AgentMemoryProvider as _;
+        use crate::memory::records::{EvidenceRef, MemoryAuthor, MemoryKind, NewMemoryRecord};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Arc::new(
+            crate::memory::sqlite_store::SqliteAgentMemoryStore::open(dir.path())
+                .expect("open store"),
+        );
+        let cites = |session: &str| NewMemoryRecord {
+            kind: MemoryKind::Fact,
+            title: format!("A note that cites {session}"),
+            description: String::new(),
+            body: "The heron is at the north pond.".to_string(),
+            tags: Vec::new(),
+            evidence: vec![EvidenceRef {
+                session_id: session.to_string(),
+                generation: 0,
+                revision: None,
+                range: Some((0, 1)),
+            }],
+            verification: None,
+        };
+        let mut stored = Vec::new();
+        for key in ["ledger-side", "private/console-caller:v1:aa/ledger-side"] {
+            let receipt = store
+                .remember_authored(
+                    &MemoryScope::Identity {
+                        realm: "default".to_string(),
+                        identity: key.to_string(),
+                    },
+                    cites("sess-1"),
+                    MemoryAuthor::Application,
+                )
+                .await
+                .expect("store the note");
+            stored.push(receipt.memory_id);
+        }
+        let spans = StoreSpanReferenceSource::new(store, "default");
+        let cited_by = |references: Vec<SpanReference>| {
+            references
+                .into_iter()
+                .map(|reference| reference.record_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            cited_by(
+                spans
+                    .span_references("ledger-side", "sess-1")
+                    .await
+                    .expect("span references")
+            ),
+            vec![stored[0].clone()]
+        );
+        for name in [
+            "private/console-caller:v1:aa/ledger-side",
+            "set-aside/ledger-side",
+        ] {
+            assert_eq!(
+                cited_by(
+                    spans
+                        .span_references(name, "sess-1")
+                        .await
+                        .expect("span references")
+                ),
+                Vec::<String>::new(),
+                "{name}"
+            );
+        }
     }
 }

@@ -109,6 +109,7 @@ pub(super) async fn handle(
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
     let call = ScheduleCall {
+        runtime,
         identity_runtime,
         aggregator,
         params: &request.params,
@@ -129,6 +130,9 @@ pub(super) async fn handle(
 /// One console schedule call: its params and caller, and what the console
 /// resolves its agent with.
 struct ScheduleCall<'a> {
+    /// The runtime whose mob the agents are members of: the list reads which
+    /// schedules are aimed at an agent from it.
+    runtime: &'a MobRuntime,
     identity_runtime: Option<&'a Arc<crate::identity_first::IdentityRuntime>>,
     aggregator: Option<&'a MetaConsoleAggregator>,
     params: &'a Value,
@@ -188,7 +192,164 @@ async fn list(
     for (schedule, send) in theirs {
         items.push(schedule_item(&schedules.service, schedule, &send, shows_sender).await);
     }
-    Ok(json!({ "identity": target, "schedules": items }))
+    let others = other_schedules(call, &schedules.service, &all, &[&target, identity]).await;
+    Ok(json!({ "identity": target, "schedules": items, "other_schedules": others }))
+}
+
+/// The schedules of `all` that are no Console schedules and whose target
+/// names the agent `names` spell (its name as the console resolves it, and
+/// as the caller wrote it), oldest first: the schedules an agent's schedule
+/// tools or a host wrote for it. A Console caller reads them beside the
+/// agent's Console schedules, and the Console's writes do not reach them.
+///
+/// A target names the agent as a member of the runtime's mob (a member
+/// target, or the source of a fork helper), by an identity (the
+/// `mob_member:` form for that mob, or the agent's name), or by a session
+/// Core's entry of the agent records. An entry that cannot be read leaves
+/// the agent's session schedules out.
+async fn other_schedules(
+    call: &ScheduleCall<'_>,
+    service: &ScheduleService,
+    all: &[Schedule],
+    names: &[&str],
+) -> Vec<Value> {
+    let mob = call.runtime.handle();
+    let mob_id = mob.mob_id().to_string();
+    let roster_id = |name: &str| {
+        crate::member_comms_id::mob_member_id_str(&crate::member_comms_id::runtime_alias_str(name))
+            .into_owned()
+    };
+    let agents = names.iter().map(|name| roster_id(name)).collect::<Vec<_>>();
+    let mut sessions = Vec::new();
+    for agent in &agents {
+        if let Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) =
+            mob.identity_entry(&meerkat_mob::AgentIdentity::from(agent.as_str()))
+        {
+            if let meerkat_mob::EntryStanding::Seated(seated)
+            | meerkat_mob::EntryStanding::Retiring(seated) = &entry.standing
+                && let Some(session_id) = seated.session_id.as_ref()
+            {
+                sessions.push(session_id.to_string());
+            }
+            if let Some(session_id) = entry.archived_session.as_ref() {
+                sessions.push(session_id.to_string());
+            }
+        }
+    }
+    let names_agent =
+        |named_mob: &str, member: &str| named_mob == mob_id && agents.contains(&roster_id(member));
+    let mut theirs =
+        all.iter()
+            .filter(|schedule| ConsoleScheduledSend::of_target(&schedule.target).is_none())
+            .filter_map(|schedule| {
+                let (form, content) = match &schedule.target {
+                    meerkat::TargetBinding::Mob(binding) => match binding.as_ref() {
+                        meerkat::MobTargetBinding::Member {
+                            mob_id: named_mob,
+                            member_id,
+                            action: meerkat::ScheduledMobAction::Send { content, .. },
+                        } if names_agent(named_mob, member_id) => {
+                            ("member", Some(content.text_content()))
+                        }
+                        meerkat::MobTargetBinding::ForkHelper {
+                            mob_id: named_mob,
+                            source_member_id,
+                            prompt,
+                            ..
+                        } if names_agent(named_mob, source_member_id) => {
+                            ("fork_helper", Some(prompt.clone()))
+                        }
+                        _ => return None,
+                    },
+                    meerkat::TargetBinding::Identity(binding) => {
+                        let named = match meerkat::surface::parse_mob_member_schedule_identity(
+                            binding.identity(),
+                        ) {
+                            Some(named) => names_agent(&named.mob_id, &named.member),
+                            None => agents.contains(&roster_id(binding.identity())),
+                        };
+                        if !named {
+                            return None;
+                        }
+                        ("identity", prompt_text(binding.action()))
+                    }
+                    meerkat::TargetBinding::Session(session) => {
+                        let (session_id, action) = match session.as_ref() {
+                            meerkat::SessionTargetBinding::ExactSession { session_id, action }
+                            | meerkat::SessionTargetBinding::ResumableSession {
+                                session_id,
+                                action,
+                            } => (session_id, action),
+                            meerkat::SessionTargetBinding::MaterializeOnDemandSession {
+                                bound_session_id: Some(session_id),
+                                action,
+                                ..
+                            } => (session_id, action),
+                            meerkat::SessionTargetBinding::MaterializeOnDemandSession {
+                                ..
+                            } => {
+                                return None;
+                            }
+                        };
+                        if !sessions.contains(&session_id.to_string()) {
+                            return None;
+                        }
+                        ("session", prompt_text(action))
+                    }
+                    meerkat::TargetBinding::HostRunnable(_) => return None,
+                };
+                Some((schedule, form, content))
+            })
+            .collect::<Vec<_>>();
+    theirs.sort_by_key(|(schedule, _, _)| schedule.config.created_at_utc);
+    let mut items = Vec::with_capacity(theirs.len());
+    for (schedule, form, content) in theirs {
+        items.push(json!({
+            "schedule_id": schedule.schedule_id.to_string(),
+            "identity": names.first(),
+            "name": schedule.config.name,
+            "target": form,
+            "content": content,
+            "trigger": schedule.trigger,
+            "phase": schedule.phase,
+            "revision": schedule.revision.0,
+            "created_at_utc": schedule.config.created_at_utc,
+            "updated_at_utc": schedule.config.updated_at_utc,
+            "next_due_at_utc": next_due_at_utc(service, schedule).await,
+        }));
+    }
+    items
+}
+
+/// The text a scheduled prompt sends, when the action is a prompt.
+fn prompt_text(action: &meerkat::ScheduledSessionAction) -> Option<String> {
+    match action {
+        meerkat::ScheduledSessionAction::Prompt { prompt, .. } => Some(prompt.text_content()),
+        _ => None,
+    }
+}
+
+/// When the next occurrence of `schedule` is due, while it is active.
+async fn next_due_at_utc(
+    service: &ScheduleService,
+    schedule: &Schedule,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if schedule.phase != SchedulePhase::Active {
+        return None;
+    }
+    service
+        .list_occurrences_matching(
+            &schedule.schedule_id,
+            OccurrenceFilter {
+                include_terminal: false,
+                limit: Some(1),
+                ..OccurrenceFilter::default()
+            },
+        )
+        .await
+        .ok()
+        .and_then(|occurrences| occurrences.into_iter().next())
+        .map(|occurrence| occurrence.due_at_utc)
 }
 
 async fn create(
@@ -651,23 +812,7 @@ async fn schedule_item(
     send: &ConsoleScheduledSend,
     shows_sender: bool,
 ) -> Value {
-    let next_due_at_utc = if schedule.phase == SchedulePhase::Active {
-        service
-            .list_occurrences_matching(
-                &schedule.schedule_id,
-                OccurrenceFilter {
-                    include_terminal: false,
-                    limit: Some(1),
-                    ..OccurrenceFilter::default()
-                },
-            )
-            .await
-            .ok()
-            .and_then(|occurrences| occurrences.into_iter().next())
-            .map(|occurrence| occurrence.due_at_utc)
-    } else {
-        None
-    };
+    let next_due_at_utc = next_due_at_utc(service, schedule).await;
     let defined_at_utc = epoch_seconds_utc(send.defined_at);
     // Earlier senders are other callers' principals: shown with the sender,
     // to a caller who may send to the agent.

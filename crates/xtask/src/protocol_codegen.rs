@@ -2443,7 +2443,8 @@ fn emit_comms_trust_payload_authorization(
         "mob_external_peer_trust_wiring"
         | "mob_external_peer_trust_unwiring"
         | "mob_external_peer_trust_repair"
-        | "mob_external_peer_reciprocal_trust" => {
+        | "mob_external_peer_reciprocal_trust"
+        | "mob_external_peer_reciprocal_trust_removal" => {
             writeln!(out, "        if self.peer_id.0 != peer_id {{")?;
             writeln!(
                 out,
@@ -2466,7 +2467,8 @@ fn comms_trust_epoch_expr(protocol: &EffectHandoffProtocol) -> Result<&'static s
         | "mob_external_peer_trust_wiring"
         | "mob_external_peer_trust_unwiring"
         | "mob_external_peer_trust_repair"
-        | "mob_external_peer_reciprocal_trust" => Ok("self.epoch"),
+        | "mob_external_peer_reciprocal_trust"
+        | "mob_external_peer_reciprocal_trust_removal" => Ok("self.epoch"),
         other => bail!("unsupported comms trust authority protocol `{other}`"),
     }
 }
@@ -2484,7 +2486,9 @@ fn comms_trust_target_peer_expr(protocol: &EffectHandoffProtocol) -> Result<Opti
         "mob_external_peer_trust_wiring"
         | "mob_external_peer_trust_unwiring"
         | "mob_external_peer_trust_repair" => Ok(Some("self.local_peer_id.0.as_str()")),
-        "mob_external_peer_reciprocal_trust" => Ok(Some("self.edge.endpoint.peer_id.0.as_str()")),
+        "mob_external_peer_reciprocal_trust" | "mob_external_peer_reciprocal_trust_removal" => {
+            Ok(Some("self.edge.endpoint.peer_id.0.as_str()"))
+        }
         other => bail!("unsupported comms trust authority protocol `{other}`"),
     }
 }
@@ -7450,6 +7454,7 @@ fn protected_obligation_protocol(name: &str) -> bool {
             | "mob_external_peer_trust_unwiring"
             | "mob_external_peer_trust_repair"
             | "mob_external_peer_reciprocal_trust"
+            | "mob_external_peer_reciprocal_trust_removal"
             | "mob_destroying_session_ingress"
             | "auth_lease_lifecycle_publication"
     )
@@ -7465,6 +7470,7 @@ fn is_mob_topology_trust_protocol(name: &str) -> bool {
             | "mob_external_peer_trust_unwiring"
             | "mob_external_peer_trust_repair"
             | "mob_external_peer_reciprocal_trust"
+            | "mob_external_peer_reciprocal_trust_removal"
     )
 }
 
@@ -7927,6 +7933,15 @@ fn generate_comms_trust_authority_helpers(
                 "reciprocal_wiring_authority_for_peer",
                 "MobMachineExternalPeerReciprocalWiring",
                 true,
+            )?;
+        }
+        "mob_external_peer_reciprocal_trust_removal" => {
+            emit_external_peer_trust_helper(
+                out,
+                obligation_type,
+                "reciprocal_removal_authority_for_peer",
+                "MobMachineExternalPeerReciprocalRemoval",
+                false,
             )?;
         }
         _ => {}

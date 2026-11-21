@@ -341,9 +341,9 @@ AuditRecoverRow ==
            f == audit_facts[i]
        IN
        \/ /\ audit_recovery[i] = "Durability"
-          /\ \/ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(i, f.durability)
+          /\ \/ ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissingIdle(i, f.durability, FALSE)
                 /\ RecoveryStep(i, "Normalize")
-             \/ ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(i, f.durability)
+             \/ ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(i, f.durability, FALSE)
                 /\ RecoveryStep(i, "Discarded")
        \/ /\ audit_recovery[i] = "Normalize"
           /\ \/ /\ r.phase = "Queued"

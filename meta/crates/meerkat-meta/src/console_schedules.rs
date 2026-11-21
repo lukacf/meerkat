@@ -360,6 +360,30 @@ pub(crate) fn targets_console_runnable(target: &TargetBinding) -> bool {
     )
 }
 
+/// Whether `schedule` is the host's memory steward schedule: its target
+/// names the steward's runnable
+/// ([`crate::schedule_wiring::STEWARD_DREAM_RUNNABLE`]). The host keeps one
+/// such schedule and retimes it itself; no agent fires, stops or retimes
+/// the host's steward.
+pub(crate) fn is_steward_schedule(schedule: &Schedule) -> bool {
+    matches!(
+        &schedule.target,
+        TargetBinding::HostRunnable(binding)
+            if binding.runnable.as_str() == crate::schedule_wiring::STEWARD_DREAM_RUNNABLE
+    )
+}
+
+/// Whether `schedule` is one of Meta's announcement source runner
+/// schedules: it carries their label
+/// ([`crate::schedule_wiring::SOURCE_RUNNER_LABEL`]), at any value. Meta
+/// makes, retimes and ends those itself; no agent reads or changes one.
+pub(crate) fn is_source_runner_schedule(schedule: &Schedule) -> bool {
+    schedule
+        .config
+        .labels
+        .contains_key(crate::schedule_wiring::SOURCE_RUNNER_LABEL)
+}
+
 /// Refuse `name` for an SDK or host runnable: the console's runnable name is
 /// reserved for console schedules.
 pub(crate) fn refuse_reserved_runnable_name(name: &HostRunnableName) -> Result<(), String> {
@@ -731,6 +755,12 @@ enum GateVerdict {
 /// refused, and so is one whose schedule cannot be read (it may be a console
 /// schedule); and `meerkat_schedule_list` leaves console schedules out.
 ///
+/// The host's memory steward is left alone the same way, in every arm: a
+/// create or update whose target names the steward's runnable is refused,
+/// every verb that names the host's steward schedule by its id is refused,
+/// and the list leaves it out. The host schedules its steward through the
+/// schedule service, which this gate does not stand in front of.
+///
 /// With an [`AgentScheduleAudience`], the schedules it hides from the calling
 /// agent are on no surface of its tools either: its list leaves them out,
 /// and every verb that names one by its id is answered exactly as the same
@@ -788,6 +818,23 @@ impl ConsoleScheduleToolGate {
                  console schedule as its Console caller, and only the Console schedules it"
             )));
         }
+        if SCHEDULE_TOOLS_WITH_TARGET.contains(&name)
+            && args.get("target").is_some_and(target_value_names_steward)
+        {
+            return GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                "{name} refused: the host runnable {} runs the host's memory steward, and \
+                 only the host schedules it",
+                crate::schedule_wiring::STEWARD_DREAM_RUNNABLE
+            )));
+        }
+        if SCHEDULE_TOOLS_WITH_TARGET.contains(&name)
+            && let Some(label) = args.get("labels").and_then(reserved_label_in)
+        {
+            return GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                "{name} refused: the label {label} marks a schedule the host keeps itself, \
+                 and only the host sets it"
+            )));
+        }
         if !SCHEDULE_TOOLS_BY_ID.contains(&name) {
             return GateVerdict::Pass;
         }
@@ -804,6 +851,18 @@ impl ConsoleScheduleToolGate {
                 GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                     "{name} refused: schedule {schedule_id} is a console schedule, a Console \
                      caller's deferred message to an agent; only the Console reads or changes it"
+                )))
+            }
+            Ok(schedule) if is_steward_schedule(&schedule) => {
+                GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                    "{name} refused: schedule {schedule_id} is the host's memory steward \
+                     schedule; only the host reads or changes it"
+                )))
+            }
+            Ok(schedule) if is_source_runner_schedule(&schedule) => {
+                GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
+                    "{name} refused: schedule {schedule_id} is an announcement source runner \
+                     schedule the host keeps itself; only the host reads or changes it"
                 )))
             }
             Ok(schedule) if self.hides(&schedule, context).await => GateVerdict::Absent,
@@ -856,7 +915,8 @@ impl ConsoleScheduleToolGate {
             .await
     }
 
-    /// `meerkat_schedule_list` without the console schedules and the
+    /// `meerkat_schedule_list` without the console schedules, the host's
+    /// steward and source runner schedules, and the
     /// schedules hidden from the agent calling with `context`: the tool's own
     /// page of summaries over the other schedules. Core leaves them out
     /// before it orders, pages and cuts, so the reply keeps the tool's
@@ -873,6 +933,8 @@ impl ConsoleScheduleToolGate {
         if self.audience.is_none() {
             return meerkat::dispatch_schedule_list_where(&self.service, call, &|schedule| {
                 !is_console_schedule(schedule)
+                    && !is_steward_schedule(schedule)
+                    && !is_source_runner_schedule(schedule)
             })
             .await;
         }
@@ -883,7 +945,11 @@ impl ConsoleScheduleToolGate {
         })?;
         let mut visible = std::collections::HashMap::with_capacity(schedules.len());
         for schedule in schedules {
-            if !is_console_schedule(&schedule) && !self.hides(&schedule, context).await {
+            if !is_console_schedule(&schedule)
+                && !is_steward_schedule(&schedule)
+                && !is_source_runner_schedule(&schedule)
+                && !self.hides(&schedule, context).await
+            {
                 visible.insert(schedule.schedule_id, schedule.revision);
             }
         }
@@ -892,6 +958,33 @@ impl ConsoleScheduleToolGate {
         })
         .await
     }
+}
+
+/// Whether a tool call's `target` argument names the memory steward's
+/// runnable.
+fn target_value_names_steward(target: &Value) -> bool {
+    target.get("target_kind").and_then(Value::as_str) == Some("host_runnable")
+        && target.get("runnable").and_then(Value::as_str)
+            == Some(crate::schedule_wiring::STEWARD_DREAM_RUNNABLE)
+}
+
+/// The labels the host puts on schedules it keeps itself: the memory
+/// steward's ([`crate::schedule_wiring::STEWARD_DREAM_LABEL`]) and the
+/// announcement source runners'
+/// ([`crate::schedule_wiring::SOURCE_RUNNER_LABEL`]). Agents' schedule
+/// tools take no create or update that carries one, at any value.
+const RESERVED_SCHEDULE_LABELS: &[&str] = &[
+    crate::schedule_wiring::STEWARD_DREAM_LABEL,
+    crate::schedule_wiring::SOURCE_RUNNER_LABEL,
+];
+
+/// The reserved label a tool call's `labels` argument holds, if it holds
+/// one.
+fn reserved_label_in(labels: &Value) -> Option<&'static str> {
+    RESERVED_SCHEDULE_LABELS
+        .iter()
+        .copied()
+        .find(|label| labels.get(*label).is_some())
 }
 
 /// Whether a tool call's `target` argument names the console's runnable.
@@ -1612,6 +1705,299 @@ mod tests {
             service.get(&own.schedule_id).await.unwrap().phase,
             meerkat::SchedulePhase::Paused
         );
+    }
+
+    /// Agents' schedule tools leave the host's memory steward alone, as they
+    /// leave console schedules alone: a create or update naming the
+    /// steward's runnable is refused, every verb on the host's steward
+    /// schedule is refused and changes nothing, and the listing leaves it
+    /// out, while the agent's own schedules pass as before. The host's own
+    /// use is untouched: it still finds its one schedule and retimes it.
+    #[tokio::test]
+    async fn agent_schedule_tools_leave_the_hosts_steward_schedule_alone() {
+        use crate::schedule_wiring::{STEWARD_DREAM_RUNNABLE, ensure_steward_dream_schedule};
+
+        let names_the_steward = |schedule: &meerkat::Schedule| {
+            matches!(
+                &schedule.target,
+                TargetBinding::HostRunnable(binding)
+                    if binding.runnable.as_str() == STEWARD_DREAM_RUNNABLE
+            )
+        };
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        ensure_steward_dream_schedule(
+            &service,
+            std::time::Duration::from_hours(1),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("the host schedules its steward");
+        let hosts = service
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|schedule| names_the_steward(schedule))
+            .expect("the host's steward schedule");
+        let own_target = json!({ "target_kind": "host_runnable", "runnable": "nightly-report" });
+        let own = service
+            .create(create_request(serde_json::from_value(own_target).unwrap()))
+            .await
+            .unwrap();
+        let gate = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+
+        let named = json!({ "target_kind": "host_runnable", "runnable": STEWARD_DREAM_RUNNABLE });
+        let create = raw(&json!({
+            "trigger": serde_json::to_value(every_hour()).unwrap(),
+            "target": named,
+        }));
+        let refused = gate
+            .dispatch(call("meerkat_schedule_create", &create))
+            .await
+            .expect_err("an agent cannot schedule the host's steward");
+        assert!(
+            refused.to_string().contains(STEWARD_DREAM_RUNNABLE),
+            "{refused}"
+        );
+        let retarget = raw(&json!({
+            "schedule_id": own.schedule_id.to_string(),
+            "target": named,
+        }));
+        assert!(
+            gate.dispatch(call("meerkat_schedule_update", &retarget))
+                .await
+                .is_err(),
+            "an agent cannot retarget its schedule to the steward's runnable"
+        );
+
+        let hosts_id = raw(&json!({ "schedule_id": hosts.schedule_id.to_string() }));
+        for verb in SCHEDULE_TOOLS_BY_ID {
+            let refused = gate
+                .dispatch(call(verb, &hosts_id))
+                .await
+                .expect_err("every verb on the host's steward schedule is refused");
+            assert!(refused.to_string().contains("steward"), "{verb}: {refused}");
+        }
+        assert_eq!(
+            service.get(&hosts.schedule_id).await.unwrap(),
+            hosts,
+            "the host's steward schedule is untouched"
+        );
+
+        let empty = raw(&json!({}));
+        let listed = gate
+            .dispatch(call("meerkat_schedule_list", &empty))
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_str(&listed.result.text_content()).unwrap();
+        let ids = listed["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["schedule_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![own.schedule_id.to_string()]);
+
+        let own_id = raw(&json!({ "schedule_id": own.schedule_id.to_string() }));
+        gate.dispatch(call("meerkat_schedule_pause", &own_id))
+            .await
+            .expect("the agent's own schedule passes");
+
+        // The host's own use: one schedule names the runnable, and the host
+        // retimes it.
+        ensure_steward_dream_schedule(
+            &service,
+            std::time::Duration::from_hours(2),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("the host retimes its steward");
+        let naming = service
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|schedule| names_the_steward(schedule))
+            .collect::<Vec<_>>();
+        assert_eq!(naming.len(), 1, "one schedule names the steward's runnable");
+        assert_eq!(naming[0].schedule_id, hosts.schedule_id);
+        assert!(
+            matches!(
+                &naming[0].trigger,
+                TriggerSpec::Interval(spec) if spec.every_seconds == 7200
+            ),
+            "the host's own change of its schedule is taken: {:?}",
+            naming[0].trigger
+        );
+    }
+
+    /// The label on the host's own steward schedule is the host's: an
+    /// agent's create or update that carries it is refused, whatever the
+    /// target, and stores or changes nothing, while another label is taken.
+    #[tokio::test]
+    async fn agent_schedule_tools_refuse_the_hosts_steward_label() {
+        use crate::schedule_wiring::STEWARD_DREAM_LABEL;
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let own_target = json!({ "target_kind": "host_runnable", "runnable": "nightly-report" });
+        let own = service
+            .create(create_request(
+                serde_json::from_value(own_target.clone()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let gate = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+
+        let create = raw(&json!({
+            "trigger": serde_json::to_value(every_hour()).unwrap(),
+            "target": own_target,
+            "labels": { STEWARD_DREAM_LABEL: "1" },
+        }));
+        let refused = gate
+            .dispatch(call("meerkat_schedule_create", &create))
+            .await
+            .expect_err("an agent's create cannot carry the host's label");
+        assert!(
+            refused.to_string().contains(STEWARD_DREAM_LABEL),
+            "{refused}"
+        );
+        let relabel = raw(&json!({
+            "schedule_id": own.schedule_id.to_string(),
+            "labels": { "team": "reports", STEWARD_DREAM_LABEL: "1" },
+        }));
+        let refused = gate
+            .dispatch(call("meerkat_schedule_update", &relabel))
+            .await
+            .expect_err("an agent's update cannot carry the host's label");
+        assert!(
+            refused.to_string().contains(STEWARD_DREAM_LABEL),
+            "{refused}"
+        );
+        assert_eq!(
+            service.list().await.unwrap(),
+            vec![own.clone()],
+            "nothing is stored and nothing is changed"
+        );
+
+        let other = raw(&json!({
+            "schedule_id": own.schedule_id.to_string(),
+            "labels": { "team": "reports" },
+        }));
+        gate.dispatch(call("meerkat_schedule_update", &other))
+            .await
+            .expect("another label is the agent's to set");
+        let labels = service.get(&own.schedule_id).await.unwrap().config.labels;
+        assert_eq!(labels.get("team").map(String::as_str), Some("reports"));
+    }
+
+    /// Agents' schedule tools leave Meta's announcement source runner
+    /// schedules alone, as they leave the steward's alone. The label on
+    /// those schedules is the host's at any value: a create or an update
+    /// that carries it is refused and stores or changes nothing. Every verb
+    /// on a schedule that carries it is refused and changes nothing, and
+    /// the listing leaves such schedules out, while the agent's own
+    /// schedules pass as before.
+    #[tokio::test]
+    async fn agent_schedule_tools_leave_the_hosts_source_runner_schedules_alone() {
+        use crate::schedule_wiring::SOURCE_RUNNER_LABEL;
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let collector = json!({
+            "target_kind": "host_runnable",
+            "runnable": "inbox-collector",
+            "params": { "mob_id": "ops", "source_id": "inbox" },
+        });
+        let mut hosts = Vec::new();
+        for value in ["1", "2"] {
+            let mut request = create_request(serde_json::from_value(collector.clone()).unwrap());
+            request.labels =
+                std::collections::BTreeMap::from([(SOURCE_RUNNER_LABEL.to_string(), value.into())]);
+            hosts.push(service.create(request).await.unwrap());
+        }
+        let own_target = json!({ "target_kind": "host_runnable", "runnable": "nightly-report" });
+        let own = service
+            .create(create_request(
+                serde_json::from_value(own_target.clone()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let stored = service.list().await.unwrap();
+        let gate = ConsoleScheduleToolGate::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            service.clone(),
+        );
+
+        for value in ["1", "2"] {
+            let create = raw(&json!({
+                "trigger": serde_json::to_value(every_hour()).unwrap(),
+                "target": own_target,
+                "labels": { SOURCE_RUNNER_LABEL: value },
+            }));
+            let refused = gate
+                .dispatch(call("meerkat_schedule_create", &create))
+                .await
+                .expect_err("an agent's create cannot carry the host's label");
+            assert!(
+                refused.to_string().contains(SOURCE_RUNNER_LABEL),
+                "{value}: {refused}"
+            );
+            let relabel = raw(&json!({
+                "schedule_id": own.schedule_id.to_string(),
+                "labels": { SOURCE_RUNNER_LABEL: value },
+            }));
+            let refused = gate
+                .dispatch(call("meerkat_schedule_update", &relabel))
+                .await
+                .expect_err("an agent's update cannot carry the host's label");
+            assert!(
+                refused.to_string().contains(SOURCE_RUNNER_LABEL),
+                "{value}: {refused}"
+            );
+        }
+
+        for hosts_schedule in &hosts {
+            let hosts_id = raw(&json!({ "schedule_id": hosts_schedule.schedule_id.to_string() }));
+            for verb in SCHEDULE_TOOLS_BY_ID {
+                let refused = gate
+                    .dispatch(call(verb, &hosts_id))
+                    .await
+                    .expect_err("every verb on a source runner schedule is refused");
+                assert!(
+                    refused.to_string().contains("source runner"),
+                    "{verb}: {refused}"
+                );
+            }
+        }
+        assert_eq!(
+            service.list().await.unwrap(),
+            stored,
+            "nothing is stored and nothing is changed"
+        );
+
+        let empty = raw(&json!({}));
+        let listed = gate
+            .dispatch(call("meerkat_schedule_list", &empty))
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_str(&listed.result.text_content()).unwrap();
+        let ids = listed["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|schedule| schedule["schedule_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![own.schedule_id.to_string()]);
+
+        let own_id = raw(&json!({ "schedule_id": own.schedule_id.to_string() }));
+        gate.dispatch(call("meerkat_schedule_pause", &own_id))
+            .await
+            .expect("the agent's own schedule passes");
     }
 
     /// The agent tool stack a gateway composes over its own durable store:

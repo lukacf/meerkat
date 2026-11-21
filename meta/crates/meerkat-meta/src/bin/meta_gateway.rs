@@ -314,6 +314,54 @@ fn conventional_paths(workspace_root: &Path) -> ConventionalPaths {
     .with_meerkat_config_from_workspace(workspace_root)
 }
 
+/// The configuration files and roots a launch names or adopts, for
+/// [`meerkat_meta::gateway_composition::declare_host_paths`]: the
+/// workspace's `config/`, `deployment/`, `skills/`, `hooks/` and `mcp/`
+/// directories (the directories the gateway counts as its configuration),
+/// its `definition.json` and its `manifest.toml` (read at every start,
+/// whether or not a file exists there yet), the shell's process records
+/// under the runtime root, the host configuration file, the provider
+/// credentials root, and the skill files `definition` names by path. The
+/// workspace's `.rkat` directory needs no declaration.
+fn launch_named_paths(
+    workspace_root: &Path,
+    runtime_root: &Path,
+    paths: &ConventionalPaths,
+    provider_credentials_root: Option<&Path>,
+    definition: &MobDefinition,
+) -> Vec<PathBuf> {
+    let mut named = vec![
+        workspace_root.join("config"),
+        workspace_root.join("deployment"),
+        workspace_root.join("skills"),
+        workspace_root.join("hooks"),
+        workspace_root.join("mcp"),
+        workspace_root.join("definition.json"),
+        workspace_root.join("manifest.toml"),
+    ];
+    // Meerkat keeps those records on the platforms where it holds the
+    // shell's process groups in custody.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    named.push(runtime_root.join(meerkat_tools::builtin::shell::PROCESS_CUSTODY_DIR));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = runtime_root;
+    named.extend(paths.meerkat_config_toml.clone());
+    named.extend(provider_credentials_root.map(Path::to_path_buf));
+    named.extend(meerkat_meta::gateway_composition::definition_skill_files(
+        definition,
+    ));
+    named
+}
+
+/// The directories a launch's stores live in: the state directory and the
+/// gateway home (the runtime registry and the peer key).
+fn launch_state_paths(layout: &MetaStorageLayout) -> Vec<PathBuf> {
+    std::iter::once(layout.state_dir())
+        .chain(layout.gateway_home())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 fn collect_recursive_files(root: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -361,6 +409,9 @@ fn resume_key_with_provider_credentials_root(key: String, root: Option<&Path>) -
     }
 }
 
+/// The launch's fingerprint as the registry's resume key uses it: every
+/// launch input and this build's version, so a launch never resumes a
+/// runtime another release started.
 #[allow(clippy::too_many_arguments)]
 fn config_fingerprint(
     workspace_root: &Path,
@@ -378,6 +429,49 @@ fn config_fingerprint(
     http_listen: SocketAddr,
     http_public_base_url: Option<&str>,
     paths: &ConventionalPaths,
+) -> anyhow::Result<String> {
+    config_fingerprint_for_version(
+        workspace_root,
+        realm,
+        isolated,
+        runtime_profile,
+        persistent_sessions,
+        console_read_only,
+        runtime_root,
+        store_path,
+        project_root,
+        context_root,
+        compaction,
+        control_listen,
+        http_listen,
+        http_public_base_url,
+        paths,
+        Some(env!("CARGO_PKG_VERSION")),
+    )
+}
+
+/// [`config_fingerprint`] with the release version given. `None` leaves the
+/// version out: the seed of the built-in default mob's id, which must not
+/// move with the release (a persistent state directory keeps the mob across
+/// upgrades).
+#[allow(clippy::too_many_arguments)]
+fn config_fingerprint_for_version(
+    workspace_root: &Path,
+    realm: Option<&str>,
+    isolated: bool,
+    runtime_profile: &str,
+    persistent_sessions: bool,
+    console_read_only: bool,
+    runtime_root: &Path,
+    store_path: &Path,
+    project_root: &Path,
+    context_root: Option<&Path>,
+    compaction: Option<&meerkat_core::config::CompactionRuntimeConfig>,
+    control_listen: Option<&ControlListenAddr>,
+    http_listen: SocketAddr,
+    http_public_base_url: Option<&str>,
+    paths: &ConventionalPaths,
+    version: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut hasher = Sha256::new();
     let realpath = workspace_root
@@ -442,7 +536,9 @@ fn config_fingerprint(
     // previous launch's value, so it joins the key beside the listen address.
     hasher.update(http_public_base_url.unwrap_or("").as_bytes());
     hasher.update(b"\n");
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    if let Some(version) = version {
+        hasher.update(version.as_bytes());
+    }
 
     let definition_json = workspace_root.join("definition.json");
     if paths.mob_toml.is_some() {
@@ -585,9 +681,20 @@ If peer messaging is available, use it to report completion or blockers.
     .map_err(|error| anyhow!("invalid fallback mob definition: {error}"))
 }
 
+/// The mob definition of a launch and whether a workspace file supplied it.
+///
+/// With no definition file the launch runs the built-in default mob. A
+/// persistent state directory that already holds a mob names it
+/// (`recorded_id`, the id its composition manifest records): the default
+/// takes that id, so its identity does not move with the launch's version,
+/// workspace path, listener or files, and the stored mob is served without
+/// an operator step. Only a launch without a recorded id derives one, from
+/// `default_id_seed`. The definition under the recorded id is still judged
+/// against the stored one before the resume.
 fn load_definition(
     workspace_root: &Path,
-    fingerprint: &str,
+    default_id_seed: &str,
+    recorded_id: Option<&meerkat_mob::MobId>,
     paths: &ConventionalPaths,
 ) -> anyhow::Result<(MobDefinition, bool)> {
     if let Some(path) = &paths.mob_toml {
@@ -620,8 +727,14 @@ fn load_definition(
         return Ok((definition, true));
     }
 
-    let runtime_id = format!("tux-{}", short_hash(fingerprint));
-    Ok((minimal_definition(&runtime_id)?, false))
+    let derived_id = format!("tux-{}", short_hash(default_id_seed));
+    let mut definition = minimal_definition(&derived_id)?;
+    if let Some(recorded) = recorded_id {
+        // Set on the parsed definition, never written into the template:
+        // the recorded id is another launch's and need not be TOML-safe.
+        definition.id = recorded.clone();
+    }
+    Ok((definition, false))
 }
 
 /// The `meerkat::Config` every agent this gateway builds starts from: the
@@ -747,6 +860,7 @@ fn build_persistent_session_service(
     member_mcp_custody: &Arc<meerkat_meta::MemberMcpCustody>,
     provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
     personal_accounts: Option<&meerkat_meta::PersonalAccountOwnerCheck>,
+    named_paths: Vec<PathBuf>,
 ) -> anyhow::Result<PersistentSessionServiceParts> {
     let store_dir = layout.state_dir().to_path_buf();
     fs::create_dir_all(&store_dir)
@@ -792,6 +906,14 @@ fn build_persistent_session_service(
         .comms(true)
         .memory(true)
         .mcp_apps(mcp_apps);
+    // The gateway declares its state directory, its gateway home and the
+    // configuration paths its launch names or adopts to the members' file
+    // tools.
+    factory = meerkat_meta::gateway_composition::declare_host_paths(
+        factory,
+        launch_state_paths(layout),
+        named_paths,
+    );
     // The launch's provider credential store replaces the process default
     // before the factory is cloned for live or consumed by its builder.
     if let Some(persistence) = provider_auth_persistence {
@@ -1254,6 +1376,30 @@ fn refuse_init_with_data(
     }
     print_json_line(&response);
     anyhow::Error::new(InitReplied)
+}
+
+/// The init refusal of a runtime bootstrap that failed, in the form
+/// `rpc_gateway` answers it: on the request id, with the reason in the
+/// message. A composition provenance refusal is a deliberate refusal, not an
+/// internal error, so it carries its own code
+/// ([`meerkat_meta::COMPOSITION_PROVENANCE_CODE`]) with the refusal's kind
+/// and facts as data; every other bootstrap failure stays `-32603`.
+fn refuse_bootstrap(
+    request_id: &Value,
+    error: &meerkat_meta::UnifiedRuntimeBootstrapError,
+) -> anyhow::Error {
+    let message = format!("Runtime bootstrap failed: {error}");
+    match error.composition_provenance() {
+        Some(refusal) => refuse_init_with_data(
+            request_id,
+            meerkat_meta::COMPOSITION_PROVENANCE_CODE,
+            message,
+            // `None` only if the refusal does not serialize, which leaves
+            // the typed code and the message intact.
+            serde_json::to_value(refusal.refusal()).ok(),
+        ),
+        None => refuse_init(request_id, -32603, message),
+    }
 }
 
 fn init_error(request_id: Value, code: i64, message: String) -> Value {
@@ -2616,6 +2762,12 @@ struct GatewayLaunchArgs {
     /// run `rkat` on this host for callers that no enforced access controller
     /// governs. Launch-only, and part of the resume key.
     flow_editor_host_deploy: bool,
+    /// `--resume-from-registry`: answer the launch `resumed` from the runtime
+    /// registry when it lists a runtime under this launch's resume key whose
+    /// listener answers. Without it no launch reports a registry entry: it
+    /// goes on to bind and start. A flag only (no init param, no environment
+    /// variable), and not part of the resume key.
+    resume_from_registry: bool,
 }
 
 fn main() {
@@ -2703,6 +2855,8 @@ fn main() {
     let flow_editor_host_deploy = args
         .iter()
         .any(|arg| arg == "--allow-flow-editor-host-deploy");
+    // --resume-from-registry: see `GatewayLaunchArgs::resume_from_registry`.
+    let resume_from_registry = args.iter().any(|arg| arg == "--resume-from-registry");
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "meta_gateway starting (console/HTTP gateway)"
@@ -2723,6 +2877,7 @@ fn main() {
         http_listen,
         allow_remote,
         flow_editor_host_deploy,
+        resume_from_registry,
     }))) {
         // A refusal `run()` already answered on the request id must not be
         // followed by a second, id-less reply.
@@ -2776,6 +2931,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         http_listen: http_listen_flag,
         allow_remote: allow_remote_flag,
         flow_editor_host_deploy,
+        resume_from_registry,
     } = launch;
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
@@ -2845,6 +3001,44 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             error.to_string(),
         )
     })?;
+    // The members' file tools are rooted at the project root. The gateway
+    // starts only where that root is apart from every directory the launch
+    // keeps its state in.
+    let kept = [
+        (
+            "the state directory (store_path)",
+            Some(layout.state_dir().to_path_buf()),
+        ),
+        (
+            "the gateway home",
+            layout.gateway_home().map(Path::to_path_buf),
+        ),
+        (
+            "the provider credentials root (provider_credentials_root)",
+            params.provider_credentials_root.clone(),
+        ),
+    ];
+    for (what, directory) in kept {
+        if let Some(directory) = directory
+            && let Some((root, directory)) =
+                meerkat_meta::gateway_composition::tools_root_in_state(&project_root, &directory)
+        {
+            return Err(refuse_init(
+                &request_id,
+                -32602,
+                format!(
+                    "init params: the members' file tools are rooted at {}, the project root \
+                     (the workspace root when no project_root is given), and that directory is \
+                     {what} {} or lies inside it. The gateway keeps that directory out of the \
+                     file tools' reach, so the two must be apart: set project_root to a \
+                     directory outside it, or move that directory so that it is not the \
+                     project root and does not contain it",
+                    root.display(),
+                    directory.display()
+                ),
+            ));
+        }
+    }
     let persistent_sessions = params.persistent_sessions.unwrap_or(false);
     let provider_credentials_root = params.provider_credentials_root.clone();
     // Host-level compaction policy: validated once here so a typo or a zero
@@ -2999,23 +3193,53 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         declared_public_base_url.as_deref(),
         &paths,
     )?;
-    // A launch requesting authenticated voice must not resume an older open
-    // console just because its workspace/listener settings happen to match.
-    let key = if params.auth_config.is_some() || params.console_voice.is_some() {
-        let auth_shape = serde_json::to_vec(&(
-            &key,
-            params.auth_config.as_ref(),
-            params.console_voice.as_ref(),
-        ))?;
-        format!("{:x}", Sha256::digest(auth_shape))
-    } else {
-        key
+    // The seed of the built-in default mob's id for a state directory that
+    // records none: the same fingerprint without the release version, so a
+    // mob created by this release keeps its id under the next one.
+    let default_mob_id_seed = config_fingerprint_for_version(
+        &workspace_root,
+        realm,
+        isolated,
+        &runtime_profile,
+        persistent_sessions,
+        console_read_only,
+        &runtime_root,
+        &store_path,
+        &project_root,
+        context_root.as_deref(),
+        compaction_policy.as_ref(),
+        control_listen.as_ref(),
+        http_listen,
+        declared_public_base_url.as_deref(),
+        &paths,
+        None,
+    )?;
+    // The launch settings that join the key after the fingerprint; the
+    // default mob id's seed takes them the same way.
+    let with_launch_shape = |fingerprint: String| -> anyhow::Result<String> {
+        // A launch requesting authenticated voice must not resume an older
+        // open console just because its workspace/listener settings happen
+        // to match.
+        let shaped = if params.auth_config.is_some() || params.console_voice.is_some() {
+            let auth_shape = serde_json::to_vec(&(
+                &fingerprint,
+                params.auth_config.as_ref(),
+                params.console_voice.as_ref(),
+            ))?;
+            format!("{:x}", Sha256::digest(auth_shape))
+        } else {
+            fingerprint
+        };
+        Ok(resume_key_with_flow_editor_host_deploy(
+            shaped,
+            flow_editor_host_deploy,
+        ))
     };
-    let key = resume_key_with_flow_editor_host_deploy(key, flow_editor_host_deploy);
+    let key = with_launch_shape(key)?;
+    let default_mob_id_seed = with_launch_shape(default_mob_id_seed)?;
     // A launch resumes only a runtime on its own credentials root. The root
-    // joins the registry's resume key alone: `key` also names a runtime
-    // started without a definition file, and its discovery namespace, which
-    // naming a root must not change.
+    // joins the registry's resume key alone: `key` also names the discovery
+    // namespace, which naming a root must not change.
     let resume_key = resume_key_with_provider_credentials_root(
         key.clone(),
         provider_credentials_root.as_deref(),
@@ -3038,7 +3262,10 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     registry.entries = live_entries;
     save_registry(&registry_file, &registry)?;
 
-    if let Some(entry) = resumed_entry {
+    // Only a launch started with `--resume-from-registry` is answered from
+    // the registry. Every other launch goes on to bind and start, and nothing
+    // the registry file holds reaches its init response.
+    if resume_from_registry && let Some(entry) = resumed_entry {
         print_json_line(&init_response(
             request_id,
             &entry.runtime_id,
@@ -3051,7 +3278,8 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     }
 
     // Bind the HTTP listener before any bootstrap work and right after the
-    // resume lookup: a resumed launch reports the live runtime's listener and
+    // resume lookup: a resumed launch (one started with
+    // `--resume-from-registry`) reports the live runtime's listener and
     // must not contend for its port, while a fresh launch on a fixed
     // `http_listen` may find the port taken (EADDRINUSE). Failing here costs
     // the init reply and nothing else: no runtime build and no schedule
@@ -3108,8 +3336,30 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     let http_public_base_url = http_binding.advertised_base_url().map(str::to_string);
 
     std::env::set_current_dir(&workspace_root).ok();
-    let (definition, used_workspace_config) = load_definition(&workspace_root, &key, &paths)
-        .map_err(|error| refuse_init(&request_id, -32602, error.to_string()))?;
+    // A persistent state directory that already holds a mob names it. A
+    // manifest that cannot be read is not judged here: the launch then
+    // supplies its own derived id and the bootstrap refuses the manifest by
+    // its own kind before any definition is compared.
+    let recorded_mob_id = if persistent_sessions {
+        meerkat_meta::mob_composition_manifest::recorded_definition_id(&layout.event_log_db())
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    "the state directory's composition manifest gives no mob id; \
+                     the bootstrap judges it"
+                );
+                None
+            })
+    } else {
+        None
+    };
+    let (definition, used_workspace_config) = load_definition(
+        &workspace_root,
+        &default_mob_id_seed,
+        recorded_mob_id.as_ref(),
+        &paths,
+    )
+    .map_err(|error| refuse_init(&request_id, -32602, error.to_string()))?;
     let console_ui = match &paths.console_toml {
         Some(path) => load_console_ui_config_from_path_for_realm(path, realm)
             .with_context(|| format!("failed to load {}", path.display()))?,
@@ -3188,6 +3438,13 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             &member_mcp_custody,
             provider_auth_persistence.clone(),
             personal_accounts.as_ref(),
+            launch_named_paths(
+                &workspace_root,
+                &runtime_root,
+                &paths,
+                provider_credentials_root.as_deref(),
+                &definition,
+            ),
         )?;
         if let Some(options) = tool_grant_options {
             options.apply(&adapter);
@@ -3238,6 +3495,13 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .with_runtime_delivery(runtime_delivery)
             .with_agent_mob_tools(Arc::clone(&voice_inputs.4))
             .context("failed to install gateway agent mob tools")?;
+        // The launch has a schedule service: it says so before its runtime is
+        // built, so that a create under a mob's id waits for the release of
+        // that mob's schedules to be bound to the runtime and never goes on
+        // without it.
+        if schedule_host_inputs.is_some() {
+            spec = spec.with_mob_schedules_declared();
+        }
         spec.committed_boundary_recoverer = Some(committed_boundary_recoverer);
         // The concrete persistent session owner pins controllers for governed
         // binding (the erased MobSessionService carries no pin method).
@@ -3303,6 +3567,19 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .comms(true)
             .memory(true)
             .mcp_apps(console_ui.mcp_apps_sandbox_url.is_some());
+        // As in the persistent arm: the paths the gateway declares to the
+        // members' file tools.
+        factory = meerkat_meta::gateway_composition::declare_host_paths(
+            factory,
+            launch_state_paths(&layout),
+            launch_named_paths(
+                &workspace_root,
+                &runtime_root,
+                &paths,
+                provider_credentials_root.as_deref(),
+                &definition,
+            ),
+        );
         // As in the persistent arm: the launch's provider credential store.
         if let Some(persistence) = provider_auth_persistence.clone() {
             factory = factory.with_provider_auth_persistence(persistence);
@@ -3489,7 +3766,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     )
     .bootstrap()
     .await
-    .context("failed to bootstrap local runtime")?;
+    .map_err(|error| refuse_bootstrap(&request_id, &error))?;
     let runtime = composition.runtime_mut();
     // And its console log in the state directory's console store, installed
     // right after the bootstrap, as rpc_gateway installs it.
@@ -3984,8 +4261,14 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
                 }
             },
             || async {
+                // Only this gateway's own entry: another gateway started
+                // under the same resume key (and so with the same runtime
+                // id) keeps the entry it wrote.
+                let own_pid = std::process::id();
                 let mut registry = load_registry(&registry_file);
-                registry.entries.retain(|entry| entry.key != resume_key);
+                registry
+                    .entries
+                    .retain(|entry| entry.key != resume_key || entry.pid != own_pid);
                 save_registry(&registry_file, &registry)
             },
         )
@@ -4520,12 +4803,12 @@ command = "files-server"
         };
         let before = meerkat_meta::storage_layout::canonicalize_storage_root(&supplied)?;
         let first_key = fingerprint(&before)?;
-        let (first_definition, _) = load_definition(&workspace, &first_key, &paths)?;
+        let (first_definition, _) = load_definition(&workspace, &first_key, None, &paths)?;
         assert!(!supplied.exists());
         fs::create_dir_all(&supplied)?;
         let after = meerkat_meta::storage_layout::canonicalize_storage_root(&supplied)?;
         let second_key = fingerprint(&after)?;
-        let (second_definition, _) = load_definition(&workspace, &second_key, &paths)?;
+        let (second_definition, _) = load_definition(&workspace, &second_key, None, &paths)?;
         assert_eq!(
             first_key, second_key,
             "directory creation must not change the launch key"
@@ -4767,6 +5050,110 @@ command = "files-server"
         Ok(())
     }
 
+    /// The built-in default mob takes the id its state directory records,
+    /// whatever the launch's seed; without a recorded id it derives one from
+    /// the seed; and apart from the id the two definitions are the same.
+    #[test]
+    fn the_default_mob_takes_the_recorded_id_and_derives_one_only_without_it() -> anyhow::Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let paths = conventional_paths(temp.path());
+        let recorded = meerkat_mob::MobId::from("tux-0915f1d0");
+
+        let (derived, from_file) = load_definition(temp.path(), "abcdef0123456789", None, &paths)?;
+        assert!(!from_file);
+        assert_eq!(derived.id.to_string(), "tux-abcdef01");
+
+        for seed in ["abcdef0123456789", "0123456789abcdef"] {
+            let (taken, from_file) = load_definition(temp.path(), seed, Some(&recorded), &paths)?;
+            assert!(!from_file);
+            assert_eq!(taken.id, recorded, "seed {seed}");
+            let mut same_but_for_the_id = taken;
+            same_but_for_the_id.id = derived.id.clone();
+            assert_eq!(same_but_for_the_id, derived, "seed {seed}");
+        }
+        Ok(())
+    }
+
+    /// A definition file names its own mob: the recorded id of the state
+    /// directory does not replace the id the operator wrote.
+    #[test]
+    fn a_definition_file_keeps_its_own_id_over_the_recorded_one() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let config = temp.path().join("config");
+        fs::create_dir_all(&config)?;
+        fs::write(
+            config.join("mob.toml"),
+            "[mob]\nid = \"m\"\n\n[profiles.w]\nmodel = \"gpt-5.5\"\n",
+        )?;
+        let paths = conventional_paths(temp.path());
+        let recorded = meerkat_mob::MobId::from("tux-0915f1d0");
+
+        let (definition, from_file) =
+            load_definition(temp.path(), "fingerprint", Some(&recorded), &paths)?;
+        assert!(from_file);
+        assert_eq!(definition.id.to_string(), "m");
+        Ok(())
+    }
+
+    /// The release version is part of the resume key and not of the default
+    /// mob id's seed: two versions give two keys, and the seed is the
+    /// fingerprint with no version at all.
+    #[test]
+    fn the_release_version_is_in_the_resume_key_and_not_in_the_default_id_seed()
+    -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().canonicalize()?;
+        let paths = conventional_paths(&workspace);
+        let fingerprint = |version: Option<&str>| {
+            config_fingerprint_for_version(
+                &workspace,
+                None,
+                false,
+                "tux-auto",
+                true,
+                false,
+                &workspace,
+                &workspace.join("store"),
+                &workspace,
+                Some(&workspace),
+                None,
+                None,
+                meerkat_meta::gateway_composition::DEFAULT_GATEWAY_HTTP_LISTEN,
+                None,
+                &paths,
+                version,
+            )
+        };
+        let seed = fingerprint(None)?;
+        let this_release = fingerprint(Some(env!("CARGO_PKG_VERSION")))?;
+        assert_eq!(seed, fingerprint(None)?, "the seed is stable");
+        assert_ne!(this_release, fingerprint(Some("0.0.0-next"))?);
+        assert_ne!(seed, this_release);
+        assert_eq!(
+            this_release,
+            config_fingerprint(
+                &workspace,
+                None,
+                false,
+                "tux-auto",
+                true,
+                false,
+                &workspace,
+                &workspace.join("store"),
+                &workspace,
+                Some(&workspace),
+                None,
+                None,
+                meerkat_meta::gateway_composition::DEFAULT_GATEWAY_HTTP_LISTEN,
+                None,
+                &paths,
+            )?,
+            "the resume key is the fingerprint under this build's version"
+        );
+        Ok(())
+    }
+
     /// `[self_hosted]` in the workspace mob.toml is refused at load with the
     /// typed message that names the file carrying host config, not dropped.
     #[test]
@@ -4781,7 +5168,7 @@ command = "files-server"
         )?;
         let paths = conventional_paths(temp.path());
 
-        let error = load_definition(temp.path(), "fingerprint", &paths)
+        let error = load_definition(temp.path(), "fingerprint", None, &paths)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();
@@ -4808,7 +5195,7 @@ command = "files-server"
         )?;
         let paths = conventional_paths(temp.path());
 
-        let error = load_definition(temp.path(), "fingerprint", &paths)
+        let error = load_definition(temp.path(), "fingerprint", None, &paths)
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default();

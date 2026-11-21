@@ -384,7 +384,15 @@ for (const mode of ["init-refused", "settled-failed", "init-unknown"]) {
     });
     assert.equal(nativeRequests(f, "meta/init").length, 1);
     assert.equal(f.rows().filter(row => row.kind === "exit").length, 1);
-    if (mode === "settled-failed") assert.equal(nativeRequests(f, "meta/shutdown")[0].privateOpen, true);
+    if (mode === "settled-failed") {
+      // A failed settlement gets no shutdown request: the native stop ends
+      // the gateway's input and joins it, and the private channel is still
+      // open when that input ends.
+      assert.equal(nativeRequests(f, "meta/shutdown").length, 0);
+      const kinds = f.rows().map(row => row.kind);
+      assert.ok(kinds.includes("native-eof"), kinds.join(","));
+      assert.ok(kinds.indexOf("native-eof") < kinds.indexOf("private-eof"), kinds.join(","));
+    }
     await assert.rejects(builder.build(), /already started/);
     assert.equal(f.rows().filter(row => row.kind === "start").length, 1);
   });

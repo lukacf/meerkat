@@ -9697,23 +9697,29 @@ ORDER BY runtime_id";
         serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
     }
 
-    /// The durable input row as this binary encodes it, for the exact batch
-    /// CAS.
+    /// The durable input row as this binary's typed decoder reads it,
+    /// re-encoded, for the exact batch CAS; `None` for a row at the current
+    /// version and for a row that does not decode.
     ///
     /// The batch CAS compares a stored row with this binary's encoding of the
     /// expected and replacement rows. A row an earlier release wrote keeps that
     /// release's older `stored_input_state_version` stamp, so its bytes never
     /// equal this binary's image of the very same typed row, and every CAS on
     /// it would report a stale row for good: a terminal completion an earlier
-    /// release left pending could never be finalized. Such a row is compared as
-    /// the current typed decoder reads it, re-encoded. A row at the current
-    /// version is compared exactly as stored, and a row that does not decode
-    /// stays as stored, so any other difference is still stale. A row this
+    /// release left pending could never be finalized. Such a row is also
+    /// compared as the current typed decoder reads it, re-encoded. A row this
     /// binary writes without a requeue fact keeps the baseline stamp, below
-    /// the current version, and is re-encoded too: the stamp cannot tell it
-    /// from an earlier release's row of that version, whose bytes may differ,
-    /// and its own re-encoding is the same bytes.
-    fn input_row_in_current_encoding(stored: Vec<u8>) -> Vec<u8> {
+    /// the current version, and has a re-encoding too: the stamp cannot tell
+    /// it from an earlier release's row of that version, whose bytes may
+    /// differ.
+    ///
+    /// The re-encoding is a second reading, never the only one (see
+    /// [`stored_input_row_holds`]): a row's typed reading does not always
+    /// re-encode to the row's own bytes. An optional JSON value that holds
+    /// JSON null is written as `null` and read back as absent, so the
+    /// re-encoding of a row its writer still holds in memory differs from the
+    /// bytes that writer stored.
+    fn input_row_in_current_encoding(stored: &[u8]) -> Option<Vec<u8>> {
         use meerkat_core::generated::session_persistence_version_authority as version_authority;
 
         #[derive(serde::Deserialize)]
@@ -9721,15 +9727,26 @@ ORDER BY runtime_id";
             stored_input_state_version: u32,
         }
         let current_version = version_authority::stored_input_state_version();
-        let earlier_release = serde_json::from_slice::<StoredVersion>(&stored)
+        let earlier_release = serde_json::from_slice::<StoredVersion>(stored)
             .is_ok_and(|row| row.stored_input_state_version < current_version);
         if !earlier_release {
-            return stored;
+            return None;
         }
-        deserialize_persisted_input_state(&stored)
+        deserialize_persisted_input_state(stored)
             .ok()
             .and_then(|row| serde_json::to_vec(&row).ok())
-            .unwrap_or(stored)
+    }
+
+    /// Whether a stored input row holds `image`, for the exact batch CAS.
+    ///
+    /// The stored bytes are compared first, exactly: an image that equals
+    /// them is the row, whatever a decoder would make of it. Only when they
+    /// differ is the row's typed re-encoding (`reencoded`, from
+    /// [`input_row_in_current_encoding`]) compared, which lets a row with an
+    /// older version stamp hold this binary's image of the same typed row.
+    /// Any other difference is stale.
+    fn stored_input_row_holds(stored: &[u8], reencoded: Option<&[u8]>, image: &[u8]) -> bool {
+        stored == image || reencoded == Some(image)
     }
 
     /// Encode a `u64` boundary-receipt sequence into the durable `INTEGER`
@@ -18624,11 +18641,15 @@ ORDER BY runtime_id";
                     let Some(current) = current else {
                         return Ok(InputStateBatchCasOutcome::Stale);
                     };
-                    let current = input_row_in_current_encoding(current);
-                    if current != row.expected_json {
+                    let reencoded = input_row_in_current_encoding(&current);
+                    if !stored_input_row_holds(&current, reencoded.as_deref(), &row.expected_json) {
                         all_expected = false;
                     }
-                    if current != row.replacement_json {
+                    if !stored_input_row_holds(
+                        &current,
+                        reencoded.as_deref(),
+                        &row.replacement_json,
+                    ) {
                         all_replacements = false;
                     }
                 }
@@ -18704,11 +18725,15 @@ ORDER BY runtime_id";
                     let Some(current) = current else {
                         return Ok(FencedInputStateBatchCasOutcome::Stale);
                     };
-                    let current = input_row_in_current_encoding(current);
-                    if current != row.expected_json {
+                    let reencoded = input_row_in_current_encoding(&current);
+                    if !stored_input_row_holds(&current, reencoded.as_deref(), &row.expected_json) {
                         all_expected = false;
                     }
-                    if current != row.replacement_json {
+                    if !stored_input_row_holds(
+                        &current,
+                        reencoded.as_deref(),
+                        &row.replacement_json,
+                    ) {
                         all_replacements = false;
                     }
                 }
@@ -29972,6 +29997,348 @@ ORDER BY runtime_id";
                 serde_json::to_vec(replacement.as_stored()).unwrap(),
                 "the swap writes the current encoding"
             );
+        }
+
+        /// A stored row of a peer input whose payload is JSON null: a peer
+        /// response sent without a result. The row is written with
+        /// `"payload":null`, and the typed decoder reads that back as no
+        /// payload.
+        fn peer_input_row_with_a_null_payload(input_id: InputId) -> StoredInputState {
+            use crate::input::{
+                Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
+                PeerInput, ResponseTerminalStatus,
+            };
+
+            let mut row = StoredInputState::new_accepted(input_id.clone());
+            row.state.persisted_input = Some(Input::Peer(PeerInput {
+                header: InputHeader {
+                    ingress_context: None,
+                    retained_resume: None,
+                    authority_association: None,
+                    id: input_id,
+                    timestamp: chrono::DateTime::from_timestamp(1_763_366_400, 0).unwrap(),
+                    source: InputOrigin::Peer {
+                        peer_id: "responder".into(),
+                        display_identity: None,
+                        runtime_id: None,
+                    },
+                    durability: InputDurability::Durable,
+                    visibility: InputVisibility::default(),
+                    idempotency_key: None,
+                    supersession_key: None,
+                    correlation_id: None,
+                    requester: None,
+                },
+                directed_interaction_id: None,
+                convention: Some(PeerConvention::ResponseTerminal {
+                    request_id: "request-1".to_string(),
+                    status: ResponseTerminalStatus::Completed,
+                }),
+                content: "a response without a result".into(),
+                payload: Some(serde_json::Value::Null),
+                handling_mode: None,
+                sender_taint: None,
+                objective_id: None,
+                system_prompts: Vec::new(),
+                injected_context: Vec::new(),
+                in_reply_to: None,
+            }));
+            row
+        }
+
+        fn stored_input_row_bytes(
+            store: &SqliteRuntimeStore,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Vec<u8> {
+            open_runtime_connection(store.path())
+                .unwrap()
+                .query_row(
+                    "SELECT state_json FROM runtime_input_states
+                     WHERE runtime_id = ?1 AND input_id = ?2",
+                    params![runtime_id_text(runtime_id), input_id.0.to_string()],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .unwrap()
+        }
+
+        /// The exact batch CAS takes the stored bytes as they are. A row whose
+        /// typed reading does not re-encode to its own bytes (a peer input
+        /// with a JSON-null payload) is still the row its writer holds: the
+        /// writer's image of it swaps, in the process that wrote it. Before,
+        /// a row with the baseline version stamp was compared only as the
+        /// typed decoder reads it, re-encoded, so that image was stale for
+        /// good and the input's completion could never be finalized.
+        #[tokio::test]
+        async fn input_state_batch_cas_sqlite_swaps_the_image_that_equals_the_stored_bytes() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-cas-null-payload");
+            let input_id = InputId::new();
+            let held = peer_input_row_with_a_null_payload(input_id.clone());
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(held.clone())])
+                .await
+                .unwrap();
+            let written = stored_input_row_bytes(&store, &runtime_id, &input_id);
+            assert_eq!(
+                written,
+                serde_json::to_vec(&held).unwrap(),
+                "the store holds the writer's image"
+            );
+            let reread = store
+                .load_input_state(&runtime_id, &input_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(
+                serde_json::to_vec(&reread).unwrap(),
+                written,
+                "the row's typed reading does not re-encode to its own bytes"
+            );
+
+            let replacement = replacement_records(std::slice::from_ref(&held), 1);
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_id,
+                        std::slice::from_ref(&held),
+                        &replacement,
+                    )
+                    .await
+                    .unwrap(),
+                InputStateBatchCasOutcome::Swapped,
+                "the writer's image of the stored row must swap"
+            );
+            assert_eq!(
+                stored_input_row_bytes(&store, &runtime_id, &input_id),
+                serde_json::to_vec(replacement[0].as_stored()).unwrap()
+            );
+        }
+
+        /// The same through the fenced exclusive-writer CAS.
+        #[tokio::test]
+        async fn input_state_fenced_batch_cas_sqlite_swaps_the_image_that_equals_the_stored_bytes()
+        {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-fenced-cas-null-payload");
+            let input_id = InputId::new();
+            let held = peer_input_row_with_a_null_payload(input_id.clone());
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(held.clone())])
+                .await
+                .unwrap();
+            let replacement = replacement_records(std::slice::from_ref(&held), 1);
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically_with_fence(
+                        &runtime_id,
+                        std::slice::from_ref(&held),
+                        &replacement,
+                        Arc::new(AppliedWriteFence),
+                    )
+                    .await
+                    .unwrap(),
+                FencedInputStateBatchCasOutcome::Swapped,
+                "the writer's image of the stored row must swap"
+            );
+            assert_eq!(
+                stored_input_row_bytes(&store, &runtime_id, &input_id),
+                serde_json::to_vec(replacement[0].as_stored()).unwrap()
+            );
+        }
+
+        /// What already held before and still holds: after a restart the row
+        /// is held as the typed decoder read it (no payload), and that image
+        /// swaps against the stored bytes that still carry `"payload":null`;
+        /// a stored row whose content changed is stale for either image.
+        #[tokio::test]
+        async fn input_state_batch_cas_sqlite_keeps_the_typed_reading_and_refuses_changed_rows() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("input-cas-null-payload-reread");
+            let input_id = InputId::new();
+            let held = peer_input_row_with_a_null_payload(input_id.clone());
+            store
+                .persist_input_states_atomically(&runtime_id, &[persistable(held.clone())])
+                .await
+                .unwrap();
+            let reread = store
+                .load_input_state(&runtime_id, &input_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let mut changed = held.clone();
+            changed.state.recovery_count = 7;
+            for image in [&held, &reread] {
+                assert_eq!(
+                    store
+                        .compare_and_swap_input_states_atomically(
+                            &runtime_id,
+                            std::slice::from_ref(&changed),
+                            &replacement_records(std::slice::from_ref(image), 1),
+                        )
+                        .await
+                        .unwrap(),
+                    InputStateBatchCasOutcome::Stale,
+                    "an image the store does not hold is stale"
+                );
+            }
+
+            let replacement = replacement_records(std::slice::from_ref(&reread), 1);
+            assert_eq!(
+                store
+                    .compare_and_swap_input_states_atomically(
+                        &runtime_id,
+                        std::slice::from_ref(&reread),
+                        &replacement,
+                    )
+                    .await
+                    .unwrap(),
+                InputStateBatchCasOutcome::Swapped,
+                "the typed reading of the stored row swaps, as after a restart"
+            );
+            assert_eq!(
+                stored_input_row_bytes(&store, &runtime_id, &input_id),
+                serde_json::to_vec(replacement[0].as_stored()).unwrap()
+            );
+        }
+
+        /// The row the 0.9.16 code wrote for an input whose run returned a
+        /// JSON-null structured output, its completion finalized (taken from
+        /// a store that code wrote in a test run; ids and times are that
+        /// run's). The run result inside its completion holds
+        /// `"structured_output":null`, and the receipt digest was taken over
+        /// the result as the writer held it.
+        const NULL_STRUCTURED_OUTPUT_FINALIZED_ROW: &str = concat!(
+            r#"{"stored_input_state_version":7,"input_id":"01a1ea32-a791-7302-a0b9-07b7fad3"#,
+            r#"2bf1","current_state":"consumed","policy":{"version":1,"decision":{"apply_mo"#,
+            r#"de":"stage_run_start","wake_mode":"wake_if_idle","queue_mode":"fifo","consum"#,
+            r#"e_point":"on_run_complete","drain_policy":"queue_next_turn","routing_disposi"#,
+            r#"tion":"queue","record_transcript":true,"emit_operator_content":true,"policy_"#,
+            r#"version":1}},"runtime_semantics":{"boundary":"run_start","execution_kind":"c"#,
+            r#"ontent_turn","execution_handling_mode":null,"peer_response_terminal_apply_in"#,
+            r#"tent":null,"live_interrupt_required":false},"terminal_outcome":{"outcome_typ"#,
+            r#"e":"consumed"},"durability":"durable","attempt_count":1,"recovery_count":0,""#,
+            r#"history":[{"timestamp":"2026-11-17T15:49:10.675877127Z","from":"accepted","t"#,
+            r#"o":"queued","reason":"QueueAccepted"},{"timestamp":"2026-11-17T15:49:10.6895"#,
+            r#"66030Z","from":"queued","to":"staged","reason":"StageForRun(01a1ea32-a7a1-71"#,
+            r#"c6-9ff0-d48396cc89d8)"},{"timestamp":"2026-11-17T15:49:10.766985470Z","from""#,
+            r#":"staged","to":"applied","reason":"MarkApplied(01a1ea32-a7a1-71c6-9ff0-d4839"#,
+            r#"6cc89d8)"},{"timestamp":"2026-11-17T15:49:10.766985470Z","from":"applied","t"#,
+            r#"o":"applied_pending_consumption","reason":"MarkAppliedPendingConsumption(bou"#,
+            r#"ndary_sequence=1)"},{"timestamp":"2026-11-17T15:49:10.767109816Z","from":"ap"#,
+            r#"plied_pending_consumption","to":"consumed","reason":"Consume"}],"terminal_co"#,
+            r#"mpletion":{"input_id":"01a1ea32-a791-7302-a0b9-07b7fad32bf1","batch_ordinal""#,
+            r#":0,"batch_key":{"scope":"run","run_id":"01a1ea32-a7a1-71c6-9ff0-d48396cc89d8"#,
+            r#""},"owner_input_id":"01a1ea32-a791-7302-a0b9-07b7fad32bf1","candidate_digest"#,
+            r#"":"037de289eceabcdef64b99dc4b7a00ef1689ac525f703d28b5246acc0f0f311d","comple"#,
+            r#"tion_input_ids_digest":"c150e9f37a5e854a0273299dd07b677c3603c5eb34efdb74493d"#,
+            r#"e34ced29e41f","requires_session_checkpoint":true,"completion_input_ids":["01"#,
+            r#"a1ea32-a791-7302-a0b9-07b7fad32bf1"],"outcome":{"completion_type":"completed"#,
+            r#"","text":"null","session_id":"01a1ea32-a709-71f7-ac2a-a119181570b2","usage":"#,
+            r#"{"input_tokens":0,"output_tokens":0,"cache_creation_tokens":null,"cache_read"#,
+            r#"_tokens":null},"run_usage":{"input_tokens":0,"output_tokens":0,"cache_creati"#,
+            r#"on_tokens":null,"cache_read_tokens":null},"request_usage":[{"input_tokens":0"#,
+            r#","output_tokens":0,"cache_creation_tokens":null,"cache_read_tokens":null,"ac"#,
+            r#"counting":{"provider":"openai","model":"gpt-5.4","presented_tokens":0,"conve"#,
+            r#"ntion":"host_declared_inclusive_input_total","aggregation":"provider_inclusi"#,
+            r#"ve_input_total"}}],"turns":1,"tool_calls":0,"structured_output":null,"skill_"#,
+            r#"diagnostics":{"source_health":{"state":"healthy","invalid_ratio":0.0,"invali"#,
+            r#"d_count":0,"total_count":14,"failure_streak":0,"handshake_failed":false},"qu"#,
+            r#"arantined":[]}},"phase":{"phase":"finalized","receipt_digest":"39dde67e32f7a"#,
+            r#"79833ab78e772dde11d6c48386389519a90a533c7cfaa649a3b","finalization":"succeed"#,
+            r#"ed"}},"scoped_destination":{"kind":"never_scoped"},"last_run_id":"01a1ea32-a"#,
+            r#"7a1-71c6-9ff0-d48396cc89d8","last_boundary_sequence":1,"admission_sequence":"#,
+            r#"1000000000,"created_at":"2026-11-17T15:49:10.675731468Z","updated_at":"2026-"#,
+            r#"11-17T15:49:10.767109816Z"}"#,
+        );
+
+        /// The same kind of row with its completion still pending: its host
+        /// ended after the run's commit and before the finalization. The
+        /// candidate digest was taken over the result as the writer held it.
+        const NULL_STRUCTURED_OUTPUT_PENDING_ROW: &str = concat!(
+            r#"{"stored_input_state_version":7,"input_id":"01a1ea5a-81b6-73e3-a983-8eeb2979"#,
+            r#"3130","current_state":"consumed","policy":{"version":1,"decision":{"apply_mo"#,
+            r#"de":"stage_run_start","wake_mode":"wake_if_idle","queue_mode":"fifo","consum"#,
+            r#"e_point":"on_run_complete","drain_policy":"queue_next_turn","routing_disposi"#,
+            r#"tion":"queue","record_transcript":true,"emit_operator_content":true,"policy_"#,
+            r#"version":1}},"runtime_semantics":{"boundary":"run_start","execution_kind":"c"#,
+            r#"ontent_turn","execution_handling_mode":null,"peer_response_terminal_apply_in"#,
+            r#"tent":null,"live_interrupt_required":false},"terminal_outcome":{"outcome_typ"#,
+            r#"e":"consumed"},"durability":"durable","attempt_count":1,"recovery_count":0,""#,
+            r#"history":[{"timestamp":"2026-11-17T16:32:42.424377609Z","from":"accepted","t"#,
+            r#"o":"queued","reason":"QueueAccepted"},{"timestamp":"2026-11-17T16:32:42.4361"#,
+            r#"23578Z","from":"queued","to":"staged","reason":"StageForRun(01a1ea5a-81c3-74"#,
+            r#"ed-b77f-1fb13ea8e651)"},{"timestamp":"2026-11-17T16:32:42.445630649Z","from""#,
+            r#":"staged","to":"applied","reason":"MarkApplied(01a1ea5a-81c3-74ed-b77f-1fb13"#,
+            r#"ea8e651)"},{"timestamp":"2026-11-17T16:32:42.445630649Z","from":"applied","t"#,
+            r#"o":"applied_pending_consumption","reason":"MarkAppliedPendingConsumption(bou"#,
+            r#"ndary_sequence=1)"},{"timestamp":"2026-11-17T16:32:42.445743368Z","from":"ap"#,
+            r#"plied_pending_consumption","to":"consumed","reason":"Consume"}],"terminal_co"#,
+            r#"mpletion":{"input_id":"01a1ea5a-81b6-73e3-a983-8eeb29793130","batch_ordinal""#,
+            r#":0,"batch_key":{"scope":"run","run_id":"01a1ea5a-81c3-74ed-b77f-1fb13ea8e651"#,
+            r#""},"owner_input_id":"01a1ea5a-81b6-73e3-a983-8eeb29793130","candidate_digest"#,
+            r#"":"72a87946030f8a280a38cb6a241d1c4f2ab94b735c08c462d95400b41f66beeb","comple"#,
+            r#"tion_input_ids_digest":"17ed757f5fe1c41bc7573ec5e13446f53a4ca22fede11fe87f3d"#,
+            r#"ceb926709fff","requires_session_checkpoint":true,"candidate":{"candidate_typ"#,
+            r#"e":"run_result","result":{"text":"result of run 1","session_id":"01a1ea5a-81"#,
+            r#"85-7329-8369-e2e53e5e03b2","usage":{"input_tokens":0,"output_tokens":0,"cach"#,
+            r#"e_creation_tokens":null,"cache_read_tokens":null},"turns":1,"tool_calls":0,""#,
+            r#"structured_output":null}},"completion_input_ids":["01a1ea5a-81b6-73e3-a983-8"#,
+            r#"eeb29793130"],"phase":{"phase":"pending"}},"scoped_destination":{"kind":"nev"#,
+            r#"er_scoped"},"persisted_input":{"input_type":"prompt","header":{"id":"01a1ea5"#,
+            r#"a-81b6-73e3-a983-8eeb29793130","timestamp":"2026-11-17T16:32:42.422529025Z","#,
+            r#""source":{"type":"operator"},"durability":"durable","visibility":{"transcrip"#,
+            r#"t_eligible":true,"operator_eligible":true}},"content":"first"},"last_run_id""#,
+            r#":"01a1ea5a-81c3-74ed-b77f-1fb13ea8e651","last_boundary_sequence":1,"admissio"#,
+            r#"n_sequence":1000000000,"created_at":"2026-11-17T16:32:42.424245961Z","update"#,
+            r#"d_at":"2026-11-17T16:32:42.445743368Z"}"#,
+        );
+
+        /// A stored input row whose run result carries a JSON-null structured
+        /// output reads again, finalized or pending, and reads back as the
+        /// bytes that were written. Such a row used to fail its digest check
+        /// on every read: the result was written with an explicit null and
+        /// read back without it.
+        #[tokio::test]
+        async fn a_stored_row_with_a_null_structured_output_reads_again() {
+            for (name, written) in [
+                ("finalized", NULL_STRUCTURED_OUTPUT_FINALIZED_ROW),
+                ("pending", NULL_STRUCTURED_OUTPUT_PENDING_ROW),
+            ] {
+                let (_dir, store) = temp_store();
+                let runtime_id = LogicalRuntimeId::new(format!("null-structured-output-{name}"));
+                let stored_id =
+                    serde_json::from_str::<serde_json::Value>(written).unwrap()["input_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                let input_id = InputId::from_uuid(uuid::Uuid::parse_str(&stored_id).unwrap());
+                open_runtime_connection(store.path())
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                         VALUES (?1, ?2, ?3)",
+                        params![runtime_id_text(&runtime_id), stored_id, written.as_bytes()],
+                    )
+                    .unwrap();
+
+                let row = store
+                    .load_input_state(&runtime_id, &input_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("the {name} row reads: {error}"))
+                    .unwrap_or_else(|| panic!("the {name} row is stored"));
+                assert_eq!(
+                    serde_json::to_string(&row).unwrap(),
+                    written,
+                    "the {name} row reads back as it was written"
+                );
+                let rows = store.load_input_states(&runtime_id).await.unwrap();
+                assert!(
+                    matches!(rows.as_slice(), [InputStateRow::Decoded(_)]),
+                    "the {name} row decodes in the runtime's row list: {rows:?}"
+                );
+            }
         }
 
         #[tokio::test]

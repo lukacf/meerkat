@@ -67,7 +67,15 @@ use tokio::task::JoinHandle;
 const LIMIT: Duration = Duration::from_secs(10);
 /// How long a connection must stay silent before it counts as drained.
 const QUIET: Duration = Duration::from_millis(500);
-const MOB: &str = "approval_notice_mob";
+/// A mob id for one gated turn. A mob's participant names are held for the whole
+/// process, so two tests of this binary that run at once must not share one.
+fn next_mob() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!(
+        "approval_notice_mob_{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
 const MEMBER: &str = "w1";
 /// The member tool the host gates; a comms tool every member has.
 const GATED_TOOL: &str = "peers";
@@ -748,22 +756,23 @@ impl Harness {
 /// Creates the mob and its member and starts a member turn that calls the
 /// gated tool; returns the turn's request id.
 async fn start_gated_turn(connection: &mut Connection) -> u64 {
+    let mob = next_mob();
     connection
         .request(
             "mob/create",
-            json!({"definition":{"id":MOB,"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            json!({"definition":{"id":mob.as_str(),"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
     connection
         .request(
             "mob/spawn",
-            json!({"mob_id":MOB,"profile":"worker","agent_identity":MEMBER,"runtime_mode":"turn_driven"}),
+            json!({"mob_id":mob.as_str(),"profile":"worker","agent_identity":MEMBER,"runtime_mode":"turn_driven"}),
         )
         .await;
     connection
         .send(
             "mob/turn_start",
-            json!({"mob_id":MOB,"agent_identity":MEMBER,"prompt":"list your peers"}),
+            json!({"mob_id":mob.as_str(),"agent_identity":MEMBER,"prompt":"list your peers"}),
         )
         .await
 }

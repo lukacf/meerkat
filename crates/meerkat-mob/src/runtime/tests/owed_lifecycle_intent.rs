@@ -381,6 +381,14 @@ async fn a_live_stop_parked_on_a_member_is_owed_like_a_recovered_one() {
         .expect("session-backed autonomous member");
     service.set_session_active(&session, true).await;
     service.hold_wind_down_after_interrupt(&session).await;
+    // The member's kickoff turn is running: the runtime has its run current,
+    // so the Stop parks on a turn it interrupted.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        service.wait_keep_alive_turn_entered(&session),
+    )
+    .await
+    .expect("the kickoff turn starts");
 
     let stop = tokio::spawn({
         let handle = handle.clone();
@@ -843,6 +851,12 @@ async fn a_refused_stop_stays_owed_until_a_stop_is_issued_again() {
         .expect("session-backed autonomous member");
     service.set_session_active(&session, true).await;
     service.hold_wind_down_after_interrupt(&session).await;
+    // The member's kickoff turn is running: the runtime has its run current,
+    // so the first Stop ends that run. A Stop that lands while the kickoff
+    // input is still queued cancels nothing, and the run that starts once the
+    // refused Stop releases its hold is one the Stop issued again waits on.
+    // No timeout: the clock is paused.
+    service.wait_keep_alive_turn_entered(&session).await;
 
     let refused = handle
         .stop()
@@ -873,6 +887,217 @@ async fn a_refused_stop_stays_owed_until_a_stop_is_issued_again() {
     );
 
     handle.stop().await.expect("the Stop is issued again");
+    assert_eq!(
+        ended(wait).await.expect("the Stop landed"),
+        MobState::Stopped
+    );
+}
+
+/// A Stop that was refused, and whose member then runs an input that was
+/// queued when that Stop held it: the state the three rows below start
+/// from. The mob is Running with its Stop owed, the member's turn is
+/// reported as ended, and `run` is current.
+struct RefusedStopThenRun {
+    handle: MobHandle,
+    adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    identity: AgentIdentity,
+    session: SessionId,
+    run: meerkat_core::lifecycle::RunId,
+    /// The queued input's completion waiter, kept for the row's length.
+    queued_input: Option<meerkat_runtime::CompletionHandle>,
+}
+
+/// Reach [`RefusedStopThenRun`] without timing. The member's kickoff turn
+/// returns, so the member has no run. An input is admitted on the member's
+/// runtime and the runtime loop is held before it takes the input into a
+/// run. The first Stop holds the member with that input queued, finds no
+/// run to cancel, and is refused at its hang guard by a turn the fixture
+/// reports as never ending. A refused Stop releases the holds it took, the
+/// loop is released, and the queued input runs: a run no Stop cancelled.
+async fn a_refused_stop_then_the_queued_input_runs(label: &str) -> RefusedStopThenRun {
+    let (handle, service) = create_test_mob(with_unique_mob_id(sample_definition(), label)).await;
+    let identity = AgentIdentity::from("never-cancelled");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn autonomous member");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("session-backed autonomous member");
+    let adapter = MobSessionService::acquire_runtime_adapter(service.as_ref(), None)
+        .expect("acquire runtime authority")
+        .expect("the test mob is runtime-backed");
+
+    // The kickoff turn runs and returns the way the provider would: the
+    // member has no run. No timeouts on these waits: the clock is paused.
+    service.wait_keep_alive_turn_entered(&session).await;
+    service.release_keep_alive_turn(&session).await;
+    adapter.wait_current_run_settled(&session).await;
+    assert_eq!(
+        adapter.current_run(&session).await,
+        None,
+        "the kickoff run is over"
+    );
+
+    // An input is admitted and the member's runtime loop is held before it
+    // takes the input into a run: the input is queued, no run is current.
+    let (queue_gap_entered, queue_gap_release) =
+        adapter.arm_runtime_loop_before_queue_authority_test_hook(session.clone());
+    let (outcome, queued_input) = adapter
+        .accept_input_with_completion(
+            &session,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                "queued when the first Stop holds the member",
+                None,
+            )),
+        )
+        .await
+        .expect("the live runtime admits the input");
+    assert!(outcome.is_accepted());
+    queue_gap_entered
+        .await
+        .expect("the runtime loop reaches the queue gap");
+
+    // The first Stop finds no run to cancel and is refused at its hang guard
+    // by a turn the fixture reports as never ending.
+    service.set_session_active(&session, true).await;
+    service.hold_wind_down_after_interrupt(&session).await;
+    let refused = handle
+        .stop()
+        .await
+        .expect_err("a member turn that never ends refuses the Stop at its hang guard");
+    assert!(
+        matches!(refused, MobError::LifecycleOperationProgressStalled { .. }),
+        "the Stop is refused at the hang guard: {refused:?}"
+    );
+    assert_eq!(
+        adapter.current_run(&session).await,
+        None,
+        "the first Stop held the member with its input queued: it had no run to cancel"
+    );
+
+    // The refused Stop released its hold: the queued input runs now.
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let turns_before = *turns_entered.borrow_and_update();
+    queue_gap_release
+        .send(())
+        .expect("release the runtime loop");
+    turns_entered
+        .wait_for(|entered| *entered > turns_before)
+        .await
+        .expect("the queued input's turn starts");
+    let run = adapter
+        .current_run(&session)
+        .await
+        .expect("the queued input's run is current");
+    assert_eq!(
+        published_facts(&handle),
+        (
+            MobPhase::Running,
+            Some(PlacedCompletionLifecycleIntentKind::Stop),
+            false
+        ),
+        "the refused Stop leaves its intent open"
+    );
+    // The member's turn is reported as ended: only the run is in the way.
+    service.set_session_active(&session, false).await;
+    RefusedStopThenRun {
+        handle,
+        adapter,
+        identity,
+        session,
+        run,
+        queued_input,
+    }
+}
+
+/// A Stop issued again after a refused Stop cancels the run that started in
+/// between, at its next boundary, and lands: the interrupt the refused Stop
+/// kept as done does not stand for a run that started after that Stop
+/// released its hold.
+#[tokio::test(start_paused = true)]
+async fn a_stop_issued_again_cancels_the_run_that_started_after_a_refused_stop() {
+    let RefusedStopThenRun {
+        handle,
+        adapter,
+        identity,
+        session,
+        run,
+        queued_input: _queued_input,
+    } = a_refused_stop_then_the_queued_input_runs("owed-stop-again-cancels").await;
+    let wait = wait_until_nothing_is_owed(&handle);
+
+    let report = handle
+        .stop()
+        .await
+        .expect("the Stop issued again cancels the run and lands");
+    assert!(
+        matches!(
+            report.members.get(&identity),
+            Some(crate::MemberStopOutcome {
+                run: crate::MemberStopRun::CancelledAtBoundary { run_id },
+                starts: crate::MemberRunStarts::Held,
+            }) if run_id == &run
+        ),
+        "the report names the run that started in between as cancelled at its boundary: {report:?}"
+    );
+    assert_eq!(adapter.current_run(&session).await, None, "the run is over");
+    assert_eq!(
+        ended(wait).await.expect("the Stop landed"),
+        MobState::Stopped
+    );
+}
+
+/// A Shutdown issued after a refused Stop ends the run that started in
+/// between and completes, for the same reason.
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_after_a_refused_stop_ends_the_run_that_started_in_between() {
+    let RefusedStopThenRun {
+        handle,
+        adapter,
+        session,
+        queued_input: _queued_input,
+        ..
+    } = a_refused_stop_then_the_queued_input_runs("owed-stop-then-shutdown").await;
+
+    handle
+        .shutdown()
+        .await
+        .expect("the Shutdown ends the run and completes");
+    assert_eq!(adapter.current_run(&session).await, None, "the run is over");
+}
+
+/// Ending the member's run by itself is admitted while a Stop is owed: a
+/// force cancel of the member is accepted, the run that started after the
+/// refused Stop ends, and the next Stop lands.
+#[tokio::test(start_paused = true)]
+async fn after_a_refused_stop_a_force_cancel_of_the_member_is_admitted_and_the_next_stop_lands() {
+    let RefusedStopThenRun {
+        handle,
+        adapter,
+        identity,
+        session,
+        run,
+        queued_input: _queued_input,
+    } = a_refused_stop_then_the_queued_input_runs("owed-stop-force-cancel").await;
+    let wait = wait_until_nothing_is_owed(&handle);
+
+    handle
+        .force_cancel_member(identity)
+        .await
+        .expect("a force cancel of the member is admitted while the Stop is owed");
+    adapter.wait_run_settled(&session, &run).await;
+    assert_eq!(
+        adapter.current_run(&session).await,
+        None,
+        "the force cancel ended the run"
+    );
+    assert!(!wait.is_finished(), "the refused Stop is still owed");
+
+    handle.stop().await.expect("the next Stop lands");
     assert_eq!(
         ended(wait).await.expect("the Stop landed"),
         MobState::Stopped

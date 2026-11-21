@@ -2305,6 +2305,65 @@ async fn a_call_dropped_during_its_commit_still_lands_and_adopts_it() {
     );
 }
 
+// A writing call dropped right after it armed its scopes, before its
+// in-memory step ran, goes on without its caller: no scope refuses, its
+// change lands on the host, and the next call on the scope commits on top
+// of it.
+#[tokio::test]
+async fn a_writing_call_dropped_right_after_its_arm_lands_and_leaves_no_scope_refusing() {
+    let host = Arc::new(TestHost::new());
+    let (realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let runtime = LogicalRuntimeId::new("dropped-early");
+    let parked = store.park_armed_calls_for_test().await;
+    let call = {
+        let store = Arc::clone(&store);
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            store
+                .persist_input_state(
+                    &runtime,
+                    &persistable(StoredInputState::new_accepted(InputId::new())),
+                )
+                .await
+        })
+    };
+    while store.parked_armed_calls_for_test().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        (realm.poisoned_scopes().len(), realm.realm_poisoned()),
+        (0, None),
+        "the dropped call left no scope refusing"
+    );
+    assert_eq!(
+        (
+            store.armed_callers_for_test().len(),
+            store.parked_armed_calls_for_test().len()
+        ),
+        (0, 1),
+        "the caller is gone and the call it was dropped in still stands, armed"
+    );
+    drop(parked);
+    store
+        .persist_input_state(
+            &runtime,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await
+        .expect("the next call commits on top of the dropped call's change");
+    assert!(realm.poisoned_scopes().is_empty() && realm.realm_poisoned().is_none());
+    let store = Arc::try_unwrap(store).expect("the dropped call released the store");
+    let (_realm, reopened) = reopen(&host, (realm, store)).await;
+    assert_eq!(
+        reopened.load_input_states(&runtime).await.unwrap().len(),
+        2,
+        "both changes are on the host"
+    );
+}
+
 // Unrun until the candidate's validation. Scopes dropped while armed
 // (a call dropped during its in-memory change) are poisoned; disarmed, they
 // are not.

@@ -5157,21 +5157,30 @@ async fn pause_fork_admission_if_requested(source: &AgentIdentity) {
     }
 }
 
-struct ProvisionedChildRetireOnDrop {
+pub(super) struct ProvisionedChildRetireOnDrop {
     handle: Option<MobHandle>,
     identity: AgentIdentity,
 }
 
 impl ProvisionedChildRetireOnDrop {
-    fn arm(handle: MobHandle, identity: AgentIdentity) -> Self {
+    pub(super) fn arm(handle: MobHandle, identity: AgentIdentity) -> Self {
         Self {
             handle: Some(handle),
             identity,
         }
     }
 
-    fn disarm(mut self) {
+    pub(super) fn disarm(mut self) {
         self.handle = None;
+    }
+}
+
+impl std::fmt::Debug for ProvisionedChildRetireOnDrop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionedChildRetireOnDrop")
+            .field("identity", &self.identity)
+            .field("armed", &self.handle.is_some())
+            .finish()
     }
 }
 
@@ -11090,6 +11099,46 @@ impl MobHandle {
         self.read_published_machine_state(crate::ControlScope::List, |state| {
             super::IdentityLife::of(state, identity)
         })
+    }
+
+    /// Whether member `from`'s own peer message to member `to` of this mob
+    /// is one MobMachine's wiring admits: the wiring edge between the two,
+    /// the fact [`Self::send_peer_message`] requires. A member's comms
+    /// trust, which its own `send_message` checks, is installed from that
+    /// edge and removed with it.
+    ///
+    /// Read as [`Self::identity_entry`] is: from the machine state the actor
+    /// last published, with no actor command and no wake, under the
+    /// [`crate::ControlScope::List`] scope. It does not say whether either
+    /// member is live, and it says nothing of a peer outside this mob.
+    ///
+    /// # Errors
+    /// The handle's principal lacks the list scope.
+    pub fn member_can_message(
+        &self,
+        from: &AgentIdentity,
+        to: &AgentIdentity,
+    ) -> Result<bool, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            Self::machine_members_wired(state, from.as_str(), to.as_str())
+        })
+    }
+
+    /// Whether MobMachine holds the wiring edge between members `one` and
+    /// `other` of this mob.
+    pub(super) fn machine_members_wired(
+        machine_state: &mob_dsl::MobMachineState,
+        one: &str,
+        other: &str,
+    ) -> bool {
+        let edge = mob_dsl::WiringEdge::new(
+            mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(one)),
+            mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(other)),
+        );
+        machine_state
+            .wiring_edges
+            .iter()
+            .any(|existing| existing == &edge)
     }
 
     /// One page of this mob's identity entries, in identity order: the

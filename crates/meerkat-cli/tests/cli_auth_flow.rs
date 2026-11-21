@@ -1143,3 +1143,354 @@ fn rkat_prompt_skips_legacy_warning_for_global_doc_outside_chain() {
         "a global doc outside the chain is not reported; stderr:\n{stderr}"
     );
 }
+
+/// The stored value `n` of the rows below: plain synthetic words, put
+/// together at run time.
+fn synthetic_stored_value(n: u8) -> String {
+    format!("synthetic stored value {n:02}")
+}
+
+/// The `dev` realm's document for the rows below: an HTTP MCP server with a
+/// stored header value, and a provider route whose auth profile holds a
+/// stored inline secret. Its path is returned with the state root.
+fn seed_dev_realm_with_stored_secrets(root: &std::path::Path) -> (PathBuf, PathBuf) {
+    let state_root = root.join("realms");
+    let document = state_root.join("dev").join("config.toml");
+    std::fs::create_dir_all(document.parent().expect("realm dir")).expect("mkdir realm");
+    std::fs::write(
+        &document,
+        format!(
+            "[[tools.mcp_servers]]\nname = \"remote\"\nurl = \"http://synthetic.invalid/mcp\"\n\
+             headers = {{ X-Synthetic = \"{}\" }}\n\n\
+             [realm.dev.backend.main]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://synthetic.invalid/v1\"\n\n\
+             [realm.dev.auth.main]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n\
+             [realm.dev.binding.main]\nbackend_profile = \"main\"\nauth_profile = \"main\"\n",
+            synthetic_stored_value(1),
+            synthetic_stored_value(2)
+        ),
+    )
+    .expect("write the realm document");
+    (state_root, document)
+}
+
+/// One `rkat` command in the `dev` realm of `state_root`.
+fn rkat_in_dev_realm(
+    rkat: &std::path::Path,
+    root: &std::path::Path,
+    state_root: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    isolated_rkat_command(rkat, root)
+        .args([
+            "--state-root",
+            state_root.to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+        ])
+        .args(args)
+        .output()
+        .expect("rkat must spawn")
+}
+
+/// `rkat config get` shows a marker in place of each stored secret value,
+/// in each of its output forms, and never the value; the document keeps its
+/// bytes.
+#[test]
+fn rkat_config_get_shows_a_marker_in_place_of_stored_secret_values() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (state_root, document) = seed_dev_realm_with_stored_secrets(tmp.path());
+    let before = std::fs::read_to_string(&document).expect("read");
+    let mut otherwise = Vec::new();
+    for form in [
+        &["config", "get"][..],
+        &["config", "get", "--with-generation"],
+        &["config", "get", "--format", "json"],
+        &["config", "get", "--format", "json", "--with-generation"],
+    ] {
+        let out = rkat_in_dev_realm(&rkat, tmp.path(), &state_root, form);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{form:?} must succeed; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if stdout.contains("synthetic stored value") {
+            otherwise.push(format!("{form:?} prints a stored value"));
+        }
+        if stdout.matches("<redacted>").count() != 2 {
+            otherwise.push(format!(
+                "{form:?} does not show the marker at the two places"
+            ));
+        }
+    }
+    assert!(otherwise.is_empty(), "{otherwise:#?}");
+    assert_eq!(std::fs::read_to_string(&document).expect("reread"), before);
+}
+
+/// The document `rkat config get` shows, written back with `rkat config
+/// set`, keeps the stored values: the marker stands for the stored value of
+/// the same place and is never stored. A stored inline secret stays with
+/// the route it was stored for: a patch of the address of the backend its
+/// binding uses is refused unless the same patch states the secret.
+#[test]
+fn rkat_config_writes_resolve_the_marker_and_keep_a_stored_secret_with_its_route() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (state_root, document) = seed_dev_realm_with_stored_secrets(tmp.path());
+    let run = |args: &[&str]| rkat_in_dev_realm(&rkat, tmp.path(), &state_root, args);
+    let stored = || std::fs::read_to_string(&document).expect("read the document");
+
+    let shown = run(&["config", "get", "--format", "json"]);
+    assert!(shown.status.success());
+    let shown = String::from_utf8(shown.stdout).expect("utf8 document");
+    let set = run(&["config", "set", "--json", &shown]);
+    assert!(
+        set.status.success(),
+        "a set of the shown document commits; stderr:\n{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let written = stored();
+    assert!(
+        written.contains(&synthetic_stored_value(1))
+            && written.contains(&synthetic_stored_value(2)),
+        "the stored values are kept"
+    );
+    assert!(
+        !written.contains("<redacted>"),
+        "the marker text is never stored"
+    );
+
+    let moved = r#"{"realm":{"dev":{"backend":{"main":{"base_url":"http://other.synthetic.invalid/v1"}}}}}"#;
+    let refused = run(&["config", "patch", "--json", moved]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a patch of the route's address alone is refused"
+    );
+    assert!(
+        stderr.contains("the auth profile `main`") && stderr.contains("again in the same write"),
+        "the refusal says what to do; stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("synthetic stored value"));
+    assert_eq!(stored(), written, "a refused patch writes nothing");
+
+    let stated = r#"{"realm":{"dev":{"backend":{"main":{"base_url":"http://other.synthetic.invalid/v1"}},"auth":{"main":{"source":{"secret":"a secret the writer states"}}}}}}"#;
+    let committed = run(&["config", "patch", "--json", stated]);
+    assert!(
+        committed.status.success(),
+        "the same patch with the secret stated commits; stderr:\n{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    assert!(stored().contains("a secret the writer states"));
+}
+
+/// A `rkat config patch` that makes an auth profile an inline secret states
+/// the secret itself: a `secret` key that an earlier form of the profile
+/// left in the document is not taken up. So two patches that never state
+/// the secret (another kind for the profile's source with another address,
+/// then the inline kind again) do not put the stored value in force at that
+/// address; the second commits when it states a secret.
+#[test]
+fn rkat_config_patch_that_makes_a_profile_an_inline_secret_must_state_it() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (state_root, document) = seed_dev_realm_with_stored_secrets(tmp.path());
+    let run = |args: &[&str]| rkat_in_dev_realm(&rkat, tmp.path(), &state_root, args);
+    let stored = || std::fs::read_to_string(&document).expect("read the document");
+
+    let first = r#"{"realm":{"dev":{"auth":{"main":{"source":{"kind":"env","env":"MEERKAT_CLI_ROW_VALUE"}}},"backend":{"main":{"base_url":"http://other.synthetic.invalid/v1"}}}}}"#;
+    let committed = run(&["config", "patch", "--json", first]);
+    assert!(
+        committed.status.success(),
+        "a patch to a credential the host holds, with another address, commits; stderr:\n{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let after_first = stored();
+
+    let inline_again = r#"{"realm":{"dev":{"auth":{"main":{"source":{"kind":"inline_secret"}}}}}}"#;
+    let refused = run(&["config", "patch", "--json", inline_again]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a patch that names the inline kind and no secret is refused"
+    );
+    assert!(
+        stderr.contains("the auth profile `main`") && stderr.contains("does not state the secret"),
+        "the refusal says what to do; stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("synthetic stored value"));
+    assert_eq!(stored(), after_first, "a refused patch writes nothing");
+
+    let with_secret = r#"{"realm":{"dev":{"auth":{"main":{"source":{"kind":"inline_secret","secret":"a secret the writer states"}}}}}}"#;
+    let restated = run(&["config", "patch", "--json", with_secret]);
+    assert!(
+        restated.status.success(),
+        "the same patch with a secret stated commits; stderr:\n{}",
+        String::from_utf8_lossy(&restated.stderr)
+    );
+    assert!(stored().contains("a secret the writer states"));
+}
+
+/// `rkat run --auth-binding realm:binding:profile` cannot name, as the
+/// override, a profile that holds an inline secret unless it is the
+/// binding's own: the secret goes only where a binding that names its
+/// profile sends it. The run is refused before anything is built; the
+/// binding's own inline profile and an override to a profile with no secret
+/// in the document are not refused that way. No provider is called: a debug
+/// build's run uses the test client, and both backends name addresses that
+/// nothing answers.
+#[test]
+fn rkat_run_auth_profile_override_cannot_name_another_bindings_inline_secret() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("realms");
+    let document = state_root.join("dev").join("config.toml");
+    std::fs::create_dir_all(document.parent().expect("realm dir")).expect("mkdir realm");
+    std::fs::write(
+        &document,
+        format!(
+            "[realm.dev.backend.vendor]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://127.0.0.1:9/v1\"\n\n\
+             [realm.dev.backend.elsewhere]\nprovider = \"openai\"\nbackend_kind = \"openai_api\"\n\
+             base_url = \"http://other.synthetic.invalid/v1\"\n\n\
+             [realm.dev.auth.inline]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"inline_secret\", secret = \"{}\" }}\n\n\
+             [realm.dev.auth.plain]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"env\", env = \"MEERKAT_CLI_ROW_VALUE\" }}\n\n\
+             [realm.dev.auth.spare]\nprovider = \"openai\"\nauth_method = \"api_key\"\n\
+             source = {{ kind = \"env\", env = \"MEERKAT_CLI_ROW_SPARE\" }}\n\n\
+             [realm.dev.binding.main]\nbackend_profile = \"vendor\"\nauth_profile = \"inline\"\n\n\
+             [realm.dev.binding.free]\nbackend_profile = \"elsewhere\"\nauth_profile = \"plain\"\n",
+            synthetic_stored_value(1)
+        ),
+    )
+    .expect("write the realm document");
+    let run = |auth_binding: &str| {
+        isolated_rkat_command(&rkat, tmp.path())
+            .env("RKAT_TEST_CLIENT", "1")
+            .args([
+                "--state-root",
+                state_root.to_str().expect("utf8 path"),
+                "--realm",
+                "dev",
+                "run",
+                "-m",
+                "gpt-5.5",
+                "--auth-binding",
+                auth_binding,
+                "hello",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("rkat must spawn")
+    };
+
+    let refused = run("dev:free:inline");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "an override to another binding's inline secret is refused; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cannot take auth profile 'inline' as an override")
+            && stderr.contains("inline secret"),
+        "the refusal names the binding's rule; stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("synthetic stored value"));
+
+    for auth_binding in ["dev:main:inline", "dev:free:spare"] {
+        let out = run(auth_binding);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("as an override"),
+            "{auth_binding} is refused as an override; stderr:\n{stderr}"
+        );
+        assert!(!stderr.contains("synthetic stored value"));
+    }
+}
+
+/// The host's own writers still pass on a document that holds stored secret
+/// values: moving an MCP server the documented way (`rkat mcp remove`, then
+/// `rkat mcp add` with its values) and setting a connector client. The
+/// stored inline secret is untouched.
+#[test]
+fn rkat_host_writers_still_pass_on_a_document_with_stored_secrets() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (state_root, document) = seed_dev_realm_with_stored_secrets(tmp.path());
+    for args in [
+        &["mcp", "remove", "remote", "--scope", "realm"][..],
+        &[
+            "mcp",
+            "add",
+            "remote",
+            "--scope",
+            "realm",
+            "--url",
+            "http://other.synthetic.invalid/mcp",
+            "--header",
+            "X-Synthetic:a value the host states",
+        ],
+        &[
+            "auth",
+            "connector-client",
+            "set",
+            "synthetic",
+            "--issuer",
+            "https://issuer.synthetic.invalid",
+            "--client",
+            "synthetic-client",
+        ],
+    ] {
+        let out = rkat_in_dev_realm(&rkat, tmp.path(), &state_root, args);
+        assert!(
+            out.status.success(),
+            "{args:?} must succeed; stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let login = rkat_in_dev_realm(
+        &rkat,
+        tmp.path(),
+        &state_root,
+        &[
+            "auth",
+            "login",
+            "openai",
+            "--non-interactive",
+            "--secret",
+            "a login value the host states",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&login.stderr);
+    assert!(
+        login.status.success()
+            || stderr.contains("requires the `anthropic`, `openai`, and `gemini`"),
+        "a scripted login must succeed; stderr:\n{stderr}"
+    );
+    let written = std::fs::read_to_string(&document).expect("read the document");
+    assert!(written.contains("http://other.synthetic.invalid/mcp"));
+    assert!(written.contains("a value the host states"));
+    assert!(
+        written.contains(&synthetic_stored_value(2)),
+        "the stored inline secret is untouched"
+    );
+}

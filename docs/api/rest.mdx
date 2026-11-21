@@ -91,6 +91,48 @@ encrypted reverse proxy. The optional webhook-secret check protects only
 `POST /sessions/{id}/peer-response-terminal`, not the other routes.
 </Warning>
 
+### Which callers the server answers
+
+The server compares two headers of a request before any route runs. Both
+settings live in the realm's `[rest]` table and are read when the server
+starts: a change to either takes effect at its next start. The table is
+the realm's own, whole: a realm that sets any `[rest]` key does not inherit
+a parent realm's lists. An entry that is not an origin, or not a host name,
+is refused when the document is loaded or written, by every host that
+loads the realm.
+
+**`Origin`.** A browser page sends its origin; a program that is not a
+browser (`curl`, a script, a server-side HTTP client, the SDKs) sends none,
+is served as before and never meets this check. The server answers a page
+only when `allowed_origins` lists its origin, written as the browser sends it
+(a scheme, a host and an optional port: `https://app.example.com`,
+`http://localhost:5173`). The answer then carries
+`Access-Control-Allow-Origin` for that one origin. Every other origin, `null`
+included (a page opened from a file, a sandboxed frame), is answered `403`
+with the code `ORIGIN_NOT_ALLOWED`, on a preflight too, and gets no
+cross-origin response header. A request that a browser marks
+`Sec-Fetch-Site: cross-site` and that carries no `Origin` is refused the same
+way. The list is empty by default; `*` and `null` cannot be listed. Listing an
+origin lets every page of that origin call every route.
+
+**`Host`.** Whatever address it is bound to, the server answers a request
+whose `Host` is `localhost`, an address literal, or a name `served_hosts`
+lists; the port does not matter and a request without a `Host` is served. Any
+other name is answered `403` with the code `HOST_NOT_SERVED`, and the answer
+names the refused host in its message and in `details.host` (the name without
+its port, in lower case): that is the name to list. The reason: a page can
+make a name of its own resolve to the server's address and would otherwise
+read the server's answers as its own. So list every name the server is
+reached under: the public host name a reverse proxy forwards, a container or
+service name, a name from a hosts file. Names only: no scheme, port, path or
+wildcard.
+
+<Warning>
+A server that is not bound to loopback and whose `served_hosts` is empty
+refuses every caller that addresses it by a name; it serves `localhost` and
+address literals only, and says so at startup.
+</Warning>
+
 ## Endpoint overview
 
 This overview follows the generated OpenAPI artifact at
@@ -277,6 +319,11 @@ Cancellation only affects uncommitted work:
   [rest]
   host = "127.0.0.1"
   port = 8080
+  # Origins of the browser pages the server answers. Default: none.
+  # allowed_origins = ["https://app.example.com"]
+  # Host names the server answers for besides localhost and address literals,
+  # on every bind: a proxy's public name, a container or service name.
+  # served_hosts = ["api.example.com"]
 
   [agent]
   model = "claude-opus-4-8"
@@ -1094,6 +1141,11 @@ dimensions. It has no detached-job service probe, so it reports
 `unmeasured:jobs` as a coverage marker and leaves that marker out of the status
 rollup.
 
+REST also measures `session_run_settlement`: `degraded` while a registered
+session holds a run whose terminal commit landed and whose completion has
+stayed unsettled for a minute. Such a session accepts input and runs none of
+it; the host logs an error naming the session and the run.
+
 A plain dimension key is a measured result. `unreadable:<dimension>` means the
 probe ran but could not obtain a reading and rolls the overall status up to at
 least `degraded`. `unmeasured:<dimension>` means this surface has no probe and
@@ -1105,7 +1157,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 16},
+  "contract_version": {"major": 0, "minor": 9, "patch": 17},
   "providers": [
     {
       "provider": "anthropic",
@@ -1139,7 +1191,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 16},
+  "contract_version": {"major": 0, "minor": 9, "patch": 17},
   "capabilities": [
     {
       "id": "sessions",
@@ -1708,6 +1760,8 @@ envelope:
 | 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, keep_alive without comms |
 | 400 | `CONFIG_WRITE_REFUSED` | A config write would administer `[governance]` or `[confinement]`; `details.type` names the section |
 | 401 | `UNAUTHORIZED` | Missing or invalid webhook secret |
+| 403 | `ORIGIN_NOT_ALLOWED` | The request carries an `Origin` that the realm's `[rest] allowed_origins` does not list, or a browser marks it `Sec-Fetch-Site: cross-site` and it carries no `Origin`. A client that sends no `Origin` header never meets it |
+| 403 | `HOST_NOT_SERVED` | The request's `Host` names a host the server does not answer for: not `localhost`, not an address literal, not listed in `[rest] served_hosts`. `details.host` names the refused host |
 | 404 | `NOT_FOUND` | Resource not found |
 | 409 | `CONFLICT` | Operation conflicts with current state |
 | 409 | `DUPLICATE_INPUT` | Duplicate runtime input; response also carries top-level `existing_id` |

@@ -26,6 +26,7 @@
         "target": "test:host_launch_sites",
         "scope": "target",
         "tests": [
+          "every_composition_of_the_schedule_tools_attaches_a_write_judge",
           "every_mob_session_service_impl_answers_the_recorded_sections_read",
           "every_process_launch_in_shipped_code_is_confined_or_a_typed_exemption",
           "the_mob_incarnation_witness_has_one_constructor",
@@ -2983,6 +2984,16 @@
     ]
   },
   "not_readers": [
+    {
+      "source": "crates/meerkat-cli/src/main.rs",
+      "literal": "cli_unread_project_sections(workspace_root)",
+      "why": "Reads the .rkat/config.toml of the project rkat runs in, a runtime convention of the host's own project root; reads nothing in the checkout."
+    },
+    {
+      "source": "crates/meerkat-cli/src/main.rs",
+      "literal": "report_cli_unread_project_sections(workspace_root)",
+      "why": "Warns about the .rkat/config.toml of the project rkat runs in, a runtime convention of the host's own project root; reads nothing in the checkout."
+    },
     {
       "source": "crates/meerkat-cli/tests/cli_auth_flow.rs",
       "literal": "derive_workspace_realm_id(workspace_root)",

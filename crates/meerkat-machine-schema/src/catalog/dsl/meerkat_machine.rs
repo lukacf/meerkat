@@ -5919,6 +5919,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             ClassifyRecoveredInputDurability {
                 input_id: String,
                 durability: Enum<InputDurabilityKind>,
+                // True only for a terminal row the store names as still
+                // carrying an unfinished completion or publication of a
+                // committed run. Such a row is not unfinished work, so its
+                // durability does not decide whether it is recovered.
+                pending_terminal_carrier: bool,
             },
             ResolveInputPublicLifecycle {
                 input_id: String,
@@ -18820,10 +18825,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         // retention authority. Persistent recovery may only retain/drop a row
         // after this typed effect is observed; ledgers and queues must not
         // interpret durability classes themselves.
+        //
+        // Durability decides only whether unfinished work survives a restart.
+        // A terminal row that still carries the pending completion or
+        // publication of a committed run is not work: it is retained whatever
+        // its durability, so the store's pending terminal owners and the
+        // recovered driver agree and the startup drain finalizes the batch
+        // (and takes the session checkpoint it requires) as a live host would
+        // have. A batch that one run consumed is never split by durability.
         transition ClassifyRecoveredInputDurabilityDiscardEphemeral {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRecoveredInputDurability { input_id, durability }
+            on input ClassifyRecoveredInputDurability { input_id, durability, pending_terminal_carrier }
             guard "ephemeral_durability" { durability == InputDurabilityKind::Ephemeral }
+            guard "unfinished_work" { pending_terminal_carrier == false }
             update {}
             to Idle
             emit RecoveredInputDurabilityClassified {
@@ -18832,9 +18846,22 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition ClassifyRecoveredInputDurabilityRetainEphemeralPendingTerminalCarrier {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRecoveredInputDurability { input_id, durability, pending_terminal_carrier }
+            guard "ephemeral_durability" { durability == InputDurabilityKind::Ephemeral }
+            guard "pending_terminal_carrier" { pending_terminal_carrier == true }
+            update {}
+            to Idle
+            emit RecoveredInputDurabilityClassified {
+                input_id: input_id,
+                disposition: RecoveredInputRecoveryDisposition::Retain
+            }
+        }
+
         transition ClassifyRecoveredInputDurabilityRetainDurableDerivedOrMissing {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRecoveredInputDurability { input_id, durability }
+            on input ClassifyRecoveredInputDurability { input_id, durability, pending_terminal_carrier }
             guard "retained_durability" {
                 durability == InputDurabilityKind::Durable
                 || durability == InputDurabilityKind::Derived

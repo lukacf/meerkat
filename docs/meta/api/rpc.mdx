@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [de520227a811](https://github.com/lukacf/meerkat/commit/de520227a81178fce9ffea3abcafa4a7bddfbf27) on 2026-11-17; Meta version 0.9.16 at that commit.*
+*Mirrored from Meerkat Meta main at [d5cab02de5b7](https://github.com/lukacf/meerkat/commit/d5cab02de5b7831af23df8bd862c80448b3c6f36) on 2026-11-20; Meta version 0.9.17 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -532,6 +532,11 @@ invalid, interrupted, recovered, applied, and rolled-back attempts, so it is
 more sensitive than graph inspection and is advertised only to callers with a
 `topology.audit` grant. Returned records additionally require `agent.view`,
 `topology.view`, and `topology.audit` on every endpoint in that record.
+From 0.9.17 the record of an apply the access rules refused holds no
+operation when an endpoint is a name the Console knows no agent under or
+an agent hidden from the caller: such a record names no endpoint, is
+returned on the Console to access administrators only, and is counted in
+`latest_seq` and `next_after_seq` for every reader.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -1418,7 +1423,9 @@ is carried out.
 On the Console, a create under the name of an
 agent private to another person answers `-32001` (unknown identity), not
 `name_taken`, to a caller who is neither that person nor an access
-administrator. A name that begins `approval-branch-` and holds only ASCII
+administrator. From 0.9.17 the access rules are asked first: a caller
+they refuse the create reads `-32030` (access denied) for such a name as
+for any other. A name that begins `approval-branch-` and holds only ASCII
 letters, digits, `-` and `_` (a name Meerkat holds as written) is refused
 `invalid_name` at `agents[i].name`: Meerkat keeps those names for its
 approval branches. `profile` is one of the mob's profiles. `instructions`
@@ -2847,6 +2854,17 @@ not a rejection.
 
 List all pending gated actions awaiting approval.
 
+While the gateway still owes a first read of who its members are private to
+(the read of its mobs' journals, and the memory store's read of the private
+members that ended), an HTTP console that identifies people answers a caller
+who is not an administrator `-32052` (`identity_history_unavailable`,
+retryable, with no `identity` field) on this method, `meta/gating/audit`,
+`meta/gating/questions`, `meta/gating/decide`, `meta/delivery/history` and the
+`meta/decisions/*` methods, whatever they hold: ask again. That lasts for as
+long as such a read keeps failing, not only right after a start. For the one
+operator of a console that identifies nobody, who holds a name now decides
+alone meanwhile.
+
 ### `meta/gating/questions`
 
 From 0.9.15. List the open [question sets](/meta/concepts/gating#question-sets): the
@@ -3222,7 +3240,14 @@ question set whose asking agent it may not view, and any
 other caller reads the decisions of the approver ids it holds and its own
 requests, and learns of no other decision. `meta/decisions/rendering` for a
 caller that may see only the status is refused `-32030`
-(`data.kind = "content_not_visible"`). From 0.9.15 rows the store cannot
+(`data.kind = "content_not_visible"`). For an open question set, the
+Console's answer carries a closing note in `rendering_suffix`; the note is
+not part of the rendering whose digest a decide compares, and the stdio
+answer does not carry it. The note stands at the end of the Console
+answer's `rendering` (a blank line, then the note), and `rendering_suffix`
+holds exactly what was added, so a reader takes it off again;
+`subject_digest` and `parts` are those of the rendering without it.
+From 0.9.15 rows the store cannot
 decode are listed only to an access administrator: a caller allowed
 `decisions.admin` who is a person listed under `admins`, or any caller
 allowed `decisions.admin` on a Console that identifies no person. To any
@@ -3673,10 +3698,14 @@ current binding in `registered_runtime_member_id` and
 `registered_session_id`; the member methods and the console's identity
 routes, `meta/console/inspect_identity` included, answer the same. A
 runtime id of an identity the runtime does not know answers `-32602`
-`invalid identity: runtime identity not found: <id>`, and a stale runtime
-id of an identity this surface hides (an implicit delegate member) answers
-`-32602` `invalid identity: identity hidden by policy: <id>` and names no
-binding. A runtime id whose identity's binding cannot be read right now is
+`invalid identity: runtime identity not found: <id>`. The stale-binding
+refusal is the answer for every identity the runtime knows, whatever profile
+and labels it declares: a declaration does not say which mob an identity is
+of, so a declared `source_mob_id` label hides no identity on this surface. A
+live implicit delegate member (a member of role `delegate` whose roster row
+names its mob) is still hidden, and its runtime id answers `-32602`
+`invalid identity: identity hidden by policy: <id>`. A runtime id whose
+identity's binding cannot be read right now is
 never passed as the current binding, nor refused as a stale or unknown id.
 The member methods and the role targets of `meta/run_flow` refuse it with
 `-32052` (`identity_history_unavailable`, retryable), and so do these methods
@@ -4075,6 +4104,16 @@ handlingMode: "steer" })` in TypeScript), and refuse the steer with
 | Scoped `meta/dispatch` (`expected_scope`) | The host-persisted exact scope | Refused: the scope moved | None | `meta/recover_delivery`, from the scope's original session |
 | Keyed `meta/send` | The identity, for good | The same key answers the first receipt | Defang; recall skipped | The receipt's status, then `meta/send_status` on the admitted pair |
 
+A `meta/dispatch` carries `idempotency_key` and `correlation_id` together or
+not at all. One without the other is refused before anything is delivered
+(`-32603`; the message begins `dispatch to <identity> refused before bridge
+admission: invalid delivery identity (idempotency key without a correlation
+id (half-pair))`, or with `(correlation id without an idempotency key
+(half-pair))` in that place). Give the
+correlation id as a canonical UUID; other text can be refused
+(`correlation_id must be a canonical UUID`). `meta/send` takes an
+`idempotency_key` by itself.
+
 Prefer a keyed `meta/send` for host sends that must survive retries over the
 identity's whole life.
 
@@ -4414,7 +4453,7 @@ under `workgraph_realm_migration`.
 | `-32000` | other WorkGraph error | `workgraph_error` |
 | `-32602` | invalid params (including `realm_id`, a non-default namespace where refused, or `limit` above 1000) | none |
 | `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign` names a member of another mob; its bindings live only in that mob's realm (`mob.<mob_id>`), so the write is refused before it happens | `attention_target_realm_mismatch` (`data.owner_key`, `data.mob_id`, `data.required_realm_id`, `data.realm_id`) |
-| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`) | `private_member_workgraph_target` (`data.member`) |
+| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`; from 0.9.17, for the target of those three methods, a caller the access rules refuse the request reads their refusal, `-32030`, as for any other name) | `private_member_workgraph_target` (`data.member`) |
 | `-32030` | ABAC denial on the console surface | `access_denied` |
 
 SDK method names are the RPC names with the `meta/workgraph/` prefix
@@ -5055,8 +5094,18 @@ place (below).
 | `next_due_at_utc` | `string \| null` | Its next planned send while it is active |
 </Accordion>
 
-`meta/schedule/list` answers `{identity, schedules}`, the agent's console
-schedules, oldest first. Create, update, pause and resume answer the
+`meta/schedule/list` answers `{identity, schedules, other_schedules}`.
+`schedules` are the agent's console schedules, oldest first.
+`other_schedules` are the schedules that are not console schedules and whose
+target names the agent, oldest first: the ones an agent's schedule tools or
+the host wrote for it, as a member of the mob (`target: "member"`), by an
+identity (`"identity"`), by one of its sessions (`"session"`), or as the
+source of a fork helper (`"fork_helper"`). Each has `schedule_id`,
+`identity`, `name`, `target`, `content` (the text it sends, when it sends
+text), `trigger`, `phase`, `revision`, `created_at_utc`, `updated_at_utc`
+and `next_due_at_utc`. They are listed to read: the Console's create,
+update, pause, resume and delete act on console schedules only. Create,
+update, pause and resume answer the
 schedule as the change left it (a resume, as Core resumed it: a change
 another caller made between the resume's write and the resume shows in
 the answer); delete answers `{identity, schedule_id, deleted: true}`.

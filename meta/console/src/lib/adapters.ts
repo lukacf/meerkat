@@ -5995,7 +5995,9 @@ function createTimelineFold(
       return;
     }
 
-    if (HIDDEN_EVENTS.has(frame.event)) {
+    // Per-request reasoning receipts remain in the raw log and activity
+    // rail, but do not add chat rows or split streamed assistant text.
+    if (HIDDEN_EVENTS.has(frame.event) || frame.event === "request_reasoning_effort_resolved") {
       return;
     }
 

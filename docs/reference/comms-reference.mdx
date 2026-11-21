@@ -149,9 +149,9 @@ boundary where a steer has registered its claim, the eligible steers that
 wait together join it, in admission order, each with its own notice and
 event. An acknowledged send is not inclusion in the next model request.
 A steer that finds no boundary before the run ends
-is written by exactly one follow-up turn. A steer that was still waiting
-when the process stopped joins the resumed run's next model request when
-that run resumes. A directed (host-residency-fenced)
+is written by exactly one follow-up turn. A steer that still waits when its
+session is loaded again from the store joins the resumed run's next model
+request when that run resumes. A directed (host-residency-fenced)
 peer delivery always takes the follow-up turn. See
 [Durable steer](/reference/session-contracts#durable-steer).
 

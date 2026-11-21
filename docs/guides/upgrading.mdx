@@ -162,11 +162,11 @@ model saw of the steer in an earlier turn that applied it and returned it to
 the queue. After the join a recall answers `not_queued` while the run holds
 the steer, and `already_terminal` once the input has ended.
 
-A steer that was admitted and was still waiting when the process stopped
-joins the resumed run's next model request when that run resumes, once, with
-the steers that waited beside it in admission order. It does not wait for a
-follow-up turn. With no run to resume it starts the next run as its own
-input. The limits and what is shown are in
+A durable steer that was admitted and still waits when its session is loaded
+again from the store joins the resumed run's next model request when that
+run resumes, once, with the steers that waited beside it in admission order.
+It does not wait for a follow-up turn. With no run to resume it starts the
+next run as its own input. The limits are in
 [Durable steer](/reference/session-contracts#durable-steer).
 
 Unchanged: no model request in flight is cancelled; steers still waiting when

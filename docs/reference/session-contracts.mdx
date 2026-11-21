@@ -1414,12 +1414,6 @@ parked, joins this request. A steer admitted after it is retained, registers
 for the next boundary of the run and joins the request after this one. No
 model request in flight is cancelled for a steer.
 
-One case is still open: a steer's admission is acknowledged before the steer
-registers with the boundary, so a boundary the runner reaches while no steer
-has registered with it carries none, and a steer acknowledged just before
-that joins the following boundary instead, or the follow-up turn when the
-run ends first.
-
 The joins follow the lane and stop at the first durable steer that cannot
 join this run: a steer of another requester than the run's, one the run's
 bound of 256 contributors refuses, one whose rows cannot be written in-turn,

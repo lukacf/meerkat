@@ -64,11 +64,7 @@ them.
   before the runner writes the rows and composes the request. Admission and
   recall take the same gate: a steer admitted before the cutoff, also one
   admitted after the runner parked at the boundary, joins that request, and
-  a steer admitted after it joins the request after it. One case is still
-  open: a steer's admission is acknowledged before the steer registers with
-  the boundary, so a boundary the runner reaches while no steer has
-  registered with it carries none, and a steer acknowledged just before that
-  joins the following boundary or the follow-up turn. Per input and exactly
+  a steer admitted after it joins the request after it. Per input and exactly
   once, as before: its join, its delivery witness, its transcript rows, its
   binding to the run's round commit and its `boundary_append_applied`;
   steers that join one boundary have adjacent rows and publish their events

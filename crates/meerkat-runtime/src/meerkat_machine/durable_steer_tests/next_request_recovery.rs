@@ -10,6 +10,11 @@
 //!   from the store delivers each steer exactly once.
 //! - On the persistent driver, steers still waiting when the run ends take
 //!   one follow-up turn in arrival order.
+//! - The first durable steer that does not join (another requester's, one
+//!   the run's contributor bound refuses, one whose row cannot be written
+//!   in-turn) ends the joins of its boundary, and nothing behind it is in
+//!   that request. A request-only steer between two durable steers does not
+//!   end them.
 use super::*;
 use crate::queued_input_recall::QueuedInputRecall;
 
@@ -1075,6 +1080,498 @@ mod observed_today {
             rig.script.apply_calls.load(Ordering::SeqCst),
             2,
             "exactly one follow-up turn ran"
+        );
+    }
+}
+
+/// What ends the joins of one boundary, and what does not.
+///
+/// The steers a boundary joins are read from the steer lane in admission
+/// order. The first durable steer that does not join ends the joins of that
+/// boundary: it keeps its place in the lane, and no steer behind it is in
+/// that request. A request-only steer admitted between two durable steers
+/// is not such a steer: both durable steers are in that request.
+mod stop_arms {
+    use super::*;
+    use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+
+    /// A person the host authenticated: an opaque, qualified requester.
+    fn person(subject: &str) -> PrincipalRef {
+        PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            subject,
+            TrustDomainId::new("oidc-issuer:https://issuer.example").expect("trust domain"),
+        )
+        .expect("qualified requester")
+    }
+
+    /// A durable steer prompt from `requester`.
+    fn steer_from(text: &str, requester: PrincipalRef) -> Input {
+        let mut input = text_prompt_steer(text);
+        input.header_mut().requester = Some(requester);
+        input
+    }
+
+    /// Start a turn for `requester`'s queued prompt and wait until the
+    /// runner is inside it.
+    async fn start_busy_turn_for(rig: &DurableSteerRig, requester: PrincipalRef) -> InputId {
+        let mut prompt = Input::Prompt(crate::input::PromptInput::new(
+            "a person's prompt keeps the runtime busy",
+            None,
+        ));
+        prompt.header_mut().requester = Some(requester);
+        let input_id = prompt.id().clone();
+        let (outcome, _completion) = rig
+            .adapter
+            .accept_input_with_completion(&rig.session_id, prompt)
+            .await
+            .expect("the person's prompt is accepted");
+        assert!(outcome.is_accepted());
+        tokio::time::timeout(Duration::from_secs(5), rig.script.apply_started.notified())
+            .await
+            .expect("the person's run starts");
+        input_id
+    }
+
+    /// A Steer prompt with no text and one typed `User` row whose content is
+    /// JSON. Admission reads the typed role only and plans an in-turn
+    /// delivery; the row itself does not lower into a user message, so no
+    /// boundary can write it.
+    fn steer_whose_row_does_not_lower(detail: &str) -> Input {
+        let mut prompt = crate::input::PromptInput::new(
+            "",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        );
+        prompt.typed_turn_appends = vec![ConversationAppend {
+            runtime_source: None,
+            role: ConversationAppendRole::User,
+            content: CoreRenderable::Json {
+                value: serde_json::json!({ "detail": detail }),
+            },
+            identity: None,
+        }];
+        Input::Prompt(prompt)
+    }
+
+    /// Person a's turn runs. Two steers of person a are followed by a steer
+    /// of person b and then a third steer of person a. The next request
+    /// carries person a's first two steers. Person b's steer never joins
+    /// a's turn, and a's third steer, admitted behind it, is in no request
+    /// of this turn: after it, b's steer runs first and a's third after it,
+    /// each in a run of its own.
+    #[tokio::test]
+    async fn another_requester_s_steer_ends_the_joins_and_the_steer_behind_it_waits() {
+        let rig = DurableSteerRig::ephemeral().await;
+        let busy = start_busy_turn_for(&rig, person("a")).await;
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        let ids = admit_in_order(
+            &rig,
+            vec![
+                steer_from("a's first", person("a")),
+                steer_from("a's second", person("a")),
+                steer_from("b's", person("b")),
+                steer_from("a's third", person("a")),
+            ],
+        )
+        .await;
+        let (joined, waiting) = ids.split_at(2);
+
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(&rig),
+            joined,
+            "the next request carries a's two steers admitted ahead of b's, and nothing else"
+        );
+        for input_id in waiting {
+            assert_eq!(
+                rig.phase(input_id).await,
+                Some(InputLifecycleState::Queued),
+                "{input_id} did not join"
+            );
+        }
+        assert_eq!(
+            rig.steer_queue().await,
+            waiting,
+            "b's steer and a's third keep their places in the steer lane, in admission order"
+        );
+
+        // No later boundary of this turn takes either.
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert!(
+            last_take_ids(&rig).is_empty(),
+            "a's third steer does not pass b's at a later boundary: {:?}",
+            rig.script.boundary_takes()
+        );
+        assert_eq!(rig.script.applied_durable(), joined);
+
+        rig.script.step(RunnerStep::Finish);
+        rig.wait_for_apply_calls(2).await;
+        assert_eq!(
+            rig.script.primitives()[1],
+            vec![waiting[0].clone()],
+            "b's steer, admitted first, runs first, in a run of its own"
+        );
+        rig.script.step(RunnerStep::Finish);
+        rig.wait_for_apply_calls(3).await;
+        assert_eq!(
+            rig.script.primitives()[2],
+            vec![waiting[1].clone()],
+            "a's third steer runs after it"
+        );
+        rig.script.step(RunnerStep::Finish);
+        for input_id in std::iter::once(&busy).chain(&ids) {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            3,
+            "three runs: a's turn with two joins, b's steer, a's third steer"
+        );
+    }
+
+    /// A run holds 254 of the 256 inputs one run's commit may name when four
+    /// steers wait for its boundary. The next request carries the first two,
+    /// which fill the run. The bound refuses the third and nothing of it is
+    /// written; it and the fourth keep their places, no later boundary of
+    /// this run takes them, and one follow-up turn starts with both, in
+    /// order. Nothing leaves the registration reload-required.
+    #[tokio::test]
+    async fn the_contributor_bound_reached_between_steers_ends_the_joins_and_keeps_the_rest_in_order()
+     {
+        let rig = DurableSteerRig::persistent(memory_store()).await;
+
+        // One run takes the whole batch: run starts are held while it queues.
+        rig.adapter
+            .hold_run_starts(&rig.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("hold run starts");
+        let mut parks = rig.adapter.run_start_held_parks();
+        let batch = RUN_CONTRIBUTOR_BOUND - 2;
+        let mut batch_ids = Vec::with_capacity(batch);
+        for index in 0..batch {
+            let event = queued_batch_event(index);
+            batch_ids.push(event.id().clone());
+            rig.admit(event).await;
+        }
+        tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+            .await
+            .expect("the runtime loop parks on the hold")
+            .expect("park signal");
+        rig.adapter
+            .release_run_starts(&rig.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("release run starts");
+        rig.wait_for_apply_calls(1).await;
+        assert_eq!(
+            rig.script.primitives(),
+            vec![batch_ids.clone()],
+            "the first run stages the whole batch"
+        );
+
+        let ids = admit_in_order(
+            &rig,
+            vec![
+                typed_steer("contributor 255", ConversationAppendRole::SystemNotice),
+                typed_steer("contributor 256", ConversationAppendRole::SystemNotice),
+                typed_steer("would be 257", ConversationAppendRole::SystemNotice),
+                typed_steer("would be 258", ConversationAppendRole::SystemNotice),
+            ],
+        )
+        .await;
+        let (joined, waiting) = ids.split_at(2);
+
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(&rig),
+            joined,
+            "the next request carries the two steers that fill the run, and nothing of the third"
+        );
+        for input_id in joined {
+            assert_eq!(rig.phase(input_id).await, Some(InputLifecycleState::Staged));
+        }
+        for input_id in waiting {
+            assert_eq!(
+                rig.phase(input_id).await,
+                Some(InputLifecycleState::Queued),
+                "{input_id} did not join"
+            );
+        }
+        assert_eq!(
+            rig.steer_queue().await,
+            waiting,
+            "the refused steer and the one behind it keep their places, in admission order"
+        );
+        assert!(
+            rig.adapter
+                .durability_reload_required(&rig.session_id)
+                .await
+                .is_none(),
+            "a join the bound refuses is not a store failure"
+        );
+
+        // No later boundary of this run takes either.
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert!(
+            last_take_ids(&rig).is_empty(),
+            "the full run takes no further steer: {:?}",
+            rig.script.boundary_takes()
+        );
+        assert_eq!(rig.script.applied_durable(), joined);
+        assert_eq!(rig.steer_queue().await, waiting);
+
+        // The run commits its batch and its two joins: exactly the bound.
+        rig.script.step(RunnerStep::Finish);
+        for input_id in batch_ids.iter().chain(joined) {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        rig.wait_for_apply_calls(2).await;
+        assert_eq!(
+            rig.script.primitives()[1],
+            waiting,
+            "one follow-up turn starts with the refused steer and the one behind it, in order"
+        );
+        rig.script.step(RunnerStep::Finish);
+        for input_id in waiting {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+            assert_eq!(
+                contributions(&rig.script.primitives(), input_id),
+                1,
+                "{input_id} is delivered exactly once"
+            );
+        }
+        assert!(
+            rig.adapter
+                .durability_reload_required(&rig.session_id)
+                .await
+                .is_none()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            2,
+            "exactly one follow-up turn ran"
+        );
+    }
+
+    /// Four steers of one requester wait for a boundary. The third was
+    /// admitted for an in-turn delivery, but its row cannot be written into
+    /// a running turn. The next request carries the first two. The third
+    /// keeps its place, and the fourth, which could have joined, is in no
+    /// request of this turn: one follow-up turn starts with the third and
+    /// then the fourth.
+    ///
+    /// The scripted runner of these rows does not lower rows, so what a real
+    /// runner makes of the third steer in that follow-up turn is not shown
+    /// here.
+    #[tokio::test]
+    async fn a_steer_no_boundary_can_write_ends_the_joins_and_the_steer_behind_it_follows_it() {
+        let unwritable = steer_whose_row_does_not_lower("no boundary can write this row");
+        assert_eq!(
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &unwritable,
+                false
+            )
+            .expect("generated admission")
+            .live_boundary_delivery(),
+            Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend),
+            "admission reads the typed role only and plans an in-turn delivery"
+        );
+        let lowered = meerkat_core::DurableTurnBoundaryAppends::try_new(
+            unwritable.id().clone(),
+            crate::input::projection_durable_boundary_appends(
+                &crate::input::runtime_input_projection(&unwritable),
+            ),
+            None,
+        );
+        assert!(
+            matches!(
+                lowered,
+                Err(meerkat_core::lifecycle::DurableTurnBoundaryAppendsError::Lowering(_))
+            ),
+            "the row does not lower into a running turn: {lowered:?}"
+        );
+
+        let rig = DurableSteerRig::ephemeral().await;
+        let batch = rig.start_busy_turn().await;
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        let ids = admit_in_order(
+            &rig,
+            vec![
+                peer_steer("payload one ahead of the unwritable steer"),
+                peer_steer("payload two ahead of the unwritable steer"),
+                unwritable,
+                peer_steer("payload behind the unwritable steer"),
+            ],
+        )
+        .await;
+        let (joined, waiting) = ids.split_at(2);
+
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(&rig),
+            joined,
+            "the next request carries the two steers ahead of the unwritable one, and not the \
+             steer behind it"
+        );
+        for input_id in waiting {
+            assert_eq!(
+                rig.phase(input_id).await,
+                Some(InputLifecycleState::Queued),
+                "{input_id} did not join"
+            );
+        }
+        assert_eq!(
+            rig.steer_queue().await,
+            waiting,
+            "the unwritable steer and the one behind it keep their places, in admission order"
+        );
+
+        // No later boundary of this turn takes the steer behind it.
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert!(
+            last_take_ids(&rig).is_empty(),
+            "the steer behind the unwritable one does not pass it at a later boundary: {:?}",
+            rig.script.boundary_takes()
+        );
+        assert_eq!(rig.script.applied_durable(), joined);
+
+        rig.script.step(RunnerStep::Finish);
+        rig.wait_for_apply_calls(2).await;
+        assert_eq!(
+            rig.script.primitives()[1],
+            waiting,
+            "one follow-up turn starts with the unwritable steer and then the one behind it"
+        );
+        rig.script.step(RunnerStep::Finish);
+        for input_id in std::iter::once(&batch).chain(&ids) {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        for input_id in waiting {
+            assert_eq!(
+                contributions(&rig.script.primitives(), input_id),
+                1,
+                "{input_id} is delivered exactly once"
+            );
+        }
+        assert_eq!(rig.script.applied_durable(), joined);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            2,
+            "exactly one follow-up turn ran"
+        );
+    }
+
+    /// A request-only steer is admitted between two durable steers. The next
+    /// request carries both durable steers, in order, and the request-only
+    /// context beside them in its own slot. Nothing takes a follow-up turn.
+    ///
+    /// This row reads the outcome only. The request-only steer's own work
+    /// and the durable steers' work both run at that boundary, and which of
+    /// the two commits first is not fixed here: when the request-only steer
+    /// is already consumed, the joins never read it in the lane.
+    #[tokio::test]
+    async fn a_request_only_steer_between_two_durable_steers_leaves_both_in_the_next_request() {
+        let rig = DurableSteerRig::ephemeral().await;
+        let batch = rig.start_busy_turn().await;
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+
+        let first = peer_steer("durable payload ahead of the context");
+        let first_id = first.id().clone();
+        rig.admit(first).await;
+        rig.wait_for_waiting_delivery().await;
+
+        let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
+        continuation.turn_append = Some(notice_append(
+            "request-only context between the two",
+            ConversationAppendRole::SystemNotice,
+        ));
+        let context = Input::Continuation(continuation);
+        let context_id = context.id().clone();
+        assert_eq!(
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &context, false
+            )
+            .expect("generated admission")
+            .live_boundary_delivery(),
+            Some(crate::ingress_types::LiveBoundaryDeliveryClass::RequestOnly),
+            "a continuation with a turn append steers request-only"
+        );
+        rig.admit(context).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !rig.state.has_registered_request_only_delivery_for_test() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("the request-only steer prepares beside the waiting durable delivery");
+
+        let last = peer_steer("durable payload behind the context");
+        let last_id = last.id().clone();
+        rig.admit(last).await;
+        // It waits in the steer lane behind the first durable steer.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rig.steer_queue().await.contains(&last_id));
+        assert!(!rig.queue().await.contains(&last_id));
+
+        rig.script
+            .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+            .await;
+        assert_eq!(
+            last_take_ids(&rig),
+            vec![first_id.clone(), last_id.clone()],
+            "the next request carries both durable steers: the request-only one between them \
+             does not end the joins"
+        );
+        assert_eq!(
+            *rig.script.request_only_taken.lock().unwrap(),
+            vec![1],
+            "the same boundary carries the request-only context in its own slot"
+        );
+        rig.wait_for_phase(&context_id, InputLifecycleState::Consumed)
+            .await;
+        for input_id in [&first_id, &last_id] {
+            assert_eq!(rig.phase(input_id).await, Some(InputLifecycleState::Staged));
+        }
+
+        rig.script.step(RunnerStep::Finish);
+        for input_id in [&batch, &first_id, &last_id] {
+            rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.script.apply_calls.load(Ordering::SeqCst),
+            1,
+            "no follow-up turn ran"
         );
     }
 }

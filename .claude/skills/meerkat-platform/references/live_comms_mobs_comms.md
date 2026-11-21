@@ -105,7 +105,10 @@ require_peer_auth = true                     # default true
   admission order, each with its own row and event (0.9.17: one per
   boundary); an acknowledged send is not inclusion in the next request. A
   steer that finds no boundary before the run ends, and a directed delivery,
-  are taken by exactly one follow-up turn. Prompts, lifecycle notices,
+  are taken by exactly one follow-up turn. A steer that still waits when its
+  session is loaded again from the store joins the resumed run's next
+  request when that run resumes.
+  Prompts, lifecycle notices,
   external events and flow steps steered into a run behave the same. 0.9.3
   and earlier showed a peer or text-only steer to one model request, then
   lost it (no transcript row, no event).

@@ -349,14 +349,10 @@ fn refusal_diagnostics_match_the_shared_sdk_cases() {
         .as_array()
         .expect("compatibility cases")
     {
-        let refusal = SessionError::reasoning_effort_refusal_from_data(&case["data"])
-            .unwrap_or_else(|| panic!("the typed reader takes {}", case["name"]));
-        assert_eq!(
-            serde_json::Value::Bool(refusal.is_retryable()),
-            case["transient"],
-            "{}",
-            case["name"]
-        );
+        // `None` here is a case the typed reader did not take.
+        let class = SessionError::reasoning_effort_refusal_from_data(&case["data"])
+            .map(|refusal| serde_json::Value::Bool(refusal.is_retryable()));
+        assert_eq!(class.as_ref(), Some(&case["transient"]), "{}", case["name"]);
     }
     // One rule for `not_before` in every reader: the listed timestamps are
     // taken, and a refusal that carries any other string is not read.

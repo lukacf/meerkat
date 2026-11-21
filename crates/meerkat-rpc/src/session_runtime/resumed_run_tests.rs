@@ -59,6 +59,10 @@ const WAITING_STEERS_CHILD_TEST: &str =
 /// The payloads of the two steers that child admits, in admission order.
 const WAITING_STEER_TOKENS: [&str; 2] = ["WAITING-STEER-FIRST-ROW", "WAITING-STEER-SECOND-ROW"];
 
+/// The payload of the steer the late-admission row admits in the new
+/// process, after the kill.
+const LATE_STEER_TOKEN: &str = "LATE-STEER-AFTER-RESTART-ROW";
+
 /// What the scripted model answers to one request.
 #[derive(Clone, Copy, Debug)]
 enum Step {
@@ -1034,5 +1038,244 @@ async fn rpc_run_killed_while_two_steers_wait_resumes_and_its_next_request_carri
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),
         "the steers' rows are in admission order: {positions:?}"
+    );
+}
+
+/// A host's resumed-run admission that holds the resume until the row
+/// releases it, then lets the run resume. The runtime asks it after the
+/// session's executor is attached and before it begins the resumed run.
+#[derive(Default)]
+struct HeldResumeAdmission {
+    asked: AtomicBool,
+    released: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl meerkat_runtime::ResumedRunAdmission for HeldResumeAdmission {
+    async fn admit_resumed_run(
+        &self,
+        _request: &meerkat_runtime::ResumedRunAdmissionRequest,
+    ) -> meerkat_runtime::ResumedRunAdmissionDecision {
+        self.asked.store(true, std::sync::atomic::Ordering::SeqCst);
+        while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        meerkat_runtime::ResumedRunAdmissionDecision::Continue
+    }
+}
+
+/// The JSON-RPC session runtime and a real kill, with two steers that are
+/// still waiting at the kill and a THIRD steer admitted in the new process
+/// before the resumed run begins. Actual process kill and restart; scripted
+/// model. The store is the HeadCanonical SQLite realm. Every steer is
+/// admitted at the runtime adapter (`accept_input_with_completion`), not
+/// through a JSON-RPC request.
+///
+/// The kill is the waiting-steers row's: a run commits one round and holds
+/// its next model request; two text steers are admitted and acknowledged;
+/// SIGKILL. In the new process the row registers the session, binds a host
+/// resumed-run admission that holds the resume, and attaches the executor.
+/// The runtime asks that admission before it begins the resumed run. While
+/// it is held (no model request has been made), the third steer is admitted.
+/// Then the admission answers that the run may resume.
+///
+/// Asserted: each of the three steers is delivered exactly once (one row in
+/// the committed transcript, in no request twice, its stored row consumed),
+/// and the two that waited come ahead of the late one, in admission order,
+/// in the transcript and in the first request that carries each.
+///
+/// Read and printed, not asserted (the contract does not state it): which
+/// path served the late steer, as the line `LATE_ADMISSION_PATH`: the
+/// resumed run's first request, a later request of the resumed run, or a
+/// follow-up run.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_run_killed_while_two_steers_wait_then_a_third_admitted_before_the_resume_is_delivered_after_them()
+ {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session_id = kill_child_at_its_kill_point(root.path(), WAITING_STEERS_CHILD_TEST).await;
+    let waiting_ids = std::fs::read_to_string(root.path().join("steer-ids"))
+        .expect("the child recorded its steers")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(waiting_ids.len(), 2, "the child admitted two steers");
+
+    let runtime = sqlite_runtime(root.path()).await;
+    let model = ScriptedModel::new([Step::Text("resumed answer")], None);
+    runtime.set_default_llm_client(Some(model.clone()));
+    let open_run = tail_run(&runtime, &session_id)
+        .await
+        .expect("the killed run's round commit stands as the provisional tail");
+    let store = runtime.service.runtime_store();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+
+    // Hold the resume at the host's resumed-run admission: register the
+    // session, bind the admission, then attach the executor.
+    let adapter = runtime.runtime_adapter();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("the session's runtime registers");
+    let registration = adapter
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the registration");
+    let admission = Arc::new(HeldResumeAdmission::default());
+    adapter
+        .bind_resumed_run_admission(&registration, Arc::clone(&admission) as _)
+        .await
+        .expect("bind the admission");
+    let attached = runtime.ensure_runtime_executor(&session_id).await;
+    assert!(
+        attached.is_ok(),
+        "the restarted runtime attaches the session whose run it resumes: {attached:?}"
+    );
+    let asked_by = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !admission.asked.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < asked_by,
+            "the runtime never asked the resumed-run admission: this rig cannot hold the \
+             resume before the run begins"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        model.requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the resume is held: the resumed run has made no model request"
+    );
+
+    // The third steer: admitted in the new process, before the resumed run
+    // begins.
+    let late = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        LATE_STEER_TOKEN,
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let late_id = late.id().to_string();
+    let (outcome, _completion) = adapter
+        .accept_input_with_completion(&session_id, late)
+        .await
+        .expect("the late steer is admitted while the resume is held");
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        model.requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the late steer was admitted before the resumed run made a request"
+    );
+    admission
+        .released
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Wait until the resumed run committed and every steer's row is consumed.
+    let all_ids = waiting_ids
+        .iter()
+        .cloned()
+        .chain(std::iter::once(late_id.clone()))
+        .collect::<Vec<_>>();
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let rows = loop {
+        let stored = store
+            .load_input_states_strict(&runtime_id)
+            .await
+            .expect("the input rows decode");
+        let rows = all_ids
+            .iter()
+            .map(|id| {
+                let row = stored
+                    .iter()
+                    .find(|row| &row.state.input_id.to_string() == id)
+                    .unwrap_or_else(|| panic!("the acknowledged steer {id} is stored"));
+                (
+                    format!("{:?}", row.seed.phase),
+                    row.seed.last_run_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if rows.iter().all(|(phase, _)| phase == "Consumed")
+            && committed_text(&runtime, &session_id, "resumed answer").await
+            && tail_run(&runtime, &session_id).await.is_none()
+        {
+            break rows;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the resumed run {open_run} commits and each steer's row ends consumed: {rows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // Let a follow-up turn, if one runs, make its request.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let tokens = [
+        WAITING_STEER_TOKENS[0],
+        WAITING_STEER_TOKENS[1],
+        LATE_STEER_TOKEN,
+    ];
+    let requests = model.request_messages();
+    // The first request that carries each steer, and its place in it.
+    let mut first_carried = Vec::new();
+    for token in tokens {
+        let mut first = None;
+        for (index, request) in requests.iter().enumerate() {
+            let at = rows_carrying(request, token);
+            assert!(
+                at.len() <= 1,
+                "no request carries {token} twice: request {index} at {at:?}"
+            );
+            if first.is_none()
+                && let Some(position) = at.first()
+            {
+                first = Some((index, *position));
+            }
+        }
+        first_carried.push(first.unwrap_or_else(|| panic!("{token} reaches a model request")));
+    }
+    let session = runtime
+        .service
+        .load_authoritative_session(&session_id)
+        .await
+        .expect("read the committed session")
+        .expect("the session is committed");
+    let mut transcript = Vec::new();
+    for token in tokens {
+        let at = rows_carrying(session.messages(), token);
+        assert_eq!(
+            at.len(),
+            1,
+            "{token} is in the committed transcript exactly once: {at:?}"
+        );
+        transcript.push(at[0]);
+    }
+
+    // The path that served the late steer: read and printed, not asserted.
+    let (late_request, _) = first_carried[2];
+    let late_run = rows[2].1.clone();
+    let path = if late_run.as_ref() == Some(&open_run) && late_request == 0 {
+        "the resumed run's first request"
+    } else if late_run.as_ref() == Some(&open_run) {
+        "a later request of the resumed run"
+    } else {
+        "a follow-up run"
+    };
+    eprintln!(
+        "LATE_ADMISSION_PATH path=\"{path}\" requests={} first_carried(request,position)={first_carried:?} transcript_rows={transcript:?} resumed_run={open_run} runs={:?}",
+        requests.len(),
+        rows.iter().map(|(_, run)| run.clone()).collect::<Vec<_>>()
+    );
+
+    // The two that waited come ahead of the late one, in admission order.
+    assert!(
+        transcript.windows(2).all(|pair| pair[0] < pair[1]),
+        "the transcript holds the two waiting steers, then the late one: {transcript:?}"
+    );
+    assert!(
+        first_carried.windows(2).all(|pair| pair[0] < pair[1]),
+        "each steer first reaches the model no earlier than the one admitted before it, and \
+         after it within one request: {first_carried:?}"
     );
 }

@@ -883,7 +883,7 @@ impl Gateway {
     }
 
     /// Print the claim and release events of the WorkGraph ledger; the
-    /// ledger's event kinds in order, or `None` when it was not read.
+    /// ledger's event kinds in order, or `None` when it was not read whole.
     fn say_claim_events(&mut self) -> Option<Vec<String>> {
         let Some(answer) = self.try_request("meta/workgraph/events", json!({}), RPC_TIMEOUT) else {
             self.say("WorkGraph ledger: NOT READ (no answer)");
@@ -906,7 +906,8 @@ impl Gateway {
             kinds.join(" "),
             answer["result"]["truncated"],
         ));
-        Some(kinds)
+        // A ledger that ended early cannot be counted.
+        (answer["result"]["truncated"] == false).then_some(kinds)
     }
 
     /// Every attention binding the WorkGraph store lists, printed.
@@ -1800,7 +1801,32 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     let status_after = gateway.read_status("after the second boot");
     let item_after = gateway.read_item(&goal.item_id, "after the second boot");
     let bindings_after = gateway.read_bindings("after the second boot");
-    read_store(row, "boot-2", &scene.state, "after the second boot");
+    // While the continuation's turn waits at the model no other turn can
+    // start, so the requests cannot show a second continuation the restart
+    // queued behind it. The store can: such a one would be a second open
+    // input that carries a notice.
+    let store_at_hold = read_store(row, "boot-2", &scene.state, "after the second boot");
+    let open_notices_at_hold = store_at_hold.as_ref().map(|inputs| {
+        inputs
+            .iter()
+            .filter(|input| input.is_open() && input.carries_notice)
+            .map(|input| input.carries_revised)
+            .collect::<Vec<_>>()
+    });
+    let one_continuation_stored = open_notices_at_hold
+        .as_ref()
+        .is_some_and(|under_revision| under_revision.as_slice() == [true]);
+    gateway.say(format!(
+        "open stored inputs that carry a notice while the continuation's turn waits at the \
+         model: {}; exactly one, under the revision: {one_continuation_stored}",
+        open_notices_at_hold.as_ref().map_or_else(
+            || "store not read".to_string(),
+            |under_revision| format!(
+                "{} (each under the revision: {under_revision:?})",
+                under_revision.len()
+            )
+        )
+    ));
     gateway.print_stderr("after the second boot");
     gateway.say_resume_gate_lines("after the second boot");
     gateway.say(format!(
@@ -1913,13 +1939,21 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     gateway.say_claim("claim after the continuation's write", &item_tied);
     let kinds_tied = gateway.say_claim_events().unwrap_or_default();
     let count = |kinds: &[String], kind: &str| kinds.iter().filter(|k| *k == kind).count();
+    let holds_the_evidence = |item: &Value| {
+        item["evidence_refs"].as_array().is_some_and(|refs| {
+            refs.iter()
+                .any(|evidence| evidence["id"] == "continuation-after-restart")
+        })
+    };
     let answer_tied = !item_before["claim"].is_null()
         && answered_item["id"] == goal.item_id.as_str()
         && answered_item["claim"] == item_before["claim"]
+        && holds_the_evidence(&answered_item)
         && answered_item["revision"].as_u64()
             == item_after["revision"].as_u64().map(|revision| revision + 1);
     let store_tied = !item_before["claim"].is_null()
         && item_tied["claim"] == item_before["claim"]
+        && holds_the_evidence(&item_tied)
         && item_tied["revision"] == answered_item["revision"];
     let ledger_tied = count(&kinds_tied, "claimed") == 1
         && count(&kinds_tied, "released") == 0
@@ -1928,7 +1962,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         "THE TIE, the tool's own answer: item {} (the goal's item: {}); claim owner={} \
          claimed_at={} lease_expires_at={} expiry_observed_at={}; the claim equals the one read \
          before the kill: {}; item revision before the call={} in the answer={}; status={}; \
-         evidence the answer holds: {}",
+         the answer holds the evidence the call added: {} ({})",
         answered_item["id"],
         answered_item["id"] == goal.item_id.as_str(),
         answered_item["claim"]["owner"]["key"],
@@ -1939,13 +1973,15 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         item_after["revision"],
         answered_item["revision"],
         answered_item["status"],
-        head(&answered_item["evidence"].to_string(), 300)
+        holds_the_evidence(&answered_item),
+        head(&answered_item["evidence_refs"].to_string(), 300)
     ));
     gateway.say(format!(
         "THE TIE, the store after that write: the claim equals the one \
-         read before the kill: {}; item revision={}; ledger events claimed={} released={} \
-         evidence_added={}",
+         read before the kill: {}; the item holds the evidence the call added: {}; item \
+         revision={}; ledger events claimed={} released={} evidence_added={}",
         !item_before["claim"].is_null() && item_tied["claim"] == item_before["claim"],
+        holds_the_evidence(&item_tied),
         item_tied["revision"],
         count(&kinds_tied, "claimed"),
         count(&kinds_tied, "released"),
@@ -1963,7 +1999,9 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
 
     // The turn ends after that one write: its next request, the one that
     // carries the tool's answer, is answered "ok". Its own write must start
-    // no further turn.
+    // no further turn, and no stored input may be left open: a second
+    // continuation that the restart had queued behind the first would be
+    // one, whether it later takes a turn or is abandoned.
     gateway.settle(SETTLE);
     let after_write = scene.print_requests("boot-2", requests_at_kill);
     gateway.print_stderr("after the continuation's write");
@@ -1973,6 +2011,14 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         "requests after the second boot that start from a notice, counted after the \
          continuation's write and the end of its turn: {} (indexes {starts_after_write:?})",
         starts_after_write.len()
+    ));
+    let store_after_turn = read_store(row, "boot-2", &scene.state, "after the continuation's turn");
+    let open_after_turn = store_after_turn
+        .as_ref()
+        .map(|inputs| inputs.iter().filter(|input| input.is_open()).count());
+    gateway.say(format!(
+        "stored inputs still open after the continuation's turn ended: {}",
+        open_after_turn.map_or_else(|| "store not read".to_string(), |open| open.to_string())
     ));
 
     // The tail: one more revision starts one more turn.
@@ -2068,6 +2114,16 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         1,
         "(a) through the end of the continuation's turn and its own write, still exactly one \
          turn must have started from the notice after the second boot"
+    );
+    assert!(
+        one_continuation_stored,
+        "(a) while the continuation's turn waits at the model, the store must hold exactly one \
+         open input that carries a notice, under the revision: {open_notices_at_hold:?}"
+    );
+    assert_eq!(
+        open_after_turn,
+        Some(0),
+        "(a) after the continuation's turn ended, no stored input may be left open"
     );
     assert_eq!(
         tail_starts.len(),

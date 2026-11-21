@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `DecisionPresentation` and typed presentation options, audiences,
+  canonical parts and links for `decisionsPresent` and nested attestations.
+  Existing raw records remain supported unchanged. The typed `atMs` value is
+  an unsigned integer limited to `Number.MAX_SAFE_INTEGER` for exact JSON values.
+
 - The SDK exposes the existing gateway host-runnable path through
   `MetaBuilder.hostRunnables(names)` and
   `MetaRuntime.onScheduleFire(name, handler)`: TypeScript hosts declare

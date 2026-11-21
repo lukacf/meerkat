@@ -125,7 +125,9 @@ If distinct decisions matter, match the earlier steer to a model decision
 before you send the next one. Its `boundary_append_applied` names the
 `input_id` and the `run_id` of the turn that applied it, and that run's next
 successful `turn_completed` says the model has answered a request that
-carried it. The applied event alone is neither a response nor the durable
+carried it. The match is by stream order: `turn_completed` carries no run id
+and no success flag, so take the next one on the session's stream after the
+applied event. The applied event alone is neither a response nor the durable
 consumption of the input. The next steer then joins a later boundary, or the
 follow-up turn when the run ends first. An earlier steer that itself takes
 the follow-up turn publishes no `boundary_append_applied`: read its
@@ -152,11 +154,11 @@ event or one new transcript row per request. Later requests carry the rows as
 transcript history, which is not another delivery.
 
 A steer withdrawn with `session/recall_input` (or
-`MeerkatMachine::recall_queued_input`) before its request's cutoff joins no
+`MeerkatMachine::recall_queued_input`) before it joins a run joins no
 request and gets no row from then on, and the steers behind it are not
 delayed. The recall withdraws the queued delivery; it does not undo what a
 model saw of the steer in an earlier turn that applied it and returned it to
-the queue. After the cutoff a recall answers `not_queued` while the run holds
+the queue. After the join a recall answers `not_queued` while the run holds
 the steer, and `already_terminal` once the input has ended.
 
 Unchanged: no model request in flight is cancelled; steers still waiting when

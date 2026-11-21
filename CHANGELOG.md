@@ -70,8 +70,9 @@ them.
   with no durable steer (none registered, or a park on request-only
   context alone) the input is fixed at the one check in which the runner
   finds every delivery it is parked on resolved, no durable steer
-  registered and no acknowledged steer still on its way: a steer whose
-  admission was acknowledged before that check is in the request. Once a
+  registered and no acknowledged steer still on its way: an eligible steer
+  whose admission was acknowledged before that check is in the request,
+  unless it is recalled or its preparation fails first. Once a
   durable steer has entered the boundary, the cutoff is its publication
   under the session mutation gate, as at any boundary. A successful in-turn
   application that the run retains is exactly once per input, as before:
@@ -143,7 +144,9 @@ them.
   matter, match the earlier steer to a model decision before sending the
   next one: its `boundary_append_applied` names the `input_id` and the
   `run_id` of the turn that applied it, and that run's next successful
-  `turn_completed` says the model has answered a request that carried it.
+  `turn_completed` says the model has answered a request that carried it
+  (matched by stream order: the event carries no run id and no success
+  flag).
   The applied event alone is neither a response nor the durable
   consumption of the input. A steer that takes the follow-up turn
   publishes no `boundary_append_applied`: read its `last_run_id` with

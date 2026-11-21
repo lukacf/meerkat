@@ -1424,9 +1424,11 @@ request-only context alone), it is fixed at the one check in which the
 runner finds that every delivery it is parked on is resolved, that no
 durable steer has registered, and that no acknowledged steer is still on
 its way; the runner then closes the boundary and awaits nothing before it
-composes the request. A steer whose admission was acknowledged before that
-check is in the request: the runner keeps the boundary open until that
-steer has registered. Once a durable steer has entered the boundary, the
+composes the request. An eligible steer whose admission was acknowledged
+before that check is in the request, unless it is recalled or its
+preparation fails first: the runner keeps the boundary open until the steer
+has registered or its preparation has ended. Once a durable steer has
+entered the boundary, the
 cutoff is that steer's publication under the session mutation gate, as at
 any boundary.
 
@@ -1473,7 +1475,10 @@ request that first carries them is sent. That run's next successful
 `turn_completed` then says that the model has answered a request that
 carried the steer: `turn_completed` is published after the response of each
 model call that succeeds, and for a call that returned tool calls after
-their results are written. A steer that takes the follow-up turn publishes
+their results are written. The match is by stream order: `turn_completed`
+carries no run id and no success flag, so it is the next `turn_completed`
+on the session's stream after the applied event. A steer that takes the
+follow-up turn publishes
 no `boundary_append_applied`: it is part of the input that turn starts
 with. For it, `session/input_status` names the follow-up run in the input's
 `last_run_id`, and that run's first successful `turn_completed` is the
@@ -1498,7 +1503,7 @@ per request. Other releases were not measured.
 When the run ends first, or the boundary refuses Session writes (for example
 a structured-output extraction boundary), the waiting steers keep their place
 in the steer lane and the follow-up turn delivers them in arrival order, ahead
-of queued work. Each steer is written exactly once.
+of queued work. Each steer's rows are in the retained history once.
 
 Arrival order holds within each delivery class: a
 follow-up-only steer (for example a directed peer message) admitted before a
@@ -1537,7 +1542,7 @@ interrupts a run.
   at the boundary. When the recalled steer was the oldest one, the claim it
   held stays with the lane: only its own delivery is withdrawn, and the
   steers behind it are joined and published at that boundary. The session
-  mutation gate orders a recall against the cutoff: before it the recall
+  mutation gate orders a recall against the steer's join: before it the recall
   withdraws the steer; after it the recall answers `NotQueued` while the run
   holds the steer, and `AlreadyTerminal` once the input has ended.
 - `QueuedInputRecall::NotQueued { phase, run_id }`: a run holds the input

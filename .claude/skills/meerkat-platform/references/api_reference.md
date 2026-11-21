@@ -163,7 +163,7 @@ rkat workgraph show <ID> [--namespace <NS>] [--json]
 rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
-rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
+rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--finish-by <RFC3339>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
 rkat workgraph goal-confirm <BINDING_ID> --expected-revision <N> --kind <KIND> --id <ID> [--namespace <NS>] [--label <TEXT>] [--summary <TEXT>] [--json]
 rkat workgraph goal-close <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--status completed|cancelled|failed] [--json]
@@ -737,6 +737,14 @@ WorkGraph tools (no `meerkat_` prefix): `workgraph_create`, `workgraph_get`,
 `workgraph_close`, `workgraph_link`, `workgraph_add_evidence`. The
 attention-scoped `workgraph_attention_reassign` and `workgraph_policy_escalate`
 are not on this unscoped surface.
+
+`finish_by` is an optional item time beside the existing `due_at`. `due_at` is
+"Available from": before it an item is not ready and takes no claim. `finish_by`
+is "Finish by", the target time; nothing is held back when it passes. An update
+keeps it when the field is absent or null, sets it with
+`{"op":"set","value":<RFC3339>}` and clears it with `{"op":"clear"}`. A keyed
+create's identity covers it: a changed value is refused without a write.
+Setting or clearing it makes an older projection stale.
 
 Comms tools (feature-gated):
 

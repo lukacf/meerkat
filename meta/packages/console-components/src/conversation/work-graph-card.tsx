@@ -117,6 +117,7 @@ function ItemRow({
   const canClaim = Boolean(actions?.onClaim) && row.status === "open" && !row.ownerLabel;
   const canClose = Boolean(actions?.onClose) && !terminal && row.status !== "blocked";
   const dueDay = formatDay(row.dueAt);
+  const finishDay = formatDay(row.finishBy);
 
   return (
     <li
@@ -143,7 +144,8 @@ function ItemRow({
             <span className="cc-work-graph__chip is-owner" title={`Owned by ${row.ownerLabel}`}>{row.ownerLabel}</span>
           ) : null}
           {row.blocked ? <span className="cc-work-graph__chip is-blocked">blocked</span> : null}
-          {dueDay ? <span className="cc-work-graph__chip is-due" title="Due date">{dueDay}</span> : null}
+          {dueDay ? <span className="cc-work-graph__chip is-due" title="Available from this day">From {dueDay}</span> : null}
+          {finishDay ? <span className="cc-work-graph__chip" title="Target day to finish. Nothing is held back when it passes.">Finish by {finishDay}</span> : null}
           {hasDetail ? (
             <span className="cc-work-graph__item-chevron" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
           ) : (

@@ -1595,7 +1595,22 @@ def announcement_error_from_rpc(
 
 
 class ContractMismatchError(MetaError):
-    """Raised when the SDK and runtime contract versions are incompatible."""
+    """Raised when a runtime response does not confirm the SDK contract.
+
+    A finish-by mutation may already have committed. When the response has
+    a valid item identity and revision, read ``returned_item_id`` with
+    ``workgraph_get`` before deciding what to do next; do not repeat create.
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        returned_item_id: str | None = None,
+        returned_item_revision: int | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.returned_item_id = returned_item_id
+        self.returned_item_revision = returned_item_revision
 
 
 class NotConnectedError(MetaError):

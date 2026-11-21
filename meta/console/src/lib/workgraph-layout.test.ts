@@ -505,3 +505,13 @@ test("workgraph links and statuses read in words, never as raw kinds", () => {
   assert.equal(workGraphStatusWord("in_progress"), "In progress");
   assert.equal(workGraphStatusWord(undefined), "Open");
 });
+
+
+test("finish-by never gates readiness in either server or fallback projections", () => {
+  const items = [item("future-target", at(0), { finish_by: "2026-07-30T00:00:00Z" }), item("past-target", at(1), { finish_by: "2026-07-01T00:00:00Z" })];
+  for (const readyItemIds of [undefined, ["future-target", "past-target"]]) {
+    const model = buildWorkGraphModel({ items, edges: [], readyItemIds, now: NOW });
+    assert.equal(model.items.get("future-target")!.ready, true);
+    assert.equal(model.items.get("past-target")!.ready, true);
+  }
+});

@@ -239,6 +239,7 @@ async fn replay_returns_current_owner_revision_without_new_admission() {
             completion_policy: None,
             labels: None,
             due_at: None,
+            finish_by: None,
             not_before: None,
             snoozed_until: None,
             external_refs: Vec::new(),
@@ -663,6 +664,7 @@ async fn metadata_observation_excludes_worker_content_and_is_stable_across_work_
             completion_policy: None,
             labels: None,
             due_at: None,
+            finish_by: None,
             not_before: None,
             snoozed_until: None,
             external_refs: vec![ExternalWorkRef {

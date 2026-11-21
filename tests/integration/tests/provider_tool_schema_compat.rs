@@ -410,6 +410,10 @@ async fn builtin_tool_schemas_lower_into_provider_accepted_shapes() {
         ("workgraph", "workgraph_claim"),
         ("workgraph", "workgraph_attention_reassign"),
         ("workgraph", "workgraph_policy_escalate"),
+        // `finish_by` gives these two a type array and a null branch
+        // inside a `oneOf`, shapes no other WorkGraph tool schema has.
+        ("workgraph", "workgraph_create"),
+        ("workgraph", "workgraph_update"),
         ("schedule", "meerkat_schedule_create"),
         ("schedule", "meerkat_schedule_update"),
         ("mob-agent", "delegate"),

@@ -846,8 +846,11 @@ export interface WorkGraphWireItem {
   owner?: WorkGraphWireOwner;
   claim?: { owner?: WorkGraphWireOwner; claimed_at?: string; lease_expires_at?: string };
   revision?: number;
-  /// When the item becomes due: an open item is not ready before it.
+  /// Earliest availability constraint, not an intended finish time;
+  /// other readiness gates still apply.
   due_at?: string;
+  /** Informational finish-by target; never a readiness gate. */
+  finish_by?: string;
   not_before?: string;
   snoozed_until?: string;
   completion_policy?: WorkGraphWireCompletionPolicy;

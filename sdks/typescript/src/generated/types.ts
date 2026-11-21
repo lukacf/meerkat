@@ -4141,6 +4141,7 @@ export interface WorkItem {
   evidence_refs?: WorkEvidenceRef[];
   external_refs?: WorkItemExternalRef[];
   failed_child_join_policy: "require_success" | "propagate" | "accept";
+  finish_by?: string | null;
   id: string;
   labels?: string[];
   machine_state: Record<string, unknown>;
@@ -8685,6 +8686,7 @@ export function parseWorkItem(value: unknown): WorkItem {
     ...(data["evidence_refs"] === undefined || data["evidence_refs"] === null ? {} : { evidence_refs: expectWireArray(data["evidence_refs"], "WorkItem.evidence_refs").map((entry) => parseWorkEvidenceRef(entry)) }),
     ...(data["external_refs"] === undefined || data["external_refs"] === null ? {} : { external_refs: expectWireArray(data["external_refs"], "WorkItem.external_refs").map((entry) => parseWorkItemExternalRef(entry)) }),
     failed_child_join_policy: expectWireEnum(requireWireField(data, "failed_child_join_policy", "WorkItem"), ["require_success", "propagate", "accept"], "WorkItem.failed_child_join_policy") as "require_success" | "propagate" | "accept",
+    ...(data["finish_by"] === undefined || data["finish_by"] === null ? {} : { finish_by: expectWireString(data["finish_by"], "WorkItem.finish_by") }),
     id: expectWireString(requireWireField(data, "id", "WorkItem"), "WorkItem.id"),
     ...(data["labels"] === undefined || data["labels"] === null ? {} : { labels: expectWireArray(data["labels"], "WorkItem.labels").map((entry) => expectWireString(entry, "WorkItem.labels[]")) }),
     machine_state: expectWireObject(requireWireField(data, "machine_state", "WorkItem"), "WorkItem.machine_state"),

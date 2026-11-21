@@ -5570,6 +5570,7 @@ class WorkItem:
     due_at: Optional[str] = None
     evidence_refs: Optional[list[WorkEvidenceRef]] = None
     external_refs: Optional[list[WorkItemExternalRef]] = None
+    finish_by: Optional[str] = None
     labels: Optional[list[str]] = None
     not_before: Optional[str] = None
     owner: Optional[WorkItemOwner] = None
@@ -5592,6 +5593,7 @@ class WorkItem:
             evidence_refs=([WorkEvidenceRef.from_wire(_item) for _item in _expect_wire_list(data['evidence_refs'], 'WorkItem.evidence_refs')] if data.get('evidence_refs') is not None else None),
             external_refs=([WorkItemExternalRef.from_wire(_item) for _item in _expect_wire_list(data['external_refs'], 'WorkItem.external_refs')] if data.get('external_refs') is not None else None),
             failed_child_join_policy=_expect_wire_enum(_require_wire_field(data, 'failed_child_join_policy', 'WorkItem'), ('require_success', 'propagate', 'accept',), 'WorkItem.failed_child_join_policy'),
+            finish_by=(_expect_wire_str(data['finish_by'], 'WorkItem.finish_by') if data.get('finish_by') is not None else None),
             id=_expect_wire_str(_require_wire_field(data, 'id', 'WorkItem'), 'WorkItem.id'),
             labels=([_expect_wire_str(_item, 'WorkItem.labels[]') for _item in _expect_wire_list(data['labels'], 'WorkItem.labels')] if data.get('labels') is not None else None),
             machine_state=_expect_wire_object(_require_wire_field(data, 'machine_state', 'WorkItem'), 'WorkItem.machine_state'),

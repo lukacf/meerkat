@@ -190,6 +190,17 @@ describe("WorkGraphConflictError", () => {
 // ---------------------------------------------------------------------------
 
 describe("ContractMismatchError", () => {
+  it("keeps message-only construction and exposes optional recovery context", () => {
+    const plain = new ContractMismatchError("version mismatch");
+    assert.equal(plain.message, "version mismatch");
+    assert.equal(plain.returnedItemId, undefined);
+    assert.equal(plain.returnedItemRevision, undefined);
+    const contextual = new ContractMismatchError("target mismatch", { returnedItemId: "work_1", returnedItemRevision: 3 });
+    assert.equal(contextual.message, "target mismatch");
+    assert.equal(contextual.returnedItemId, "work_1");
+    assert.equal(contextual.returnedItemRevision, 3);
+  });
+
   it("extends MetaError", () => {
     const err = new ContractMismatchError("version mismatch");
     assert.ok(err instanceof MetaError);

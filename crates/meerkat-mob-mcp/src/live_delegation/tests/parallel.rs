@@ -1427,6 +1427,7 @@ async fn an_open_item_not_yet_due_keeps_its_worker_waiting() {
             completion_policy: None,
             labels: None,
             due_at: None,
+            finish_by: None,
             not_before: Some(chrono::Utc::now() + chrono::Duration::days(1)),
             snoozed_until: None,
             external_refs: Vec::new(),

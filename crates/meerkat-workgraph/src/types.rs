@@ -1202,6 +1202,9 @@ pub struct WorkItem {
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    /// Nonoperative finish-by target; it does not gate readiness or claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_by: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1243,6 +1246,8 @@ struct WorkItemWire {
     revision: u64,
     #[serde(default)]
     due_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    finish_by: Option<DateTime<Utc>>,
     #[serde(default)]
     not_before: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -1286,6 +1291,7 @@ impl<'de> Deserialize<'de> for WorkItem {
             machine_state,
             revision: wire.revision,
             due_at: wire.due_at,
+            finish_by: wire.finish_by,
             not_before: wire.not_before,
             snoozed_until: wire.snoozed_until,
             created_at: wire.created_at,
@@ -1482,6 +1488,7 @@ impl schemars::JsonSchema for WorkItem {
                 },
                 "revision": { "type": "integer", "format": "uint64", "minimum": 0 },
                 "due_at": { "type": ["string", "null"], "format": "date-time" },
+                "finish_by": { "type": ["string", "null"], "format": "date-time", "description": "Nonoperative finish-by target; does not gate readiness or claims." },
                 "not_before": { "type": ["string", "null"], "format": "date-time" },
                 "snoozed_until": { "type": ["string", "null"], "format": "date-time" },
                 "created_at": { "type": "string", "format": "date-time" },
@@ -1734,6 +1741,9 @@ pub struct CreateWorkItemRequest {
     pub labels: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    /// Nonoperative finish-by target; it does not gate readiness or claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_by: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1744,6 +1754,42 @@ pub struct CreateWorkItemRequest {
     pub evidence_refs: Vec<WorkEvidenceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<WorkStatus>,
+}
+
+/// Explicit update to the optional, nonoperative finish-by item data.
+/// At the request field, absence and JSON null both mean Keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "op",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WorkFinishByUpdate {
+    Set(DateTime<Utc>),
+    Clear,
+}
+
+impl<'de> Deserialize<'de> for WorkFinishByUpdate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Struct variants make Clear reject a content key even when its value
+        // is null. The ordinary adjacently tagged unit-variant decoder accepts
+        // that spelling, while the published schema deliberately does not.
+        #[derive(Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Set { value: DateTime<Utc> },
+            Clear {},
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Set { value } => Ok(Self::Set(value)),
+            Wire::Clear {} => Ok(Self::Clear),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1767,6 +1813,9 @@ pub struct UpdateWorkItemRequest {
     pub labels: Option<BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    /// Absent/null keeps the target; an explicit operation sets or clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_by: Option<WorkFinishByUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1912,6 +1961,9 @@ pub struct GoalCreateRequest {
     pub labels: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    /// Nonoperative finish-by target; it does not gate readiness or claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_by: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1953,6 +2005,9 @@ pub struct PublicGoalCreateRequest {
     pub labels: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
+    /// Nonoperative finish-by target; it does not gate readiness or claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_by: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1984,6 +2039,7 @@ impl From<PublicGoalCreateRequest> for GoalCreateRequest {
             priority: request.priority,
             labels: request.labels,
             due_at: request.due_at,
+            finish_by: request.finish_by,
             not_before: request.not_before,
             snoozed_until: request.snoozed_until,
             external_refs: request.external_refs,

@@ -13,6 +13,8 @@
 //! provider whose client reports a scripted route observation (the provider
 //! family's direct route unless a row scripts another), so binding selection,
 //! catalog validation and client construction are the factory's real path.
+//! One row uses a real provider runtime over scripted HTTP answers instead,
+//! and says so.
 //! That is why this lives under `factory`: the registry slot is private.
 
 use std::sync::{Arc, Mutex as StdMutex};
@@ -1062,4 +1064,202 @@ mod live {
             None
         );
     }
+}
+/// A build on a GitHub Copilot device sign-in whose model listing answers
+/// 401 to the first token and to the one minted after it is the typed
+/// sign-in failure, through the factory's real path: the realm's binding,
+/// the stored sign-in, the Copilot runtime's own resolution and mint (over
+/// scripted HTTP answers), and the session service's builder. The caller
+/// receives the provider-auth failure of kind `user_reauth_required` as
+/// typed data, not a refused level, although the build names a strict
+/// reasoning effort level: the resolution runs before the level is judged.
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn a_build_whose_listing_refuses_the_token_twice_is_the_typed_sign_in_failure() {
+    use meerkat_copilot::CopilotScriptedAnswer;
+    use meerkat_core::auth::{
+        PersistedAuthMode, PersistedTokens, ProviderAuthPersistence, TokenKey, TokenStore as _,
+    };
+    use meerkat_session::ephemeral::SessionAgentBuilder as _;
+
+    const COPILOT_BINDING: &str = "copilot_openai";
+    const COPILOT_ACCOUNT: &str = "github_copilot";
+
+    let token = |name: &str| CopilotScriptedAnswer {
+        status: 200,
+        body: json!({
+            "token": name,
+            "expires_at": chrono::Utc::now().timestamp() + 3600,
+            "refresh_in": 1800,
+            "endpoints": {"api": "https://copilot.example.test"}
+        }),
+    };
+    let unauthorized = || CopilotScriptedAnswer {
+        status: 401,
+        body: json!({"message": "expired"}),
+    };
+    let (runtime, requests) =
+        meerkat_copilot::CopilotRuntime::with_scripted_answers_for_tests(vec![
+            token("derived-one"),
+            unauthorized(),
+            token("derived-two"),
+            unauthorized(),
+        ]);
+
+    // The realm: one Copilot device sign-in route for the OpenAI family.
+    let mut section = RealmConfigSection::default();
+    section.backend.insert(
+        COPILOT_BINDING.to_string(),
+        BackendProfileConfig {
+            provider: Provider::OpenAI.as_str().to_string(),
+            backend_kind: OpenAiBackendKind::Copilot.as_str().to_string(),
+            base_url: None,
+            options: serde_json::Value::Null,
+            server: None,
+        },
+    );
+    section.auth.insert(
+        COPILOT_BINDING.to_string(),
+        meerkat_core::AuthProfileConfig {
+            provider: Provider::OpenAI.as_str().to_string(),
+            auth_method: "github_copilot_oauth".to_string(),
+            source: CredentialSourceSpec::ManagedStore,
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        },
+    );
+    section.binding.insert(
+        COPILOT_BINDING.to_string(),
+        ProviderBindingConfig {
+            backend_profile: COPILOT_BINDING.to_string(),
+            auth_profile: COPILOT_BINDING.to_string(),
+            credential_account: Some(
+                meerkat_core::CredentialAccountId::parse(COPILOT_ACCOUNT).expect("valid account"),
+            ),
+            default_model: None,
+            policy: Default::default(),
+            provider_default: true,
+        },
+    );
+    let mut config = Config::default();
+    config.realm.insert(REALM.to_string(), section);
+
+    // The stored device sign-in, published to the lease the build resolves
+    // under.
+    let identity =
+        meerkat_core::AuthCredentialIdentity::Account(meerkat_core::CredentialAccountRef {
+            realm: RealmId::parse(REALM).expect("valid realm"),
+            account: meerkat_core::CredentialAccountId::parse(COPILOT_ACCOUNT)
+                .expect("valid account"),
+        });
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let session = Session::new();
+    let bindings = machine
+        .prepare_bindings(session.id().clone())
+        .await
+        .expect("an ephemeral machine prepares session-owned bindings");
+    let auth_lease = bindings.auth_lease().clone();
+    let store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
+    let persistence = ProviderAuthPersistence::new(
+        store.clone(),
+        Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+    );
+    let tokens = PersistedTokens {
+        auth_mode: PersistedAuthMode::GithubCopilotOauth,
+        primary_secret: Some(format!("{}-{}-{}", "stub", "source", "token")),
+        refresh_token: None,
+        id_token: None,
+        expires_at: None,
+        last_refresh: Some(chrono::Utc::now()),
+        scopes: vec!["read:user".to_string()],
+        account_id: None,
+        metadata: serde_json::Value::Null,
+    };
+    let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+        &auth_lease,
+        &identity,
+        &tokens,
+    )
+    .expect("the sign-in is published to the lease");
+    let key = TokenKey::from_credential_identity(&identity);
+    let marked =
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &tokens, &transition)
+            .expect("the stored sign-in carries its publication");
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .expect("the sign-in is stored");
+    let phase = || {
+        auth_lease
+            .snapshot(&meerkat_core::handles::LeaseKey::from_credential_identity(
+                &identity,
+            ))
+            .phase
+    };
+
+    // The factory, with the real OpenAI provider runtime over the scripted
+    // Copilot runtime in its registry.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut factory = AgentFactory::new(temp.path().join("sessions"))
+        .with_provider_auth_persistence(persistence)
+        .builtins(false);
+    factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(Arc::new(
+        meerkat_openai::OpenAiProviderRuntime::with_copilot(Arc::new(runtime)),
+    )));
+    let builder = crate::FactoryAgentBuilder::new(factory, config);
+    let request = meerkat_core::service::CreateSessionRequest {
+        injected_context: Vec::new(),
+        model: OPENAI_MODEL.to_string(),
+        prompt: meerkat_core::ContentInput::Text(String::new()),
+        system_prompt: crate::SystemPromptOverride::Inherit,
+        max_tokens: None,
+        event_tx: None,
+        initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+        build: Some(meerkat_core::service::SessionBuildOptions {
+            provider: Some(Provider::OpenAI),
+            realm_id: Some(RealmId::parse(REALM).expect("valid realm")),
+            auth_binding: Some(binding(COPILOT_BINDING)),
+            override_image_generation: ToolCategoryOverride::Disable,
+            provider_params: level(EffortLevel::High),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone()),
+            ..Default::default()
+        }),
+        labels: None,
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let error = match builder.build_agent(&request, tx).await {
+        Ok(_) => panic!("a sign-in the listing refused twice must not build"),
+        Err(error) => error,
+    };
+
+    // The witnesses of the scene: the listing's two answers, not the row,
+    // marked the sign-in, in four requests (a mint and its listing, twice).
+    assert_eq!(requests.count(), 4);
+    assert_eq!(
+        phase(),
+        Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+    );
+
+    assert!(
+        !matches!(
+            &error,
+            meerkat_core::SessionError::Agent(
+                meerkat_core::error::AgentError::ReasoningEffortRefused(_)
+            )
+        ),
+        "a sign-in failure is not a refused reasoning effort level: {error:?}"
+    );
+    let data = error.structured_data().expect("structured auth failure");
+    assert_eq!(
+        data,
+        json!({
+            "cause": "provider_auth",
+            "kind": "user_reauth_required",
+            "provider": "openai",
+            "realm_id": REALM,
+            "binding_id": COPILOT_BINDING,
+            "agent_build_failure_cause": "LlmIdentityUnresolvable",
+        })
+    );
 }

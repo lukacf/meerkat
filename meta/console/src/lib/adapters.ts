@@ -1527,6 +1527,7 @@ interface WorkGraphItemDraft {
   ownerLabel?: string;
   revision?: number;
   dueAt?: string;
+  finishBy?: string;
   description?: string;
   labels?: string[];
   evidence?: string[];
@@ -1661,6 +1662,7 @@ function foldWorkGraphItem(
     ownerLabel: workGraphOwnerLabel(record),
     revision,
     dueAt: workGraphString(record.due_at),
+    finishBy: workGraphString(record.finish_by),
     description: workGraphString(record.description),
     labels: Array.isArray(record.labels)
       ? record.labels.filter((label): label is string => typeof label === "string")
@@ -2013,6 +2015,7 @@ function workGraphItemRows(
           : {}),
         blocked: draft.status === "blocked",
         dueAt: draft.dueAt ?? null,
+        finishBy: draft.finishBy ?? null,
         lastEventAt: draft.lastEventAt ?? null,
         description: draft.description ?? null,
         ...(draft.labels && draft.labels.length > 0 ? { labels: draft.labels } : {}),

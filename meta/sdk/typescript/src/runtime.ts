@@ -139,6 +139,7 @@ import {
   WaitEndedError,
   WorkGraphUnavailableError,
   WorkGraphConflictError,
+  ContractMismatchError,
   isRpcError,
   parseAnnouncementRpcError,
 } from "./errors.js";
@@ -487,6 +488,59 @@ const ANNOUNCEMENT_METHODS_BEFORE_SOURCES: ReadonlySet<string> = new Set(
 export type AnnouncementMemberParam =
   | AnnouncementMember
   | { readonly mob_id: string; readonly identity: string };
+
+function finishByInstant(value: string): string | null {
+  // Chrono's serde reader accepts relaxed RFC3339 and truncates after nine
+  // fraction digits. Keep those digits out of floating-point date conversion.
+  const match = /^\s*([+-]\d{1,6}|\d{1,4})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})[Tt ]\s*(\d{1,2})\s*:\s*(\d{1,2})\s*:\s*(\d{1,2})(?:\.(\d+))?\s*([Zz]|[Uu][Tt][Cc]|[+−-]\d{2}[:\s]*\d{2})\s*$/.exec(value);
+  if (!match) return null;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const fraction = match[7] ?? "";
+  const zone = match[8];
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (!(month >= 1 && month <= 12 && day >= 1 && day <= monthDays[month - 1]
+      && hour >= 0 && hour < 24 && minute >= 0 && minute < 60 && second >= 0 && second <= 60)) return null;
+  let offset = 0;
+  if (!["z", "utc"].includes(zone.toLowerCase())) {
+    const digits = zone.slice(1).replace(/[:\s]/g, "");
+    const offsetHour = Number(digits.slice(0, 2));
+    const offsetMinute = Number(digits.slice(2));
+    if (offsetHour >= 24 || offsetMinute >= 60) return null;
+    offset = (offsetHour * 60 + offsetMinute) * 60 * (zone[0] === "+" ? 1 : -1);
+  }
+  // Proleptic Gregorian civil-date arithmetic supports year zero and signed
+  // Chrono years without JS Date's range or millisecond-precision limitations.
+  const adjustedYear = year - (month <= 2 ? 1 : 0);
+  const era = Math.floor(adjustedYear / 400);
+  const yearOfEra = adjustedYear - era * 400;
+  const dayOfYear = Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1;
+  const dayOfEra = yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
+  const days = era * 146097 + dayOfEra - 719468;
+  const whole = days * 86400 + hour * 3600 + minute * 60 + Math.min(second, 59) - offset;
+  return `${whole}:${fraction.slice(0, 9).replace(/0+$/, "")}:${second === 60}`;
+}
+
+function verifyFinishBy(requested: unknown, returned: unknown, update = false): void {
+  if (requested === undefined || (update && requested === null)) return;
+  let expected: unknown = requested;
+  if (update) {
+    const operation = asWireRecord(requested);
+    if (operation.op === "clear" && Object.keys(operation).length === 1) expected = null;
+    else if (operation.op === "set" && Object.keys(operation).length === 2 && "value" in operation) expected = operation.value;
+    else throw new ContractMismatchError("WorkGraph finish_by response cannot confirm the requested operation; the operation may already have committed");
+  }
+  let matches = expected === null && (returned === undefined || returned === null);
+  if (typeof expected === "string" && typeof returned === "string") {
+    const instant = finishByInstant(expected);
+    matches = instant !== null && instant === finishByInstant(returned);
+  }
+  if (!matches) {
+    throw new ContractMismatchError(
+      "WorkGraph finish_by was not confirmed by the gateway response; the operation may already have committed",
+    );
+  }
+}
 
 function announcementMemberToWire(member: AnnouncementMemberParam): Record<string, string> {
   return "mobId" in member
@@ -5061,7 +5115,9 @@ export class MobHandle {
     const params = workGraphCreateOptionsToDict(options);
     params.title = title;
     const raw = await this._runtime._rpc("meta/workgraph/create", params);
-    return parseWorkGraphItem(asWireRecord(raw).item);
+    const item = asWireRecord(raw).item;
+    verifyFinishBy(params.finish_by, asWireRecord(item).finish_by);
+    return parseWorkGraphItem(item);
   }
 
   async workgraphUpdate(
@@ -5073,7 +5129,9 @@ export class MobHandle {
     params.id = id;
     params.expected_revision = expectedRevision;
     const raw = await this._runtime._rpc("meta/workgraph/update", params);
-    return parseWorkGraphItem(asWireRecord(raw).item);
+    const item = asWireRecord(raw).item;
+    verifyFinishBy(params.finish_by, asWireRecord(item).finish_by, true);
+    return parseWorkGraphItem(item);
   }
 
   async workgraphClaim(
@@ -5194,9 +5252,9 @@ export class MobHandle {
     const params = workGraphGoalCreateOptionsToDict(options);
     params.title = title;
     params.target = workGraphGoalTargetToDict(target);
-    return parseWorkGraphGoalResult(
-      await this._runtime._rpc("meta/workgraph/goal/create", params),
-    );
+    const raw = await this._runtime._rpc("meta/workgraph/goal/create", params);
+    verifyFinishBy(params.finish_by, asWireRecord(asWireRecord(raw).item).finish_by);
+    return parseWorkGraphGoalResult(raw);
   }
 
   async workgraphGoalConfirm(

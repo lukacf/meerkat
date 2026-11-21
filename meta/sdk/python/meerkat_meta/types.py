@@ -2655,6 +2655,7 @@ class WorkGraphItem:
     terminal_at: str | None
     external_refs: list[Any]
     evidence_refs: list[Any]
+    finish_by: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkGraphItem:
@@ -2673,6 +2674,7 @@ class WorkGraphItem:
             machine_state=dict(data.get("machine_state") or {}),
             revision=_coerce_int(data.get("revision")),
             due_at=data.get("due_at"),
+            finish_by=data.get("finish_by"),
             not_before=data.get("not_before"),
             snoozed_until=data.get("snoozed_until"),
             created_at=str(data.get("created_at", "")),

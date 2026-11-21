@@ -47877,6 +47877,7 @@ function ItemRow({
   const canClaim = Boolean(actions?.onClaim) && row.status === "open" && !row.ownerLabel;
   const canClose = Boolean(actions?.onClose) && !terminal && row.status !== "blocked";
   const dueDay = formatDay(row.dueAt);
+  const finishDay = formatDay(row.finishBy);
   return /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)(
     "li",
     {
@@ -47901,7 +47902,14 @@ function ItemRow({
                 row.priority && row.priority !== "medium" ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("span", { className: "cc-work-graph__chip is-priority-".concat(row.priority), children: row.priority }) : null,
                 row.ownerLabel ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("span", { className: "cc-work-graph__chip is-owner", title: "Owned by ".concat(row.ownerLabel), children: row.ownerLabel }) : null,
                 row.blocked ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("span", { className: "cc-work-graph__chip is-blocked", children: "blocked" }) : null,
-                dueDay ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("span", { className: "cc-work-graph__chip is-due", title: "Due date", children: dueDay }) : null,
+                dueDay ? /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("span", { className: "cc-work-graph__chip is-due", title: "Available from this day", children: [
+                  "From ",
+                  dueDay
+                ] }) : null,
+                finishDay ? /* @__PURE__ */ (0, import_jsx_runtime61.jsxs)("span", { className: "cc-work-graph__chip", title: "Target day to finish. Nothing is held back when it passes.", children: [
+                  "Finish by ",
+                  finishDay
+                ] }) : null,
                 hasDetail ? /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("span", { className: "cc-work-graph__item-chevron", "aria-hidden": "true", children: expanded ? "\u25BE" : "\u25B8" }) : /* @__PURE__ */ (0, import_jsx_runtime61.jsx)("span", { className: "cc-work-graph__item-status", children: itemStatusLabel(row.status) })
               ]
             }
@@ -57330,6 +57338,7 @@ function foldWorkGraphItem(state, value, frameIso) {
     ownerLabel: workGraphOwnerLabel(record11),
     revision,
     dueAt: workGraphString(record11.due_at),
+    finishBy: workGraphString(record11.finish_by),
     description: workGraphString(record11.description),
     labels: Array.isArray(record11.labels) ? record11.labels.filter((label2) => typeof label2 === "string") : void 0,
     evidence: workGraphEvidenceLines(record11),
@@ -57605,6 +57614,7 @@ function workGraphItemRows(rootId, memberIds, state) {
         ...extraParents && extraParents.size > 0 ? { alsoUnder: [...extraParents].map((parent) => state.items.get(parent)?.title || parent) } : {},
         blocked: draft.status === "blocked",
         dueAt: draft.dueAt ?? null,
+        finishBy: draft.finishBy ?? null,
         lastEventAt: draft.lastEventAt ?? null,
         description: draft.description ?? null,
         ...draft.labels && draft.labels.length > 0 ? { labels: draft.labels } : {},
@@ -82932,7 +82942,8 @@ function timing(item) {
     at(item.created_at, "Created", "created"),
     at(item.claim?.claimed_at, "Claimed", "claimed"),
     at(item.claim?.lease_expires_at, "Lease ends", "lease"),
-    at(item.due_at, "Becomes due", "due"),
+    at(item.due_at, "Available from", "due"),
+    at(item.finish_by, "Finish by", "finish-by"),
     at(item.not_before, "Not before", "not-before"),
     at(item.snoozed_until, "Snoozed until", "snoozed"),
     at(item.terminal_at, "Done", "done"),
@@ -84156,7 +84167,7 @@ function WorkGraphPanel({
           tone: "ok",
           value: counts.ready,
           foot: counts.ready ? "can start now" : "nothing can start yet",
-          title: model.readySource === "server" ? "Open, unblocked and due, as the runtime reports" : void 0,
+          title: model.readySource === "server" ? "Counts loaded items that the runtime reports as ready and for which the snapshot records no blockers. Panel filters do not change this count." : void 0,
           testId: "workgraph-glance:ready"
         }
       ),
@@ -93766,7 +93777,7 @@ function useQuestionSets(input) {
 // src/lib/console-bundle.ts
 var APP_SCRIPT_VERSION = /\/console-app\.js\?(?:[^#]*&)?v=([0-9A-Za-z._-]+)/;
 function builtBeside() {
-  const named = true ? "7c40ad94afbb".trim() : "";
+  const named = true ? "2d04c0d8553a".trim() : "";
   return named || void 0;
 }
 function loadedByThePage(page) {

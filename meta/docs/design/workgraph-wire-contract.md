@@ -234,3 +234,39 @@ namespace restriction below are superseded by the
   the binding mode's workgraph allow-set for that turn; there are no push
   events at meerkat 0.7.23 — poll `snapshot`
   (`event_high_water_mark`) + `events(after_seq)`.
+
+### Informational finish-by target
+
+`finish_by` is optional item data on create/read and on goal creation. It does
+not change the existing `due_at` activation rule, `not_before`, snoozing,
+readiness, claim admission, ordering, attention authority or automatic waking.
+On update, an omitted or null `finish_by` keeps the existing value;
+`{"op":"set","value":"2030-01-02T03:04:05Z"}` replaces it and
+`{"op":"clear"}` clears it. Clear accepts no `value` key, including null.
+Malformed operations return the existing typed invalid-arguments outcome
+without a write. Successful updates use the ordinary item revision CAS and
+Updated event. The three existing dates cannot be cleared today.
+
+A successful Set or Clear advances the item revision, so an attention projection
+made before that update is stale. This changes projection currency, not the
+attention-authority or readiness rules.
+
+Keyed create includes the encoded `finish_by` in the request identity. An equal
+value replays; changing, adding or removing the value conflicts without a write.
+An older server ignores this request key and digests without it, so a
+field-bearing request admitted there conflicts when replayed to a newer server;
+the reverse conflicts after rollback. An absent value keeps its prior encoding.
+
+The field is not a lifecycle fact and introduces no ledger version fence.
+An older typed writer drops it when rewriting an item, including the item in
+an update event; replaying that event preserves the loss. Older gateways may
+ignore the new request key. Meta SDK create/goal-create and explicit Set/Clear
+helpers compare only the returned finish-by target and raise the existing
+`ContractMismatchError` if it is not confirmed. Equivalent timestamp spellings
+compare at Chrono's nanosecond precision. Omitted/null updates are Keep and do
+not assert a target. A mismatch never causes an automatic retry; the mutation
+may already have committed. The SDK comparison is conservative: an unrecognized
+timestamp spelling can raise a mismatch even if the gateway accepted the write.
+Realm migration and current typed readers carry the field. This compatibility
+limit does not grant a future operational meaning to finish-by: making it a
+lifecycle gate would require a separate machine and migration review.

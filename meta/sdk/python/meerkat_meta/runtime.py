@@ -337,6 +337,68 @@ def _durable_member_alias(member: str) -> str:
     return member
 
 
+_FINISH_BY_RFC3339 = re.compile(
+    r"^\s*([+-][0-9]{1,6}|[0-9]{1,4})\s*-\s*([0-9]{1,2})\s*-\s*([0-9]{1,2})[Tt ]\s*"
+    r"([0-9]{1,2})\s*:\s*([0-9]{1,2})\s*:\s*([0-9]{1,2})(?:\.([0-9]+))?\s*"
+    r"([Zz]|[Uu][Tt][Cc]|[+−-][0-9]{2}[:\s]*[0-9]{2})\s*$"
+)
+
+
+def _finish_by_instant(value: str) -> tuple[int, str, bool] | None:
+    """Mirror Chrono's relaxed RFC3339 forms and nanosecond precision."""
+    match = _FINISH_BY_RFC3339.fullmatch(value)
+    if match is None:
+        return None
+    year, month, day, hour, minute, second = map(int, match.groups()[:6])
+    fraction, zone = match.groups()[6:]
+    leap_year = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days_in_month = [31, 29 if leap_year else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if not (1 <= month <= 12 and 1 <= day <= days_in_month[month - 1]
+            and 0 <= hour < 24 and 0 <= minute < 60 and 0 <= second <= 60):
+        return None
+    offset = 0
+    if zone.lower() not in ("z", "utc"):
+        digits = re.sub(r"[:\s]", "", zone[1:])
+        offset_hour, offset_minute = int(digits[:2]), int(digits[2:])
+        if offset_hour >= 24 or offset_minute >= 60:
+            return None
+        offset = (offset_hour * 60 + offset_minute) * 60
+        if zone[0] != "+":
+            offset = -offset
+    # Proleptic Gregorian civil-date arithmetic also covers year zero and
+    # Chrono's signed years, outside datetime's range. No float time conversion.
+    adjusted_year = year - (1 if month <= 2 else 0)
+    era = adjusted_year // 400
+    year_of_era = adjusted_year - era * 400
+    day_of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
+    days = era * 146097 + day_of_era - 719468
+    whole = days * 86400 + hour * 3600 + minute * 60 + min(second, 59) - offset
+    return (whole, (fraction or "")[:9].rstrip("0"), second == 60)
+
+
+def _verify_finish_by(requested: Any, returned: Any, *, update: bool = False) -> None:
+    if update and requested is None:
+        return  # null is Keep, not Clear.
+    expected = requested
+    if update:
+        if isinstance(requested, dict) and requested == {"op": "clear"}:
+            expected = None
+        elif isinstance(requested, dict) and set(requested) == {"op", "value"} and requested.get("op") == "set":
+            expected = requested["value"]
+        else:
+            raise ContractMismatchError("WorkGraph finish_by response cannot confirm the requested operation; the operation may already have committed")
+    matches = expected is None and returned is None
+    if isinstance(expected, str) and isinstance(returned, str):
+        instant = _finish_by_instant(expected)
+        matches = instant is not None and instant == _finish_by_instant(returned)
+    if not matches:
+        raise ContractMismatchError(
+            "WorkGraph finish_by was not confirmed by the gateway response; "
+            "the operation may already have committed"
+        )
+
+
 def _role_targets_request(role_targets: Mapping[str, Sequence[str]]) -> dict[str, list[str]]:
     """The ``role_targets`` parameter: each role with its member ids."""
     request: dict[str, list[str]] = {}
@@ -5313,12 +5375,21 @@ class MobHandle:
         params: dict[str, Any] = {"title": title, **kwargs}
         raw = await self._runtime._rpc("meta/workgraph/create", params)
         item_data = raw.get("item", raw) if isinstance(raw, dict) else raw
+        if "finish_by" in params:
+            _verify_finish_by(params["finish_by"], item_data.get("finish_by") if isinstance(item_data, dict) else None)
         return WorkGraphItem.from_dict(item_data)
 
     async def workgraph_update(
         self, id: str, expected_revision: int, **kwargs: Any
     ) -> WorkGraphItem:
-        """Update a WorkGraph item's mutable fields (CAS via ``expected_revision``)."""
+        """Update a WorkGraph item's mutable fields (CAS via ``expected_revision``).
+
+        ``finish_by`` omitted or None keeps it. Use
+        ``{"op": "set", "value": "<RFC3339>"}`` to set the nonoperative
+        target, or ``{"op": "clear"}`` to clear it. The helper compares only
+        the returned target and raises ``ContractMismatchError`` if the gateway
+        did not apply it. The mutation may already have committed; it is not retried.
+        """
         params: dict[str, Any] = {
             "id": id,
             "expected_revision": expected_revision,
@@ -5326,6 +5397,8 @@ class MobHandle:
         }
         raw = await self._runtime._rpc("meta/workgraph/update", params)
         item_data = raw.get("item", raw) if isinstance(raw, dict) else raw
+        if "finish_by" in params:
+            _verify_finish_by(params["finish_by"], item_data.get("finish_by") if isinstance(item_data, dict) else None, update=True)
         return WorkGraphItem.from_dict(item_data)
 
     async def workgraph_claim(
@@ -5453,6 +5526,9 @@ class MobHandle:
         """
         params: dict[str, Any] = {"title": title, "target": target, **kwargs}
         raw = await self._runtime._rpc("meta/workgraph/goal/create", params)
+        if "finish_by" in params:
+            item_data = raw.get("item") if isinstance(raw, dict) else None
+            _verify_finish_by(params["finish_by"], item_data.get("finish_by") if isinstance(item_data, dict) else None)
         return WorkGraphGoalResult.from_dict(raw)
 
     async def workgraph_goal_confirm(

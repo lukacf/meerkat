@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- WorkGraph items in the Python and TypeScript SDKs carry an optional
+  informational finish-by target. Create and goal-create take a timestamp;
+  updates use explicit set/clear operations, with omission or null keeping
+  the target. TypeScript's `WorkGraphItem.finishBy` remains optional for
+  consumer-created items; decoding supplies a string or null. The Console
+  shows the target as “Finish by” and the existing availability date as
+  “Available from” / “From”. Finish-by changes no readiness, claim, ordering,
+  attention-authority, wake, or close rule.
+
 - The TypeScript SDK exposes the existing gateway host-runnable path:
   hosts declare deterministic schedule targets with
   `MetaBuilder.hostRunnables(names)` and handle their fires with
@@ -34,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gateways have not been checked.
 
 ### Upgrade
+
+- Finish-by mutation helpers compare the returned target and raise the
+  existing `ContractMismatchError` when it is not confirmed, including when
+  an older gateway ignores the field. The write may already have committed;
+  the helpers do not retry. Older readers accept an absent target, but older
+  writers can drop it when rewriting an item.
 
 - TypeScript host runnables are opt-in access to the existing gateway
   contract. Existing callers, defaults, wire schemas and stored forms are

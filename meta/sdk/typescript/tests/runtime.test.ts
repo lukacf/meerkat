@@ -17,6 +17,7 @@ import {
   NotConnectedError,
   RpcError,
   TransportError,
+  ContractMismatchError,
 } from "../dist/index.js";
 import type { AgentEvent } from "../dist/index.js";
 import { runtimeConfig } from "./runtime-config.js";
@@ -3230,6 +3231,21 @@ describe("MobHandle.workgraphCreate()", () => {
 });
 
 describe("MobHandle.workgraphUpdate()", () => {
+  it("finish-by update sends exact tags and returns the gateway field", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    const value = "2030-01-02T03:04:05Z";
+    setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: value } }));
+    const set = await handle.workgraphUpdate("work_1", 3, { finishBy: { op: "set", value } });
+    assert.equal(set.finishBy, value);
+    assert.deepEqual(calls[0], { method: "meta/workgraph/update", params: { id: "work_1", expected_revision: 3, finish_by: { op: "set", value } } });
+    setResponse(() => ({ item: WG_ITEM_WIRE }));
+    const cleared = await handle.workgraphUpdate("work_1", 4, { finishBy: { op: "clear" } });
+    assert.equal(cleared.finishBy, null);
+    assert.deepEqual(calls[1].params, { id: "work_1", expected_revision: 4, finish_by: { op: "clear" } });
+    // A legacy gateway's ignored mutation must not look successful.
+    await assert.rejects(handle.workgraphUpdate("work_1", 5, { finishBy: { op: "set", value } }), ContractMismatchError);
+  });
+
   it("sends id/expected_revision plus converted options", async () => {
     const { handle, calls, setResponse } = createMockRuntime();
     setResponse(() => ({ item: WG_ITEM_WIRE }));
@@ -3246,6 +3262,63 @@ describe("MobHandle.workgraphUpdate()", () => {
       labels: [],
     });
     assert.equal(result.id, "work_1");
+  });
+});
+
+describe("MobHandle finish-by verification", () => {
+  for (const operation of ["create", "goal-create", "set", "clear"] as const) {
+    it(`finish-by ${operation} raises when the gateway ignores it`, async () => {
+      const { handle, calls, setResponse } = createMockRuntime();
+      const value = "2030-01-02T03:04:05.123456789Z";
+      setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: operation === "clear" ? value : null }, attention: WG_ATTENTION_WIRE }));
+      const result = operation === "create"
+        ? handle.workgraphCreate("Target", { finishBy: value })
+        : operation === "goal-create"
+          ? handle.workgraphGoalCreate("Target", { kind: "session", sessionId: "session_1" }, { finishBy: value })
+          : handle.workgraphUpdate("work_1", 1, { finishBy: operation === "clear" ? { op: "clear" } : { op: "set", value } });
+      await assert.rejects(result, ContractMismatchError);
+      assert.equal(calls.length, 1);
+    });
+  }
+
+  it("finish-by preserves nanoseconds and accepts equivalent timezone/fraction spellings", async () => {
+    const { handle, setResponse } = createMockRuntime();
+    const value = "2030-01-02T04:04:05.123456789+01:00";
+    const echoed = "2030-01-02T03:04:05.123456789Z";
+    setResponse(() => ({ item: { ...WG_ITEM_WIRE, title: "Concurrent title", revision: 99, finish_by: echoed }, attention: WG_ATTENTION_WIRE }));
+    assert.equal((await handle.workgraphCreate("Target", { finishBy: value })).finishBy, echoed);
+    assert.equal((await handle.workgraphGoalCreate("Target", { kind: "session", sessionId: "session_1" }, { finishBy: value })).item.finishBy, echoed);
+    assert.equal((await handle.workgraphUpdate("work_1", 1, { finishBy: { op: "set", value } })).finishBy, echoed);
+    setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: "2030-01-02T03:04:05.1200Z" } }));
+    await handle.workgraphUpdate("work_1", 1, { finishBy: { op: "set", value: "2030-01-02T03:04:05.12+00:00" } });
+    setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: "2030-01-02T03:04:05.123456788Z" } }));
+    await assert.rejects(handle.workgraphUpdate("work_1", 1, { finishBy: { op: "set", value } }), ContractMismatchError);
+    setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: 42 } }));
+    await assert.rejects(handle.workgraphUpdate("work_1", 1, { finishBy: { op: "clear" } }), ContractMismatchError);
+  });
+
+  it("finish-by absence and null Keep do not assert an unrequested target", async () => {
+    const { handle, setResponse } = createMockRuntime();
+    const value = "2030-01-02T03:04:05Z";
+    setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: value } }));
+    assert.equal((await handle.workgraphUpdate("work_1", 1)).finishBy, value);
+    assert.equal((await handle.workgraphUpdate("work_1", 2, { finishBy: null })).finishBy, value);
+  });
+
+  it("finish-by accepts Chrono-normalized relaxed forms and signed years", async () => {
+    const { handle, setResponse } = createMockRuntime();
+    for (const [value, echoed] of [
+      ["2030- 1-2 3:4:5.1200000009 UTC", "2030-01-02T03:04:05.120Z"],
+      ["0000-01-02T01:02:03.4+01:00", "0000-01-02T00:02:03.400Z"],
+      ["0000-01-01T00:30:00+01:00", "-0001-12-31T23:30:00Z"],
+      ["2000-03-01T00:30:00+01:00", "2000-02-29T23:30:00Z"],
+      ["1900-03-01T00:30:00+01:00", "1900-02-28T23:30:00Z"],
+      ["+10000-01-02T01:02:03.1234567899+0100", "+10000-01-02T00:02:03.123456789Z"],
+      ["2016-12-31T23:59:60Z", "2016-12-31T23:59:60+00:00"],
+    ]) {
+      setResponse(() => ({ item: { ...WG_ITEM_WIRE, finish_by: echoed } }));
+      assert.equal((await handle.workgraphUpdate("work_1", 1, { finishBy: { op: "set", value } })).finishBy, echoed);
+    }
   });
 });
 

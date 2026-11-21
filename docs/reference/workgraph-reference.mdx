@@ -87,6 +87,8 @@ target through older writers. An older server can ignore the new field and
 still report success, so a caller that needs the target compares the returned
 `finish_by` with what it asked for.
 
+Meta SDK create, goal-create, and explicit set/clear helpers compare only the returned `finish_by` with the requested target and raise `ContractMismatchError` if it is not confirmed, without retrying; the mutation may already have committed.
+
 Keyed create includes the encoded `finish_by` in its request identity. Repeating
 the same key and value replays the existing item; changing, adding, or removing
 the value conflicts without a write. A request without this value keeps its

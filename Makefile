@@ -582,7 +582,8 @@ machine-codegen: xtask-build
 # does not fit any local or CI budget. MACHINE_VERIFY_PART runs one part of
 # the lane: machine-verify (the bounded adaptive witness, then
 # `machine-verify --all` with those skips) or one audit shard
-# (audits-a..audits-o, audits-q..audits-z); without it every part runs.
+# (audits-a..audits-o, audits-q..audits-z, audits-aa, audits-ab); without it
+# every part runs.
 # Nightly runs the machine-verify part, and ci.yml's tlc-audits job runs the
 # audit shards on every machine-authority change.
 machine-verify: xtask-build

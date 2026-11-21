@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-z
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-z|audits-aa|audits-ab
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -30,10 +30,12 @@ set -euo pipefail
 #   audits-x        hand-written audit shard X
 #   audits-y        hand-written audit shard Y
 #   audits-z        hand-written audit shard Z
+#   audits-aa       hand-written audit shard AA
+#   audits-ab       hand-written audit shard AB
 #   all             every part (the default: `make machine-verify` without
 #                   MACHINE_VERIFY_PART, and the release gate); the nightly
 #                   bounded TLC job runs the machine-verify part only
-# Bazel runs the twenty-six parts as separate targets
+# Bazel runs the twenty-eight parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
 # machine_verify_audits_d_tlc_test, machine_verify_audits_e_tlc_test,
@@ -46,14 +48,15 @@ set -euo pipefail
 # machine_verify_audits_s_tlc_test, machine_verify_audits_t_tlc_test,
 # machine_verify_audits_u_tlc_test, machine_verify_audits_v_tlc_test,
 # machine_verify_audits_w_tlc_test, machine_verify_audits_x_tlc_test,
-# machine_verify_audits_y_tlc_test, machine_verify_audits_z_tlc_test) so the
+# machine_verify_audits_y_tlc_test, machine_verify_audits_z_tlc_test,
+# machine_verify_audits_aa_tlc_test, machine_verify_audits_ab_tlc_test) so the
 # BuildBuddy machine-authority lane runs them in parallel; together they are
-# exactly `all`. CI's tlc-audits job runs the twenty-five audit shards, one
+# exactly `all`. CI's tlc-audits job runs the twenty-seven audit shards, one
 # job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x|audits-y|audits-z) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x|audits-y|audits-z|audits-aa|audits-ab) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -62,13 +65,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-z may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o, audits-q..audits-z, audits-aa or audits-ab may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-z) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-z, audits-aa, audits-ab) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-z, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-z, audits-aa, audits-ab, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -262,14 +265,13 @@ fi
 # settlement and an abandon that keep it, a hold that ignores the input's
 # phase, a release that clears every hold, a resume that ignores the
 # destination and a resume that keeps the previous staged run and context.
-# 14 steps reach every witness. It runs in shard audits-h, with the
-# instruction boundary audit and the superseded-ack retention audit below.
+# 14 steps reach every witness. It runs in shard audits-aa.
 input_controller_hold_audit="${workspace_root}/specs/machines/meerkat_machine/input_controller_hold_audit.sh"
 if [[ ! -x "${input_controller_hold_audit}" ]]; then
   echo "error: input controller hold audit runner is missing from workspace runfiles: ${input_controller_hold_audit}" >&2
   exit 1
 fi
-if run_part audits-h; then
+if run_part audits-aa; then
   echo "running bounded input controller hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${input_controller_hold_audit}" "${INPUT_CONTROLLER_HOLD_AUDIT_MAX_STEPS:-14}" --mutants
 fi
@@ -623,13 +625,13 @@ fi
 # extension never opens a name and is taken only for a gated server, and the
 # gated stage stages only a gated server. It requires ten witnesses reached
 # and refuses nine seeded defects (--mutants). 5 steps reach every witness.
-# It runs in shard audits-s.
+# It runs in shard audits-ab.
 tool_grant_gate_audit="${workspace_root}/specs/machines/meerkat_machine/tool_grant_gate_audit.sh"
 if [[ ! -x "${tool_grant_gate_audit}" ]]; then
   echo "error: tool grant gate audit runner is missing from workspace runfiles: ${tool_grant_gate_audit}" >&2
   exit 1
 fi
-if run_part audits-s; then
+if run_part audits-ab; then
   echo "running bounded tool grant gate TLC audit"
   TLC_WORKERS="${tlc_workers}" "${tool_grant_gate_audit}" "${TOOL_GRANT_GATE_AUDIT_MAX_STEPS:-5}" --mutants
 fi
@@ -723,7 +725,7 @@ if [[ ! -x "${generation_highwater_audit}" ]]; then
   echo "error: generation high-water audit runner is missing from workspace runfiles: ${generation_highwater_audit}" >&2
   exit 1
 fi
-if run_part audits-r; then
+if run_part audits-aa; then
   echo "running bounded generation high-water TLC audit"
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
 fi
@@ -742,13 +744,13 @@ fi
 # carried decisions). It requires its four witnesses reached and refuses
 # fourteen seeded defects (--mutants), each by its target property alone.
 # 6 steps reach every witness and mutant.
-# It runs in shard audits-r.
+# It runs in shard audits-aa.
 grant_custody_end_audit="${workspace_root}/specs/machines/grant_authority/custody_end_audit.sh"
 if [[ ! -x "${grant_custody_end_audit}" ]]; then
   echo "error: grant custody end audit runner is missing from workspace runfiles: ${grant_custody_end_audit}" >&2
   exit 1
 fi
-if run_part audits-r; then
+if run_part audits-aa; then
   echo "running bounded grant custody end TLC audit"
   TLC_WORKERS="${tlc_workers}" "${grant_custody_end_audit}" "${GRANT_CUSTODY_END_AUDIT_MAX_STEPS:-6}" --mutants
 fi
@@ -1260,8 +1262,8 @@ fi
 # opposed to one the host declared) are recorded by the boot's scan of the
 # identity store's created entry rows, which the ci profile cannot reach
 # either. A hand-written audit over the same generated model
-# (created_identity_audit.tla, shards audits-q, audits-r and audits-t
-# through audits-v) checks
+# (created_identity_audit.tla, shards audits-q, audits-r, audits-t
+# through audits-v and audits-ab) checks
 # eighteen runs over their whole reachable space, in three parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
@@ -1365,12 +1367,12 @@ if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
   exit 1
 fi
-# Its runs are split over five shards (sized below): the recovery part's
+# Its runs are split over six shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
 # audits-v; the changes part's admit, commit, update and adoption runs and
 # the doors part's doors run in audits-r, its archive, unlist, placement,
-# recovered and edges runs in audits-t, and its removal, preparation,
-# prepverdicts and cycle runs in audits-u.
+# recovered and edges runs in audits-t, its removal, preparation and
+# prepverdicts runs in audits-u, and its cycle run in audits-ab.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
@@ -1395,7 +1397,7 @@ if run_part audits-u; then
   echo "running bounded created identity preparations TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part preparation,prepverdicts
 fi
-if run_part audits-u; then
+if run_part audits-ab; then
   echo "running bounded created identity downgrade cycle TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part cycle
 fi
@@ -1707,7 +1709,11 @@ run_machine_verify() {
 # activation-body retirement audit with --mutants 15-23, and the
 # ScheduleLifecycleMachine superseded-ack retention audit with --mutants
 # 7-11: 389-445 s before the delivery audit's fork run, which adds about
-# 135-190 s (the shard is not measured again with it);
+# 135-190 s. On pull-request runs 44819129634 and 44838991962 the shard
+# took 756 s and 1062 s: the delivery audit 515 s and 737 s, the input
+# controller hold audit 142 s and 196 s, the other three 68 s and 100 s.
+# The input controller hold audit moved to audits-aa: about 610-865 s, and
+# about 890 s at the pace of the shard's slowest run (1089 s);
 # audits-i = member residency's witness runs (--part witnesses), alone: the
 # audit 346-542, the shard 357-565 s;
 # audits-j = the durable decision audit's whole-space run (--part space),
@@ -1724,6 +1730,16 @@ run_machine_verify() {
 # from those runs' times (252 s locally). Eight of the
 # twenty-two witnesses are 7 or 8 states deep and search most of the space
 # (38-176 s each); the others take 2-7 s;
+# audits-aa = the generation high-water audit and the GrantAuthorityMachine
+# custody end audit, from audits-r, and the input controller hold audit,
+# from audits-h: 387 s and 499 s of those shards on pull-request runs
+# 44819129634 and 44838991962, so about 410-520 s, and about 605 s at the
+# pace of those shards' slowest runs (298 s locally with 4 TLC
+# workers);
+# audits-ab = the created identity runner's downgrade cycle run, from
+# audits-u, and the scoped tool grant gate audit, from audits-s: 429 s
+# and 461 s of those shards on those runs, so about 450-480 s, and about
+# 680 s at the pace of those shards' slowest runs (337 s locally);
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, each alone: apply 384-460 (the shard
 # 396-484 s), legacy 596-726 (605-751 s), roles 563-740 (604-745 s, and
@@ -1770,7 +1786,11 @@ run_machine_verify() {
 # doors run with --mutants (52 s locally with 4 TLC workers, up to about
 # 200 s hosted): about 740-1015 s (475 s locally), past the 720 s target
 # below. The retained-run settle audit and the scoped tool grant gate
-# audit (0.9.11) moved to audits-b and audits-s;
+# audit (0.9.11) moved to audits-b and audits-s. On pull-request runs
+# 44819129634, 44838991962 and 43650149872 the shard took 842 s, 1010 s
+# and 1271 s: its created identity runs 561 s, 670 s and 868 s, the custody
+# end audit 148 s, 188 s and 240 s, the generation high-water audit 97 s,
+# 115 s and 138 s. Those two audits moved to audits-aa: about 580-890 s;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s, plus the requester
@@ -1782,7 +1802,13 @@ run_machine_verify() {
 # locally), past the 720 s target below. The 0.9.11 lease fixes grew the
 # source-credential publication audit to 797 s locally (the shard 1111 s,
 # and 3072 s on main push 42552143103) until the auth CI profile sampled
-# the restores' unread fields: 87 s, the shard 396 s locally;
+# the restores' unread fields: 87 s, the shard 396 s locally. On
+# pull-request runs 44819129634 and 44838991962 the shard took 681 s and
+# 826 s: the requester batch audit 308 s and 390 s, the tool grant gate
+# audit 193 s and 223 s, the source-credential publication audit 145 s and
+# 190 s. The tool grant gate audit moved to audits-ab: about 490-605 s,
+# and about 750 s at the pace of the shard's slowest run since that
+# sampling (1049 s);
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
 # the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
 # (eleven runs, not yet measured hosted; the empty-resume residency audit's
@@ -1793,7 +1819,13 @@ run_machine_verify() {
 # grant expiry audit with --mutants 13-16 (the shard 228-264 s), and the
 # removal run, from audits-s: about 454-497 s, and its downgrade cycle run
 # (0.9.11; 97 s locally with 4 TLC workers, about 110-160 s at that
-# factor): about 565-660 s;
+# factor): about 565-660 s. On pull-request runs 44819129634 and
+# 44838991962 the shard took 752 s and 742 s: the downgrade cycle run
+# 236 s and 238 s, the preparation runs 177 s and 179 s, the removal run
+# 173 s and 177 s, the host store writer fence audit 81 s and 79 s, the
+# tool grant expiry audit 47 s and 46 s. The downgrade cycle run moved to
+# audits-ab: about 505-515 s, and about 790 s at the pace of the shard's
+# slowest run (1152 s);
 # audits-v = its reseat and names runs: 500-665, the shard 525-690 s.
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran

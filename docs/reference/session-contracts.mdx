@@ -1376,8 +1376,8 @@ boundary of the same run. If the run ends first (the model answered without
 another tool call), or the boundary refuses Session writes (structured-output
 extraction), the input takes the ordinary follow-up turn, which writes the same
 transcript rows. It keeps its admitted `steer` lane, so the runtime serves it
-first after the run, ahead of queued work. Exactly one of the two paths writes
-them:
+first after the run, ahead of queued work. Only one path contributes the rows
+to retained history:
 
 - The input joins the running run as a late contributor before its payload
   reaches the runner. Persistent runtimes make that binding durable first.
@@ -1408,15 +1408,16 @@ not inclusion in a request: the cutoff below decides that, and a steer that
 is not eligible keeps its own path (the delivery classes above and the
 follow-up turn are unchanged). The oldest waiting steer holds
 the boundary's one claim. Once the runner has parked at the boundary, the
-runtime joins that steer and every durable steer behind it in the lane to the
-run, each join durable on a persistent runtime, and then publishes the claim.
-That publication is the cutoff of the request: one step under the session
-mutation gate, before the runner writes the rows and composes the request.
-Admission and recall take the same gate, so each is ordered before or after
-the cutoff. A steer admitted before it, also one admitted after the runner
-parked, joins this request. A steer admitted after it is retained, registers
-for the next boundary of the run and joins the request after this one. No
-model request in flight is cancelled for a steer.
+runtime joins that steer and the eligible prefix of the durable steers behind
+it in the lane to the run, each join durable on a persistent runtime, and
+then publishes the claim. Where a claim is registered, that publication is
+the cutoff of the request: one step under the session mutation gate, before
+the runner writes the rows and composes the request. Admission and recall
+take the same gate, so each is ordered before or after the cutoff. A steer
+admitted before it, also one admitted after the runner parked, joins this
+request when it is in the eligible prefix. A steer admitted after it is
+retained and waits for the next eligible boundary of the run or for the
+follow-up turn. No model request in flight is cancelled for a steer.
 
 The request's input is fixed in one of two ways. At a boundary with no
 durable steer (none has registered with it, or the runner is parked there on

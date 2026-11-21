@@ -63,10 +63,13 @@ them.
   instead not applied, preserving the existing level or provider default.
   Long decode is not added.
 - Optional, nonoperative `finish_by` item data is preserved by create, read,
-  event replay, realm copying and the generated SDK types. It is not a
-  readiness, claim, ordering, attention-authority or wake rule. Setting or
-  clearing it advances the item revision, so an older attention projection
-  becomes stale. The existing `due_at` remains activation eligibility; its
+  event replay, realm copying and the generated SDK types. It gates no
+  readiness, claim, order, wake or close; a keyed create's identity covers it
+  (see the keyed create entry below). It changes no attention authority.
+  Setting or clearing it advances the item revision, so an older attention
+  projection becomes stale. An item in a terminal status takes no update, so
+  its target cannot be set or cleared there. The existing `due_at` remains
+  activation eligibility; its
   omitted/null update semantics are unchanged and existing dates cannot be
   cleared today.
 - `rkat workgraph goal-create --finish-by <RFC3339>` sets the target; item output

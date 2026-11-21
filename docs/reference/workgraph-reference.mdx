@@ -53,8 +53,10 @@ future. Passing the gates still requires the machine's other readiness
 conditions, including status, claims, dependencies, and child joins. Ready
 items are ordered by priority, creation time, and id.
 
-`finish_by` records when the work is intended to finish. It does not affect
-readiness, claimability, ordering, attention authority, or wakeups. An otherwise ready
+`finish_by` records when the work is intended to finish. It gates no
+readiness, claim, order, wake or close; a keyed create's identity covers it,
+as the last paragraph of this section describes. It changes no attention
+authority. An otherwise ready
 item with only a future `finish_by` remains ready. Passing that target does
 not create an overdue fact or close the item. Use Schedule when an agent
 needs a timed wakeup.
@@ -67,7 +69,8 @@ admitted update advances the revision and emits the existing `updated` event,
 including when it sets the same value or clears an already absent target.
 The revision change makes any older attention projection stale; the attention
 authority and readiness rules stay the same. Malformed update values are refused
-before a write.
+before a write. An item in a terminal status (`completed`, `cancelled`,
+`failed`) takes no update, so its target cannot be set or cleared there.
 
 | `finish_by` in a `workgraph_update` request | Effect |
 |------------------------------------------|--------|

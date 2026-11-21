@@ -142,8 +142,9 @@ The date fields answer two separate questions. `due_at`, `not_before`, and
 item out of ready work and prevents a claim. Despite its name, `due_at` is an
 activation gate. Passing it still requires the other readiness conditions.
 
-`finish_by` records an intended completion time. It can be set or cleared
-without changing readiness, claimability, priority order, or attention authority. For
+`finish_by` records an intended completion time. It gates no readiness,
+claim, order, wake or close; a keyed create's identity covers it. It changes
+no attention authority. For
 example, an open item with a target of Friday is ready on Monday if it has no
 activation gate or unresolved dependency. Reaching Friday emits no overdue
 fact and wakes no agent; Schedule owns timed wakeups.

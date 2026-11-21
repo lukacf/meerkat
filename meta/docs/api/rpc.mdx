@@ -4156,6 +4156,13 @@ gate and every check; Meta keeps no grant state.
 The methods serve the identities the gateway's identity runtime knows, on the
 stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
 
+A grant-gated member can see `request_tool_grant` even when the host does
+not accept grant requests from agents. On the stock Meta 0.9.17 gateway,
+a call then returns the tool error `this host takes no tool grant requests`.
+It does not open an approval request or issue a grant. If the operator
+approves access, the SDK host or an authorized Console caller can issue a
+scoped grant with `meta/tool_grants/grant`, described below.
+
 ### `meta/tool_grants/grant`
 
 ```json

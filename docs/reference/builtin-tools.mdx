@@ -76,7 +76,7 @@ may apply explicit presets of their own.
 | `meerkat_schedule_delete` | Schedule | Yes | `schedule` | Delete a schedule |
 | `meerkat_schedule_occurrences` | Schedule | Yes | `schedule` | List a page of occurrence summaries for a schedule (optional exact id, due range, phase, `limit` / `cursor`, full view) |
 | `workgraph_create` | WorkGraph | No | `work_graph` | Create a work item |
-| `workgraph_get` | WorkGraph | No | `work_graph` | Read one item |
+| `workgraph_get` | WorkGraph | No | `work_graph` | Read one item; optionally page recent evidence with `evidence_limit` and `evidence_cursor` |
 | `workgraph_list` | WorkGraph | No | `work_graph` | List items |
 | `workgraph_ready` | WorkGraph | No | `work_graph` | List ready items |
 | `workgraph_snapshot` | WorkGraph | No | `work_graph` | Read an observability snapshot |
@@ -761,7 +761,7 @@ attention controls.
 | Tool | Purpose |
 |------|---------|
 | `workgraph_create` | Create a durable work item |
-| `workgraph_get` | Read one item |
+| `workgraph_get` | Read one item in full; opt into recent evidence with `evidence_limit` (1 through 20), then continue with `evidence_cursor` from `evidence_page.next_cursor` |
 | `workgraph_list` | List items with filters |
 | `workgraph_ready` | List machine-derived ready items |
 | `workgraph_snapshot` | Read items, edges, ready ids, timestamp, and event high-water mark |
@@ -779,6 +779,12 @@ attention controls.
 For operating guidance, load the `workgraph-workflow` companion skill when it
 is available. For the data model and host observability surfaces, see
 [WorkGraph reference](/reference/workgraph-reference).
+
+The public MCP server exposes the same tool definition: its description and
+input schema include these evidence options for every caller. Omitting both
+preserves the full-item answer. Only the returned entry count is bounded;
+any item revision change refuses continuation, so a busy item's caller may
+need to restart or read the whole item. Each page checks access again.
 </Accordion>
 
 ## Task tools

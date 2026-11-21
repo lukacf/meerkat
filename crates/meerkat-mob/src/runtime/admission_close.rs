@@ -108,6 +108,31 @@ pub enum CloseIfIdleOutcome {
     Busy(MobBusy),
 }
 
+/// Answer of [`MobHandle::observe_idle`](super::MobHandle::observe_idle):
+/// what one observation on the actor's serialized admission path found, the
+/// same facts an idle close is decided on. Nothing is decided by it and
+/// nothing is closed, held or reserved: the mob may be busy again, or
+/// closed, when the caller next acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MobIdleObservation {
+    /// What was in flight. The counts are diagnostic: their categories
+    /// overlap, and the native work of the members' sessions is read only
+    /// when the actor's own counts are idle.
+    pub busy: MobBusy,
+    /// Why the mob's admission is closed, when it is. A mob whose admission
+    /// is closed takes no new work, whatever `busy` says.
+    pub admission_closed: Option<MobAdmissionCloseReason>,
+}
+
+impl MobIdleObservation {
+    /// Whether the observation found nothing in flight and admission open:
+    /// the mob an idle close would have closed at that instant.
+    pub fn is_idle(&self) -> bool {
+        self.busy.is_idle() && self.admission_closed.is_none()
+    }
+}
+
 /// Owner presence and the Closing state of one mob, shared by its handles and
 /// its actor. The actor writes `closed`, and so does the actor task's end
 /// guard, only once the actor future has stopped (a lost task); every write
@@ -235,6 +260,19 @@ impl MobOwnership {
         }
         state.closed = Some(reason);
         CloseDecision::Closed { reason, busy }
+    }
+
+    /// Read what a close is decided on, and decide nothing: `busy` with the
+    /// foreground leases, and why admission is closed when it is, both under
+    /// the ownership lock. The root owner is not a busy term, as it is none
+    /// for an idle close. Nothing is written.
+    pub(super) fn observe(&self, mut busy: MobBusy) -> MobIdleObservation {
+        let state = self.lock();
+        busy.foreground_owners = state.leases;
+        MobIdleObservation {
+            busy,
+            admission_closed: state.closed,
+        }
     }
 
     fn release(&self, kind: OwnerKind) {

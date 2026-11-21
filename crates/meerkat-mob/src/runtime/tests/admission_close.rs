@@ -1310,6 +1310,157 @@ async fn native_accepted_but_held_work_keeps_the_mob_busy() {
     assert!(closed.is_ok(), "the mob closes once the held turn ends");
 }
 
+/// Observe the mob until it reads idle, within the step bound: work that a
+/// spawn or a turn leaves behind drains on the actor's own loop.
+async fn observed_idle(handle: &MobHandle) -> crate::MobIdleObservation {
+    let waited = tokio::time::timeout(STEP, async {
+        loop {
+            let observed = handle.observe_idle().await.expect("observe");
+            if observed.is_idle() {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let Ok(observed) = waited else {
+        panic!(
+            "the mob did not read idle: {:?}",
+            handle.observe_idle().await
+        );
+    };
+    observed
+}
+
+/// An observation reads what an idle close is decided on and closes
+/// nothing: a mob that reads idle still admits work, a spawn in flight
+/// reads busy with the counts the close would answer, and after a close
+/// the observation names why admission is closed.
+#[tokio::test]
+async fn an_idle_observation_reads_what_a_close_would_find_and_closes_nothing() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let idle = handle.observe_idle().await.expect("observe an idle mob");
+    assert!(idle.is_idle(), "{idle:?}");
+    assert!(
+        handle.admission_closed().borrow().is_none(),
+        "the observation closed nothing"
+    );
+
+    let (release, mut entered) = hold_spawn_entered("d67-observed");
+    let spawn = enqueue_spawn(&handle, "d67-observed").await;
+    spawn_entered(&mut entered).await;
+    let busy = handle.observe_idle().await.expect("observe a busy mob");
+    assert!(
+        !busy.is_idle() && busy.admission_closed.is_none(),
+        "a spawn in flight reads busy: {busy:?}"
+    );
+    match handle.close_if_idle().await.expect("close if idle") {
+        CloseIfIdleOutcome::Busy(found) => assert_eq!(
+            found, busy.busy,
+            "the observation read what the close is decided on"
+        ),
+        other => panic!("a spawn in flight keeps the mob busy, got {other:?}"),
+    }
+    release.add_permits(1);
+    reply(spawn).await.expect("the held spawn completes");
+
+    let idle = observed_idle(&handle).await;
+    assert!(
+        handle.admission_closed().borrow().is_none(),
+        "no observation closed admission: {idle:?}"
+    );
+    handle
+        .spawn_spec(worker_spec("d67-after-observation"))
+        .await
+        .expect("a mob that was observed idle still admits work");
+
+    observed_idle(&handle).await;
+    assert_eq!(
+        handle.close_if_idle().await.expect("close if idle"),
+        CloseIfIdleOutcome::Closed
+    );
+    let closed = handle.observe_idle().await.expect("observe a closed mob");
+    assert_eq!(
+        closed.admission_closed,
+        Some(MobAdmissionCloseReason::IdleClose)
+    );
+    assert!(
+        !closed.is_idle(),
+        "a mob whose admission is closed does not read idle: {closed:?}"
+    );
+}
+
+/// An observation counts the foreground owner leases and takes none: a
+/// lease reads busy while it is held, the mob reads idle once it is
+/// dropped, with the launched handle still held, and nothing closed.
+#[tokio::test]
+async fn an_idle_observation_counts_a_foreground_lease_and_takes_none() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let lease = handle.acquire_owner().expect("an owner lease");
+    let held = handle.observe_idle().await.expect("observe under a lease");
+    assert_eq!(held.busy.foreground_owners, 1, "{held:?}");
+    assert!(!held.is_idle(), "{held:?}");
+    let again = handle.observe_idle().await.expect("observe again");
+    assert_eq!(
+        again.busy.foreground_owners, 1,
+        "an observation takes no lease of its own: {again:?}"
+    );
+
+    drop(lease);
+    let released = handle
+        .observe_idle()
+        .await
+        .expect("observe after the release");
+    assert!(released.is_idle(), "{released:?}");
+    assert!(
+        handle.admission_closed().borrow().is_none(),
+        "the launched handle still owns the mob: nothing closed"
+    );
+}
+
+/// An observation reads the native work a member's session holds: a turn
+/// that is accepted and held at its start reads busy, and the mob reads
+/// idle once the turn has ended. Admission stays open throughout.
+#[tokio::test]
+async fn an_idle_observation_reads_native_accepted_work() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("d67-observed-held");
+    // The lead profile is externally addressable, so it takes direct turns.
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("lead"), identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn turn-driven lead");
+
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
+    let entered_before = *held.borrow_and_update();
+    handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .send("hold this turn", HandlingMode::Queue)
+        .await
+        .expect("the turn is admitted");
+    tokio::time::timeout(STEP, held.wait_for(|entries| *entries > entered_before))
+        .await
+        .expect("the turn enters the hold")
+        .expect("held-turn signal");
+
+    let busy = handle.observe_idle().await.expect("observe a held turn");
+    assert!(busy.busy.runs >= 1 && !busy.is_idle(), "{busy:?}");
+
+    service.release_held_start_turns();
+    observed_idle(&handle).await;
+    assert!(
+        handle.admission_closed().borrow().is_none(),
+        "no observation closed admission"
+    );
+}
+
 #[test]
 fn live_control_is_classified_by_verb() {
     use super::super::bridge_protocol::BridgeLiveControlVerb;

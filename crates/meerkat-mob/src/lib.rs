@@ -407,7 +407,7 @@ pub use runtime::{
     MemberGrantMintRequest, NotAdoptableReason, OwnedEdgeEndOutcome, PurgeRefusedReason,
     StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
-pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
+pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy, MobIdleObservation};
 pub use runtime::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,

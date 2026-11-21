@@ -6842,6 +6842,32 @@ impl MobHandle {
         self.admission_closed_rx.clone()
     }
 
+    /// Observe whether the mob is idle, and decide nothing. The actor reads,
+    /// on its serialized admission path, the facts an idle close
+    /// ([`Self::close_if_idle`]) is decided on: what is in flight, the
+    /// foreground owner leases, and why admission is closed when it is.
+    /// Nothing is closed, no owner is taken and nothing is waited for: a
+    /// mob that reads idle may be busy, or closed, when the caller next
+    /// acts, and a command the actor admits after the observation is
+    /// admitted as before.
+    ///
+    /// The observation covers the mob's own admission and nothing outside
+    /// it: a schedule that is due, a delivery another owner holds for one
+    /// of its members, and the mobs its members created are not in it. The
+    /// counts are diagnostic. The native work of the members' sessions
+    /// (accepted inputs that are queued, held or running) is read only
+    /// when the actor's own counts are idle, for the members that have a
+    /// bridge session in this process, and reads as none in a build
+    /// without the runtime adapter. The step between the actor's delivery
+    /// of a peer message and the member's accepted input is not traced for
+    /// it.
+    pub async fn observe_idle(
+        &self,
+    ) -> Result<super::admission_close::MobIdleObservation, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ObserveIdle { reply_tx })
+            .await?
+    }
+
     /// Close admission if the mob is idle (D67). The actor decides on its
     /// serialized admission path, in the same step that closes: a command it
     /// admitted earlier makes the mob busy, and a mutating command it

@@ -25,6 +25,9 @@ struct RegistrationLag {
     released: AtomicUsize,
     /// Durable preparations handed on to the coordinator, held or not.
     forwarded: AtomicUsize,
+    /// While set, a held preparation that is let go fails at the handle
+    /// instead of reaching the coordinator.
+    refuses: AtomicBool,
 }
 
 impl RegistrationLag {
@@ -103,6 +106,13 @@ impl CoreExecutorBoundaryHandle for LaggingRegistrationBoundaryHandle {
             meerkat_core::TurnBoundaryDelivery::DurableAppends(_)
         ) {
             self.lag.hold().await;
+            if self.lag.refuses.load(Ordering::SeqCst) {
+                return Err(
+                    meerkat_core::lifecycle::CoreBoundaryStageError::unavailable(
+                        "the boundary handle failed before the coordinator saw the delivery",
+                    ),
+                );
+            }
             // The coordinator registers the delivery in the first poll of
             // the call below, in this same poll of this task.
             self.lag.forwarded.fetch_add(1, Ordering::SeqCst);
@@ -289,12 +299,45 @@ async fn finish_without_a_follow_up(rig: &DurableSteerRig, delivered: &[InputId]
     );
 }
 
+/// The door an input is admitted through.
+#[derive(Clone, Copy)]
+enum AdmissionDoor {
+    /// `accept_input_with_completion`.
+    AcceptWithCompletion,
+    /// The control plane's `ingest`.
+    ControlPlaneIngest,
+}
+
+async fn admit_through(rig: &DurableSteerRig, door: AdmissionDoor, input: Input) {
+    match door {
+        AdmissionDoor::AcceptWithCompletion => {
+            rig.admit(input).await;
+        }
+        AdmissionDoor::ControlPlaneIngest => {
+            let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::traits::RuntimeControlPlane::ingest(
+                    rig.adapter.as_ref(),
+                    &runtime_id,
+                    input,
+                ),
+            )
+            .await
+            .expect("an ingest answers without waiting for a boundary")
+            .expect("steer input ingested");
+            assert!(outcome.is_accepted());
+        }
+    }
+}
+
 /// The first steer, with nobody holding the boundary. Its admission is
 /// acknowledged, its preparation has not registered, and the runner reaches
 /// the boundary. The request the runner makes next carries the steer.
 async fn acknowledged_first_steer_is_in_the_next_request(
     rig: DurableSteerRig,
     lag: Arc<RegistrationLag>,
+    door: AdmissionDoor,
 ) {
     rig.start_busy_turn().await;
     rig.script
@@ -304,7 +347,7 @@ async fn acknowledged_first_steer_is_in_the_next_request(
     let steer = peer_steer("acknowledged payload");
     let steer_id = steer.id().clone();
     // The admission answers its caller here.
-    rig.admit(steer).await;
+    admit_through(&rig, door, steer).await;
     lag.wait_held(1).await;
     assert!(
         !rig.state.has_waiting_delivery_for_test(),
@@ -337,13 +380,15 @@ async fn acknowledged_first_steer_is_in_the_next_request(
 #[tokio::test]
 async fn acknowledged_first_steer_whose_registration_lags_is_in_the_next_request() {
     let (rig, lag) = ephemeral_lagging_rig().await;
-    acknowledged_first_steer_is_in_the_next_request(rig, lag).await;
+    acknowledged_first_steer_is_in_the_next_request(rig, lag, AdmissionDoor::AcceptWithCompletion)
+        .await;
 }
 
 #[tokio::test]
 async fn persistent_acknowledged_first_steer_whose_registration_lags_is_in_the_next_request() {
     let (rig, lag) = persistent_lagging_rig().await;
-    acknowledged_first_steer_is_in_the_next_request(rig, lag).await;
+    acknowledged_first_steer_is_in_the_next_request(rig, lag, AdmissionDoor::AcceptWithCompletion)
+        .await;
 }
 
 /// A second steer is acknowledged while an older one holds the boundary for
@@ -654,4 +699,301 @@ async fn steers_acknowledged_after_the_parked_holder_was_recalled_are_in_that_re
         rig.phase(&holder_id).await,
         Some(InputLifecycleState::Abandoned)
     );
+}
+
+#[tokio::test]
+async fn acknowledged_first_steer_ingested_through_the_control_plane_is_in_the_next_request() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    acknowledged_first_steer_is_in_the_next_request(rig, lag, AdmissionDoor::ControlPlaneIngest)
+        .await;
+}
+
+async fn recall(rig: &DurableSteerRig, input_id: &InputId) {
+    let recalled = tokio::time::timeout(
+        Duration::from_secs(5),
+        rig.adapter.recall_queued_input(&rig.session_id, input_id),
+    )
+    .await
+    .expect("a recall answers without waiting for a boundary")
+    .expect("recall");
+    assert_eq!(
+        recalled,
+        Some(crate::queued_input_recall::QueuedInputRecall::Abandoned {
+            input_id: input_id.clone(),
+            attempt_count: 0,
+        })
+    );
+}
+
+/// The runner reaches its boundary and stays there for an acknowledged steer
+/// whose preparation is held. Returns the runner's step count before the
+/// step and the index of the take that step makes.
+async fn runner_waits_at_the_boundary_for_the_held_steer(rig: &DurableSteerRig) -> (usize, usize) {
+    let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
+    let takes_before = rig.script.boundary_takes().len();
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    tokio::time::sleep(RUNNER_REACHES_THE_BOUNDARY).await;
+    assert_eq!(
+        rig.script.steps_done.load(Ordering::SeqCst),
+        steps_before,
+        "the runner keeps its boundary open for the acknowledged steer"
+    );
+    (steps_before, takes_before)
+}
+
+/// An acknowledged steer is recalled before its preparation registers. The
+/// boundary the runner kept open for it ends without it: the steer is in no
+/// request, has no row and is never delivered.
+#[tokio::test]
+async fn acknowledged_steer_recalled_before_its_registration_is_in_no_request() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    lag.arm();
+    let steer = peer_steer("recalled before registration");
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    lag.wait_held(1).await;
+    let (steps_before, takes_before) = runner_waits_at_the_boundary_for_the_held_steer(&rig).await;
+
+    recall(&rig, &steer_id).await;
+    lag.release_through(1);
+    assert!(
+        wait_for_steps_done(&rig, steps_before + 1).await,
+        "the boundary ends: nothing waits for the recalled steer"
+    );
+    assert!(
+        rig.script.boundary_takes()[takes_before].is_empty(),
+        "the recalled steer reaches no request: {:?}",
+        rig.script.boundary_takes()
+    );
+    assert!(
+        rig.script.applied_durable().is_empty(),
+        "the recalled steer has no row"
+    );
+    assert_eq!(
+        rig.phase(&steer_id).await,
+        Some(InputLifecycleState::Abandoned)
+    );
+    finish_without_a_follow_up(&rig, &[]).await;
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+}
+
+/// The boundary handle fails for an acknowledged steer before the
+/// coordinator sees its delivery. The boundary the runner kept open for it
+/// ends, and the steer takes its queued follow-up turn, once.
+#[tokio::test]
+async fn acknowledged_steer_whose_preparation_fails_takes_one_follow_up() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    lag.arm();
+    let steer = peer_steer("preparation fails");
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    lag.wait_held(1).await;
+    let (steps_before, takes_before) = runner_waits_at_the_boundary_for_the_held_steer(&rig).await;
+
+    lag.refuses.store(true, Ordering::SeqCst);
+    lag.release_through(1);
+    assert!(
+        wait_for_steps_done(&rig, steps_before + 1).await,
+        "the boundary ends once the steer's work is over without a preparation"
+    );
+    assert!(rig.script.boundary_takes()[takes_before].is_empty());
+    assert_eq!(
+        rig.phase(&steer_id).await,
+        Some(InputLifecycleState::Queued)
+    );
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(
+        rig.script.primitives()[1],
+        vec![steer_id.clone()],
+        "the steer starts one follow-up turn"
+    );
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    assert!(rig.script.applied_durable().is_empty());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
+}
+
+/// Request-only context is registered for the boundary and a durable steer
+/// is acknowledged, its preparation held, when the runner reaches it. The
+/// runner does not park on the request-only context alone: the request
+/// carries both.
+#[tokio::test]
+async fn acknowledged_steer_beside_registered_request_only_context_is_in_that_request() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let context = request_only_steer("request-only context first");
+    let context_id = context.id().clone();
+    rig.admit(context).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rig.state.has_registered_request_only_delivery_for_test() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the request-only steer prepares for the open boundary");
+    lag.arm();
+    let steer = peer_steer("payload beside request-only context");
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    lag.wait_held(1).await;
+
+    let request = runner_reaches_the_boundary_before_the_registration(&rig, &lag).await;
+    assert_eq!(
+        take_ids(&request),
+        vec![steer_id.clone()],
+        "the steer was acknowledged before the request's input was fixed"
+    );
+    assert!(request[0].1.contains("payload beside request-only context"));
+    assert_eq!(*rig.script.request_only_taken.lock().unwrap(), vec![1]);
+    rig.wait_for_phase(&context_id, InputLifecycleState::Consumed)
+        .await;
+    finish_without_a_follow_up(&rig, &[steer_id]).await;
+}
+
+/// A steer is acknowledged while the model streams its last response, and
+/// its preparation is still held when the run ends with no further boundary.
+/// Nothing hangs: the steer starts one follow-up turn, and that turn's first
+/// boundary ends once the held preparation of the ended run returns.
+#[tokio::test]
+async fn acknowledged_steer_still_unregistered_when_the_run_ends_takes_one_follow_up() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    lag.arm();
+    let steer = peer_steer("run ends first");
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    lag.wait_held(1).await;
+
+    // The model answers: the run ends with the preparation still held.
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(
+        rig.script.primitives()[1],
+        vec![steer_id.clone()],
+        "the steer starts one follow-up turn"
+    );
+
+    // The follow-up turn reaches its first boundary while the ended run's
+    // preparation is still held, then that preparation is let go: it
+    // belongs to no active run and returns at once.
+    let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
+    let takes_before = rig.script.boundary_takes().len();
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    lag.release_through(1);
+    assert!(
+        wait_for_steps_done(&rig, steps_before + 1).await,
+        "the follow-up turn's boundary ends once the ended run's preparation returned"
+    );
+    assert!(rig.script.boundary_takes()[takes_before].is_empty());
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    assert!(
+        rig.script.applied_durable().is_empty(),
+        "the steer was delivered by its follow-up turn, not at a boundary"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
+}
+
+/// Two steers join one boundary; the runner then goes through the next
+/// boundary at once, with nothing to deliver. It is not held by the two
+/// steers' finished work beyond that work's own return.
+#[tokio::test]
+async fn empty_boundary_right_after_two_steers_joined_ends_promptly() {
+    let (rig, _lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let first = peer_steer("joined payload one");
+    let first_id = first.id().clone();
+    let second = peer_steer("joined payload two");
+    let second_id = second.id().clone();
+    rig.admit(first).await;
+    rig.admit(second).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert_eq!(
+        take_ids(rig.script.boundary_takes().last().expect("a take")),
+        vec![first_id.clone(), second_id.clone()]
+    );
+
+    let started = std::time::Instant::now();
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let elapsed = started.elapsed();
+    eprintln!("empty boundary right after two steers joined: {elapsed:?}");
+    assert!(
+        rig.script
+            .boundary_takes()
+            .last()
+            .expect("a take")
+            .is_empty()
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "the empty boundary ended in {elapsed:?}"
+    );
+    finish_without_a_follow_up(&rig, &[first_id, second_id]).await;
+}
+
+/// A boundary carried one steer. Another steer is acknowledged afterwards
+/// and its preparation is held when the runner reaches the following
+/// boundary: that request carries it.
+#[tokio::test]
+async fn steer_acknowledged_after_a_boundary_that_carried_another_is_in_the_following_request() {
+    let (rig, lag) = ephemeral_lagging_rig().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    let first = peer_steer("first boundary payload");
+    let first_id = first.id().clone();
+    rig.admit(first).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert_eq!(
+        take_ids(rig.script.boundary_takes().last().expect("a take")),
+        vec![first_id.clone()]
+    );
+
+    lag.arm();
+    let later = peer_steer("following boundary payload");
+    let later_id = later.id().clone();
+    rig.admit(later).await;
+    lag.wait_held(1).await;
+    let following = runner_reaches_the_boundary_before_the_registration(&rig, &lag).await;
+    assert_eq!(
+        take_ids(&following),
+        vec![later_id.clone()],
+        "the steer was acknowledged before this request's input was fixed"
+    );
+    assert!(following[0].1.contains("following boundary payload"));
+    finish_without_a_follow_up(&rig, &[first_id, later_id]).await;
 }

@@ -2446,10 +2446,13 @@ impl PendingBoundaryAdmissions {
     }
 
     fn any_outstanding(&self) -> bool {
+        self.outstanding() > 0
+    }
+
+    fn outstanding(&self) -> usize {
         self.inner
             .outstanding
             .load(std::sync::atomic::Ordering::SeqCst)
-            > 0
     }
 }
 
@@ -2492,14 +2495,44 @@ impl std::fmt::Debug for PendingBoundaryAdmission {
     }
 }
 
+/// How long a boundary waits for an acknowledged durable delivery before it
+/// says so, and how often it says it again. The wait itself has no limit: the
+/// delivery was acknowledged before the request's input was fixed.
+const PENDING_ADMISSION_WAIT_WARNS_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+const PENDING_ADMISSION_WAIT_WARNS_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One boundary's wait for acknowledged durable deliveries, across its
+/// wake-ups, so a wake-up that changes nothing does not reset the warning.
+struct PendingAdmissionWait<'a> {
+    run_id: &'a RunId,
+    admissions: &'a PendingBoundaryAdmissions,
+    started: Option<crate::time_compat::Instant>,
+    warns_at: std::time::Duration,
+}
+
+impl<'a> PendingAdmissionWait<'a> {
+    fn new(run_id: &'a RunId, admissions: &'a PendingBoundaryAdmissions) -> Self {
+        Self {
+            run_id,
+            admissions,
+            started: None,
+            warns_at: PENDING_ADMISSION_WAIT_WARNS_AFTER,
+        }
+    }
+}
+
 /// Resolves when the coordinator reports a change (`registered`) or an
 /// announcement of a bound [`PendingBoundaryAdmissions`] ends (`ended`).
 /// Both must be enabled before the state they guard is read.
+///
+/// With `pending_admission` the boundary is waiting for an acknowledged
+/// durable delivery to register: a wait that lasts is reported, never ended.
 async fn registration_or_end_of_an_announcement(
     mut registered: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
     mut ended: std::pin::Pin<&mut Option<tokio::sync::futures::Notified<'_>>>,
+    pending_admission: Option<&mut PendingAdmissionWait<'_>>,
 ) {
-    std::future::poll_fn(|cx| {
+    let woken = std::future::poll_fn(|cx| {
         use std::future::Future;
         if registered.as_mut().poll(cx).is_ready() {
             return std::task::Poll::Ready(());
@@ -2508,8 +2541,31 @@ async fn registration_or_end_of_an_announcement(
             Some(ended) => ended.poll(cx),
             None => std::task::Poll::Pending,
         }
-    })
-    .await;
+    });
+    let Some(wait) = pending_admission else {
+        return woken.await;
+    };
+    tokio::pin!(woken);
+    loop {
+        let started = *wait
+            .started
+            .get_or_insert_with(crate::time_compat::Instant::now);
+        let until_warning = wait.warns_at.saturating_sub(started.elapsed());
+        if tokio::time::timeout(until_warning, woken.as_mut())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tracing::warn!(
+            run_id = %wait.run_id,
+            outstanding = wait.admissions.outstanding(),
+            waited_secs = started.elapsed().as_secs(),
+            "a model boundary is still open for an acknowledged durable steer \
+             whose boundary preparation has not registered"
+        );
+        wait.warns_at = started.elapsed() + PENDING_ADMISSION_WAIT_WARNS_EVERY;
+    }
 }
 
 impl TransientTurnContextBoundaryLifecycle {
@@ -3388,6 +3444,8 @@ impl TransientTurnContextStateHandle {
     ) -> Result<crate::lifecycle::boundary_delivery::TakenBoundaryDelivery, CoreBoundaryStageError>
     {
         let pending_admissions = self.boundary.pending_admissions.get();
+        let mut pending_admission_wait =
+            pending_admissions.map(|admissions| PendingAdmissionWait::new(run_id, admissions));
         let generation = loop {
             // Both waits are armed before the window is read, so neither a
             // registration nor the end of an announcement is missed.
@@ -3404,7 +3462,12 @@ impl TransientTurnContextStateHandle {
                 acceptance,
                 pending_admissions,
             ) {
-                registration_or_end_of_an_announcement(registered, ended).await;
+                registration_or_end_of_an_announcement(
+                    registered,
+                    ended,
+                    pending_admission_wait.as_mut(),
+                )
+                .await;
                 continue;
             }
             let mut lifecycle = self.boundary.lock();
@@ -3508,6 +3571,9 @@ impl TransientTurnContextStateHandle {
             if let Some(ended) = ended.as_mut().as_pin_mut() {
                 ended.enable();
             }
+            // Whether every delivery of the park is resolved and the park
+            // stays only for an acknowledged delivery that has not registered.
+            let mut stays_for_pending_admission = false;
             let poll = {
                 let mut lifecycle = self.boundary.lock();
                 if lifecycle.actor_live {
@@ -3566,6 +3632,7 @@ impl TransientTurnContextStateHandle {
                                 }
                                 Ok(Some(taken))
                             } else {
+                                stays_for_pending_admission = resolved;
                                 Ok(None)
                             }
                         }
@@ -3586,7 +3653,16 @@ impl TransientTurnContextStateHandle {
                     self.boundary.notify.notify_waiters();
                     return Ok(taken);
                 }
-                Ok(None) => registration_or_end_of_an_announcement(notified, ended).await,
+                Ok(None) => {
+                    registration_or_end_of_an_announcement(
+                        notified,
+                        ended,
+                        pending_admission_wait
+                            .as_mut()
+                            .filter(|_| stays_for_pending_admission),
+                    )
+                    .await;
+                }
                 Err(error) => {
                     park_guard.armed = false;
                     return Err(error);
@@ -12661,6 +12737,35 @@ mod tests {
             .expect("runner consume");
         assert!(taken.request_only.is_empty());
         assert!(!state.has_registered_durable_for_test());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boundary_wait_for_an_announced_delivery_outlasts_its_warnings() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let announced = admissions.announce();
+        let runner = spawn_runner_take(&state, &run_id, BOTH);
+        // Far beyond the first warning and several repeats: the boundary is
+        // reported as still open, and it stays open.
+        tokio::time::sleep(
+            PENDING_ADMISSION_WAIT_WARNS_AFTER + PENDING_ADMISSION_WAIT_WARNS_EVERY * 4,
+        )
+        .await;
+        assert!(
+            !runner.is_finished(),
+            "no time limit closes a boundary on an acknowledged delivery"
+        );
+        drop(announced);
+        tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+            .await
+            .expect("the boundary closes once no announcement stands")
+            .expect("runner task")
+            .expect("runner consume");
     }
 
     #[tokio::test]

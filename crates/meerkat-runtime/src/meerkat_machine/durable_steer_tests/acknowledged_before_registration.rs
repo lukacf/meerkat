@@ -10,11 +10,6 @@
 //! lets the runner reach the boundary meanwhile.
 use super::*;
 
-/// How long a row gives the runner to reach the boundary and close it while
-/// the preparations are held. A runner that waits for them is still at the
-/// boundary when this elapses.
-const RUNNER_REACHES_THE_BOUNDARY: Duration = Duration::from_millis(250);
-
 /// Holds durable boundary preparations before they reach the coordinator.
 #[derive(Default)]
 struct RegistrationLag {
@@ -247,6 +242,32 @@ async fn wait_for_steps_done(rig: &DurableSteerRig, expected: usize) -> bool {
     .is_ok()
 }
 
+/// Waits until the runner did one of two things at its boundary: decided to
+/// keep it, or its park, for an acknowledged steer whose preparation has not
+/// registered (the coordinator's count moved past `waits_before`), or fixed
+/// the request's input (its step is done). `true` for the first. No time
+/// interval stands in for either: a held preparation is let through only
+/// after the runner's own decision was observed.
+async fn runner_decides_at_the_boundary(
+    rig: &DurableSteerRig,
+    steps_before: usize,
+    waits_before: u64,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if rig.script.steps_done.load(Ordering::SeqCst) > steps_before {
+                return false;
+            }
+            if rig.state.pending_admission_waits_entered_for_test() > waits_before {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the runner reaches its boundary and decides")
+}
+
 /// The runner reaches its next boundary while every durable preparation that
 /// was held before this call is still held, so none of them has registered.
 /// Only then do those preparations go on to the coordinator. Returns what
@@ -258,15 +279,12 @@ async fn runner_reaches_the_boundary_before_the_registration(
     let held = lag.held();
     let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
     let takes_before = rig.script.boundary_takes().len();
+    let waits_before = rig.state.pending_admission_waits_entered_for_test();
     rig.script.step(RunnerStep::BoundaryThenToolCalls);
     // A runner that does not wait for an acknowledged steer closes the
-    // boundary here, within this time, and fixes the request's input.
-    let _ = tokio::time::timeout(RUNNER_REACHES_THE_BOUNDARY, async {
-        while rig.script.steps_done.load(Ordering::SeqCst) <= steps_before {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    // boundary and fixes the request's input; one that waits says so. The
+    // held preparations go on only after either was observed.
+    let _ = runner_decides_at_the_boundary(rig, steps_before, waits_before).await;
     lag.release_through(held);
     assert!(
         wait_for_steps_done(rig, steps_before + 1).await,
@@ -561,19 +579,19 @@ async fn durable_steer_acknowledged_during_a_request_only_park_is_in_that_reques
         "the runner is still parked: the request's input is not fixed yet"
     );
 
+    let waits_before = rig.state.pending_admission_waits_entered_for_test();
     rig.script
         .prepare_hold_released
         .store(true, Ordering::SeqCst);
     if registration_lags {
         // The request-only delivery is published now. A park that ends on
-        // it fixes the request's input here, within this time, without the
-        // acknowledged steer.
-        let _ = tokio::time::timeout(RUNNER_REACHES_THE_BOUNDARY, async {
-            while rig.script.steps_done.load(Ordering::SeqCst) <= steps_before {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await;
+        // it fixes the request's input without the acknowledged steer; one
+        // that stays for the steer says so. The steer's preparation goes on
+        // only after either was observed, and after the request-only input
+        // was consumed by its publication.
+        rig.wait_for_phase(&context_id, InputLifecycleState::Consumed)
+            .await;
+        let _ = runner_decides_at_the_boundary(&rig, steps_before, waits_before).await;
         lag.release_through(1);
     }
     assert!(
@@ -611,6 +629,12 @@ async fn durable_steer_acknowledged_while_the_runner_is_parked_on_request_only_c
 #[tokio::test]
 async fn durable_steer_whose_registration_lags_a_request_only_park_is_in_that_request() {
     let (rig, lag) = ephemeral_lagging_rig().await;
+    durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag, true).await;
+}
+
+#[tokio::test]
+async fn persistent_durable_steer_whose_registration_lags_a_request_only_park_is_in_that_request() {
+    let (rig, lag) = persistent_lagging_rig().await;
     durable_steer_acknowledged_during_a_request_only_park_is_in_that_request(rig, lag, true).await;
 }
 
@@ -731,11 +755,10 @@ async fn recall(rig: &DurableSteerRig, input_id: &InputId) {
 async fn runner_waits_at_the_boundary_for_the_held_steer(rig: &DurableSteerRig) -> (usize, usize) {
     let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
     let takes_before = rig.script.boundary_takes().len();
+    let waits_before = rig.state.pending_admission_waits_entered_for_test();
     rig.script.step(RunnerStep::BoundaryThenToolCalls);
-    tokio::time::sleep(RUNNER_REACHES_THE_BOUNDARY).await;
-    assert_eq!(
-        rig.script.steps_done.load(Ordering::SeqCst),
-        steps_before,
+    assert!(
+        runner_decides_at_the_boundary(rig, steps_before, waits_before).await,
         "the runner keeps its boundary open for the acknowledged steer"
     );
     (steps_before, takes_before)
@@ -896,8 +919,9 @@ async fn acknowledged_steer_still_unregistered_when_the_run_ends_takes_one_follo
     // belongs to no active run and returns at once.
     let steps_before = rig.script.steps_done.load(Ordering::SeqCst);
     let takes_before = rig.script.boundary_takes().len();
+    let waits_before = rig.state.pending_admission_waits_entered_for_test();
     rig.script.step(RunnerStep::BoundaryThenToolCalls);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = runner_decides_at_the_boundary(&rig, steps_before, waits_before).await;
     lag.release_through(1);
     assert!(
         wait_for_steps_done(&rig, steps_before + 1).await,

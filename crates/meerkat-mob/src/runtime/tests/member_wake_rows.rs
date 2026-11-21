@@ -492,6 +492,57 @@ impl WakeFixture {
         wake_retry_backoff: Option<(Duration, Duration)>,
         storage: MobStorage,
     ) -> Self {
+        Self::build_with_storage_and_workgraph(
+            label,
+            configure,
+            edit,
+            member_seats,
+            wake_retry_backoff,
+            storage,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::new`], for a mob whose workers have the WorkGraph tools of
+    /// the mob's realm in `host_workgraph`'s store, with the mob's wake
+    /// retry backoff when one is given.
+    async fn with_workgraph(
+        label: &str,
+        host_workgraph: meerkat::WorkGraphService,
+        wake_retry_backoff: Option<(Duration, Duration)>,
+    ) -> Self {
+        Self::build_with_storage_and_workgraph(
+            label,
+            |_| {},
+            |definition| {
+                definition
+                    .profiles
+                    .get_mut(&ProfileName::from("worker"))
+                    .and_then(ProfileBinding::as_inline_mut)
+                    .expect("inline worker")
+                    .tools
+                    .workgraph = true;
+            },
+            false,
+            wake_retry_backoff,
+            MobStorage::in_memory(),
+            Some(host_workgraph),
+        )
+        .await
+    }
+
+    /// [`Self::build_with_storage`], with the host's WorkGraph service the
+    /// mob is given (none: the mob has no WorkGraph).
+    async fn build_with_storage_and_workgraph(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+        wake_retry_backoff: Option<(Duration, Duration)>,
+        storage: MobStorage,
+        host_workgraph: Option<meerkat::WorkGraphService>,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-wake-")
             .tempdir()
@@ -539,7 +590,8 @@ impl WakeFixture {
             .with_session_service(service.clone())
             .with_default_llm_client(Arc::new(client.clone()))
             .with_member_build_preparer(preparer.clone())
-            .with_spawn_member_customizer(customizer.clone());
+            .with_spawn_member_customizer(customizer.clone())
+            .with_workgraph_service(host_workgraph);
         if let Some((initial, max)) = wake_retry_backoff {
             mob = mob.with_member_wake_retry_backoff(initial, max);
         }
@@ -6096,6 +6148,615 @@ async fn a_spawn_rollback_driven_by_a_retire_sends_no_kickoff_notice_for_the_mem
          notice reached its held send: {handed_off}; the retire answered {retired:?}; the member \
          stayed seated: {seated_after}; {sent_after} send(s) of the notice went on after the \
          rollback (0 expected); the peer holds {received:?}"
+    );
+    fixture.finish().await;
+}
+
+/// How the notice of a turn under a WorkGraph attention projection begins.
+const ATTENTION_NOTICE: &str = "Continue from the WorkGraph attention projection";
+
+/// A host's WorkGraph service over a store of its own, for a row's mob.
+fn attention_rows_host_workgraph() -> meerkat::WorkGraphService {
+    meerkat::WorkGraphService::with_scope(
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        "wake-attention-realm",
+        meerkat::WorkNamespace::new("goals").expect("namespace"),
+    )
+}
+
+/// A goal in the realm of the fixture's mob whose attention is bound to
+/// `member`, and the projection of that binding as the store holds it.
+async fn bound_goal_projection(
+    fixture: &WakeFixture,
+    host_workgraph: &meerkat::WorkGraphService,
+    member: &AgentIdentity,
+) -> meerkat::AttentionContextProjection {
+    let mob_workgraph =
+        crate::mob_scoped_workgraph_service(host_workgraph, fixture.handle.mob_id())
+            .expect("mob realm")
+            .expect("the mob's WorkGraph service");
+    let goal = mob_workgraph
+        .create_goal(meerkat::GoalCreateRequest {
+            failed_child_join_policy: Default::default(),
+            cancelled_child_join_policy: Default::default(),
+            priority: Default::default(),
+            labels: Default::default(),
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+            realm_id: None,
+            namespace: None,
+            title: "A goal the member is bound to".to_string(),
+            description: None,
+            target: crate::lower_agent_identity_attention_target(fixture.handle.mob_id(), member)
+                .expect("the member's owner target"),
+            mode: meerkat::WorkAttentionMode::Coordinate,
+            completion_policy: meerkat::WorkCompletionPolicy::SelfAttest,
+            delegated_authority: meerkat::AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: meerkat::AttentionProjectionPolicy::default(),
+        })
+        .await
+        .expect("create the goal the member is bound to");
+    mob_workgraph
+        .attention_projection(meerkat::AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id,
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("the binding's projection")
+        .projection
+}
+
+/// Hand the continuation of `projection` to `member` and answer what the
+/// one who hands it over is answered.
+async fn hand_over(
+    fixture: &WakeFixture,
+    member: &AgentIdentity,
+    projection: &meerkat::AttentionContextProjection,
+) -> Result<crate::MemberTurnHandle, MobError> {
+    let continuation = meerkat::surface::workgraph_attention_continuation(projection)
+        .expect("the projection's continuation");
+    tokio::time::timeout(
+        WAIT,
+        fixture
+            .handle
+            .start_attention_continuation(member, continuation),
+    )
+    .await
+    .expect("the handover answers")
+}
+
+/// A WorkGraph attention continuation handed to a member that is seated and
+/// not materialized brings it up: the member is live afterwards, the host
+/// prepared its build exactly once, and the member takes one turn that
+/// starts from the continuation's notice, with WorkGraph tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attention_continuation_wakes_a_released_member_once_and_it_takes_one_turn() {
+    let host_workgraph = attention_rows_host_workgraph();
+    let fixture = WakeFixture::with_workgraph("wake-attention", host_workgraph.clone(), None).await;
+    let member = fixture.spawn("attention-member").await;
+    let projection = bound_goal_projection(&fixture, &host_workgraph, &member).await;
+    fixture.release(&member).await;
+    let started_before = fixture.client.started_count();
+
+    let turn = hand_over(&fixture, &member, &projection)
+        .await
+        .expect("the member's session admits the continuation");
+    let admission = turn
+        .admission()
+        .expect("the one who handed it over is answered with the admission");
+    assert!(
+        !admission.deduplicated,
+        "the first handover of a continuation matches no earlier one"
+    );
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the continuation's turn finishes")
+        .expect("the continuation's turn succeeds");
+
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "the continuation brought the member up"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "the member's build was prepared exactly once"
+    );
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the member's model is called once for the continuation"
+    );
+    assert_eq!(
+        fixture.client.requests_mentioning(ATTENTION_NOTICE),
+        1,
+        "that call starts from the continuation's notice"
+    );
+    let tools = fixture.client.tools_of_request_mentioning(ATTENTION_NOTICE);
+    assert!(
+        tools.iter().any(|tool| tool.starts_with("workgraph_")),
+        "the turn has WorkGraph tools: {tools:?}"
+    );
+    fixture.finish().await;
+}
+
+/// The same continuation handed over a second time while its turn runs is
+/// one input: the second handover is answered with the admission of the
+/// first, and the member takes one turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_attention_continuation_handed_over_twice_is_one_turn() {
+    let host_workgraph = attention_rows_host_workgraph();
+    let fixture =
+        WakeFixture::with_workgraph("wake-attention-twice", host_workgraph.clone(), None).await;
+    let member = fixture.spawn("attention-twice").await;
+    let projection = bound_goal_projection(&fixture, &host_workgraph, &member).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.client.block();
+    let first = hand_over(&fixture, &member, &projection)
+        .await
+        .expect("the member's session admits the continuation");
+    fixture.client.wait_started(started_before + 1).await;
+    let second = hand_over(&fixture, &member, &projection)
+        .await
+        .expect("the second handover is answered");
+    let first_admission = first.admission().expect("the first handover's admission");
+    let second_admission = second.admission().expect("the second handover's admission");
+    assert!(
+        !first_admission.deduplicated,
+        "the first handover matches no earlier one"
+    );
+    assert!(
+        second_admission.deduplicated,
+        "the second handover is matched to the first"
+    );
+    assert_eq!(
+        second_admission.input_id, first_admission.input_id,
+        "both are answered with the one input the session admitted"
+    );
+
+    fixture.client.release();
+    tokio::time::timeout(WAIT, first.wait())
+        .await
+        .expect("the continuation's turn finishes")
+        .expect("the continuation's turn succeeds");
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the member's model is called once for the two handovers"
+    );
+    assert_eq!(fixture.client.requests_mentioning(ATTENTION_NOTICE), 1);
+    fixture.finish().await;
+}
+
+/// A continuation for a released member whose wake is refused is answered
+/// with the wake's typed refusal, and nothing was handed over: the member
+/// stays dormant, its model is not called, and the same continuation handed
+/// over again once the host prepares the member's build is admitted as a
+/// first handover and runs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attention_continuation_whose_wake_is_refused_is_answered_with_the_refusal() {
+    let host_workgraph = attention_rows_host_workgraph();
+    let fixture = WakeFixture::with_workgraph(
+        "wake-attention-refused",
+        host_workgraph.clone(),
+        Some((PREPARATION_RETRY, PREPARATION_RETRY)),
+    )
+    .await;
+    let member = fixture.spawn("attention-refused").await;
+    let projection = bound_goal_projection(&fixture, &host_workgraph, &member).await;
+    fixture.release(&member).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.preparer.answer_with(PreparerAnswer::Retryable);
+    let refused = hand_over(&fixture, &member, &projection).await.map(|_| ());
+    assert!(
+        refused_for_build_preparation_retry(&refused),
+        "the one who handed the continuation over is answered with the wake's refusal: \
+         {refused:?}"
+    );
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "a refused wake leaves the member dormant"
+    );
+    assert_eq!(
+        fixture.client.started_count(),
+        started_before,
+        "the member's model is not called for a refused continuation"
+    );
+
+    // The host prepares the build now; the retry it asked for ends first.
+    fixture
+        .wait_host_preparation(
+            &member,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
+        .await;
+    fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    fixture.wait_host_preparation(&member, None).await;
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the refused continuation left nothing that wakes the member later"
+    );
+    let turn = hand_over(&fixture, &member, &projection)
+        .await
+        .expect("the member's session admits the continuation");
+    assert!(
+        !turn
+            .admission()
+            .expect("the handover's admission")
+            .deduplicated,
+        "the refused handover left no input: this one is a first handover"
+    );
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the continuation's turn finishes")
+        .expect("the continuation's turn succeeds");
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the member's model is called once"
+    );
+    fixture.finish().await;
+}
+
+/// A continuation for a released member whose wake fails for good is
+/// answered with the wake's failure, and nothing was handed over: the
+/// member's model is not called.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attention_continuation_whose_wake_fails_is_answered_with_the_failure() {
+    let host_workgraph = attention_rows_host_workgraph();
+    let fixture =
+        WakeFixture::with_workgraph("wake-attention-failed", host_workgraph.clone(), None).await;
+    let member = fixture.spawn("attention-failed").await;
+    let projection = bound_goal_projection(&fixture, &host_workgraph, &member).await;
+    fixture.release(&member).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.preparer.answer_with(PreparerAnswer::Final);
+    let failed = hand_over(&fixture, &member, &projection).await.map(|_| ());
+    assert!(
+        matches!(failed, Err(MobError::MemberRestoreFailed { ref member_id, .. }) if member_id == &member),
+        "the one who handed the continuation over is answered with the wake's failure: \
+         {failed:?}"
+    );
+    assert_eq!(
+        fixture.client.started_count(),
+        started_before,
+        "the member's model is not called for a continuation whose wake failed"
+    );
+    fixture.finish().await;
+}
+
+/// With pursuit attached, a write to the item of a released member's
+/// pursued binding wakes that member exactly once and it takes one turn
+/// that starts from the continuation's notice. A released member whose
+/// binding the host does not state is not woken by a write to its item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_wakes_a_released_member_whose_binding_is_pursued_and_no_other() {
+    let not_pursued = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+    let excluded = Arc::clone(&not_pursued);
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(move |binding: &meerkat::WorkAttentionBinding| {
+            !excluded
+                .lock()
+                .expect("not pursued")
+                .contains(&binding.target.target_key())
+        }),
+    );
+    let fixture =
+        WakeFixture::with_workgraph("wake-pursuit", pursuit.workgraph_service().clone(), None)
+            .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let stated = fixture.spawn("pursuit-stated").await;
+    let unstated = fixture.spawn("pursuit-unstated").await;
+    not_pursued.lock().expect("not pursued").insert(
+        crate::lower_agent_identity_attention_target(fixture.handle.mob_id(), &unstated)
+            .expect("the member's owner target")
+            .to_attention_target()
+            .target_key(),
+    );
+    fixture.release(&stated).await;
+    fixture.release(&unstated).await;
+    let started_before = fixture.client.started_count();
+
+    // The host binds a goal to each: two writes each, told in this order.
+    bound_goal_projection(&fixture, pursuit.workgraph_service(), &unstated).await;
+    bound_goal_projection(&fixture, pursuit.workgraph_service(), &stated).await;
+
+    fixture
+        .wait_residency(&stated, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    fixture.client.wait_started(started_before + 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fixture.residency(&unstated),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "a member whose binding is not stated is not woken"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "exactly one member was woken, once"
+    );
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the woken member's model is called once"
+    );
+    assert_eq!(
+        fixture.client.requests_mentioning(ATTENTION_NOTICE),
+        1,
+        "that call starts from the continuation's notice"
+    );
+    fixture.finish().await;
+}
+
+/// A continuation the pursuit could not hand over, because the member's
+/// wake was refused, leaves nothing behind: the same write told again, once
+/// the host prepares the member's build, wakes the member and starts its
+/// turn. Told once more after that, it starts no second turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_whose_wake_was_refused_starts_its_turn_when_it_is_told_again() {
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
+    );
+    let fixture = WakeFixture::with_workgraph(
+        "wake-pursuit-refused",
+        pursuit.workgraph_service().clone(),
+        Some((PREPARATION_RETRY, PREPARATION_RETRY)),
+    )
+    .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let member = fixture.spawn("pursuit-refused").await;
+    fixture.release(&member).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.preparer.answer_with(PreparerAnswer::Retryable);
+    let projection = bound_goal_projection(&fixture, pursuit.workgraph_service(), &member).await;
+    fixture
+        .wait_host_preparation(
+            &member,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
+        .await;
+    fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    fixture.wait_host_preparation(&member, None).await;
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the refused continuation left nothing that wakes the member later"
+    );
+    assert_eq!(
+        fixture.client.started_count(),
+        started_before,
+        "the member's model is not called for a continuation whose wake was refused"
+    );
+
+    let told_again = || {
+        pursuit
+            .workgraph_service()
+            .commit_observer()
+            .expect("the pursuit's service has its observer")
+            .committed(meerkat::WorkGraphCommitNotice {
+                realm_id: projection.work_ref.realm_id.clone(),
+                namespace: projection.work_ref.namespace.clone(),
+                item_id: projection.work_ref.item_id.clone(),
+                binding_id: None,
+                origin: meerkat::WorkGraphCommitOrigin::Unattributed,
+            });
+    };
+    told_again();
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    fixture.client.wait_started(started_before + 1).await;
+    told_again();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fixture.client.started_count() - started_before,
+        1,
+        "the refused hand-over left nothing behind, so the write told again starts the turn; \
+         told once more, it starts no second one"
+    );
+    assert_eq!(fixture.client.requests_mentioning(ATTENTION_NOTICE), 1);
+    fixture.finish().await;
+}
+
+/// The host revises the item of `projection`, in the realm of the fixture's
+/// mob.
+async fn revise_bound_item(
+    host_workgraph: &meerkat::WorkGraphService,
+    fixture: &WakeFixture,
+    projection: &meerkat::AttentionContextProjection,
+    text: &str,
+) {
+    let mob_workgraph =
+        crate::mob_scoped_workgraph_service(host_workgraph, fixture.handle.mob_id())
+            .expect("mob realm")
+            .expect("the mob's WorkGraph service");
+    let item = mob_workgraph
+        .get(None, None, projection.work_ref.item_id.clone())
+        .await
+        .expect("read the item");
+    let revision: meerkat::UpdateWorkItemRequest = serde_json::from_value(serde_json::json!({
+        "id": item.id,
+        "expected_revision": item.revision,
+        "description": text,
+    }))
+    .expect("an item revision");
+    mob_workgraph
+        .update(revision)
+        .await
+        .expect("the host revises the item");
+}
+
+/// What the member of a pursued binding does with a peer's message and a
+/// continuation that both wait while its turn runs. The row asserts the
+/// facts of one run as one value: how many model calls follow the held
+/// turn, whether one call holds both the peer's message and the
+/// continuation's notice, which tools other than WorkGraph's that call
+/// has, and how often the peer's message reached the member's transcript.
+///
+/// This row pins what happens today: one turn for both, with the
+/// continuation's tools only, so the member answers its peer without its
+/// ordinary tools. It is not the behaviour that is wanted. The rule that
+/// gives a continuation a turn of its own turns it: the peer's message
+/// then takes a turn of its own, with the member's ordinary tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_and_a_continuation_that_wait_together_are_one_turn() {
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
+    );
+    let fixture = WakeFixture::with_workgraph(
+        "wake-pursuit-beside-peer",
+        pursuit.workgraph_service().clone(),
+        None,
+    )
+    .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let sender = fixture.spawn("pursuit-peer-sender").await;
+    let recipient = fixture.spawn("pursuit-peer-recipient").await;
+    fixture.wire(&sender, &recipient).await;
+    let started_before = fixture.client.started_count();
+
+    // The recipient's first turn, for its goal's creation, is held open.
+    fixture.client.block();
+    let projection = bound_goal_projection(&fixture, pursuit.workgraph_service(), &recipient).await;
+    fixture.client.wait_started(started_before + 1).await;
+
+    // A peer's message and a revision's continuation wait behind it.
+    let body = token("pursuit-beside-peer");
+    fixture
+        .raw_peer_send(&sender, &recipient, &body)
+        .await
+        .expect("the peer's message is accepted");
+    revise_bound_item(
+        pursuit.workgraph_service(),
+        &fixture,
+        &projection,
+        "revised",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    fixture.client.release();
+    let delivered = fixture.delivered_count(&recipient, &body).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let calls_after_the_held_turn = fixture.client.started_count() - started_before - 1;
+    let one_call_holds_both = fixture
+        .client
+        .requests_mentioning_all(&[&body, ATTENTION_NOTICE]);
+    let tools = fixture.client.tools_of_request_mentioning(&body);
+    let other_than_workgraph_tools = tools
+        .iter()
+        .filter(|tool| !tool.starts_with("workgraph_"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (
+            calls_after_the_held_turn,
+            one_call_holds_both,
+            other_than_workgraph_tools,
+            delivered,
+        ),
+        (1, 1, Vec::<String>::new(), 1),
+        "the peer's message and the continuation are one turn, with the continuation's \
+         tool set: {tools:?}"
+    );
+    fixture.finish().await;
+}
+
+/// What the member of a pursued binding does with a peer's message that
+/// waits beside TWO continuations while its turn runs. The two are two
+/// revisions of one binding, so the later one supersedes the earlier one
+/// while it waits, and the peer's message is taken up with the later one:
+/// one turn for both, with the continuation's tools only. The row asserts
+/// the facts of one run as one value: how many model calls follow the
+/// held turn, whether one call holds the peer's message, the
+/// continuation's notice and the LATER revision's text, how many calls
+/// hold the earlier revision's text, which tools other than WorkGraph's
+/// that one call has, and how often the peer's message reached the
+/// member's transcript. The two revisions' texts are tokens of this row,
+/// and a notice carries its projection's text with the item's
+/// description, so the one call is read as the later continuation's.
+///
+/// The message is not lost. That it shares the continuation's turn, and
+/// so is answered without the member's ordinary tools, is what happens
+/// today and is not the behaviour that is wanted. The rule that gives a
+/// continuation a turn of its own turns that: the peer's message then
+/// takes a turn of its own, with the member's ordinary tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_that_waits_beside_two_continuations_is_answered_in_the_newer_ones_turn() {
+    let pursuit = crate::WorkGraphPursuit::new(
+        attention_rows_host_workgraph(),
+        Arc::new(|_binding: &meerkat::WorkAttentionBinding| true),
+    );
+    let fixture = WakeFixture::with_workgraph(
+        "wake-pursuit-peer-two",
+        pursuit.workgraph_service().clone(),
+        None,
+    )
+    .await;
+    pursuit.attach(&fixture.handle).expect("attach the pursuit");
+    let sender = fixture.spawn("pursuit-two-sender").await;
+    let recipient = fixture.spawn("pursuit-two-recipient").await;
+    fixture.wire(&sender, &recipient).await;
+    let started_before = fixture.client.started_count();
+
+    fixture.client.block();
+    let projection = bound_goal_projection(&fixture, pursuit.workgraph_service(), &recipient).await;
+    fixture.client.wait_started(started_before + 1).await;
+
+    let body = token("pursuit-peer-two");
+    let earlier = token("pursuit-peer-two-earlier-revision");
+    let later = token("pursuit-peer-two-later-revision");
+    fixture
+        .raw_peer_send(&sender, &recipient, &body)
+        .await
+        .expect("the peer's message is accepted");
+    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, &earlier).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    revise_bound_item(pursuit.workgraph_service(), &fixture, &projection, &later).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    fixture.client.release();
+    let delivered = fixture.delivered_count(&recipient, &body).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let calls_after_the_held_turn = fixture.client.started_count() - started_before - 1;
+    let one_call_holds_the_message_and_the_later_notice = fixture
+        .client
+        .requests_mentioning_all(&[&body, ATTENTION_NOTICE, &later]);
+    let calls_holding_the_earlier_revision = fixture.client.requests_mentioning(&earlier);
+    let tools = fixture.client.tools_of_request_mentioning(&body);
+    let other_than_workgraph_tools = tools
+        .iter()
+        .filter(|tool| !tool.starts_with("workgraph_"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (
+            calls_after_the_held_turn,
+            one_call_holds_the_message_and_the_later_notice,
+            calls_holding_the_earlier_revision,
+            other_than_workgraph_tools,
+            delivered,
+        ),
+        (1, 1, 0, Vec::<String>::new(), 1),
+        "the earlier continuation is superseded and never reaches the model; the peer's \
+         message and the later continuation are one turn, with the continuation's tool \
+         set: {tools:?}"
     );
     fixture.finish().await;
 }

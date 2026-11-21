@@ -21127,8 +21127,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
-                self.admission_authorized_existing_actions.remove(input_id);
-                self.admission_authorized_existing_targets.remove(input_id);
+                // A later continuation supersedes the earlier one the shell
+                // names for its key, only while that one still waits and is
+                // another input. Otherwise it is admitted beside it and
+                // supersedes nothing: never a refusal.
+                if existing_superseded_input_id != None
+                    && existing_superseded_input_id.get("value") != input_id
+                    && self.input_phases.get_cloned(existing_superseded_input_id.get("value")) == Some(InputPhase::Queued)
+                {
+                    self.admission_authorized_existing_actions.insert(input_id, AdmissionExistingQueuedActionKind::Supersede);
+                    self.admission_authorized_existing_targets.insert(input_id, existing_superseded_input_id.get("value"));
+                } else {
+                    self.admission_authorized_existing_actions.remove(input_id);
+                    self.admission_authorized_existing_targets.remove(input_id);
+                }
                 self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
                 self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
                 self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
@@ -21148,15 +21160,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                         AdmissionPolicyWakeMode::WakeIfIdle
                     }
                 },
-                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_queue_mode: AdmissionPolicyQueueMode::Supersede,
                 policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
                 policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
                 policy_routing_disposition: AdmissionRoutingDisposition::Queue,
                 lane: InputLane::Queue,
                 plan: AdmissionPlanKind::Queued,
                 queue_action: AdmissionQueueActionKind::EnqueueTo,
-                existing_action: AdmissionExistingQueuedActionKind::None,
-                existing_input_id: None,
+                existing_action: if existing_superseded_input_id != None
+                    && existing_superseded_input_id.get("value") != input_id
+                    && self.input_phases.get_cloned(existing_superseded_input_id.get("value")) == Some(InputPhase::Queued)
+                {
+                    AdmissionExistingQueuedActionKind::Supersede
+                } else {
+                    AdmissionExistingQueuedActionKind::None
+                },
+                existing_input_id: if existing_superseded_input_id != None
+                    && existing_superseded_input_id.get("value") != input_id
+                    && self.input_phases.get_cloned(existing_superseded_input_id.get("value")) == Some(InputPhase::Queued)
+                {
+                    existing_superseded_input_id
+                } else {
+                    None
+                },
                 requires_active_pre_admission: without_wake == false
                     && runtime_running == false
                     && active_turn_boundary_available == false,
@@ -26437,9 +26463,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_peer_response_terminal_apply_intent,
                 lane
             }
+            // The stored kind and the stored execution kind agree, in three
+            // cases, each a pair an admission writes: a continuation stored
+            // as resume-pending resumes the pending run; a continuation
+            // stored as a content turn at a run's start is taken as that
+            // content turn; every other kind is a content turn.
             guard "recovered_execution_kind_matches_input" {
                 (input_kind == RecoveredInputKind::Continuation
                     && runtime_execution_kind == RecoveredRuntimeExecutionKind::ResumePending)
+                || (input_kind == RecoveredInputKind::Continuation
+                    && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
                 || (input_kind != RecoveredInputKind::Continuation
                     && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn)
             }
@@ -27793,6 +27827,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // Only an input that still waits is superseded: one that was
+            // staged or runs keeps its turn, whatever an earlier resolution
+            // authorized.
+            guard "superseded_input_is_queued" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+            }
             guard "input_not_live_boundary_joined" {
                 !self.input_live_boundary_join_run.contains_key(input_id)
             }

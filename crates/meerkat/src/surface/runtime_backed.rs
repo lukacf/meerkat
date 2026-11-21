@@ -2309,24 +2309,13 @@ async fn validate_workgraph_attention_primitive(
     workgraph_service: Option<&WorkGraphService>,
     primitive: &RunPrimitive,
 ) -> Result<(), CoreExecutorError> {
-    let Some(workgraph_service) = workgraph_service else {
-        return Ok(());
-    };
-    let projection = match primitive.turn_metadata() {
-        Some(metadata) => {
-            crate::workgraph_attention_projection_from_overlay(metadata.turn_tool_overlay.as_ref())
-                .map_err(|error| {
-                    CoreExecutorError::apply_failed_primitive_rejected(error.to_string())
-                })?
-        }
-        None => None,
-    };
-    let Some(projection) = projection else {
-        return Ok(());
-    };
-    crate::validate_workgraph_attention_projection_current(workgraph_service, &projection)
-        .await
-        .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))
+    super::validate_workgraph_attention_turn_overlay(
+        workgraph_service,
+        primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.turn_tool_overlay.as_ref()),
+    )
+    .await
 }
 
 fn start_turn_request_from_primitive(

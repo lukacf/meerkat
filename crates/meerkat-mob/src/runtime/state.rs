@@ -443,7 +443,27 @@ pub(super) struct SubmitWorkPayload {
     /// any external work, and the member's native admission alone decides
     /// the input.
     pub governed_input: Option<Box<GovernedInputDelivery>>,
+    /// A WorkGraph attention continuation realized for this work in place
+    /// of a turn built from `content`. Shell dispatch carrier only: the
+    /// MobMachine admits the same identity facts as for any internal work,
+    /// and the member's native admission alone decides the input. It is
+    /// never stored and never sent to another host.
+    pub attention_continuation: Option<Box<AttentionContinuationDelivery>>,
 }
+
+/// A WorkGraph attention continuation and the channel that forwards the
+/// member session's canonical admission of it back to the one who handed it
+/// over.
+#[derive(Debug)]
+pub(super) struct AttentionContinuationDelivery {
+    pub(super) input: meerkat_runtime::ContinuationInput,
+    pub(super) admission_tx: super::handle::MemberInputAdmissionSender,
+}
+
+/// Why a WorkGraph attention continuation is refused for a member that is
+/// hosted elsewhere or has no session binding.
+pub(super) const ATTENTION_CONTINUATION_NEEDS_LOCAL_SESSION: &str =
+    "a WorkGraph attention continuation requires a local session-backed member";
 
 /// A caller-bound governed input and the channel that forwards the member
 /// session's canonical admission of it back to the caller.

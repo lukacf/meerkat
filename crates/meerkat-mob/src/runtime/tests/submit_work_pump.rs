@@ -65,6 +65,7 @@ async fn submit(
         requester: None,
         sender_label: None,
         governed_input: None,
+        attention_continuation: None,
         expected_session_id: None,
     });
     handle

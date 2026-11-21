@@ -12951,8 +12951,8 @@ ResolveAdmissionPlanWorkgraphAttentionContinuationIdle(input_id, authority_bindi
     /\ input_is_prompt' = MapSet(input_is_prompt, input_id, FALSE)
     /\ admission_authorized_lanes' = MapSet(admission_authorized_lanes, input_id, "Queue")
     /\ admission_authorized_plans' = MapSet(admission_authorized_plans, input_id, "Queued")
-    /\ admission_authorized_existing_actions' = MapRemove(admission_authorized_existing_actions, input_id)
-    /\ admission_authorized_existing_targets' = MapRemove(admission_authorized_existing_targets, input_id)
+    /\ admission_authorized_existing_actions' = IF ((existing_superseded_input_id # None) /\ ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) # input_id) /\ ((IF ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases) THEN Some((IF (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases THEN input_phases[(IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some("Queued"))) THEN MapSet(admission_authorized_existing_actions, input_id, "Supersede") ELSE MapRemove(admission_authorized_existing_actions, input_id)
+    /\ admission_authorized_existing_targets' = IF ((existing_superseded_input_id # None) /\ ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) # input_id) /\ ((IF ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases) THEN Some((IF (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases THEN input_phases[(IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some("Queued"))) THEN MapSet(admission_authorized_existing_targets, input_id, (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)) ELSE MapRemove(admission_authorized_existing_targets, input_id)
     /\ admission_authorized_live_boundary_delivery' = MapRemove(admission_authorized_live_boundary_delivery, input_id)
     /\ UnchangedFrame_ac0059c031df494b
 
@@ -12974,8 +12974,8 @@ ResolveAdmissionPlanWorkgraphAttentionContinuationAttached(input_id, authority_b
     /\ input_is_prompt' = MapSet(input_is_prompt, input_id, FALSE)
     /\ admission_authorized_lanes' = MapSet(admission_authorized_lanes, input_id, "Queue")
     /\ admission_authorized_plans' = MapSet(admission_authorized_plans, input_id, "Queued")
-    /\ admission_authorized_existing_actions' = MapRemove(admission_authorized_existing_actions, input_id)
-    /\ admission_authorized_existing_targets' = MapRemove(admission_authorized_existing_targets, input_id)
+    /\ admission_authorized_existing_actions' = IF ((existing_superseded_input_id # None) /\ ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) # input_id) /\ ((IF ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases) THEN Some((IF (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases THEN input_phases[(IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some("Queued"))) THEN MapSet(admission_authorized_existing_actions, input_id, "Supersede") ELSE MapRemove(admission_authorized_existing_actions, input_id)
+    /\ admission_authorized_existing_targets' = IF ((existing_superseded_input_id # None) /\ ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) # input_id) /\ ((IF ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases) THEN Some((IF (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases THEN input_phases[(IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some("Queued"))) THEN MapSet(admission_authorized_existing_targets, input_id, (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)) ELSE MapRemove(admission_authorized_existing_targets, input_id)
     /\ admission_authorized_live_boundary_delivery' = MapRemove(admission_authorized_live_boundary_delivery, input_id)
     /\ UnchangedFrame_ac0059c031df494b
 
@@ -12997,8 +12997,8 @@ ResolveAdmissionPlanWorkgraphAttentionContinuationRunning(input_id, authority_bi
     /\ input_is_prompt' = MapSet(input_is_prompt, input_id, FALSE)
     /\ admission_authorized_lanes' = MapSet(admission_authorized_lanes, input_id, "Queue")
     /\ admission_authorized_plans' = MapSet(admission_authorized_plans, input_id, "Queued")
-    /\ admission_authorized_existing_actions' = MapRemove(admission_authorized_existing_actions, input_id)
-    /\ admission_authorized_existing_targets' = MapRemove(admission_authorized_existing_targets, input_id)
+    /\ admission_authorized_existing_actions' = IF ((existing_superseded_input_id # None) /\ ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) # input_id) /\ ((IF ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases) THEN Some((IF (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases THEN input_phases[(IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some("Queued"))) THEN MapSet(admission_authorized_existing_actions, input_id, "Supersede") ELSE MapRemove(admission_authorized_existing_actions, input_id)
+    /\ admission_authorized_existing_targets' = IF ((existing_superseded_input_id # None) /\ ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) # input_id) /\ ((IF ((IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases) THEN Some((IF (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None) \in DOMAIN input_phases THEN input_phases[(IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)] ELSE "None")) ELSE None) = Some("Queued"))) THEN MapSet(admission_authorized_existing_targets, input_id, (IF "value" \in DOMAIN existing_superseded_input_id THEN existing_superseded_input_id["value"] ELSE None)) ELSE MapRemove(admission_authorized_existing_targets, input_id)
     /\ admission_authorized_live_boundary_delivery' = MapRemove(admission_authorized_live_boundary_delivery, input_id)
     /\ UnchangedFrame_ac0059c031df494b
 
@@ -16065,7 +16065,7 @@ RecycleFromAttached ==
 
 RecoverAdmittedInputIdle(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Idle"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Idle"
@@ -16077,7 +16077,7 @@ RecoverAdmittedInputIdle(input_id, input_kind, runtime_boundary, runtime_executi
 
 RecoverAdmittedInputAttached(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Attached"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Attached"
@@ -16089,7 +16089,7 @@ RecoverAdmittedInputAttached(input_id, input_kind, runtime_boundary, runtime_exe
 
 RecoverAdmittedInputRunning(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Running"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Running"
@@ -16101,7 +16101,7 @@ RecoverAdmittedInputRunning(input_id, input_kind, runtime_boundary, runtime_exec
 
 RecoverAdmittedInputRetired(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Retired"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Retired"
@@ -16113,7 +16113,7 @@ RecoverAdmittedInputRetired(input_id, input_kind, runtime_boundary, runtime_exec
 
 RecoverAdmittedInputStopped(input_id, input_kind, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane) ==
     /\ phase = "Stopped"
-    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn")))
+    /\ (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ResumePending")) THEN TRUE ELSE (IF ((input_kind = "Continuation") /\ (runtime_execution_kind = "ContentTurn") /\ (runtime_boundary = "RunStart")) THEN TRUE ELSE ((input_kind # "Continuation") /\ (runtime_execution_kind = "ContentTurn"))))
     /\ (IF ((input_kind = "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = Some("AppendContentAndRun"))) THEN TRUE ELSE ((input_kind # "PeerResponseTerminal") /\ (runtime_peer_response_terminal_apply_intent = None)))
     /\ (IF (runtime_boundary # "Immediate") THEN TRUE ELSE (lane = "Steer"))
     /\ phase' = "Stopped"
@@ -18231,6 +18231,7 @@ ConsumeInputStopped(input_id) ==
 SupersedeInputIdle(input_id, superseded_by) ==
     /\ phase = "Idle"
     /\ (input_id \in DOMAIN input_phases)
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
     /\ ~((input_id \in DOMAIN input_live_boundary_join_run))
     /\ ((IF ~((superseded_by \in DOMAIN admission_authorized_existing_actions)) THEN TRUE ELSE ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ (IF ~(((admission_authorized_existing_actions)[superseded_by] = "Supersede")) THEN TRUE ELSE (IF ~((superseded_by \in DOMAIN admission_authorized_existing_targets)) THEN TRUE ELSE (superseded_by \in DOMAIN admission_authorized_existing_targets))))) /\ ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ ((admission_authorized_existing_actions)[superseded_by] = "Supersede") /\ (superseded_by \in DOMAIN admission_authorized_existing_targets) /\ ((admission_authorized_existing_targets)[superseded_by] = input_id)))
     /\ ((IF (input_id \in DOMAIN input_authority_batch_keys) THEN Some((IF input_id \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[input_id] ELSE "None")) ELSE None) = (IF (superseded_by \in DOMAIN input_authority_batch_keys) THEN Some((IF superseded_by \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[superseded_by] ELSE "None")) ELSE None))
@@ -18254,6 +18255,7 @@ SupersedeInputIdle(input_id, superseded_by) ==
 SupersedeInputAttached(input_id, superseded_by) ==
     /\ phase = "Attached"
     /\ (input_id \in DOMAIN input_phases)
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
     /\ ~((input_id \in DOMAIN input_live_boundary_join_run))
     /\ ((IF ~((superseded_by \in DOMAIN admission_authorized_existing_actions)) THEN TRUE ELSE ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ (IF ~(((admission_authorized_existing_actions)[superseded_by] = "Supersede")) THEN TRUE ELSE (IF ~((superseded_by \in DOMAIN admission_authorized_existing_targets)) THEN TRUE ELSE (superseded_by \in DOMAIN admission_authorized_existing_targets))))) /\ ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ ((admission_authorized_existing_actions)[superseded_by] = "Supersede") /\ (superseded_by \in DOMAIN admission_authorized_existing_targets) /\ ((admission_authorized_existing_targets)[superseded_by] = input_id)))
     /\ ((IF (input_id \in DOMAIN input_authority_batch_keys) THEN Some((IF input_id \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[input_id] ELSE "None")) ELSE None) = (IF (superseded_by \in DOMAIN input_authority_batch_keys) THEN Some((IF superseded_by \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[superseded_by] ELSE "None")) ELSE None))
@@ -18277,6 +18279,7 @@ SupersedeInputAttached(input_id, superseded_by) ==
 SupersedeInputRunning(input_id, superseded_by) ==
     /\ phase = "Running"
     /\ (input_id \in DOMAIN input_phases)
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
     /\ ~((input_id \in DOMAIN input_live_boundary_join_run))
     /\ ((IF ~((superseded_by \in DOMAIN admission_authorized_existing_actions)) THEN TRUE ELSE ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ (IF ~(((admission_authorized_existing_actions)[superseded_by] = "Supersede")) THEN TRUE ELSE (IF ~((superseded_by \in DOMAIN admission_authorized_existing_targets)) THEN TRUE ELSE (superseded_by \in DOMAIN admission_authorized_existing_targets))))) /\ ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ ((admission_authorized_existing_actions)[superseded_by] = "Supersede") /\ (superseded_by \in DOMAIN admission_authorized_existing_targets) /\ ((admission_authorized_existing_targets)[superseded_by] = input_id)))
     /\ ((IF (input_id \in DOMAIN input_authority_batch_keys) THEN Some((IF input_id \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[input_id] ELSE "None")) ELSE None) = (IF (superseded_by \in DOMAIN input_authority_batch_keys) THEN Some((IF superseded_by \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[superseded_by] ELSE "None")) ELSE None))
@@ -18300,6 +18303,7 @@ SupersedeInputRunning(input_id, superseded_by) ==
 SupersedeInputRetired(input_id, superseded_by) ==
     /\ phase = "Retired"
     /\ (input_id \in DOMAIN input_phases)
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
     /\ ~((input_id \in DOMAIN input_live_boundary_join_run))
     /\ ((IF ~((superseded_by \in DOMAIN admission_authorized_existing_actions)) THEN TRUE ELSE ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ (IF ~(((admission_authorized_existing_actions)[superseded_by] = "Supersede")) THEN TRUE ELSE (IF ~((superseded_by \in DOMAIN admission_authorized_existing_targets)) THEN TRUE ELSE (superseded_by \in DOMAIN admission_authorized_existing_targets))))) /\ ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ ((admission_authorized_existing_actions)[superseded_by] = "Supersede") /\ (superseded_by \in DOMAIN admission_authorized_existing_targets) /\ ((admission_authorized_existing_targets)[superseded_by] = input_id)))
     /\ ((IF (input_id \in DOMAIN input_authority_batch_keys) THEN Some((IF input_id \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[input_id] ELSE "None")) ELSE None) = (IF (superseded_by \in DOMAIN input_authority_batch_keys) THEN Some((IF superseded_by \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[superseded_by] ELSE "None")) ELSE None))
@@ -18323,6 +18327,7 @@ SupersedeInputRetired(input_id, superseded_by) ==
 SupersedeInputStopped(input_id, superseded_by) ==
     /\ phase = "Stopped"
     /\ (input_id \in DOMAIN input_phases)
+    /\ ((IF (input_id \in DOMAIN input_phases) THEN Some((IF input_id \in DOMAIN input_phases THEN input_phases[input_id] ELSE "None")) ELSE None) = Some("Queued"))
     /\ ~((input_id \in DOMAIN input_live_boundary_join_run))
     /\ ((IF ~((superseded_by \in DOMAIN admission_authorized_existing_actions)) THEN TRUE ELSE ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ (IF ~(((admission_authorized_existing_actions)[superseded_by] = "Supersede")) THEN TRUE ELSE (IF ~((superseded_by \in DOMAIN admission_authorized_existing_targets)) THEN TRUE ELSE (superseded_by \in DOMAIN admission_authorized_existing_targets))))) /\ ((superseded_by \in DOMAIN admission_authorized_existing_actions) /\ ((admission_authorized_existing_actions)[superseded_by] = "Supersede") /\ (superseded_by \in DOMAIN admission_authorized_existing_targets) /\ ((admission_authorized_existing_targets)[superseded_by] = input_id)))
     /\ ((IF (input_id \in DOMAIN input_authority_batch_keys) THEN Some((IF input_id \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[input_id] ELSE "None")) ELSE None) = (IF (superseded_by \in DOMAIN input_authority_batch_keys) THEN Some((IF superseded_by \in DOMAIN input_authority_batch_keys THEN input_authority_batch_keys[superseded_by] ELSE "None")) ELSE None))

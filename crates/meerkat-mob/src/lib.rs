@@ -346,6 +346,8 @@ pub use runtime::stop_report::{
     MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport, NotHoldableReason,
     StopOptions,
 };
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub use runtime::workgraph_pursuit::{WorkGraphPursuit, WorkGraphPursuitPredicate};
 pub use runtime::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,

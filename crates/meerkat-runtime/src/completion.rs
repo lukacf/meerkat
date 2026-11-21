@@ -123,11 +123,18 @@ pub enum CompletionWaitError {
         "the input joined run {run_id}, whose committed rounds took its content; the run was closed as interrupted, so it does not run again"
     )]
     ConsumedWithInterruptedRun { run_id: RunId },
+    /// The input was superseded: a later input of its supersession key was
+    /// admitted while this one still waited, and took its place. It was
+    /// never staged and no run saw it; `superseded_by` is the input that
+    /// replaced it. It is neither a completion nor a failure of the input's
+    /// work. Do not resubmit it; follow the later input instead.
+    #[error("the input was superseded by input {superseded_by} while it waited; it does not run")]
+    Superseded { superseded_by: InputId },
 }
 
 impl CompletionWaitError {
     /// The generated wait-failure observation of a waiter failure; `None`
-    /// for a disclosure refusal, which is not one.
+    /// for a disclosure refusal and for a supersession, which are not one.
     pub fn wait_failure_observation(
         &self,
     ) -> Option<crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation> {
@@ -145,7 +152,24 @@ impl CompletionWaitError {
             Self::RequeuedAcrossStop { .. } => Some(
                 crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop,
             ),
-            Self::DisclosureRefused { .. } => None,
+            Self::DisclosureRefused { .. } | Self::Superseded { .. } => None,
+        }
+    }
+
+    /// Stable typed predicate: a later input of the same supersession key
+    /// replaced this one while it waited. The input does not run.
+    #[must_use]
+    pub const fn is_superseded(&self) -> bool {
+        matches!(self, Self::Superseded { .. })
+    }
+
+    /// The input that replaced this one, for a
+    /// [`Superseded`](Self::Superseded) answer; `None` for every other.
+    #[must_use]
+    pub fn superseded_by(&self) -> Option<&InputId> {
+        match self {
+            Self::Superseded { superseded_by } => Some(superseded_by),
+            _ => None,
         }
     }
 
@@ -1465,10 +1489,13 @@ type CompletionWaiterMap = HashMap<
 ///
 /// Supersession and coalescing terminalize a queued input inside a later
 /// admission: the machine stages no terminal-completion receipt for them and
-/// no completion is delivered, so a completion waiter on that input is never
-/// resolved. The terminal-receipt wait parks on one of these next to its
-/// completion waiter, and the admission that committed the transition wakes
-/// it. A wake carries nothing; the woken wait re-reads machine-owned state.
+/// no completion is delivered. A superseded input's completion waiters are
+/// answered by that admission with the typed
+/// [`CompletionWaitError::Superseded`]; a coalesced input's completion
+/// waiter is never resolved. The terminal-receipt wait parks on one of these
+/// next to its completion waiter, and the admission that committed the
+/// transition wakes it. A wake carries nothing; the woken wait re-reads
+/// machine-owned state.
 /// Like the waiter map, this is plumbing only and never runtime truth.
 type ReceiptLessTerminalObserverMap = HashMap<InputId, HashMap<uuid::Uuid, oneshot::Sender<()>>>;
 

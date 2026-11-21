@@ -30212,8 +30212,8 @@ fn interrupt_yielding_peer_input(
 
 /// A request-only Steer that takes the exact live-boundary path: an ordinary
 /// continuation carrying a typed notice append. A peer steer joins the running
-/// run through the durable path, one per boundary, so the exact-boundary
-/// tests drive this input instead.
+/// run through the durable path (every waiting one at the next boundary), so
+/// the exact-boundary tests drive this input instead.
 fn interrupt_yielding_request_only_input(body: &str) -> (Input, InputId) {
     let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
     continuation.header.durability = crate::input::InputDurability::Durable;

@@ -9,6 +9,11 @@
 //! kills it with SIGKILL, opens a new runtime over the same realm, and lets
 //! that runtime resume the open run. The resumed run must complete and commit
 //! its boundary over the committed history.
+//!
+//! One row runs a second kind of child: three steers join one boundary of
+//! the run, the run commits a further round, and the child is killed. The
+//! round commit the real agent loop wrote must bind the three steers to the
+//! run, and the resumed run must deliver none of them a second time.
 
 use super::*;
 use meerkat_client::{LlmDoneOutcome, LlmEvent, LlmRequest};
@@ -36,12 +41,25 @@ const OVERRIDE_CHILD_TEST: &str =
 /// The model the override child's second turn selects: one the session's
 /// provider owns, other than [`MODEL`].
 const OVERRIDE_MODEL: &str = "claude-opus-4-8";
+/// The libtest path of the child incarnation whose run joins three steers at
+/// one boundary before its last round commit.
+const JOINED_STEERS_CHILD_TEST: &str =
+    "session_runtime::resumed_run_tests::rpc_resumed_run_with_joined_steers_child_incarnation";
+/// The payloads of the three steers that child admits, in admission order.
+const JOINED_STEER_TOKENS: [&str; 3] = [
+    "JOINED-STEER-ONE-1R",
+    "JOINED-STEER-TWO-2S",
+    "JOINED-STEER-THREE-3T",
+];
 
 /// What the scripted model answers to one request.
 #[derive(Clone, Copy, Debug)]
 enum Step {
     /// One call of [`PROBE_TOOL`].
     Tool,
+    /// Hold the request in flight until the test releases it, then one call
+    /// of [`PROBE_TOOL`].
+    HeldTool,
     /// Text at once.
     Text(&'static str),
     /// Record the kill point and never answer: the incarnation is killed
@@ -55,6 +73,10 @@ struct ScriptedModel {
     /// The model each request named, in order.
     models: StdMutex<Vec<String>>,
     kill_marker: Option<PathBuf>,
+    /// Set once a [`Step::HeldTool`] request is in flight.
+    hold_reached: AtomicBool,
+    /// Set by the test to let the held request answer.
+    hold_released: AtomicBool,
 }
 
 impl ScriptedModel {
@@ -64,6 +86,8 @@ impl ScriptedModel {
             requests: AtomicUsize::new(0),
             models: StdMutex::new(Vec::new()),
             kill_marker,
+            hold_reached: AtomicBool::new(false),
+            hold_released: AtomicBool::new(false),
         })
     }
 
@@ -121,6 +145,31 @@ impl LlmClient for ScriptedModel {
                     outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                 }),
             ])),
+            Step::HeldTool => {
+                let events = vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: format!("probe-call-{n}"),
+                        name: PROBE_TOOL.into(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::UsageUpdate { usage }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    }),
+                ];
+                Box::pin(
+                    futures::stream::once(async move {
+                        self.hold_reached
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        while !self.hold_released.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        events
+                    })
+                    .flat_map(futures::stream::iter),
+                )
+            }
             Step::Text(answer) => Box::pin(futures::stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
                     delta: answer.into(),
@@ -461,5 +510,250 @@ async fn rpc_run_with_a_model_override_resumed_after_a_kill_completes_on_that_mo
         (true, true, Some(OVERRIDE_MODEL.to_string())),
         "the resumed run {open_run} completes and commits its boundary, keeps the round the \
          killed run committed, and asks the overriding model"
+    );
+}
+
+/// The child incarnation of the joined-steers row. Its second turn's first
+/// model request is held in flight while three text steers are admitted, in
+/// order. Released, the request returns a tool call: the round commits, and
+/// the boundary before the next request joins the three steers. The next
+/// request returns a tool call too, so the run commits one more round, the
+/// first whose document holds the steers' rows. The request after it is the
+/// kill point.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_resumed_run_with_joined_steers_child_incarnation() {
+    let Some(root) = std::env::var_os(ROOT_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let runtime = sqlite_runtime(&root).await;
+    let model = ScriptedModel::new(
+        [
+            Step::Text("first answer"),
+            Step::HeldTool,
+            Step::Tool,
+            Step::KillPoint,
+        ],
+        Some(root.join("killed")),
+    );
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(model.clone()),
+        ..AgentBuildConfig::new(MODEL)
+    };
+    let session_id = runtime
+        .create_session(build_config, None, None, Vec::new())
+        .await
+        .expect("create the session");
+    std::fs::write(root.join("session-id"), session_id.to_string()).expect("record the session");
+    run_turn(&runtime, &session_id, "first")
+        .await
+        .expect("the first turn completes");
+
+    let turn_runtime = Arc::clone(&runtime);
+    let turn_session = session_id.clone();
+    let _held = tokio::spawn(async move { run_turn(&turn_runtime, &turn_session, "second").await });
+    let started = std::time::Instant::now();
+    while !model.hold_reached.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the second turn's first request is in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Three steers admitted while that request is in flight.
+    let adapter = runtime.runtime_adapter();
+    let mut steer_ids = Vec::new();
+    for token in JOINED_STEER_TOKENS {
+        let steer = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            token,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        steer_ids.push(steer.id().to_string());
+        let (outcome, _completion) = adapter
+            .accept_input_with_completion(&session_id, steer)
+            .await
+            .expect("the steer is admitted while the turn runs");
+        assert!(outcome.is_accepted());
+    }
+    std::fs::write(root.join("steer-ids"), steer_ids.join("\n")).expect("record the steers");
+    // Let the oldest steer register for the run's next boundary.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    model
+        .hold_released
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    std::future::pending::<()>().await;
+}
+
+/// How many transcript messages of `session` carry `token`.
+fn rows_carrying(session: &meerkat_core::Session, token: &str) -> usize {
+    session
+        .messages()
+        .iter()
+        .filter(|message| format!("{message:?}").contains(token))
+        .count()
+}
+
+/// JSON-RPC, the actual round commit of the real agent loop and a real
+/// kill: a run joins three steers at one boundary, commits one more round and
+/// is killed. Actual process kill and restart; scripted model. The store is
+/// the HeadCanonical SQLite realm. The round commit's cursor binds the input
+/// that started the run
+/// and then the three steers, in admission order, and each steer's stored row
+/// is bound to the run. A new runtime over the realm resumes that run; it
+/// completes and commits. No joined steer is delivered twice and none is
+/// lost: the committed transcript holds each steer's row exactly once, in
+/// admission order; the resumed runtime asks the model exactly once (no
+/// follow-up turn starts with a steer); and each steer's row ends consumed
+/// by the resumed run.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_run_killed_after_a_round_commit_holds_three_joined_steers_resumes_and_delivers_none_twice()
+ {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session_id = kill_child_at_its_kill_point(root.path(), JOINED_STEERS_CHILD_TEST).await;
+    let steer_ids = std::fs::read_to_string(root.path().join("steer-ids"))
+        .expect("the child recorded its steers")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(steer_ids.len(), 3, "the child admitted three steers");
+
+    let runtime = sqlite_runtime(root.path()).await;
+    let model = ScriptedModel::new([Step::Text("resumed answer")], None);
+    runtime.set_default_llm_client(Some(model.clone()));
+    let open_run = tail_run(&runtime, &session_id)
+        .await
+        .expect("the killed run's round commit stands as the provisional tail");
+
+    // The round commit the killed run's agent loop wrote, read as recovery
+    // reads it: the run its cursor names and the inputs the cursor binds.
+    let store = runtime.service.runtime_store();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+    let observed = meerkat_runtime::recovery::observe_resumable_run(store.as_ref(), &session_id)
+        .await
+        .expect("read the round commit")
+        .expect("the round commit leaves a continuable run");
+    assert_eq!(observed.run_id, open_run);
+    let bound = observed
+        .bound_input_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bound.len(),
+        4,
+        "the cursor binds the input that started the run and the three joined steers: {bound:?}"
+    );
+    assert!(
+        !steer_ids.contains(&bound[0]),
+        "the input that started the run is bound first: {bound:?}"
+    );
+    assert_eq!(
+        bound[1..],
+        steer_ids[..],
+        "then the three joined steers, in admission order"
+    );
+    let steers = observed.bound_input_ids[1..].to_vec();
+    for input_id in &steers {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load the joined steer's row")
+            .expect("the joined steer's row is stored");
+        assert_eq!(
+            (
+                format!("{:?}", row.seed.phase),
+                row.seed.last_run_id.clone()
+            ),
+            ("Staged".to_string(), Some(open_run.clone())),
+            "the joined steer {input_id} is bound to the open run"
+        );
+    }
+
+    // The restart: the new runtime resumes the run from that round commit.
+    let attached = runtime.ensure_runtime_executor(&session_id).await;
+    assert!(
+        attached.is_ok(),
+        "the restarted runtime attaches the session whose run it resumes: {attached:?}"
+    );
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        if committed_text(&runtime, &session_id, "resumed answer").await
+            && tail_run(&runtime, &session_id).await.is_none()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the resumed run {open_run} completes and commits its boundary"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Each steer's row ends consumed by the resumed run.
+    loop {
+        let mut consumed = Vec::new();
+        for input_id in &steers {
+            let row = store
+                .load_input_state(&runtime_id, input_id)
+                .await
+                .expect("load the steer's row")
+                .expect("the steer's row is stored");
+            consumed.push((
+                format!("{:?}", row.seed.phase),
+                row.seed.last_run_id.clone(),
+            ));
+        }
+        if consumed
+            .iter()
+            .all(|row| row == &("Consumed".to_string(), Some(open_run.clone())))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "each joined steer ends consumed by the resumed run: {consumed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // A steer delivered a second time would start a follow-up turn, which
+    // asks the model again.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        model.requests.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the resumed runtime asks the model once: no follow-up turn starts with a steer"
+    );
+    let session = runtime
+        .service
+        .load_authoritative_session(&session_id)
+        .await
+        .expect("read the committed session")
+        .expect("the session is committed");
+    let mut positions = Vec::new();
+    for token in JOINED_STEER_TOKENS {
+        assert_eq!(
+            rows_carrying(&session, token),
+            1,
+            "{token} is in the committed transcript exactly once"
+        );
+        positions.push(
+            session
+                .messages()
+                .iter()
+                .position(|message| format!("{message:?}").contains(token))
+                .expect("the steer's row"),
+        );
+    }
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the steers' rows are in admission order: {positions:?}"
+    );
+    assert!(
+        committed_probe_call(&runtime, &session_id).await,
+        "the resumed run keeps the rounds the killed run committed"
     );
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-y
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-z
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -29,10 +29,11 @@ set -euo pipefail
 #   audits-w        hand-written audit shard W
 #   audits-x        hand-written audit shard X
 #   audits-y        hand-written audit shard Y
+#   audits-z        hand-written audit shard Z
 #   all             every part (the default: `make machine-verify` without
 #                   MACHINE_VERIFY_PART, and the release gate); the nightly
 #                   bounded TLC job runs the machine-verify part only
-# Bazel runs the twenty-five parts as separate targets
+# Bazel runs the twenty-six parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
 # machine_verify_audits_d_tlc_test, machine_verify_audits_e_tlc_test,
@@ -45,14 +46,14 @@ set -euo pipefail
 # machine_verify_audits_s_tlc_test, machine_verify_audits_t_tlc_test,
 # machine_verify_audits_u_tlc_test, machine_verify_audits_v_tlc_test,
 # machine_verify_audits_w_tlc_test, machine_verify_audits_x_tlc_test,
-# machine_verify_audits_y_tlc_test) so the
+# machine_verify_audits_y_tlc_test, machine_verify_audits_z_tlc_test) so the
 # BuildBuddy machine-authority lane runs them in parallel; together they are
-# exactly `all`. CI's tlc-audits job runs the twenty-four audit shards, one
+# exactly `all`. CI's tlc-audits job runs the twenty-five audit shards, one
 # job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x|audits-y) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x|audits-y|audits-z) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -61,13 +62,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-y may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-z may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-y) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-z) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-y, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-z, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -1562,17 +1563,28 @@ fi
 # still current; a cleanup opened only under a permit and settled only after
 # the end; one reply settled) and two state invariants (an owner's commit
 # stays settleable; the first presentation time is the earliest). It
-# requires every wrapper to fire, twenty witnesses reached and refuses
-# thirty-three seeded defects (--mutants; a thirty-fourth from 7 steps). 6
-# steps reach every witness. It runs alone in shard audits-j.
+# requires every wrapper to fire, twenty-two witnesses reached and refuses
+# thirty-five seeded defects (a thirty-sixth from 7 steps). 6
+# steps reach every witness. The lane runs it in three parts, each run in
+# exactly one of them: its whole-space run in shard audits-j (--part space),
+# its witness runs in shard audits-z (--part witnesses) and its seeded
+# defects in shard audits-a (--part mutants).
 durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
 if [[ ! -x "${durable_decision_audit}" ]]; then
   echo "error: durable decision audit runner is missing from workspace runfiles: ${durable_decision_audit}" >&2
   exit 1
 fi
 if run_part audits-j; then
-  echo "running bounded durable decision TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --mutants
+  echo "running bounded durable decision whole-space TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --part space
+fi
+if run_part audits-z; then
+  echo "running bounded durable decision witness TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --part witnesses
+fi
+if run_part audits-a; then
+  echo "running bounded durable decision seeded-defect TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --part mutants
 fi
 
 # Approval-carried child grants (GrantAuthorityMachine: a grant under a child
@@ -1653,7 +1665,11 @@ run_machine_verify() {
 # 2026-11-02 and 2026-11-03), and each shard's job time is its range on the
 # three pushes, 7-26 s of it checkout and TLC setup:
 # audits-a = live unregister cleanup 238-341, mob operator grant with
-# --mutants 158-240: 414-602 s;
+# --mutants 158-240: 414-602 s (500 s at the median of the 42 pull-request
+# runs of 2026-11-09 to 2026-11-20, 637 s at most), and the durable decision
+# audit's seeded defects (--part mutants; thirty-five runs, 139 s and 184 s
+# of audits-j on pull-request runs 44399170268 and 44819129634; 73 s locally
+# with 4 TLC workers): about 640-820 s;
 # audits-b = durable in-turn steer with its per-kind goal runs 348-610, live
 # delegation steer 34-51: 514-685 s, and the retained-run settle audit with
 # --mutants (0.9.11), from audits-r, which it joined as the lighter of
@@ -1694,8 +1710,20 @@ run_machine_verify() {
 # 135-190 s (the shard is not measured again with it);
 # audits-i = member residency's witness runs (--part witnesses), alone: the
 # audit 346-542, the shard 357-565 s;
-# audits-j = durable decision with --mutants, alone: the audit 182-372, the
-# shard 206-398 s;
+# audits-j = the durable decision audit's whole-space run (--part space),
+# alone. The whole audit with --mutants ran here alone: 182-372 s (the shard
+# 206-398 s) on those 0.9.9 runs, then 833-1598 s (1180 s at the median) on
+# the 42 pull-request runs of 2026-11-09 to 2026-11-20, after its space grew
+# from 42729 to 81907 distinct states (10.3 to 25.1 million generated), its
+# witnesses from 17 to 22 and its seeded defects from 27 to 35. On
+# pull-request runs 44399170268 and 44819129634 (1160 s and 1490 s) the
+# whole-space run took 477 s and 607 s, the witness runs 532 s and 670 s
+# and the seeded defects 139 s and 184 s: about 500-630 s for this shard
+# (191 s locally with 4 TLC workers);
+# audits-z = its witness runs (--part witnesses), alone: about 555-695 s
+# from those runs' times (252 s locally). Eight of the
+# twenty-two witnesses are 7 or 8 states deep and search most of the space
+# (38-176 s each); the others take 2-7 s;
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, each alone: apply 384-460 (the shard
 # 396-484 s), legacy 596-726 (605-751 s), roles 563-740 (604-745 s, and
@@ -1771,8 +1799,9 @@ run_machine_verify() {
 # time added or taken away, not yet measured as one job. Hosted time ran
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these
 # audits, so size a new audit by a hosted run. The job times out at 30
-# minutes, since one audit that no shard can split (the durable decision
-# audit, alone in audits-j) runs near 20 hosted; each shard is still sized
+# minutes, since a shard has run past 20 hosted (audits-r 1271 s on a pull
+# request's run 43650149872; the durable decision audit 1598 s while it ran
+# whole in audits-j); each shard is still sized
 # to stay within about 720 s hosted. audits-n, one audit part, reaches
 # 745-776 s and gets shorter only when its part splits. A new audit
 # joins the lightest shard, or a new shard when it would take that shard

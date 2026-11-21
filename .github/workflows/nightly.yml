@@ -517,7 +517,7 @@ jobs:
       # the bounded adaptive witness, then `machine-verify --all`: 40 minutes
       # with setup and the xtask build on 2026-11-16, and about 50 on the
       # slower kind of runner (see TLC_RUN_CAP_SECS above). The lane's
-      # twenty-four audit shards run in ci.yml's tlc-audits job on every
+      # twenty-five audit shards run in ci.yml's tlc-audits job on every
       # change scripts/machine-authority-changed matches. The whole lane in
       # one 4-vCPU job needs an estimated 218-260 minutes, and it hit this
       # job's 90-minute limit every night from 2026-11-04.

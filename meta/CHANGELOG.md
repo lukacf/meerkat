@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Python and TypeScript SDKs: typed presentations for direct and attested decisions, retaining raw mapping and record compatibility.
+
 - The TypeScript SDK exposes the existing gateway host-runnable path:
   hosts declare deterministic schedule targets with
   `MetaBuilder.hostRunnables(names)` and handle their fires with

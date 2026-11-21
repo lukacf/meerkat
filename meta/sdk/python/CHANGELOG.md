@@ -4,6 +4,11 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- Added `DecisionPresentation`, typed approver/reviewer audiences,
+  `DecisionCanonicalPart` and `DecisionPresentationLink` for `decisions_present`
+  and `DecisionAttestation.presentation`. Existing raw mappings and dictionaries
+  remain supported unchanged.
+
 ## 0.9.17
 
 - Added `Meta.builder().on_schedule_fire(name, handler)`: the handler for a

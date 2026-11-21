@@ -159,7 +159,15 @@ from .models import (
 from .agent_builder import SessionAgentBuilder
 
 # Durable decisions
-from .decisions import DecisionAttestation
+from .decisions import (
+    DecisionApproverAudience,
+    DecisionAttestation,
+    DecisionAudience,
+    DecisionCanonicalPart,
+    DecisionPresentation,
+    DecisionPresentationLink,
+    DecisionReviewerAudience,
+)
 
 # Errors
 from .errors import (
@@ -583,6 +591,12 @@ __all__ = [
     "DECIDE_INSIDE_TOOL_CALLBACK_KIND",
     # Durable decisions
     "DecisionAttestation",
+    "DecisionApproverAudience",
+    "DecisionAudience",
+    "DecisionCanonicalPart",
+    "DecisionPresentation",
+    "DecisionPresentationLink",
+    "DecisionReviewerAudience",
     "TransportError",
     "TransportReaderFailedError",
     "GatewayChildEndedError",

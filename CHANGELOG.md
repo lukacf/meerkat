@@ -133,7 +133,8 @@ them.
   behavior and rollback notes.
 - Steers: do not rely on a model decision between consecutive eligible
   steers. Steers that wait together now reach the model in one request,
-  where 0.9.17 delivered one per model boundary. If distinct decisions
+  where 0.9.17 delivered one per model boundary. No setting keeps one
+  steer per model boundary. If distinct decisions
   matter, wait for an observed model boundary before sending the next
   steer: the first `turn_completed` of the run after the earlier steer's
   `boundary_append_applied`, which says the model has answered a request

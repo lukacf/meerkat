@@ -116,7 +116,8 @@ Do not rely on a model decision between consecutive eligible steers. In
 0.9.17 one durable steer joined a running turn per model boundary, so steers
 that waited together reached the model one request apart. Now the durable
 steers that wait in the steer lane join a boundary together, in admission
-order, and the next model request is the first to carry all of them.
+order, and the next model request is the first to carry all of them. No
+setting keeps one steer per model boundary.
 
 If distinct decisions matter, wait for an observed model boundary before you
 send the next steer: the first `turn_completed` of the run after the earlier

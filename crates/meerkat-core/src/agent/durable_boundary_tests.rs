@@ -462,8 +462,8 @@ fn notice_rows<'a>(messages: &[Message], tokens: &[&'a str]) -> Vec<(usize, &'a 
 #[cfg(feature = "workspace-tests")]
 #[tokio::test]
 async fn several_durable_deliveries_published_at_one_boundary_all_join_the_next_request_in_order() {
-    const TOKENS: [&str; 3] = ["JOIN-ONE-1A", "JOIN-TWO-2B", "JOIN-THREE-3C"];
-    const WITHDRAWN_TOKEN: &str = "JOIN-WITHDRAWN-4D";
+    const TOKENS: [&str; 3] = ["JOIN-ONE-1Q", "JOIN-TWO-2R", "JOIN-THREE-3S"];
+    const WITHDRAWN_TOKEN: &str = "JOIN-WITHDRAWN-4T";
     let all_tokens = [TOKENS[0], TOKENS[1], TOKENS[2], WITHDRAWN_TOKEN];
 
     let client = Arc::new(RecordingClient::new());

@@ -853,16 +853,13 @@ async fn fresh_turn_only_steer_between_two_durable_steers_takes_the_follow_up() 
     let before_id = before.id().clone();
     rig.admit(before).await;
     rig.wait_for_waiting_delivery().await;
+    let mut routed_metadata = steer_metadata();
+    routed_metadata.model = Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+        "claude-sonnet-4-5",
+    ));
     let routed = Input::Prompt(crate::input::PromptInput::new(
         "fresh turn row routed prompt",
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
-                    "claude-sonnet-4-5",
-                )),
-                ..steer_metadata()
-            },
-        ),
+        Some(routed_metadata),
     ));
     let routed_id = routed.id().clone();
     rig.admit(routed).await;

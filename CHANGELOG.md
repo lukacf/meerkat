@@ -51,9 +51,11 @@ them.
 
 - **Behavior:** (behaviour-only, not measured by the gate) steers into a
   running turn, a change of timing with no type, wire or schema change: the
-  durable content steers that wait in the steer lane now join a model
-  boundary together, in admission order, so the next model request is the
-  first to carry all of them. In 0.9.17 one durable steer joined per model
+  eligible prefix of the durable content steers that wait in the steer lane
+  now joins a boundary where a durable steer has registered its claim, in
+  admission order, so the next model request is the first to carry them.
+  An acknowledged admission is not inclusion in a request: the cutoff
+  decides that. In 0.9.17 one durable steer joined per model
   boundary, and a steer admitted while an earlier one waited joined the
   boundary after it (read from the source at tag `v0.9.17`:
   `DurableSteerOrder`, `crates/meerkat-runtime/src/driver/ephemeral.rs` lines
@@ -71,11 +73,14 @@ them.
   registered and no acknowledged steer still on its way: a steer whose
   admission was acknowledged before that check is in the request. Once a
   durable steer has entered the boundary, the cutoff is its publication
-  under the session mutation gate, as at any boundary. Per input and exactly
-  once, as before: its join, its delivery witness, its transcript rows, its
-  binding to the run's round commit and its `boundary_append_applied`;
-  steers that join one boundary have adjacent rows and publish their events
-  in admission order. The joins stop at the first durable steer that cannot
+  under the session mutation gate, as at any boundary. A successful in-turn
+  application that the run retains is exactly once per input, as before:
+  its join, its delivery witness, its transcript rows and its
+  `boundary_append_applied`; steers that join one boundary have adjacent
+  rows and publish their events in admission order. The applied event is
+  neither the model's response nor the durable consumption of the input,
+  and the round commit is separate evidence (retained history). The joins
+  stop at the first durable steer that cannot
   join the run (another requester's, one the run's bound of 256 contributors
   refuses, one whose rows cannot be written in-turn, one whose join could
   not be made durable): it keeps its place and no steer behind it overtakes
@@ -84,8 +89,8 @@ them.
   input that only a fresh turn applies never joins a running turn. In our
   held-tool test, 0.9.3 put the first steer in the next request and the
   rest in a follow-up turn; 0.9.4 and the tested revision of `main`
-  delivered one per request; this change delivers all eligible waiting
-  steers together. Other releases were not measured. See
+  delivered one per request; this change delivers the eligible waiting
+  prefix together. Other releases were not measured. See
   [Durable steer](docs/reference/session-contracts.mdx#durable-steer) and
   Upgrade notes.
 
@@ -135,19 +140,26 @@ them.
   steers. Steers that wait together now reach the model in one request,
   where 0.9.17 delivered one per model boundary. No setting keeps one
   steer per model boundary. If distinct decisions
-  matter, wait for an observed model boundary before sending the next
-  steer: the first `turn_completed` of the run after the earlier steer's
-  `boundary_append_applied`, which says the model has answered a request
-  that carried that steer. A steer that takes the follow-up turn publishes
-  no `boundary_append_applied`: read its `last_run_id` with
-  `session/input_status` and wait for that run's first `turn_completed`.
+  matter, match the earlier steer to a model decision before sending the
+  next one: its `boundary_append_applied` names the `input_id` and the
+  `run_id` of the turn that applied it, and that run's next successful
+  `turn_completed` says the model has answered a request that carried it.
+  The applied event alone is neither a response nor the durable
+  consumption of the input. A steer that takes the follow-up turn
+  publishes no `boundary_append_applied`: read its `last_run_id` with
+  `session/input_status` and take that run's first successful
+  `turn_completed`. When that `turn_completed` does not come (a failed
+  call, a discard, a terminal or a replay without it), do not wait without
+  a limit and do not resend on your own: reconcile with
+  `session/input_status`, `boundary_appends_discarded` and retained
+  history.
   A steer admitted after a request's input is fixed waits for the next
   boundary, even when its admission was acknowledged before the request
   was composed or sent: a caller cannot tell the two instants apart, so
   an admission acknowledged before the request left does not mean the
   steer is in that request.
-  Each input keeps its own input id, delivery witness, round-commit
-  binding and `boundary_append_applied` (match a delivery by its
+  Each input keeps its own input id, and a successful retained in-turn
+  application has one `boundary_append_applied` (match a delivery by its
   `input_id`); the changed contract is timing. See
   [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
 
@@ -22895,7 +22907,8 @@ them.
   the first steer in the next model request and the rest in a follow-up
   turn; now one durable steer
   joins per boundary, and the later ones land at later boundaries of the run
-  or in the follow-up turn. (Corrected with 0.9.18: this entry said that
+  or in the follow-up turn. (Corrected on 2026-11-21, with the steer entry
+  under Unreleased: this entry said that
   before, every peer or text steer admitted during one boundary reached the
   next model request. Our held-tool test on 0.9.3 does not show that; other
   releases were not measured.)

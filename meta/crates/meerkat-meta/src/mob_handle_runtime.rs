@@ -7815,6 +7815,8 @@ pub struct MobBootstrapSpec {
     /// state so child mobs inherit it. Set via
     /// [`with_workgraph_service`](Self::with_workgraph_service).
     pub(crate) workgraph_service: Option<meerkat::WorkGraphService>,
+    #[cfg(feature = "workgraph-pursuit-test-vehicle")]
+    pub(crate) workgraph_pursuit: crate::workgraph_pursuit_test_vehicle::Vehicle,
     /// Tool-plane admission slots (one per `install_workgraph_tools` call on
     /// a builder feeding this runtime). `MobRuntime::bootstrap` fills each
     /// with the runtime-wide [`WorkGraphAdmission`] so the agent tool plane's
@@ -8073,6 +8075,8 @@ impl MobBootstrapSpec {
             #[cfg(feature = "extension-state")]
             child_mcp_servers: None,
             workgraph_service: None,
+            #[cfg(feature = "workgraph-pursuit-test-vehicle")]
+            workgraph_pursuit: Default::default(),
             workgraph_admission_slots: Vec::new(),
             member_workgraph_tools,
             composition_release: CompositionRelease::default(),
@@ -12074,6 +12078,8 @@ impl MobRuntime {
         // one), which is the handle's.
         spec.side_chat_memory_slot
             .bind_definition(handle.definition());
+        #[cfg(feature = "workgraph-pursuit-test-vehicle")]
+        crate::workgraph_pursuit_test_vehicle::attach(&spec.workgraph_pursuit, &handle)?;
         if let Some(state) = agent_mob_mcp_state.as_ref() {
             state.mob_insert_handle(mob_id, handle.observer()).await;
             match child_mob_root_claim.as_ref() {

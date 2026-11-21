@@ -254,6 +254,9 @@ test-realtime-fixtures = [
 ]
 # Non-shipping deterministic fault points for the console send process tests.
 console-test-faults = []
+# Non-shipping composition of idle WorkGraph pursuit for one gateway process
+# test target. No default, release, CI or packaging build names it.
+workgraph-pursuit-test-vehicle = []
 # Calibration-harness seam for the memory Distiller (§8.4/§11); same contract
 # as the other calibration bins, fixture in / structured ops out.
 # `scripts/memory-evals --mode live` drives these binaries per fixture. Each is

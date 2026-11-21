@@ -19265,6 +19265,10 @@ external_addressable = true
             }
         };
         let workgraph_service = workgraph.as_ref().map(|(service, _, _)| service.clone());
+        #[cfg(feature = "workgraph-pursuit-test-vehicle")]
+        let workgraph_pursuit = crate::workgraph_pursuit_test_vehicle::compose(&workgraph_service);
+        #[cfg(feature = "workgraph-pursuit-test-vehicle")]
+        let workgraph_service = workgraph_pursuit.service_or(workgraph_service);
         let agent_mob_tools_slot = Arc::clone(&inner_builder.default_mob_tools);
         let detached_jobs = callback_job_store.as_ref().map(|store| {
             DetachedCallbackJobRuntime::new(
@@ -19407,6 +19411,8 @@ external_addressable = true
         if schedule_host_inputs.is_some() {
             spec = spec.with_mob_schedules_declared();
         }
+        #[cfg(feature = "workgraph-pursuit-test-vehicle")]
+        crate::workgraph_pursuit_test_vehicle::carry(&mut spec, workgraph_pursuit);
         spec.committed_boundary_recoverer = Some(committed_boundary_recoverer);
         if let Some(root) = gateway_options.session_identity_config_root.as_ref() {
             spec = spec.with_session_identity_config_root(root.clone());

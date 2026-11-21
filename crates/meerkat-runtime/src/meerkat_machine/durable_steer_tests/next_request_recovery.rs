@@ -959,26 +959,21 @@ pub(super) mod observed_today {
     }
 
     /// PROVEN RESUMABILITY, the witness: steer E waits for a boundary when
-    /// the process dies, the same run resumes, and steer F is admitted while
-    /// it runs.
+    /// the first runtime is abandoned, a fresh runtime over the same store
+    /// resumes the same run, and steer F is admitted while it runs.
     ///
-    /// OBSERVED TODAY, at the cutoff of the resumed run's next request: E is
-    /// back in the steer lane with its `Queued` row; the runtime and the row
-    /// still class it a durable in-turn delivery, but the new machine holds
-    /// NO delivery for it (only an admission writes one). F holds its
-    /// delivery in all three places. No delivery registers, the request
-    /// carries NEITHER E nor F, and after the run ends exactly one follow-up
-    /// turn starts with E and then F. Each is delivered exactly once, and E's
-    /// payload is the one it was admitted with.
-    ///
-    /// Open choice, not asserted here. If E is still eligible in a run that
-    /// resumed, both belong in that request, E before F. If a restart ends
-    /// E's eligibility for it, F belongs in that request and E in the
-    /// follow-up. A stale class or the machine's missing delivery alone does
-    /// not decide which.
+    /// OBSERVED, at the cutoff of the resumed run's next request: E is back
+    /// in the steer lane with its `Queued` row and the payload it was
+    /// admitted with, and the machine, the runtime and the row all class it
+    /// a durable in-turn delivery, as before the restart: recovery hands the
+    /// machine the row's class and the machine keeps it for an input that
+    /// never left the steer lane. A delivery registers for the run's next
+    /// boundary without any new admission, F holds its delivery in all three
+    /// places behind E, and that request carries E and then F. Both are
+    /// bound to the resumed run and consumed with it; no follow-up turn
+    /// runs.
     #[tokio::test]
-    async fn observed_a_steer_waiting_at_a_restart_keeps_itself_and_a_later_one_out_of_the_resumed_run()
-     {
+    async fn observed_a_steer_waiting_at_a_restart_and_a_later_one_join_the_resumed_run() {
         let resumed = restart_beside_a_resumed_run(true).await;
         let rig = &resumed.rig;
         let e_id = resumed
@@ -986,6 +981,7 @@ pub(super) mod observed_today {
             .clone()
             .expect("the scene has a waiting steer");
         assert_eq!(rig.steer_queue().await, vec![e_id.clone()]);
+        rig.wait_for_waiting_delivery().await;
 
         let steer = peer_steer("resumed run payload F");
         let f_id = steer.id().clone();
@@ -993,26 +989,18 @@ pub(super) mod observed_today {
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // The cutoff: what the three places hold of E and of F.
-        assert_eq!(
-            read_held(rig, &resumed.store, &e_id).await,
-            held(
-                None,
-                Some("DurableAppend"),
-                Some("DurableAppend"),
-                InputLifecycleState::Queued
-            ),
-            "E: no machine delivery, the class kept by the runtime and by the row"
-        );
-        assert_eq!(
-            read_held(rig, &resumed.store, &f_id).await,
-            held(
-                Some("DurableAppend"),
-                Some("DurableAppend"),
-                Some("DurableAppend"),
-                InputLifecycleState::Queued
-            ),
-            "F: a durable in-turn delivery in all three places"
-        );
+        for (input_id, name) in [(&e_id, "E"), (&f_id, "F")] {
+            assert_eq!(
+                read_held(rig, &resumed.store, input_id).await,
+                held(
+                    Some("DurableAppend"),
+                    Some("DurableAppend"),
+                    Some("DurableAppend"),
+                    InputLifecycleState::Queued
+                ),
+                "{name}: a durable in-turn delivery in all three places"
+            );
+        }
         let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
         let e_row = resumed
             .store
@@ -1023,10 +1011,6 @@ pub(super) mod observed_today {
         assert!(
             format!("{:?}", e_row.state.persisted_input).contains("resumed run payload E"),
             "E's row keeps the payload it was admitted with"
-        );
-        assert!(
-            !rig.state.has_waiting_delivery_for_test(),
-            "no delivery registers for the resumed run's next boundary"
         );
         assert_eq!(
             rig.steer_queue().await,
@@ -1040,41 +1024,27 @@ pub(super) mod observed_today {
             .await;
         assert_eq!(
             last_take_ids(rig),
-            Vec::<InputId>::new(),
-            "the resumed run's next request carries neither E nor F"
+            vec![e_id.clone(), f_id.clone()],
+            "the resumed run's next request carries E and then F"
         );
 
-        // The run ends; the follow-up turn.
+        // The run ends.
         discard_the_stood_tail(&resumed).await;
-        rig.script.step(RunnerStep::Finish);
-        rig.wait_for_apply_calls(2).await;
         rig.script.step(RunnerStep::Finish);
         for input_id in [&resumed.batch, &e_id, &f_id] {
             rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
                 .await;
         }
-        let primitives = rig.script.primitives();
         assert_eq!(
-            primitives[1],
-            vec![e_id.clone(), f_id.clone()],
-            "one follow-up turn starts with E and then F"
-        );
-        for input_id in [&e_id, &f_id] {
-            assert_eq!(
-                contributions(&primitives, input_id),
-                1,
-                "{input_id} is delivered exactly once"
-            );
-        }
-        assert!(
-            rig.script.applied_durable().is_empty(),
-            "no boundary applied E or F"
+            rig.script.applied_durable(),
+            vec![e_id, f_id],
+            "each was applied at the boundary once, in admission order"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             rig.script.apply_calls.load(Ordering::SeqCst),
-            2,
-            "exactly one follow-up turn ran"
+            1,
+            "no follow-up turn ran"
         );
     }
 }

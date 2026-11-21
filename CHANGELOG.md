@@ -49,6 +49,43 @@ them.
   precedence. The global and image defaults are unchanged. No wire/schema
   break is introduced.
 
+- **Behavior:** (behaviour-only, not measured by the gate) steers into a
+  running turn, a change of timing with no type, wire or schema change: the
+  durable content steers that wait in the steer lane now join a model
+  boundary together, in admission order, so the next model request is the
+  first to carry all of them. In 0.9.17 one durable steer joined per model
+  boundary, and a steer admitted while an earlier one waited joined the
+  boundary after it (read from the source at tag `v0.9.17`:
+  `DurableSteerOrder`, `crates/meerkat-runtime/src/driver/ephemeral.rs` lines
+  306-320, and the Durable steer section of
+  `docs/reference/session-contracts.mdx` there). The cutoff
+  of a request is the publication of the boundary's claim: one step under the
+  session mutation gate, after every waiting steer is joined to the run and
+  before the runner writes the rows and composes the request. Admission and
+  recall take the same gate: a steer admitted before the cutoff, also one
+  admitted after the runner parked at the boundary, joins that request, and
+  a steer admitted after it joins the request after it. One case is still
+  open: a steer's admission is acknowledged before the steer registers with
+  the boundary, so a boundary the runner reaches while no steer has
+  registered with it carries none, and a steer acknowledged just before that
+  joins the following boundary or the follow-up turn. Per input and exactly
+  once, as before: its join, its delivery witness, its transcript rows, its
+  binding to the run's round commit and its `boundary_append_applied`;
+  steers that join one boundary have adjacent rows and publish their events
+  in admission order. The joins stop at the first durable steer that cannot
+  join the run (another requester's, one the run's bound of 256 contributors
+  refuses, one whose rows cannot be written in-turn, one whose join could
+  not be made durable): it keeps its place and no steer behind it overtakes
+  it. Unchanged: no model request in flight is cancelled, steers still
+  waiting when the run ends take the follow-up turn in arrival order, and an
+  input that only a fresh turn applies never joins a running turn. In our
+  held-tool test, 0.9.3 put the first steer in the next request and the
+  rest in a follow-up turn; 0.9.4 and the tested revision of `main`
+  delivered one per request; this change delivers all eligible waiting
+  steers together. Other releases were not measured. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer) and
+  Upgrade notes.
+
 ### Added
 
 - `gemini-4-neon` in the Core model catalog: a paid Gemini API model with a
@@ -59,6 +96,12 @@ them.
   instead not applied, preserving the existing level or provider default.
   Long decode is not added.
 
+- `meerkat-core`: `CoreBoundaryStageOutput::attach_durable_delivery` and
+  `CoreBoundaryStageOutput::withdraw_durable_delivery`. The holder of a
+  parked durable boundary preparation attaches the deliveries of other
+  inputs that join the same boundary, or takes one back, before its one
+  commit publishes them in attach order.
+
 ### Changed
 
 - Core catalog presentation identifies Neon as the Gemini default. Hydrogen
@@ -68,7 +111,7 @@ them.
 
 ### Fixed
 
-- `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary gives that boundary back. The next durable steer in the steer lane now joins the very boundary the recalled one waited for. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Each boundary still takes one durable delivery, in arrival order, and the recall's answers are unchanged. The boundary is freed while the recalled steer still waits for it; a recall that commits after the runner has already parked at that boundary with the steer frees nothing, and that boundary delivers nothing, as before.
+- `meerkat-runtime`: a durable steer recalled with `MeerkatMachine::recall_queued_input` while it waits for its model boundary no longer delays the durable steers behind it. Before, the recalled steer's preparation kept the boundary until the runner reached it, so that boundary delivered nothing and every later steer landed one model request later. Now the steers behind a recalled one join the request they would have joined, in admission order, whether the recall commits before or after the runner parks at the boundary: when the recalled steer held the boundary's claim, only its own delivery is withdrawn, and the steers behind it are joined and published at that boundary. The recalled steer is in no request and has no transcript row, and the recall's answers are unchanged.
 
 ### Upgrade notes
 
@@ -79,6 +122,19 @@ them.
   `[models.gemini-4-neon]` entry before upgrading because model IDs must be
   unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
   behavior and rollback notes.
+- Steers: do not rely on a model decision between consecutive eligible
+  steers. Steers that wait together now reach the model in one request,
+  where 0.9.17 delivered one per model boundary. If distinct decisions
+  matter, wait for an observed model boundary before sending the next
+  steer: the first `turn_completed` of the run after the earlier steer's
+  `boundary_append_applied`, which says the model has answered a request
+  that carried that steer. A steer that takes the follow-up turn publishes
+  no `boundary_append_applied`: read its `last_run_id` with
+  `session/input_status` and wait for that run's first `turn_completed`.
+  Each input keeps its own input id, delivery witness, round-commit
+  binding and `boundary_append_applied` (match a delivery by its
+  `input_id`); the changed contract is timing. See
+  [Durable steer](docs/reference/session-contracts.mdx#durable-steer).
 
 ## [0.9.17] - 2026-11-18
 
@@ -22820,10 +22876,14 @@ them.
   per boundary, in arrival order: a steer admitted while an earlier one still
   waits joins the boundary after it, in the same run, instead of falling back
   to the follow-up turn; steers still waiting when the run ends take the
-  follow-up turn in arrival order. Before, every peer or text steer admitted
-  during one boundary reached the next model request; now one durable steer
+  follow-up turn in arrival order. Before, in our held-tool test, 0.9.3 put
+  the first steer in the next model request and the rest in a follow-up
+  turn; now one durable steer
   joins per boundary, and the later ones land at later boundaries of the run
-  or in the follow-up turn.
+  or in the follow-up turn. (Corrected with 0.9.18: this entry said that
+  before, every peer or text steer admitted during one boundary reached the
+  next model request. Our held-tool test on 0.9.3 does not show that; other
+  releases were not measured.)
 - `meerkat-core`: `SystemNoticeBlock::Comms` and
   `AgentEvent::PeerContentIngested` gain the field
   `delivery_id: Option<InteractionId>`: the delivery id of an incoming peer

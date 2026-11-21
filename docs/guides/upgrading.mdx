@@ -107,6 +107,43 @@ See [Providers](/concepts/providers) for the synchronous limits. If rolling
 back to 0.9.17, restore the custom entry where you still select Neon; that
 release has no built-in Neon row.
 
+### Steers join the next model request
+
+A change of timing, with no type, wire or schema change. It concerns hosts
+that send more than one `steer` input into a running turn.
+
+Do not rely on a model decision between consecutive eligible steers. In
+0.9.17 one durable steer joined a running turn per model boundary, so steers
+that waited together reached the model one request apart. Now the durable
+steers that wait in the steer lane join a boundary together, in admission
+order, and the next model request is the first to carry all of them.
+
+If distinct decisions matter, wait for an observed model boundary before you
+send the next steer: the first `turn_completed` of the run after the earlier
+steer's `boundary_append_applied`. It says the model has answered a request
+that carried that steer. The next steer then joins a later boundary, or the
+follow-up turn when the run ends first. An earlier steer that itself takes
+the follow-up turn publishes no `boundary_append_applied`: read its
+`last_run_id` with `session/input_status` and wait for that run's first
+`turn_completed`.
+
+What stays per input, exactly once: the transcript rows, the input id, the
+delivery witness, the binding to the run's round commit and the
+`boundary_append_applied`. Several of those events can now
+precede one model request, so match a delivery by `input_id`, not by one
+event or one new transcript row per request. Later requests carry the rows as
+transcript history, which is not another delivery.
+
+A steer withdrawn with `session/recall_input` (or
+`MeerkatMachine::recall_queued_input`) before its request's cutoff is in no
+request and has no row, and the steers behind it are not delayed.
+
+Unchanged: no model request in flight is cancelled; steers still waiting when
+the run ends take the follow-up turn in arrival order; an input that only a
+fresh turn applies, and a directed delivery, never join a running turn. The
+contract, its cutoff and the case that is still open are in
+[Durable steer](/reference/session-contracts#durable-steer).
+
 ## Upgrading to 0.9.17
 
 This section is for systems running 0.9.16. The full list of changes is in
@@ -5410,7 +5447,9 @@ mode with leading zeros (`'0755'`; unquoted it reads as `755.0`).
   by exactly one follow-up turn. 0.9.3 showed peer and text-only prompt
   steers to one model request and never stored them. History now holds their
   rows, `boundary_append_applied` reports them, and each incoming comms
-  notice publishes one `peer_content_ingested`.
+  notice publishes one `peer_content_ingested`. From 0.9.18 every eligible
+  steer waiting at a boundary joins it: see
+  [Steers join the next model request](#steers-join-the-next-model-request).
 - **Replies name what they answer:** the model's peer message notice gains a
   `Delivery ID: <id>` line and, for a reply, an `In reply to: <id>` line.
   `reply_to_peer` can answer a message that joined the running turn.

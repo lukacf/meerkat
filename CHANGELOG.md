@@ -64,7 +64,12 @@ them.
   before the runner writes the rows and composes the request. Admission and
   recall take the same gate: a steer admitted before the cutoff, also one
   admitted after the runner parked at the boundary, joins that request, and
-  a steer admitted after it joins the request after it. Per input and exactly
+  a steer admitted after it joins the request after it. With no durable
+  steer at the boundary, the input is fixed when the runner finds none
+  registered and none acknowledged and still on its way, and closes the
+  boundary: a steer whose admission was acknowledged before that is in the
+  request, also when the runner is parked on request-only context alone.
+  Per input and exactly
   once, as before: its join, its delivery witness, its transcript rows, its
   binding to the run's round commit and its `boundary_append_applied`;
   steers that join one boundary have adjacent rows and publish their events
@@ -97,6 +102,12 @@ them.
   parked durable boundary preparation attaches the deliveries of other
   inputs that join the same boundary, or takes one back, before its one
   commit publishes them in attach order.
+
+- `meerkat-core`: `PendingBoundaryAdmissions` and `PendingBoundaryAdmission`,
+  and the provided method `TurnStateHandle::pending_boundary_admissions`
+  (`None` by default). A runtime announces a durable steer it has
+  acknowledged before that steer's boundary preparation registers, and
+  the runner keeps its boundary open while an announcement stands.
 
 ### Changed
 

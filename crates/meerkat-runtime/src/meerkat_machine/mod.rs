@@ -6856,6 +6856,38 @@ struct RuntimeAcceptedLiveBoundaryPlan {
     witness: RuntimeLiveBoundaryAttachmentWitness,
     input_id: InputId,
     publication_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>>,
+    /// The admission's announcement of an acknowledged durable steer
+    /// ([`Self::announce_pending_boundary_admission`]), ended when this
+    /// input's live-boundary work is over. `None` for another class.
+    pending_admission: Option<meerkat_core::PendingBoundaryAdmission>,
+}
+
+impl RuntimeAcceptedLiveBoundaryPlan {
+    /// Announce, under the admission's mutation gate and before the
+    /// admission answers its caller, that `input_id` was admitted as a
+    /// durable steer whose boundary preparation is still to register.
+    ///
+    /// The preparation runs in a task of its own after the admission
+    /// answered, so the runner could otherwise reach its boundary first,
+    /// find nothing registered and fix the next request's input without a
+    /// steer that was acknowledged before it. While the announcement stands
+    /// the runner keeps that boundary open. It names no input: which steer
+    /// joins the run is still decided by the machine when the preparation's
+    /// work revalidates under the gate.
+    async fn announce_pending_boundary_admission(
+        mutation_gate: &SessionMutationGate,
+        driver: &SharedDriver,
+        input_id: &InputId,
+    ) -> Option<meerkat_core::PendingBoundaryAdmission> {
+        let durable = driver
+            .lock()
+            .await
+            .driver_ingress()
+            .runtime_semantics(input_id)
+            .and_then(|semantics| semantics.live_boundary_delivery())
+            == Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend);
+        durable.then(|| mutation_gate.pending_boundary_admissions().announce())
+    }
 }
 
 struct RuntimeAcceptedBoundaryCancelPlan {
@@ -9986,6 +10018,10 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         let mut gate_guard = held_mutation_gate;
         let live_boundary_disposition = if let Some(live_boundary_plan) = live_boundary_plan {
+            // The admission's announcement stands for as long as this
+            // input's live-boundary work runs, and ends with it on every
+            // path, an error included.
+            let pending_admission = live_boundary_plan.pending_admission;
             let (returned_gate, disposition) = self
                 .commit_live_boundary_input_if_available(
                     session_id,
@@ -9997,6 +10033,7 @@ impl MeerkatMachine {
                     &mut fallback_wake,
                 )
                 .await?;
+            drop(pending_admission);
             gate_guard = returned_gate;
             disposition
         } else {

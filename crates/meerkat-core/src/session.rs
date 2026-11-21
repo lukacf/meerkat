@@ -2282,6 +2282,9 @@ struct TransientTurnContextBoundaryCoordinator {
     incarnation_id: uuid::Uuid,
     lifecycle: std::sync::Mutex<TransientTurnContextBoundaryLifecycle>,
     notify: tokio::sync::Notify,
+    /// The runtime's announcements of acknowledged durable deliveries that
+    /// have not registered here yet, once bound.
+    pending_admissions: std::sync::OnceLock<PendingBoundaryAdmissions>,
 }
 
 struct TransientTurnContextBoundaryLifecycle {
@@ -2291,6 +2294,9 @@ struct TransientTurnContextBoundaryLifecycle {
     /// Run whose boundaries the runner currently opens.
     active_run: Option<RunId>,
     window: TransientTurnContextBoundaryWindow,
+    /// Whether the take that parked `window` accepts durable deliveries. Set
+    /// by every park and read only while the window is parked.
+    parked_accepts_durable: bool,
     /// One durable delivery waiting for the next boundary of `active_run`.
     next_boundary_durable: Option<RegisteredBoundaryRequest>,
     /// One request-only delivery waiting for the next boundary of
@@ -2383,17 +2389,157 @@ impl Default for TransientTurnContextBoundaryCoordinator {
                 next_request_id: 0,
                 active_run: None,
                 window: TransientTurnContextBoundaryWindow::Closed,
+                parked_accepts_durable: false,
                 next_boundary_durable: None,
                 next_boundary_request_only: None,
                 run_durable_witnesses: None,
                 durable_apply_ordinal: 0,
             }),
             notify: tokio::sync::Notify::new(),
+            pending_admissions: std::sync::OnceLock::new(),
         }
     }
 }
 
+/// Durable deliveries a runtime acknowledged to their senders whose boundary
+/// preparation has not reached the actor's boundary coordinator yet.
+///
+/// A runtime commits an input and answers its sender before that input's
+/// boundary preparation runs, and the preparation reaches the coordinator
+/// through the executor's boundary handle, which may await first. A runner
+/// that reached its boundary in between would close an empty window and fix
+/// the next request's input without a delivery that was acknowledged before
+/// it. The runtime therefore announces such a delivery here before it
+/// answers, and a boundary with no durable delivery registered stays open
+/// while an announcement is outstanding.
+///
+/// An announcement names no input and carries no payload: it only makes the
+/// runner wait. Which input joins a run stays the runtime's decision.
+#[derive(Clone, Default)]
+pub struct PendingBoundaryAdmissions {
+    inner: Arc<PendingBoundaryAdmissionsInner>,
+}
+
+#[derive(Default)]
+struct PendingBoundaryAdmissionsInner {
+    outstanding: std::sync::atomic::AtomicUsize,
+    ended: tokio::sync::Notify,
+}
+
+impl PendingBoundaryAdmissions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Announce one acknowledged durable delivery whose boundary preparation
+    /// is still to register. The announcement ends when the returned value is
+    /// dropped: once the delivery's boundary work is over, whether it joined
+    /// the run or not.
+    pub fn announce(&self) -> PendingBoundaryAdmission {
+        self.inner
+            .outstanding
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        PendingBoundaryAdmission {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn any_outstanding(&self) -> bool {
+        self.inner
+            .outstanding
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    }
+}
+
+impl std::fmt::Debug for PendingBoundaryAdmissions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingBoundaryAdmissions")
+            .field(
+                "outstanding",
+                &self
+                    .inner
+                    .outstanding
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+            .finish()
+    }
+}
+
+/// One announced delivery of [`PendingBoundaryAdmissions`]. Dropping it ends
+/// the announcement.
+#[must_use = "dropping the announcement lets the boundary close without the delivery"]
+pub struct PendingBoundaryAdmission {
+    inner: Arc<PendingBoundaryAdmissionsInner>,
+}
+
+impl Drop for PendingBoundaryAdmission {
+    fn drop(&mut self) {
+        self.inner
+            .outstanding
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.ended.notify_waiters();
+    }
+}
+
+impl std::fmt::Debug for PendingBoundaryAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingBoundaryAdmission")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Resolves when the coordinator reports a change (`registered`) or an
+/// announcement of a bound [`PendingBoundaryAdmissions`] ends (`ended`).
+/// Both must be enabled before the state they guard is read.
+async fn registration_or_end_of_an_announcement(
+    mut registered: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
+    mut ended: std::pin::Pin<&mut Option<tokio::sync::futures::Notified<'_>>>,
+) {
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        if registered.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(());
+        }
+        match ended.as_mut().as_pin_mut() {
+            Some(ended) => ended.poll(cx),
+            None => std::task::Poll::Pending,
+        }
+    })
+    .await;
+}
+
 impl TransientTurnContextBoundaryLifecycle {
+    /// Whether the runner of `run_id` leaves its boundary open for an
+    /// acknowledged durable delivery that has not registered yet: the
+    /// boundary accepts durable deliveries, none is registered for it or
+    /// waiting for the next one, and `admissions` holds an announcement.
+    fn boundary_waits_for_pending_admission(
+        &self,
+        run_id: &RunId,
+        acceptance: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance,
+        admissions: Option<&PendingBoundaryAdmissions>,
+    ) -> bool {
+        self.actor_live
+            && matches!(
+                acceptance,
+                crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable
+            )
+            && self.next_boundary_durable.is_none()
+            && matches!(
+                &self.window,
+                TransientTurnContextBoundaryWindow::Open {
+                    run_id: current,
+                    durable: None,
+                    ..
+                } if current == run_id
+            )
+            && admissions.is_some_and(PendingBoundaryAdmissions::any_outstanding)
+    }
+
     /// Withdraw every registered or parked durable delivery owned by `run_id`
     /// (every run when `None`) and close its window.
     fn withdraw_run(&mut self, run_id: Option<&RunId>) -> bool {
@@ -2880,6 +3026,15 @@ impl TransientTurnContextStateHandle {
         }
     }
 
+    /// Bind the announcements of the runtime that admits this actor's
+    /// inputs, so a boundary stays open for a durable delivery the runtime
+    /// acknowledged before the boundary's request was fixed. The first
+    /// binding stays; an unbound coordinator never waits for one.
+    #[doc(hidden)]
+    pub fn bind_pending_boundary_admissions(&self, admissions: PendingBoundaryAdmissions) {
+        let _ = self.boundary.pending_admissions.set(admissions);
+    }
+
     pub(crate) fn begin_boundary_run(
         &self,
         run_id: RunId,
@@ -3103,11 +3258,26 @@ impl TransientTurnContextStateHandle {
                             },
                         ]),
                     };
+                    let parked_accepts_durable = lifecycle.parked_accepts_durable;
                     match &mut lifecycle.window {
                         TransientTurnContextBoundaryWindow::Open { durable, .. }
                             if durable.is_none() =>
                         {
                             *durable = Some(request);
+                        }
+                        // The runner is parked at a boundary of this run
+                        // that accepts durable deliveries and has none (it
+                        // parked with request-only context alone). Its
+                        // request's input is not fixed until the park ends,
+                        // so the delivery joins this boundary: the park
+                        // waits for every delivery it holds.
+                        TransientTurnContextBoundaryWindow::Parked {
+                            run_id, durable, ..
+                        } if parked_accepts_durable
+                            && run_id == expected_run_id
+                            && durable.is_none() =>
+                        {
+                            *durable = Some(ParkedBoundaryRequest::from_registered(request));
                         }
                         _ => {
                             if lifecycle.next_boundary_durable.is_some() {
@@ -3217,13 +3387,44 @@ impl TransientTurnContextStateHandle {
         acceptance: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance,
     ) -> Result<crate::lifecycle::boundary_delivery::TakenBoundaryDelivery, CoreBoundaryStageError>
     {
-        let generation = {
+        let pending_admissions = self.boundary.pending_admissions.get();
+        let generation = loop {
+            // Both waits are armed before the window is read, so neither a
+            // registration nor the end of an announcement is missed.
+            let registered = self.boundary.notify.notified();
+            tokio::pin!(registered);
+            registered.as_mut().enable();
+            let ended = pending_admissions.map(|admissions| admissions.inner.ended.notified());
+            tokio::pin!(ended);
+            if let Some(ended) = ended.as_mut().as_pin_mut() {
+                ended.enable();
+            }
+            if self.boundary.lock().boundary_waits_for_pending_admission(
+                run_id,
+                acceptance,
+                pending_admissions,
+            ) {
+                registration_or_end_of_an_announcement(registered, ended).await;
+                continue;
+            }
             let mut lifecycle = self.boundary.lock();
             if !lifecycle.actor_live {
                 return Err(CoreBoundaryStageError::stale(format!(
                     "actor incarnation {} was revoked",
                     self.boundary.incarnation_id
                 )));
+            }
+            // Read again in the critical section that would close the
+            // window. A delivery announced before this read holds the
+            // boundary open until its preparation registers or its work
+            // ends; one announced after it was acknowledged after this
+            // boundary's request was fixed, and waits for the next boundary.
+            if lifecycle.boundary_waits_for_pending_admission(
+                run_id,
+                acceptance,
+                pending_admissions,
+            ) {
+                continue;
             }
             let (generation, request_only, durable) = match &mut lifecycle.window {
                 TransientTurnContextBoundaryWindow::Open {
@@ -3266,13 +3467,17 @@ impl TransientTurnContextStateHandle {
                 self.boundary.notify.notify_waiters();
                 return Ok(crate::lifecycle::boundary_delivery::TakenBoundaryDelivery::default());
             }
+            lifecycle.parked_accepts_durable = matches!(
+                acceptance,
+                crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable
+            );
             lifecycle.window = TransientTurnContextBoundaryWindow::Parked {
                 run_id: run_id.clone(),
                 generation,
                 request_only: request_only.map(ParkedBoundaryRequest::from_registered),
                 durable: durable.map(ParkedBoundaryRequest::from_registered),
             };
-            generation
+            break generation;
         };
         self.boundary.notify.notify_waiters();
 
@@ -3298,6 +3503,11 @@ impl TransientTurnContextStateHandle {
             let notified = self.boundary.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            let ended = pending_admissions.map(|admissions| admissions.inner.ended.notified());
+            tokio::pin!(ended);
+            if let Some(ended) = ended.as_mut().as_pin_mut() {
+                ended.enable();
+            }
             let poll = {
                 let mut lifecycle = self.boundary.lock();
                 if lifecycle.actor_live {
@@ -3312,7 +3522,22 @@ impl TransientTurnContextStateHandle {
                                 .into_iter()
                                 .flatten()
                                 .all(|parked| parked.resolution.is_some());
-                            if resolved {
+                            // A park that holds no durable delivery (the
+                            // runner parked with request-only context alone)
+                            // does not end while an acknowledged durable
+                            // delivery has still to register: its
+                            // preparation enters this parked generation, or
+                            // its announcement ends. Read in the critical
+                            // section that would close the window, as the
+                            // head of the take reads it. A park that holds a
+                            // durable delivery never waits here: its cutoff
+                            // is that delivery's publication.
+                            let waits_for_pending_admission = durable.is_none()
+                                && lifecycle.parked_accepts_durable
+                                && lifecycle.next_boundary_durable.is_none()
+                                && pending_admissions
+                                    .is_some_and(PendingBoundaryAdmissions::any_outstanding);
+                            if resolved && !waits_for_pending_admission {
                                 let TransientTurnContextBoundaryWindow::Parked {
                                     request_only,
                                     durable,
@@ -3361,7 +3586,7 @@ impl TransientTurnContextStateHandle {
                     self.boundary.notify.notify_waiters();
                     return Ok(taken);
                 }
-                Ok(None) => notified.as_mut().await,
+                Ok(None) => registration_or_end_of_an_announcement(notified, ended).await,
                 Err(error) => {
                     park_guard.armed = false;
                     return Err(error);
@@ -12346,6 +12571,427 @@ mod tests {
             stage.commit().is_err(),
             "publication after the runner left is stale"
         );
+    }
+
+    /// How long a row lets a runner that must wait show that it waits.
+    const RUNNER_STAYS_AT_THE_BOUNDARY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    fn spawn_runner_take(
+        state: &TransientTurnContextStateHandle,
+        run_id: &RunId,
+        acceptance: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance,
+    ) -> tokio::task::JoinHandle<
+        Result<crate::lifecycle::boundary_delivery::TakenBoundaryDelivery, CoreBoundaryStageError>,
+    > {
+        let state = state.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            state
+                .take_pending_at_exact_boundary(&run_id, acceptance)
+                .await
+        })
+    }
+
+    #[tokio::test]
+    async fn boundary_stays_open_for_an_announced_delivery_until_it_registers() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        // The runtime acknowledged a durable delivery whose preparation has
+        // not reached the coordinator.
+        let announced = admissions.announce();
+        let mut runner = spawn_runner_take(&state, &run_id, BOTH);
+        assert!(
+            tokio::time::timeout(RUNNER_STAYS_AT_THE_BOUNDARY, &mut runner)
+                .await
+                .is_err(),
+            "the boundary stays open while the acknowledged delivery has not registered"
+        );
+
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("acknowledged"))
+                .await
+        });
+        let stage = prepare
+            .await
+            .expect("prepare task")
+            .expect("the runner parks with the delivery it waited for")
+            .into_stage_output(None);
+        drop(announced);
+        let witness = stage.delivery_witness().cloned().expect("durable witness");
+        stage.commit().expect("publish durable appends");
+        runner.await.expect("runner task").expect("runner consume");
+        assert!(
+            state.record_durable_apply(&witness),
+            "the delivery the boundary waited for reached the runner"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_closes_once_the_announcement_ends_without_a_registration() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let announced = admissions.announce();
+        let mut runner = spawn_runner_take(&state, &run_id, BOTH);
+        assert!(
+            tokio::time::timeout(RUNNER_STAYS_AT_THE_BOUNDARY, &mut runner)
+                .await
+                .is_err(),
+            "the boundary stays open while the announcement stands"
+        );
+        // The delivery's work ended without a preparation (it took its
+        // queued turn, or was recalled).
+        drop(announced);
+        let taken = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+            .await
+            .expect("the boundary closes once no announcement stands")
+            .expect("runner task")
+            .expect("runner consume");
+        assert!(taken.request_only.is_empty());
+        assert!(!state.has_registered_durable_for_test());
+    }
+
+    #[tokio::test]
+    async fn unbound_or_unannounced_boundary_closes_at_once() {
+        // Unbound: no runtime announces to this coordinator.
+        let unbound = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = unbound
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            unbound.take_pending_at_exact_boundary(&run_id, BOTH),
+        )
+        .await
+        .expect("an unbound boundary never waits")
+        .expect("runner consume");
+
+        // Bound, with an announcement that ended before the boundary.
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        drop(admissions.announce());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.take_pending_at_exact_boundary(&run_id, BOTH),
+        )
+        .await
+        .expect("a boundary with no announcement outstanding never waits")
+        .expect("runner consume");
+    }
+
+    #[tokio::test]
+    async fn request_only_boundary_does_not_wait_for_an_announced_delivery() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let _announced = admissions.announce();
+        // An extraction or noncommitting boundary takes no durable delivery,
+        // so it has nothing to wait for.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.take_pending_at_exact_boundary(&run_id, REQUEST_ONLY),
+        )
+        .await
+        .expect("a request-only boundary never waits for a durable delivery")
+        .expect("extraction boundary");
+    }
+
+    #[tokio::test]
+    async fn registered_delivery_parks_the_runner_while_another_announcement_stands() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("holder"))
+                .await
+        });
+        wait_for_open_durable_request(&state).await;
+        // A later delivery was acknowledged and waits behind the registered
+        // one: its announcement must not keep the runner from parking, or
+        // the registered delivery could never be published.
+        let _later = admissions.announce();
+        let runner = spawn_runner_take(&state, &run_id, BOTH);
+        let stage = tokio::time::timeout(std::time::Duration::from_secs(5), prepare)
+            .await
+            .expect("the runner parks with the registered delivery")
+            .expect("prepare task")
+            .expect("parked durable preparation")
+            .into_stage_output(None);
+        let witness = stage.delivery_witness().cloned().expect("durable witness");
+        stage.commit().expect("publish durable appends");
+        runner.await.expect("runner task").expect("runner consume");
+        assert!(state.record_durable_apply(&witness));
+    }
+
+    /// The runner of `run_id` parks with one request-only delivery alone.
+    /// Returns that delivery's unpublished authority and the runner's task.
+    async fn park_on_request_only_alone(
+        state: &TransientTurnContextStateHandle,
+        run_id: &RunId,
+        acceptance: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance,
+    ) -> (
+        crate::lifecycle::CoreBoundaryStageOutput,
+        tokio::task::JoinHandle<
+            Result<
+                crate::lifecycle::boundary_delivery::TakenBoundaryDelivery,
+                CoreBoundaryStageError,
+            >,
+        >,
+    ) {
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(
+                    &prepare_run_id,
+                    request_only(vec![transient_context("context")]),
+                )
+                .await
+        });
+        wait_for_boundary_window(
+            state,
+            |lifecycle| {
+                matches!(
+                    &lifecycle.window,
+                    TransientTurnContextBoundaryWindow::Open {
+                        request_only: Some(_),
+                        ..
+                    }
+                )
+            },
+            "request-only boundary registration",
+        )
+        .await;
+        let runner = spawn_runner_take(state, run_id, acceptance);
+        let stage = prepare
+            .await
+            .expect("prepare task")
+            .expect("the runner parks with the request-only delivery")
+            .into_stage_output(None);
+        (stage, runner)
+    }
+
+    fn spawn_durable_prepare(
+        state: &TransientTurnContextStateHandle,
+        run_id: &RunId,
+        detail: &'static str,
+    ) -> tokio::task::JoinHandle<Result<PreparedTransientTurnContextBoundary, CoreBoundaryStageError>>
+    {
+        let state = state.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            state
+                .prepare_active_turn_boundary(&run_id, durable_notice(detail))
+                .await
+        })
+    }
+
+    #[tokio::test]
+    async fn durable_delivery_registered_during_a_request_only_park_joins_that_boundary() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (context_stage, runner) = park_on_request_only_alone(&state, &run_id, BOTH).await;
+
+        // The request's input is not fixed while the runner is parked, so a
+        // durable delivery registered now is parked with it at once.
+        let durable_stage = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            spawn_durable_prepare(&state, &run_id, "during the park"),
+        )
+        .await
+        .expect("the delivery joins the boundary the runner is parked at")
+        .expect("prepare task")
+        .expect("parked durable preparation")
+        .into_stage_output(None);
+        assert!(
+            !state.has_registered_durable_for_test(),
+            "the delivery does not wait for the next boundary"
+        );
+        let witness = durable_stage
+            .delivery_witness()
+            .cloned()
+            .expect("durable witness");
+
+        // The park waits for every delivery it holds.
+        context_stage.commit().expect("publish request context");
+        let mut runner = runner;
+        assert!(
+            tokio::time::timeout(RUNNER_STAYS_AT_THE_BOUNDARY, &mut runner)
+                .await
+                .is_err(),
+            "the park lasts until the durable delivery is published too"
+        );
+        durable_stage.commit().expect("publish durable appends");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+        assert!(
+            state.record_durable_apply(&witness),
+            "the durable delivery reached the runner with the request-only context"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_only_park_outlasts_its_publication_for_an_announced_durable_delivery() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (context_stage, mut runner) = park_on_request_only_alone(&state, &run_id, BOTH).await;
+
+        // A durable delivery is acknowledged during the park; its
+        // preparation has not reached the coordinator when the request-only
+        // delivery is published.
+        let announced = admissions.announce();
+        context_stage.commit().expect("publish request context");
+        assert!(
+            tokio::time::timeout(RUNNER_STAYS_AT_THE_BOUNDARY, &mut runner)
+                .await
+                .is_err(),
+            "the park does not end while the acknowledged delivery has not registered"
+        );
+
+        let durable_stage = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            spawn_durable_prepare(&state, &run_id, "announced during the park"),
+        )
+        .await
+        .expect("the delivery joins the boundary the runner is parked at")
+        .expect("prepare task")
+        .expect("parked durable preparation")
+        .into_stage_output(None);
+        drop(announced);
+        let witness = durable_stage
+            .delivery_witness()
+            .cloned()
+            .expect("durable witness");
+        durable_stage.commit().expect("publish durable appends");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+        assert!(state.record_durable_apply(&witness));
+    }
+
+    #[tokio::test]
+    async fn request_only_park_ends_once_the_announcement_ends_without_a_registration() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (context_stage, mut runner) = park_on_request_only_alone(&state, &run_id, BOTH).await;
+        let announced = admissions.announce();
+        context_stage.commit().expect("publish request context");
+        assert!(
+            tokio::time::timeout(RUNNER_STAYS_AT_THE_BOUNDARY, &mut runner)
+                .await
+                .is_err(),
+            "the park does not end while the announcement stands"
+        );
+        // The delivery's work ended without a preparation.
+        drop(announced);
+        let taken = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+            .await
+            .expect("the park ends once no announcement stands")
+            .expect("runner task")
+            .expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn extraction_park_takes_no_durable_delivery_and_waits_for_none() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let (context_stage, runner) =
+            park_on_request_only_alone(&state, &run_id, REQUEST_ONLY).await;
+
+        // An extraction or noncommitting boundary writes no Session state:
+        // a durable delivery registered during its park waits for the next
+        // boundary, and an announcement does not keep the park.
+        let _announced = admissions.announce();
+        let durable = spawn_durable_prepare(&state, &run_id, "not at an extraction boundary");
+        wait_for_next_boundary_durable(&state).await;
+        context_stage.commit().expect("publish request context");
+        let taken = tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+            .await
+            .expect("an extraction park ends on its request-only delivery")
+            .expect("runner task")
+            .expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+        assert!(
+            state.has_registered_durable_for_test(),
+            "the durable delivery still waits for the next boundary"
+        );
+        durable.abort();
+    }
+
+    #[tokio::test]
+    async fn park_with_a_durable_delivery_does_not_wait_for_an_announcement() {
+        let state = TransientTurnContextStateHandle::new();
+        let admissions = PendingBoundaryAdmissions::new();
+        state.bind_pending_boundary_admissions(admissions.clone());
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare = spawn_durable_prepare(&state, &run_id, "holder");
+        wait_for_open_durable_request(&state).await;
+        let runner = spawn_runner_take(&state, &run_id, BOTH);
+        let stage = prepare
+            .await
+            .expect("prepare task")
+            .expect("parked durable preparation")
+            .into_stage_output(None);
+        // A park that holds a durable delivery ends with that delivery's
+        // resolution, published or not: a later announcement belongs to the
+        // next boundary.
+        let _later = admissions.announce();
+        stage.abort().expect("abort durable appends");
+        tokio::time::timeout(std::time::Duration::from_secs(5), runner)
+            .await
+            .expect("the park ends on its durable delivery's resolution")
+            .expect("runner task")
+            .expect("runner consume");
     }
 
     #[tokio::test]

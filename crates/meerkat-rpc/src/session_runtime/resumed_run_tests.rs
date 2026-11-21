@@ -600,7 +600,9 @@ fn rows_carrying(session: &meerkat_core::Session, token: &str) -> usize {
 
 /// JSON-RPC, the actual round commit of the real agent loop and a real
 /// kill: a run joins three steers at one boundary, commits one more round and
-/// is killed. The round commit's cursor binds the input that started the run
+/// is killed. Actual process kill and restart; scripted model. The store is
+/// the HeadCanonical SQLite realm. The round commit's cursor binds the input
+/// that started the run
 /// and then the three steers, in admission order, and each steer's stored row
 /// is bound to the run. A new runtime over the realm resumes that run; it
 /// completes and commits. No joined steer is delivered twice and none is

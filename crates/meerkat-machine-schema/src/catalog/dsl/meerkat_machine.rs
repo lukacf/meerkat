@@ -26620,9 +26620,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // the delivery class it was admitted with: it still waits for
                 // a boundary of the run that resumes. Every other recovered
                 // input takes the queued path, and a join is never recovered.
-                // The phase condition is stated for the reader: the guard
-                // `recovered_current_lane_matches_phase` gives every other
-                // phase no lane, so the lane condition already implies it.
                 if live_boundary_delivery != None
                     && phase == InputPhase::Queued
                     && lane == Some(InputLane::Steer)

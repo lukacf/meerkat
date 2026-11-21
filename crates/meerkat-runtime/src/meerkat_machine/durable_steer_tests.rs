@@ -27,7 +27,6 @@ mod acknowledged_before_registration;
 mod next_request;
 mod next_request_recovery;
 mod recall;
-mod recycle_beside_a_steer;
 mod request_only_context;
 mod requester;
 mod waits_across_a_restart;

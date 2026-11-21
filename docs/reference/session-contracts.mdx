@@ -1507,6 +1507,29 @@ a structured-output extraction boundary), the waiting steers keep their place
 in the steer lane and the follow-up turn delivers them in arrival order, ahead
 of queued work. Each steer's rows are in the retained history once.
 
+A durable steer that was admitted and was still waiting for its run's next
+boundary when the process stopped is not left to a follow-up turn when its
+session is loaded from the store and that run resumes. It joins the resumed
+run's next model request, once, and the steers that waited with it join in
+admission order. A recall of one of them leaves the others in that request.
+The limits of a live boundary hold here too: when the resumed run's boundary
+refuses Session writes, or the run ends before a boundary, one follow-up turn
+delivers them in admission order. A steer whose stored row counts a stage
+attempt takes the follow-up turn. A steer that joined the resumed run and
+whose session is loaded once more before a round commit held its rows takes
+one follow-up turn after the run, once. With no run to resume, the steer
+that waited starts the next run as its own input. A recycle with no run
+current keeps a queued steer's delivery class.
+
+What is shown: with an actual process kill and restart, on the JSON-RPC
+session runtime over a SQLite realm, two text prompt steers that waited are
+both in the resumed run's next request, once each, in admission order. The
+other cases above are shown with the restart reconstructed in one test
+process. For a steer that had joined the run and whose join was returned
+unapplied before the stop, only the machine's rule is shown (it keeps its
+delivery class at recovery); no runtime test shows which request carries
+it.
+
 Arrival order holds within each delivery class: a
 follow-up-only steer (for example a directed peer message) admitted before a
 plain peer message still lands after it, because the plain one joins the

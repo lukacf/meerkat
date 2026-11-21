@@ -48,6 +48,7 @@ them.
   Existing session models and explicit/configured session pins retain their
   precedence. The global and image defaults are unchanged. No wire/schema
   break is introduced.
+
 - `meerkat-machine-kernels`: the generated input struct `generated::meerkat::inputs::RecoverInputLifecycle` gains the public field `live_boundary_delivery: Option<LiveBoundaryDelivery>`. `meerkat-runtime`: the variant `RecoverInputLifecycle` of the public generated input enum `meerkat_machine::dsl::MeerkatMachineInput` gains the same field, and so does its expansion in `meerkat-machine-schema`. Code that builds any of these with a struct literal adds the field; `None` keeps the earlier behaviour. No variant is added and no enum order moves. No wire form and no stored form changes.
 
 - **Behavior:** (behaviour-only, not measured by the gate) steers into a
@@ -126,6 +127,7 @@ them.
   remains recommended/selectable and `gemini-3.1-pro-preview` remains supported.
   Forge's local setup preset and separately pinned installer catalog are
   unchanged; this does not establish Neon availability there.
+
 - `meerkat-runtime`: a durable steer that was admitted and was still waiting for its run's next boundary when its session was loaded again from the store now joins that run when the run resumes. Before, no request of the resumed run carried that steer or any durable steer admitted behind it while the run ran, and one follow-up turn delivered them after the run ended. Now the resumed run's next boundary that accepts durable deliveries carries the steer that waited and the durable steers admitted behind it, in admission order, each once, and no follow-up turn runs for them. A recall of the steer that waited leaves the steers behind it in that request. When that boundary refuses durable deliveries, or the run ends before a boundary, one follow-up turn delivers them in admission order. A steer whose row counts a stage attempt takes the follow-up turn. A steer that joined the resumed run and whose session is then loaded once more before a round commit held its append takes one follow-up turn after the run, exactly once. A join write the store refuses is not published and fences the runtime; a reload then delivers the steer once. With no run to resume nothing changes: the steer that waited starts the next run. A recycle, which the machine takes only while no run is current, now keeps the delivery class of a queued steer; the next run still takes that steer as its own input, once.
 
 ### Fixed
@@ -141,6 +143,7 @@ them.
   `[models.gemini-4-neon]` entry before upgrading because model IDs must be
   unique. See the [upgrade guide](docs/guides/upgrading.mdx) for consumer-specific
   behavior and rollback notes.
+
 - Steers: do not rely on a model decision between consecutive eligible
   steers. Steers that wait together now reach the model in one request,
   where 0.9.17 delivered one per model boundary. No setting keeps one

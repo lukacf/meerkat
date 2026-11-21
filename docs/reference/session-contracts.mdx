@@ -1477,7 +1477,8 @@ carried the steer: `turn_completed` is published after the response of each
 model call that succeeds, and for a call that returned tool calls after
 their results are written. The match is by stream order: `turn_completed`
 carries no run id and no success flag, so it is the next `turn_completed`
-on the session's stream after the applied event. A steer that takes the
+on the session's stream after the applied event and before that run ends
+(`run_completed` or `run_failed`). A steer that takes the
 follow-up turn publishes
 no `boundary_append_applied`: it is part of the input that turn starts
 with. For it, `session/input_status` names the follow-up run in the input's

@@ -127,7 +127,8 @@ before you send the next one. Its `boundary_append_applied` names the
 successful `turn_completed` says the model has answered a request that
 carried it. The match is by stream order: `turn_completed` carries no run id
 and no success flag, so take the next one on the session's stream after the
-applied event. The applied event alone is neither a response nor the durable
+applied event and before that run ends (`run_completed` or `run_failed`).
+The applied event alone is neither a response nor the durable
 consumption of the input. The next steer then joins a later boundary, or the
 follow-up turn when the run ends first. An earlier steer that itself takes
 the follow-up turn publishes no `boundary_append_applied`: read its

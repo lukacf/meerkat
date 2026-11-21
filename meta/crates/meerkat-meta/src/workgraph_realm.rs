@@ -355,6 +355,7 @@ async fn migrate_one(
             priority: item.priority,
             labels: item.labels.clone(),
             due_at: item.due_at,
+            finish_by: item.finish_by,
             not_before: item.not_before,
             snoozed_until: item.snoozed_until,
             external_refs: item.external_refs.clone(),
@@ -515,6 +516,7 @@ mod tests {
                 priority: Default::default(),
                 labels: ["legacy".to_string()].into_iter().collect(),
                 due_at: None,
+                finish_by: Some("2030-01-02T03:04:05Z".parse().expect("finish-by")),
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),
@@ -664,6 +666,14 @@ mod tests {
             .expect("moved item");
         assert_eq!(moved_item.title, "child reviewer goal");
         assert_eq!(moved_item.description.as_deref(), Some("legacy"));
+        assert_eq!(
+            moved_item.finish_by,
+            Some(
+                "2030-01-02T03:04:05Z"
+                    .parse()
+                    .expect("finish-by carries across realm migration")
+            )
+        );
         assert!(moved_item.labels.contains("legacy"));
         let moved_paused = child_bindings
             .iter()

@@ -29799,6 +29799,14 @@
             ],
             "type": "string"
           },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },

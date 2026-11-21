@@ -16570,6 +16570,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 cancelled_child_join_policy: Default::default(),
                 labels: Default::default(),
                 due_at: None,
+                finish_by: None,
                 not_before: None,
                 snoozed_until: None,
                 external_refs: Vec::new(),

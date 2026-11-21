@@ -35,7 +35,8 @@ supplying filter fields.
 | `claim` | `WorkClaim?` | Active claim owner and optional lease |
 | `machine_state` | object | Generated WorkGraph lifecycle machine state |
 | `revision` | `u64` | CAS revision for write tools |
-| `due_at` | RFC3339 timestamp? | Due time |
+| `due_at` | RFC3339 timestamp? | Activation gate: a future value prevents readiness and claiming |
+| `finish_by` | RFC3339 timestamp? | Informational completion target; omitted when absent |
 | `not_before` | RFC3339 timestamp? | Earliest eligibility time |
 | `snoozed_until` | RFC3339 timestamp? | Snooze gate |
 | `created_at` | RFC3339 timestamp | Creation time |
@@ -43,6 +44,56 @@ supplying filter fields.
 | `terminal_at` | RFC3339 timestamp? | Terminal time |
 | `external_refs` | `ExternalWorkRef[]` | Typed pointers to external objects |
 | `evidence_refs` | `WorkEvidenceRef[]` | Typed evidence pointers |
+
+### Activation And Completion Targets
+
+`due_at`, `not_before`, and `snoozed_until` are activation gates. An item
+cannot become ready or be claimed while any of these timestamps is in the
+future. Passing the gates still requires the machine's other readiness
+conditions, including status, claims, dependencies, and child joins. Ready
+items are ordered by priority, creation time, and id.
+
+`finish_by` records when the work is intended to finish. It does not affect
+readiness, claimability, ordering, attention authority, or wakeups. An otherwise ready
+item with only a future `finish_by` remains ready. Passing that target does
+not create an overdue fact or close the item. Use Schedule when an agent
+needs a timed wakeup.
+
+Create requests and returned items use an ordinary optional RFC3339 timestamp
+for `finish_by`; returned items omit the field when it is absent. Updates
+use explicit tagged set and clear operations for this field. Omitting
+`finish_by` or supplying `null` in an update keeps the existing value. An
+admitted update advances the revision and emits the existing `updated` event,
+including when it sets the same value or clears an already absent target.
+The revision change makes any older attention projection stale; the attention
+authority and readiness rules stay the same. Malformed update values are refused
+before a write.
+
+| `finish_by` in a `workgraph_update` request | Effect |
+|------------------------------------------|--------|
+| Omitted, or `null` | Keep the current target |
+| `{"op":"set","value":"2026-12-04T17:00:00Z"}` | Set the target to that timestamp |
+| `{"op":"clear"}` | Remove the target |
+
+The three activation timestamps cannot be cleared today. Omitting one or
+passing `null` in an update keeps its value; supplying a timestamp replaces
+it. The clear operation applies only to `finish_by`.
+
+The new field requires no store migration or ledger-version change because
+it is item data rather than a lifecycle fact. Older builds can read the item while ignoring
+`finish_by`, but an older build that rewrites the whole item or rebuilds it
+from events drops the field. A rollback therefore does not preserve this
+target through older writers. An older server can ignore the new field and
+still report success, so a caller that needs the target compares the returned
+`finish_by` with what it asked for.
+
+Keyed create includes the encoded `finish_by` in its request identity. Repeating
+the same key and value replays the existing item; changing, adding, or removing
+the value conflicts without a write. A request without this value keeps its
+prior encoding. If an older server ignored the field and admitted the key
+without it, replaying the same field-bearing request to a newer server conflicts.
+The reverse also conflicts after rollback. Pin the server version when replaying
+such keyed requests across an upgrade or rollback.
 
 ## Statuses
 

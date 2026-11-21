@@ -39863,6 +39863,7 @@ async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn(
             priority: Default::default(),
             labels: Default::default(),
             due_at: None,
+            finish_by: None,
             not_before: None,
             snoozed_until: None,
             external_refs: Vec::new(),

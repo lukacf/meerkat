@@ -116010,6 +116010,14 @@
             ],
             "type": "string"
           },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -116569,6 +116577,14 @@
       "failed_child_join_policy": {
         "$ref": "#/$defs/FailedChildJoinPolicy",
         "default": "require_success"
+      },
+      "finish_by": {
+        "description": "Nonoperative finish-by target; it does not gate readiness or claims.",
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "labels": {
         "items": {
@@ -117193,6 +117209,14 @@
               "accept"
             ],
             "type": "string"
+          },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string"
@@ -117985,6 +118009,14 @@
             ],
             "type": "string"
           },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -118755,6 +118787,14 @@
               "accept"
             ],
             "type": "string"
+          },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string"
@@ -155175,6 +155215,14 @@
       "failed_child_join_policy": {
         "$ref": "#/$defs/FailedChildJoinPolicy",
         "default": "require_success"
+      },
+      "finish_by": {
+        "description": "Nonoperative finish-by target; it does not gate readiness or claims.",
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "labels": {
         "items": {
@@ -227389,6 +227437,14 @@
             ],
             "type": "string"
           },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -228171,6 +228227,14 @@
             ],
             "type": "string"
           },
+          "finish_by": {
+            "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -228768,6 +228832,14 @@
           "accept"
         ],
         "type": "string"
+      },
+      "finish_by": {
+        "description": "Nonoperative finish-by target; does not gate readiness or claims.",
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "id": {
         "type": "string"

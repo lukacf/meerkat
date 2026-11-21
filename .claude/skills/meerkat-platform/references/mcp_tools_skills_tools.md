@@ -279,6 +279,14 @@ and confinement still applies to a call it opens.
 `workgraph_link`, `workgraph_add_evidence`; `workgraph_policy_escalate` and
 `workgraph_attention_reassign` only with a runtime-bound attention authority.
 
+- `finish_by` is an optional item time beside the existing `due_at`. `due_at` is
+  "Available from": before it an item is not ready and takes no claim. `finish_by`
+  is "Finish by", the target time; nothing is held back when it passes. An update
+  keeps it when the field is absent or null, sets it with
+  `{"op":"set","value":<RFC3339>}` and clears it with `{"op":"clear"}`. A keyed
+  create's identity covers it: a changed value is refused without a write.
+  Setting or clearing it makes an older projection stale.
+
 - `workgraph_create` has no parent field. Link a child with
   `workgraph_link {kind: "parent", from_id: <child>, to_id: <parent>}` right
   after creating it. Edge kinds: `blocks` (`from_id` blocker, `to_id`

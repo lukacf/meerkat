@@ -671,6 +671,10 @@ fn create_schema() -> Value {
             json!({ "type": "string", "format": "date-time" }),
         ),
         (
+            "finish_by".to_string(),
+            json!({ "type": ["string", "null"], "format": "date-time", "description": "Nonoperative finish-by target." }),
+        ),
+        (
             "not_before".to_string(),
             json!({ "type": "string", "format": "date-time" }),
         ),
@@ -821,6 +825,14 @@ fn update_schema() -> Value {
         (
             "due_at".to_string(),
             json!({ "type": "string", "format": "date-time" }),
+        ),
+        (
+            "finish_by".to_string(),
+            json!({"description":"Absent or null keeps the target; explicitly set or clear it.", "oneOf":[
+                {"type":"null"},
+                {"type":"object","required":["op","value"],"additionalProperties":false,"properties":{"op":{"const":"set"},"value":{"type":"string","format":"date-time"}}},
+                {"type":"object","required":["op"],"additionalProperties":false,"properties":{"op":{"const":"clear"}}}
+            ]}),
         ),
         (
             "not_before".to_string(),

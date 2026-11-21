@@ -796,7 +796,7 @@ rkat workgraph show <ID> [--namespace <NS>] [--json]
 rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
-rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
+rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--finish-by <RFC3339>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
 rkat workgraph goal-confirm <BINDING_ID> --expected-revision <N> --kind <KIND> --id <ID> [--namespace <NS>] [--label <TEXT>] [--summary <TEXT>] [--json]
 rkat workgraph goal-close <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--status completed|cancelled|failed] [--json]
@@ -807,6 +807,10 @@ rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespac
 
 `--status` on `list`/`snapshot` is repeatable: `open`, `in-progress`,
 `blocked`, `completed`, `cancelled`, `failed`. `--label` is repeatable.
+
+`--finish-by <RFC3339>` on `goal-create` sets the new item's finish-by target.
+It does not delay readiness. `show` and the goal commands print a `finish_by:`
+line when an item has one. No `rkat workgraph` command changes it afterwards.
 
 `list`, `ready` and `snapshot` page: a page that ends early prints
 `N of M, more with --cursor <CURSOR>` (`--json` carries `next_cursor`), and

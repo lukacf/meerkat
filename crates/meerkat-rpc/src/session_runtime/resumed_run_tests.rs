@@ -52,6 +52,13 @@ const JOINED_STEER_TOKENS: [&str; 3] = [
     "JOINED-STEER-THREE-3T",
 ];
 
+/// The libtest path of the child incarnation that is killed while two
+/// steers still wait for its run's next boundary.
+const WAITING_STEERS_CHILD_TEST: &str =
+    "session_runtime::resumed_run_tests::rpc_resumed_run_with_waiting_steers_child_incarnation";
+/// The payloads of the two steers that child admits, in admission order.
+const WAITING_STEER_TOKENS: [&str; 2] = ["WAITING-STEER-FIRST-ROW", "WAITING-STEER-SECOND-ROW"];
+
 /// What the scripted model answers to one request.
 #[derive(Clone, Copy, Debug)]
 enum Step {
@@ -787,5 +794,245 @@ async fn rpc_run_killed_after_a_round_commit_holds_three_joined_steers_resumes_a
     assert!(
         committed_probe_call(&runtime, &session_id).await,
         "the resumed run keeps the rounds the killed run committed"
+    );
+}
+
+/// The child incarnation of the waiting-steers row. Its second turn takes
+/// one tool round, which commits, so the run is resumable. Its next model
+/// request is held in flight and never released. While it is held, two text
+/// steers are admitted, in order, at the runtime adapter
+/// (`accept_input_with_completion`, the method the RPC handlers call), not
+/// through a JSON-RPC request, and both admissions are acknowledged. Neither
+/// steer has joined a request when the child records its kill point.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_resumed_run_with_waiting_steers_child_incarnation() {
+    let Some(root) = std::env::var_os(ROOT_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let runtime = sqlite_runtime(&root).await;
+    let model = ScriptedModel::new(
+        [Step::Text("first answer"), Step::Tool, Step::HeldTool],
+        None,
+    );
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(model.clone()),
+        ..AgentBuildConfig::new(MODEL)
+    };
+    let session_id = runtime
+        .create_session(build_config, None, None, Vec::new())
+        .await
+        .expect("create the session");
+    std::fs::write(root.join("session-id"), session_id.to_string()).expect("record the session");
+    run_turn(&runtime, &session_id, "first")
+        .await
+        .expect("the first turn completes");
+
+    let turn_runtime = Arc::clone(&runtime);
+    let turn_session = session_id.clone();
+    let _held = tokio::spawn(async move { run_turn(&turn_runtime, &turn_session, "second").await });
+    let started = std::time::Instant::now();
+    while !model.hold_reached.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the second turn's request after its first round is in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Two steers admitted and acknowledged while that request is in flight.
+    // The request is never released: neither steer joins a request here.
+    let adapter = runtime.runtime_adapter();
+    let mut steer_ids = Vec::new();
+    for token in WAITING_STEER_TOKENS {
+        let steer = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            token,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        steer_ids.push(steer.id().to_string());
+        let (outcome, _completion) = adapter
+            .accept_input_with_completion(&session_id, steer)
+            .await
+            .expect("the steer is admitted while the turn runs");
+        assert!(outcome.is_accepted());
+    }
+    std::fs::write(root.join("steer-ids"), steer_ids.join("\n")).expect("record the steers");
+    // Let the oldest steer register for the run's next boundary, then tell
+    // the parent to kill this process.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(root.join("killed"), "steers_waiting").expect("record the kill point");
+    std::future::pending::<()>().await;
+}
+
+/// The JSON-RPC session runtime and a real kill, with steers that are still
+/// WAITING at the kill. Actual process kill and restart; scripted model. The
+/// store is the HeadCanonical SQLite realm. The two steers are admitted at
+/// the runtime adapter (`accept_input_with_completion`), not through a
+/// JSON-RPC request.
+///
+/// A run commits one round and holds its next model request in flight. Two
+/// text steers are admitted and acknowledged while it is held; the request is
+/// not released, so neither has joined. The process is killed with SIGKILL. A
+/// new runtime over the same realm resumes the run.
+///
+/// Before the restart the store holds the run's round commit, whose cursor
+/// binds only the input that started the run, and the two steers' rows,
+/// queued. After it: the resumed run's next request carries both steers'
+/// rows once each, in admission order; the resumed runtime asks the model
+/// exactly once, so no follow-up turn starts with a steer; each steer's row
+/// ends consumed by the resumed run; and the committed transcript holds each
+/// steer's row exactly once, in admission order.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_run_killed_while_two_steers_wait_resumes_and_its_next_request_carries_both() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session_id = kill_child_at_its_kill_point(root.path(), WAITING_STEERS_CHILD_TEST).await;
+    let steer_ids = std::fs::read_to_string(root.path().join("steer-ids"))
+        .expect("the child recorded its steers")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(steer_ids.len(), 2, "the child admitted two steers");
+
+    let runtime = sqlite_runtime(root.path()).await;
+    let model = ScriptedModel::new([Step::Text("resumed answer")], None);
+    runtime.set_default_llm_client(Some(model.clone()));
+    let open_run = tail_run(&runtime, &session_id)
+        .await
+        .expect("the killed run's round commit stands as the provisional tail");
+
+    // What the kill left: the round commit binds only the starting input,
+    // and the two steers are stored, queued, never bound to a run.
+    let store = runtime.service.runtime_store();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+    let observed = meerkat_runtime::recovery::observe_resumable_run(store.as_ref(), &session_id)
+        .await
+        .expect("read the round commit")
+        .expect("the round commit leaves a continuable run");
+    assert_eq!(observed.run_id, open_run);
+    let bound = observed
+        .bound_input_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bound.len(),
+        1,
+        "only the starting input is bound: {bound:?}"
+    );
+    assert!(!steer_ids.contains(&bound[0]));
+    let stored = store
+        .load_input_states_strict(&runtime_id)
+        .await
+        .expect("the input rows decode");
+    let mut steers = Vec::new();
+    for steer_id in &steer_ids {
+        let row = stored
+            .iter()
+            .find(|row| &row.state.input_id.to_string() == steer_id)
+            .unwrap_or_else(|| panic!("the acknowledged steer {steer_id} is stored"));
+        assert_eq!(
+            format!("{:?}", row.seed.phase),
+            "Queued",
+            "the steer {steer_id} was still waiting at the kill"
+        );
+        steers.push(row.state.input_id.clone());
+    }
+
+    // The restart: the new runtime resumes the run.
+    let attached = runtime.ensure_runtime_executor(&session_id).await;
+    assert!(
+        attached.is_ok(),
+        "the restarted runtime attaches the session whose run it resumes: {attached:?}"
+    );
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        if committed_text(&runtime, &session_id, "resumed answer").await
+            && tail_run(&runtime, &session_id).await.is_none()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the resumed run {open_run} completes and commits its boundary"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The resumed run's next request: both steers' rows, once each, in
+    // admission order.
+    let requests = model.request_messages();
+    let resumed_request = requests.first().expect("the resumed run asks the model");
+    let mut in_request = Vec::new();
+    for token in WAITING_STEER_TOKENS {
+        let rows = rows_carrying(resumed_request, token);
+        assert_eq!(
+            rows.len(),
+            1,
+            "a steer acknowledged and still waiting when the process was killed is in the \
+             resumed run's next request exactly once: {token} at {rows:?}"
+        );
+        in_request.push(rows[0]);
+    }
+    assert!(
+        in_request.windows(2).all(|pair| pair[0] < pair[1]),
+        "the resumed run's next request carries the steers in admission order: {in_request:?}"
+    );
+
+    // Each steer's row ends consumed by the resumed run.
+    loop {
+        let mut consumed = Vec::new();
+        for input_id in &steers {
+            let row = store
+                .load_input_state(&runtime_id, input_id)
+                .await
+                .expect("load the steer's row")
+                .expect("the steer's row is stored");
+            consumed.push((
+                format!("{:?}", row.seed.phase),
+                row.seed.last_run_id.clone(),
+            ));
+        }
+        if consumed
+            .iter()
+            .all(|row| row == &("Consumed".to_string(), Some(open_run.clone())))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "each waiting steer ends consumed by the resumed run: {consumed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // A steer left for a follow-up turn would ask the model again.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        model.requests.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the resumed runtime asks the model once: no follow-up turn starts with a steer"
+    );
+    let session = runtime
+        .service
+        .load_authoritative_session(&session_id)
+        .await
+        .expect("read the committed session")
+        .expect("the session is committed");
+    let mut positions = Vec::new();
+    for token in WAITING_STEER_TOKENS {
+        let rows = rows_carrying(session.messages(), token);
+        assert_eq!(
+            rows.len(),
+            1,
+            "{token} is in the committed transcript exactly once: {rows:?}"
+        );
+        positions.push(rows[0]);
+    }
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the steers' rows are in admission order: {positions:?}"
     );
 }

@@ -60,13 +60,15 @@ them.
   boundary after it (read from the source at tag `v0.9.17`:
   `DurableSteerOrder`, `crates/meerkat-runtime/src/driver/ephemeral.rs` lines
   306-320, and the Durable steer section of
-  `docs/reference/session-contracts.mdx` there). The cutoff
-  of a request is the publication of the boundary's claim: one step under the
-  session mutation gate, after every waiting steer is joined to the run and
-  before the runner writes the rows and composes the request. Admission and
-  recall take the same gate: a steer admitted before the cutoff, also one
-  admitted after the runner parked at the boundary, joins that request, and
-  a steer admitted after it joins the request after it. At a boundary
+  `docs/reference/session-contracts.mdx` there). Where a claim is
+  registered, the cutoff of a request is the publication of that claim: one
+  step under the session mutation gate, after the eligible prefix of the
+  waiting steers is joined to the run and before the runner writes the rows
+  and composes the request. Admission and recall take the same gate: a steer
+  admitted before the cutoff, also one admitted after the runner parked at
+  the boundary, joins that request when it is in the eligible prefix, and a
+  steer admitted after it waits for the next eligible boundary or the
+  follow-up turn. At a boundary
   with no durable steer (none registered, or a park on request-only
   context alone) the input is fixed at the one check in which the runner
   finds every delivery it is parked on resolved, no durable steer

@@ -520,7 +520,7 @@ mod refused_join {
 /// OBSERVATION rows. Each asserts what happens today, so that a change of it
 /// is seen; none states a requirement. The open choice is named in each
 /// row's comment.
-mod observed_today {
+pub(super) mod observed_today {
     use super::*;
 
     /// Wait until the boundary's refusal has taken the registered delivery
@@ -674,7 +674,7 @@ mod observed_today {
     /// runner writes no session document, so the row stands the tail itself;
     /// everything else in these rows goes through the ordinary admission and
     /// the ordinary registration.
-    async fn stand_continuable_run_tail(
+    pub(in super::super) async fn stand_continuable_run_tail(
         store: &Arc<dyn crate::store::RuntimeStore>,
         session_id: &SessionId,
         run_id: &RunId,

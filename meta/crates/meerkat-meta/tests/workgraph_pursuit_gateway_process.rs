@@ -25,8 +25,10 @@
 //!   on the same state directory, under the item as last revised, with no
 //!   write and no prompt after the kill. That turn waits at the model while
 //!   the claim, the binding and the session are read as the restart left
-//!   them, and is then answered with one scripted call of the member's own
-//!   `workgraph_release`: the one write of its turn that the item admits only
+//!   them, and is then answered with two scripted calls of the member's own
+//!   tools, one after the other: `workgraph_add_evidence`, read back with
+//!   the claim it landed under before anything else is written, and then
+//!   `workgraph_release`, the one write of its turn that the item admits only
 //!   while a claim is present. One more revision then starts one more turn.
 //!   The kill also leaves a run in flight, which is recovery work
 //!   by itself, so this row does not show that a waiting input alone brings
@@ -230,13 +232,14 @@ const REPLY: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
      data: [DONE]\n\n";
 
 /// The answer that makes one call of `tool` with `arguments` and ends there.
-fn tool_call_reply(tool: &str, arguments: &Value) -> String {
+/// `number` tells the calls of one row apart.
+fn tool_call_reply(number: usize, tool: &str, arguments: &Value) -> String {
     let call = json!({
         "choices": [{
             "delta": {
                 "tool_calls": [{
                     "index": 0,
-                    "id": "call-scripted-1",
+                    "id": format!("call-scripted-{number}"),
                     "type": "function",
                     "function": { "name": tool, "arguments": arguments.to_string() }
                 }]
@@ -250,13 +253,23 @@ fn tool_call_reply(tool: &str, arguments: &Value) -> String {
     format!("data: {call}\n\ndata: {done}\n\ndata: [DONE]\n\n")
 }
 
+/// The tool calls a row scripts for one turn. The turn's first request
+/// starts from a notice that carries `marker`; each later request of it
+/// carries a tool's result. Each of them takes the next call while one is
+/// left, and waits at the model until the row names it.
+struct Script {
+    marker: String,
+    calls: usize,
+    taken: usize,
+}
+
 struct Model {
     base_url: String,
     requests: Arc<Mutex<Vec<Value>>>,
     hold: Arc<Mutex<Option<String>>>,
     release: tokio::sync::watch::Sender<bool>,
-    scripted: Arc<Mutex<Option<String>>>,
-    scripted_reply: tokio::sync::watch::Sender<Option<String>>,
+    script: Arc<Mutex<Option<Script>>>,
+    scripted_replies: tokio::sync::watch::Sender<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -264,8 +277,8 @@ struct ModelState {
     requests: Arc<Mutex<Vec<Value>>>,
     hold: Arc<Mutex<Option<String>>>,
     released: tokio::sync::watch::Receiver<bool>,
-    scripted: Arc<Mutex<Option<String>>>,
-    scripted_reply: tokio::sync::watch::Receiver<Option<String>>,
+    script: Arc<Mutex<Option<Script>>>,
+    scripted_replies: tokio::sync::watch::Receiver<Vec<String>>,
 }
 
 fn message_text(message: &Value) -> String {
@@ -322,17 +335,23 @@ fn tool_names(request: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether the request's newest message is a tool's result: the request a
+/// turn makes after a tool call.
+fn ends_with_tool_result(request: &Value) -> bool {
+    messages(request)
+        .last()
+        .is_some_and(|last| last["role"] == "tool")
+}
+
 /// The first request from `from` on whose newest message is a tool's result,
-/// with that result's text: the request a turn makes after its tool call.
+/// with that result's text.
 fn tool_result(requests: &[Value], from: usize) -> Option<(usize, String)> {
     requests
         .iter()
         .enumerate()
         .skip(from)
-        .find_map(|(index, request)| {
-            let last = messages(request).last()?;
-            (last["role"] == "tool").then(|| (index, message_text(last)))
-        })
+        .find(|(_, request)| ends_with_tool_result(request))
+        .map(|(index, request)| (index, last_message(request)))
 }
 
 /// One line for a request: what it carries and what it starts from.
@@ -386,33 +405,39 @@ async fn chat_completions(
         .unwrap()
         .as_ref()
         .is_some_and(|marker| transcript(&request).contains(marker.as_str()));
-    // The scripted call is made once: the first request that starts from a
-    // notice carrying the marker takes it.
+    // A scripted turn: this request takes the next of the row's calls when
+    // it is that turn's next request and a call is left.
     let scripted = {
-        let mut marker = state.scripted.lock().unwrap();
-        let taken = marker.as_ref().is_some_and(|marker| {
-            starts_from_notice(&request) && last_message(&request).contains(marker.as_str())
-        });
-        if taken {
-            *marker = None;
-        }
-        taken
+        let mut script = state.script.lock().unwrap();
+        script.as_mut().and_then(|script| {
+            let next = if script.taken == 0 {
+                starts_from_notice(&request)
+                    && last_message(&request).contains(script.marker.as_str())
+            } else {
+                ends_with_tool_result(&request)
+            };
+            (next && script.taken < script.calls).then(|| {
+                script.taken += 1;
+                script.taken - 1
+            })
+        })
     };
     state.requests.lock().unwrap().push(request);
     if held {
         let mut released = state.released.clone();
         let _ = released.wait_for(|released| *released).await;
     }
-    let body = if scripted {
-        let mut reply = state.scripted_reply.clone();
-        reply
-            .wait_for(Option::is_some)
-            .await
-            .ok()
-            .and_then(|reply| reply.clone())
-            .unwrap_or_else(|| REPLY.to_string())
-    } else {
-        REPLY.to_string()
+    let body = match scripted {
+        Some(call) => {
+            let mut replies = state.scripted_replies.clone();
+            replies
+                .wait_for(|replies| replies.len() > call)
+                .await
+                .ok()
+                .and_then(|replies| replies.get(call).cloned())
+                .unwrap_or_else(|| REPLY.to_string())
+        }
+        None => REPLY.to_string(),
     };
     ([("content-type", "text/event-stream")], body)
 }
@@ -426,14 +451,14 @@ impl Model {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let hold = Arc::new(Mutex::new(None));
         let (release, released) = tokio::sync::watch::channel(false);
-        let scripted = Arc::new(Mutex::new(None));
-        let (scripted_reply, scripted_answer) = tokio::sync::watch::channel(None);
+        let script = Arc::new(Mutex::new(None));
+        let (scripted_replies, scripted_answers) = tokio::sync::watch::channel(Vec::new());
         let state = ModelState {
             requests: Arc::clone(&requests),
             hold: Arc::clone(&hold),
             released,
-            scripted: Arc::clone(&scripted),
-            scripted_reply: scripted_answer,
+            script: Arc::clone(&script),
+            scripted_replies: scripted_answers,
         };
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -470,8 +495,8 @@ impl Model {
             requests,
             hold,
             release,
-            scripted,
-            scripted_reply,
+            script,
+            scripted_replies,
         }
     }
 
@@ -494,19 +519,25 @@ impl Model {
         self.release.send(true).expect("release the model");
     }
 
-    /// From now on the first request whose newest message is a notice that
-    /// carries `marker` waits at the model until the test names the tool
-    /// call it is answered with. Every other request is answered as before.
-    fn script_call_on_notice(&self, marker: &str) {
-        *self.scripted.lock().unwrap() = Some(marker.to_string());
+    /// From now on the turn whose first request's newest message is a
+    /// notice that carries `marker` makes `calls` tool calls, one per
+    /// request, and each of those requests waits at the model until the test
+    /// names its call. Every other request is answered as before.
+    fn script_calls_on_notice(&self, marker: &str, calls: usize) {
+        *self.script.lock().unwrap() = Some(Script {
+            marker: marker.to_string(),
+            calls,
+            taken: 0,
+        });
     }
 
-    /// Answer the request that waits for the scripted call with one call of
-    /// `tool`.
+    /// Name the next scripted call: the request that waits for it is
+    /// answered with one call of `tool`.
     fn answer_scripted_call(&self, tool: &str, arguments: &Value) {
-        self.scripted_reply
-            .send(Some(tool_call_reply(tool, arguments)))
-            .expect("answer the scripted call");
+        self.scripted_replies.send_modify(|replies| {
+            let reply = tool_call_reply(replies.len() + 1, tool, arguments);
+            replies.push(reply);
+        });
     }
 }
 
@@ -853,11 +884,12 @@ impl Gateway {
         }
     }
 
-    /// Print the claim and release events of the WorkGraph ledger.
-    fn say_claim_events(&mut self) {
+    /// Print the claim and release events of the WorkGraph ledger; the
+    /// ledger's event kinds in order, or `None` when it was not read.
+    fn say_claim_events(&mut self) -> Option<Vec<String>> {
         let Some(answer) = self.try_request("meta/workgraph/events", json!({}), RPC_TIMEOUT) else {
             self.say("WorkGraph ledger: NOT READ (no answer)");
-            return;
+            return None;
         };
         let events = answer["result"]["events"]
             .as_array()
@@ -876,6 +908,7 @@ impl Gateway {
             kinds.join(" "),
             answer["result"]["truncated"],
         ));
+        Some(kinds)
     }
 
     /// Every attention binding the WorkGraph store lists, printed.
@@ -955,6 +988,21 @@ impl Gateway {
             result["item"]["revision"],
             goal.binding_id,
             result["attention"]["target"],
+        ));
+        // The lowering of the name: the member id the roster seats it under
+        // and the owner key the goal's binding was stored with. A turn is
+        // started for the binding's member only where the key names that id.
+        let status = self.call("meta/status_identity", json!({ "identity": identity() }));
+        let member_id = status["member_id"].as_str().unwrap_or_default();
+        let key_of_member = format!("mob/{MOB_ID}/agent/{member_id}");
+        self.say(format!(
+            "lowering of the name {:?}: the member id it is seated under (the gateway's status): \
+             {:?}; the stored owner key of the goal's binding: {}; the key is that member's own \
+             ({key_of_member}): {} (printed, not asserted)",
+            identity(),
+            member_id,
+            goal.owner_key,
+            !member_id.is_empty() && goal.owner_key["id"] == key_of_member.as_str()
         ));
         goal
     }
@@ -1501,9 +1549,9 @@ fn a_host_goal_wakes_a_never_prompted_member_and_starts_no_turn_without_the_valu
 /// Row 2. A continuation that waits behind a running turn when the gateway
 /// process is killed takes exactly one turn after a second boot on the same
 /// state directory, under the item as last revised, with no write and no
-/// prompt after the kill. That turn then makes one write of its own, the
-/// release of the claim the restart kept, which starts no further turn; one
-/// more revision then starts exactly one more.
+/// prompt after the kill. That turn then makes two writes of its own, one
+/// under the claim the restart kept and then that claim's release, which
+/// start no further turn; one more revision then starts exactly one more.
 #[test]
 fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     let row = "row2";
@@ -1651,7 +1699,7 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
     scene.model.release();
     // The continuation's turn after the second boot waits at the model, so
     // that the claim is read as the restart left it before that turn writes.
-    scene.model.script_call_on_notice(REVISED);
+    scene.model.script_calls_on_notice(REVISED, 2);
     read_store(row, "between", &scene.state, "after the kill, no process");
     scene.say_turns("between", "after the kill, no process");
 
@@ -1819,60 +1867,156 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         ),
     );
 
-    // The continuation's own write. Its turn has waited at the model since
+    // The continuation's first write. Its turn has waited at the model since
     // the second boot; it is now answered with one call of the member's own
-    // `workgraph_release`. The item's lifecycle admits a release only while
-    // a claim is present, so the tool's answer and the item afterwards say
-    // whether the claim the restart kept is one that turn can act on. The
-    // call names the item and its revision only: whose claim it is, is no
-    // part of it.
-    let before_call = scene.model.seen();
-    let call = json!({ "id": goal.item_id, "expected_revision": item_after["revision"] });
-    scene.model.answer_scripted_call("workgraph_release", &call);
+    // `workgraph_add_evidence` on the claimed item. The turn's next request,
+    // which carries the tool's answer, waits at the model in its turn, so
+    // the item, its claim and the ledger are read after this one write and
+    // before any other: the write lands on the item under the claim the
+    // restart kept, with no release and no second claim before it.
+    let before_first = scene.model.seen();
+    let evidence = json!({
+        "id": goal.item_id,
+        "expected_revision": item_after["revision"],
+        "evidence": {
+            "kind": "finding",
+            "id": "continuation-after-restart",
+            "summary": "written by the continuation's turn after the second boot"
+        }
+    });
+    scene
+        .model
+        .answer_scripted_call("workgraph_add_evidence", &evidence);
     gateway.say(format!(
         "the continuation's turn, which waited at the model since the second boot, is answered \
-         with one tool call: workgraph_release {call}"
+         with its first tool call: workgraph_add_evidence {evidence}"
     ));
-    let call_answered = gateway.eventually(WAKE_WAIT, || {
-        tool_result(&scene.model.requests(), before_call).is_some()
+    let first_answered = gateway.eventually(WAKE_WAIT, || {
+        tool_result(&scene.model.requests(), before_first).is_some()
     });
-    gateway.settle(SETTLE);
-    let after_call = scene.print_requests("boot-2", requests_at_kill);
-    let call_result = tool_result(&after_call, before_call);
+    let after_first = scene.print_requests("boot-2", requests_at_kill);
+    let first_result = tool_result(&after_first, before_first);
     gateway.say(format!(
-        "the turn's next request carries the tool's result as its newest message within \
-         {WAKE_WAIT:?}: {call_answered}; {}",
-        call_result.as_ref().map_or_else(
+        "the turn's next request carries the tool's answer as its newest message within \
+         {WAKE_WAIT:?}: {first_answered}; {}",
+        first_result.as_ref().map_or_else(
             || "no such request".to_string(),
-            |(index, text)| format!("request #{index}, the result: {}", head(text, 900))
+            |(index, text)| format!("request #{index}, the answer: {}", head(text, 600))
         )
     ));
-    let item_written = gateway.read_item(&goal.item_id, "after the continuation's write");
-    gateway.say_claim("claim after the continuation's write", &item_written);
-    gateway.say_claim_events();
-    gateway.print_stderr("after the continuation's write");
-    scene.say_turns("boot-2", "after the continuation's write");
-    let starts_after_call = notice_starts(&after_call, requests_at_kill);
-    let claim_released = !item_after["claim"].is_null()
-        && item_written["claim"].is_null()
-        && item_written["revision"].as_u64()
+    let answered_item = first_result
+        .as_ref()
+        .and_then(|(_, text)| serde_json::from_str::<Value>(text).ok())
+        .map_or(Value::Null, |answer| answer["item"].clone());
+    let item_tied = gateway.read_item(&goal.item_id, "after the continuation's first write");
+    gateway.say_claim("claim after the continuation's first write", &item_tied);
+    let kinds_tied = gateway.say_claim_events().unwrap_or_default();
+    let count = |kinds: &[String], kind: &str| kinds.iter().filter(|k| *k == kind).count();
+    let answer_tied = !item_before["claim"].is_null()
+        && answered_item["id"] == goal.item_id.as_str()
+        && answered_item["claim"] == item_before["claim"]
+        && answered_item["revision"].as_u64()
             == item_after["revision"].as_u64().map(|revision| revision + 1);
+    let store_tied = !item_before["claim"].is_null()
+        && item_tied["claim"] == item_before["claim"]
+        && item_tied["revision"] == answered_item["revision"];
+    let ledger_tied = count(&kinds_tied, "claimed") == 1
+        && count(&kinds_tied, "released") == 0
+        && count(&kinds_tied, "evidence_added") == 1;
     gateway.say(format!(
-        "the continuation's write: a claim was held before it: {}; none is held after it: {}; \
-         item revision before={} after={}; requests after the second boot that start from a \
-         notice, counted after the write: {} (indexes {starts_after_call:?})",
-        !item_after["claim"].is_null(),
-        item_written["claim"].is_null(),
+        "THE TIE, the tool's own answer: item {} (the goal's item: {}); claim owner={} \
+         claimed_at={} lease_expires_at={} expiry_observed_at={}; the claim equals the one read \
+         before the kill: {}; item revision before the call={} in the answer={}; status={}; \
+         evidence the answer holds: {}",
+        answered_item["id"],
+        answered_item["id"] == goal.item_id.as_str(),
+        answered_item["claim"]["owner"]["key"],
+        answered_item["claim"]["claimed_at"],
+        answered_item["claim"]["lease_expires_at"],
+        answered_item["claim"]["expiry_observed_at"],
+        !item_before["claim"].is_null() && answered_item["claim"] == item_before["claim"],
         item_after["revision"],
-        item_written["revision"],
-        starts_after_call.len()
+        answered_item["revision"],
+        answered_item["status"],
+        head(&answered_item["evidence"].to_string(), 300)
+    ));
+    gateway.say(format!(
+        "THE TIE, the store after that write and before any other: the claim equals the one \
+         read before the kill: {}; item revision={}; ledger events claimed={} released={} \
+         evidence_added={}",
+        !item_before["claim"].is_null() && item_tied["claim"] == item_before["claim"],
+        item_tied["revision"],
+        count(&kinds_tied, "claimed"),
+        count(&kinds_tied, "released"),
+        count(&kinds_tied, "evidence_added")
     ));
     say(
         row,
         format!(
-            "READING (d) the continuation's turn released the claim the restart kept, by its \
-             own tool call, and that write started no further turn: {}",
-            verdict(call_answered && claim_released && starts_after_call.len() == 1)
+            "READING (d) the continuation's first write landed on the original item under the \
+             claim the restart kept (same owner, claimed_at and lease), with no release and no \
+             second claim in the ledger: {}",
+            verdict(first_answered && answer_tied && store_tied && ledger_tied)
+        ),
+    );
+
+    // The continuation's second write, in the same turn: the member's own
+    // `workgraph_release`. The item's lifecycle admits a release only while
+    // a claim is present. The call names the item and its revision only:
+    // whose claim it is, is no part of it.
+    let before_second = scene.model.seen();
+    let release = json!({ "id": goal.item_id, "expected_revision": item_tied["revision"] });
+    scene
+        .model
+        .answer_scripted_call("workgraph_release", &release);
+    gateway.say(format!(
+        "the same turn is answered with its second tool call: workgraph_release {release}"
+    ));
+    let second_answered = gateway.eventually(WAKE_WAIT, || {
+        tool_result(&scene.model.requests(), before_second).is_some()
+    });
+    gateway.settle(SETTLE);
+    let after_calls = scene.print_requests("boot-2", requests_at_kill);
+    let second_result = tool_result(&after_calls, before_second);
+    gateway.say(format!(
+        "the turn's next request carries the tool's answer as its newest message within \
+         {WAKE_WAIT:?}: {second_answered}; {}",
+        second_result.as_ref().map_or_else(
+            || "no such request".to_string(),
+            |(index, text)| format!("request #{index}, the answer: {}", head(text, 600))
+        )
+    ));
+    let item_written = gateway.read_item(&goal.item_id, "after the continuation's writes");
+    gateway.say_claim("claim after the continuation's writes", &item_written);
+    let kinds_written = gateway.say_claim_events().unwrap_or_default();
+    gateway.print_stderr("after the continuation's writes");
+    scene.say_turns("boot-2", "after the continuation's writes");
+    let starts_after_calls = notice_starts(&after_calls, requests_at_kill);
+    let claim_released = !item_tied["claim"].is_null()
+        && item_written["claim"].is_null()
+        && item_written["revision"].as_u64()
+            == item_tied["revision"].as_u64().map(|revision| revision + 1)
+        && count(&kinds_written, "claimed") == 1
+        && count(&kinds_written, "released") == 1;
+    gateway.say(format!(
+        "the continuation's second write: a claim was held before it: {}; none is held after \
+         it: {}; item revision before={} after={}; ledger events claimed={} released={}; \
+         requests after the second boot that start from a notice, counted after both writes: \
+         {} (indexes {starts_after_calls:?})",
+        !item_tied["claim"].is_null(),
+        item_written["claim"].is_null(),
+        item_tied["revision"],
+        item_written["revision"],
+        count(&kinds_written, "claimed"),
+        count(&kinds_written, "released"),
+        starts_after_calls.len()
+    ));
+    say(
+        row,
+        format!(
+            "READING (e) the same turn then released that claim by its own tool call, and \
+             neither write started a further turn: {}",
+            verdict(second_answered && claim_released && starts_after_calls.len() == 1)
         ),
     );
 
@@ -1951,22 +2095,30 @@ fn a_continuation_that_waits_at_a_kill_takes_one_turn_after_the_second_boot() {
         digest(recovered_starts[0], first_recovered)
     );
     assert!(
-        call_answered,
-        "(d) the continuation's turn must make its one tool call and read the tool's result"
+        first_answered && second_answered,
+        "(d) (e) the continuation's turn must make its two tool calls and read each answer: \
+         first {first_answered}, second {second_answered}"
+    );
+    assert!(
+        answer_tied && store_tied && ledger_tied,
+        "(d) the continuation's first write must land on the original item under the claim the \
+         restart kept, with no release and no second claim: the tool's answer {answer_tied}, \
+         the store {store_tied}, the ledger {ledger_tied} ({kinds_tied:?}); claim before the \
+         kill {}, in the answer {}, in the store {}",
+        item_before["claim"],
+        answered_item["claim"],
+        item_tied["claim"]
     );
     assert!(
         claim_released,
-        "(d) the continuation's turn must release the claim the restart kept: claim before the \
-         call {}, after it {}; item revision before {} and after {}",
-        item_after["claim"],
-        item_written["claim"],
-        item_after["revision"],
-        item_written["revision"]
+        "(e) the continuation's turn must then release that claim: claim before the call {}, \
+         after it {}; item revision before {} and after {}; ledger {kinds_written:?}",
+        item_tied["claim"], item_written["claim"], item_tied["revision"], item_written["revision"]
     );
     assert_eq!(
-        starts_after_call.len(),
+        starts_after_calls.len(),
         1,
-        "(a) through the end of the continuation's turn and its own write, still exactly one \
+        "(a) through the end of the continuation's turn and its own writes, still exactly one \
          turn must have started from the notice after the second boot"
     );
     assert_eq!(

@@ -588,3 +588,73 @@ async fn finish_by_does_not_change_attention_authority_or_binding() {
     assert_eq!(after.item_revision, item.revision);
     assert_eq!(before.text.title, after.text.title);
 }
+
+// An item in a terminal status takes no update, so its target can be neither
+// set nor cleared there: the refusal comes before any field is written.
+#[tokio::test]
+async fn terminal_item_refuses_finish_by_set_and_clear_without_writes() {
+    let store: std::sync::Arc<dyn meerkat_workgraph::WorkGraphStore> =
+        std::sync::Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new());
+    let service = meerkat_workgraph::WorkGraphService::new(store.clone());
+    let item = service
+        .create(
+            serde_json::from_value(json!({
+                "title":"Terminal finish-by", "finish_by":"2026-11-19T08:00:00Z"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("create");
+    let closed = service
+        .close(
+            serde_json::from_value(json!({
+                "id":item.id, "expected_revision":item.revision, "status":"cancelled"
+            }))
+            .expect("close request"),
+        )
+        .await
+        .expect("close");
+    assert_eq!(closed.status, meerkat_workgraph::WorkStatus::Cancelled);
+    assert_eq!(closed.finish_by, item.finish_by);
+    let events_before = serde_json::to_value(
+        store
+            .list_events(meerkat_workgraph::WorkGraphEventFilter::default())
+            .await
+            .expect("events"),
+    )
+    .expect("events");
+    for operation in [
+        json!({"op":"set","value":"2026-11-20T08:00:00Z"}),
+        json!({"op":"clear"}),
+    ] {
+        let refused = service
+            .update(
+                serde_json::from_value(json!({
+                    "id":closed.id, "expected_revision":closed.revision, "finish_by":operation
+                }))
+                .expect("update request"),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(WorkGraphError::InvalidTransition(_))),
+            "a terminal item must refuse {operation}"
+        );
+    }
+    let read = service
+        .get(None, None, closed.id.clone())
+        .await
+        .expect("read");
+    assert_eq!(read.status, meerkat_workgraph::WorkStatus::Cancelled);
+    assert_eq!(read.revision, closed.revision);
+    assert_eq!(read.finish_by, closed.finish_by);
+    assert_eq!(
+        serde_json::to_value(
+            store
+                .list_events(meerkat_workgraph::WorkGraphEventFilter::default())
+                .await
+                .expect("events")
+        )
+        .expect("events"),
+        events_before
+    );
+}

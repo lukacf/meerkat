@@ -224,6 +224,25 @@ Delegated authority is one of `add_evidence`, `close_own_review_item`,
 carries bounded item/parent context and its exact binding and item revisions.
 Reassignment and policy escalation require that current projection.
 
+A turn that runs under a binding is given the projection once, when it
+starts, and every WorkGraph tool call of that turn, a read included, is served
+only while the projection is still the current one: the binding and its
+revision, mode and authority, the item's revision and evidence, and the parent
+context must be what the turn was given. A write to the bound item changes
+the item's revision, so after a bound turn's own first write to that item
+every further WorkGraph call of the turn is refused with
+`<tool> cannot use stale or inactive WorkGraph attention projection`,
+`workgraph_get` included.
+
+That refusal is a stale projection, not a revision conflict. A revision
+conflict is a write whose `expected_revision` is no longer the item's, and
+reading the item and retrying cures it. A stale projection is not cured
+within the turn: only a later turn is given the current projection, and
+nothing starts that turn; it starts when another input reaches the target.
+So a bound turn makes at most one write to its bound item. Tool use without
+a binding is not checked this way: there a caller chains calls on the
+revision each write returns, and reloads after a revision conflict.
+
 ## Flow Execution Bindings
 
 `WorkExecutionBinding` durably associates one item with one exact Mob Flow

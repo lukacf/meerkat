@@ -66,6 +66,19 @@ them.
   Forge's local setup preset and separately pinned installer catalog are
   unchanged; this does not establish Neon availability there.
 
+- `meerkat-workgraph`, guidance only (no behaviour change): the WorkGraph
+  reference, the built-in `workgraph-workflow` skill and the text of the
+  stale attention projection refusal now state the limit of a turn that runs
+  under an attention binding. Every WorkGraph call of such a turn, a read
+  included, is served only while the projection the turn was given is still
+  current, so after the turn's own first write to the bound item its further
+  WorkGraph calls are refused. That is a stale projection, not a revision
+  conflict: reloading or another `expected_revision` does not cure it, a
+  later turn does, and that turn starts only when another input arrives.
+  Tool use without a binding chains calls and reloads as before. The check
+  is the one 0.9.17 has; only the words changed, and the refusal message is
+  longer.
+
 ### Upgrade notes
 
 - For ordinary Gemini sessions, pin `--model gemini-4-argon` or

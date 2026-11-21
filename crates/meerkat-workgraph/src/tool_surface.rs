@@ -390,11 +390,32 @@ async fn validate_attention_projection_current(
     validate_workgraph_attention_projection_current(service, projection)
         .await
         .map_err(|error| ToolError::ExecutionFailed {
-            message: format!(
-                "{name} cannot use stale or inactive WorkGraph attention projection: {error}"
-            ),
+            message: attention_projection_refusal(name, &error),
         })
 }
+
+/// The refusal of a WorkGraph call under an attention binding whose currency
+/// read failed. The guidance describes a projection that is no longer the
+/// current one, which the service reports as an invalid transition. Any other
+/// failure of the read (a store fault, a binding that cannot be found) keeps
+/// the plain refusal: nothing is known to have changed, and a later call of
+/// the same turn may be served.
+fn attention_projection_refusal(name: &str, error: &crate::WorkGraphError) -> String {
+    let refusal =
+        format!("{name} cannot use stale or inactive WorkGraph attention projection: {error}");
+    if matches!(error, crate::WorkGraphError::InvalidTransition(_)) {
+        format!("{refusal}. {STALE_ATTENTION_PROJECTION_GUIDANCE}")
+    } else {
+        refusal
+    }
+}
+
+/// What a model is told with the refusal of a WorkGraph call under an
+/// attention binding whose projection is no longer the current one. The
+/// projection is given to a turn once, so the refusal holds for the rest of
+/// that turn, and it is not the `expected_revision` conflict a model may take
+/// it for.
+const STALE_ATTENTION_PROJECTION_GUIDANCE: &str = "This turn runs under an attention binding, and the WorkGraph attention projection it was given when it started is no longer current: the bound item, its binding or its parent context changed after that, and a write of this turn to the bound item is such a change. This is not a revision conflict: reading the item or passing another expected_revision does not help, and no further WorkGraph call of this turn can succeed. Stop calling WorkGraph tools in this turn and say in your reply what is left to do. A later turn is given the current projection; it starts only when another input arrives.";
 
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
     tool_defs_from_values(workgraph_tools_list())
@@ -1546,6 +1567,42 @@ mod tests {
             second,
             ToolError::ExecutionFailed { ref message } if message.contains("item revision")
         ));
+        // The refusal tells the model what happened and what it can do: the
+        // cause is the turn's projection, not the revision it passed.
+        assert!(matches!(
+            second,
+            ToolError::ExecutionFailed { ref message }
+                if message.contains("stale or inactive WorkGraph attention projection")
+                    && message.contains("This is not a revision conflict")
+                    && message.contains("no further WorkGraph call of this turn can succeed")
+                    && message.contains("it starts only when another input arrives")
+        ));
+    }
+
+    #[test]
+    fn attention_projection_refusal_carries_the_guidance_only_for_a_stale_projection() {
+        let stale = attention_projection_refusal(
+            "workgraph_get",
+            &crate::WorkGraphError::InvalidTransition(
+                "stale WorkGraph attention projection for binding b item i".to_string(),
+            ),
+        );
+        assert!(
+            stale.starts_with(
+                "workgraph_get cannot use stale or inactive WorkGraph attention projection: "
+            ) && stale.contains("This is not a revision conflict"),
+            "a stale projection's refusal carries the guidance: {stale}"
+        );
+        // A store fault says nothing about the item or its binding, and a
+        // later call of the turn may be served: the old words alone.
+        let store_fault = attention_projection_refusal(
+            "workgraph_get",
+            &crate::WorkGraphError::Store("disk I/O error".to_string()),
+        );
+        assert_eq!(
+            store_fault,
+            "workgraph_get cannot use stale or inactive WorkGraph attention projection: work graph store error: disk I/O error"
+        );
     }
 
     #[tokio::test]

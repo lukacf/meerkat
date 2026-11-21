@@ -36,12 +36,30 @@ scratch space and not semantic memory.
   actually happened. Cancelling, or replacing the work with a new item, must be a
   real decision: keep the history (attach evidence, link the replacement) and do
   not create a duplicate of work that already exists.
-- If a write fails with a stale revision, reload the item with `workgraph_get`
+- If a write fails with a stale revision (the `expected_revision` you passed
+  is no longer the item's), reload the item with `workgraph_get`
   or `workgraph_snapshot`, reconsider the current state, then retry only if the
   work still makes sense.
 - Every successful mutation advances the item revision. Use the returned item,
   not an older cached revision, for the next claim, update, evidence, release,
   block, or close operation.
+- The two rules above are for ordinary tool use. They do not hold in a turn
+  that runs under an attention binding, that is, a turn of a member a goal is
+  bound to: such a turn is offered only the WorkGraph tools of the binding's
+  mode and none of your other tools, and it may also carry a
+  `WorkGraph attention projection` block. Every WorkGraph call of such a turn,
+  a read included, is served only while the turn's projection is still
+  current, and the projection is fixed for the turn. Your own first write to
+  the bound item changes the item,
+  so every later WorkGraph call of the same turn is refused with "stale or
+  inactive WorkGraph attention projection", `workgraph_get` included. That is
+  not a revision conflict: reloading, or passing another `expected_revision`,
+  does not help. In such a turn read first if you need to, make the one write
+  that matters most, stop calling WorkGraph tools after it, and say in your
+  reply what is left to do. A later turn carries a current projection.
+  Nothing starts that turn for you: it starts when another input reaches you.
+  The same refusal on a turn's first call means the item, its binding or its
+  parent changed after the turn started.
 - Use `workgraph_link` for real dependencies and relationships. Edges are
   permanent; there is no unlink. Use `blocks` (`from_id` blocker, `to_id`
   blocked) only when the target must not be ready until the source is
@@ -112,3 +130,7 @@ scratch space and not semantic memory.
 6. Update the item if the scope, timing, priority, or labels changed.
 7. Close it with an explicit `status` only when the outcome is terminal, or
    release it if another agent should continue.
+
+Steps 5 to 7 in one turn are for ordinary tool use. In a turn under an
+attention binding only one of them can be done on the bound item; the others
+wait for later turns (see Operating Rules).

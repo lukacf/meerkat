@@ -663,6 +663,10 @@ impl LlmClient for ProviderAgnosticLlmClient {
         self.inner.reasoning_route()
     }
 
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.inner.on_reasoning_effort_unavailable()
+    }
+
     // The route the wrapped client bound a projection to. The trait's
     // default answers with the request-free route, which is not the
     // projection's for a client whose route can change between requests.
@@ -797,6 +801,10 @@ impl meerkat_core::AgentLlmClient for ReplaySanitizingAgentLlmClient {
     // set on a member whose client reports none is refused as unknown.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
+    }
+
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.inner.on_reasoning_effort_unavailable()
     }
 
     // The default tag of the wrapped client. The trait's default is no tag,
@@ -1023,6 +1031,10 @@ impl LlmClient for ReplaySanitizingLlmClient {
     // set on a member whose client reports none is refused as unknown.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
+    }
+
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.inner.on_reasoning_effort_unavailable()
     }
 
     // The route the wrapped client bound a projection to. The trait's
@@ -18835,6 +18847,7 @@ realm_profile = "worker-v2"
     /// route witness, and a prepared entry recording what reaches it.
     #[derive(Default)]
     struct GovernedRawClient {
+        diagnostic_calls: std::sync::atomic::AtomicUsize,
         credential_preparations: std::sync::atomic::AtomicUsize,
         dispatched: std::sync::Mutex<Option<GovernedRawDispatch>>,
     }
@@ -18853,6 +18866,12 @@ realm_profile = "worker-v2"
 
     #[async_trait]
     impl LlmClient for GovernedRawClient {
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.diagnostic_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::memory::dispatch_taint::controller_test_support::reasoning_diagnostics()
+        }
+
         async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
             self.credential_preparations
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -18987,7 +19006,8 @@ realm_profile = "worker-v2"
         use crate::memory::dispatch_taint::controller_test_support::{
             PinnedInner, default_provider_tag, reasoning_route, reasoning_route_of_a_projection,
         };
-        let inner: Arc<dyn LlmClient> = Arc::new(GovernedRawClient::default());
+        let probe = Arc::new(GovernedRawClient::default());
+        let inner: Arc<dyn LlmClient> = probe.clone();
         let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
         assert_eq!(inner.reasoning_route(), Some(reasoning_route()));
         assert_ne!(reasoning_route_of_a_projection(), reasoning_route());
@@ -19013,7 +19033,28 @@ realm_profile = "worker-v2"
                 ))),
             ),
         ] {
+            let before = probe
+                .diagnostic_calls
+                .load(std::sync::atomic::Ordering::SeqCst);
             assert_eq!(client.reasoning_route(), Some(reasoning_route()), "{shape}");
+            assert_eq!(
+                probe
+                    .diagnostic_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                before
+            );
+            assert_eq!(
+                client.on_reasoning_effort_unavailable(),
+                crate::memory::dispatch_taint::controller_test_support::reasoning_diagnostics(),
+                "{shape}"
+            );
+            assert_eq!(
+                probe
+                    .diagnostic_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                before + 1,
+                "{shape}"
+            );
             assert_eq!(
                 client.reasoning_route_of(&projection),
                 Some(reasoning_route_of_a_projection()),
@@ -19021,7 +19062,14 @@ realm_profile = "worker-v2"
             );
         }
 
-        let wrapped = ReplaySanitizingAgentLlmClient::new(Arc::new(PinnedInner::default()));
+        assert_eq!(
+            probe
+                .credential_preparations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let agent_probe = Arc::new(PinnedInner::default());
+        let wrapped = ReplaySanitizingAgentLlmClient::new(agent_probe.clone());
         assert_eq!(
             meerkat_core::AgentLlmClient::reasoning_route(&wrapped),
             Some(reasoning_route()),
@@ -19031,6 +19079,22 @@ realm_profile = "worker-v2"
             meerkat_core::AgentLlmClient::default_provider_tag(&wrapped),
             Some(default_provider_tag()),
             "the replay sanitizer around the agent client"
+        );
+        assert_eq!(
+            agent_probe
+                .diagnostic_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            meerkat_core::AgentLlmClient::on_reasoning_effort_unavailable(&wrapped),
+            crate::memory::dispatch_taint::controller_test_support::reasoning_diagnostics()
+        );
+        assert_eq!(
+            agent_probe
+                .diagnostic_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
     }
 

@@ -6,6 +6,7 @@ route does not accept gets, and the report of what a run sent.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
@@ -40,6 +41,15 @@ know is not parsed (see :func:`reasoning_effort_refusal`)."""
 REASONING_EFFORT_REFUSAL_REASONS: tuple[str, ...] = get_args(ReasoningEffortRefusalReason)
 """The refusal reasons this SDK knows, in the server's order."""
 
+REASONING_CAUSE_NEW_SIGN_IN_REQUIRED = "new_sign_in_required"
+"""A device sign-in is required; this does not classify an operator-token lease.
+
+No built-in provider reports a cause yet.
+"""
+
+REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE = "token_exchange_unavailable"
+"""A held typed exchange outage leaves no usable account token."""
+
 _TRANSIENT_REASON = "supported_levels_unavailable"
 
 
@@ -73,12 +83,19 @@ class ReasoningEffortRefusal:
     ``conflicting_param`` and ``conflicting_level`` are set for the
     ``conflicting_*`` reasons.
 
-    ``transient`` says whether the same request can succeed later with no
-    configuration change. It is true only for
-    ``supported_levels_unavailable`` (the account's model list is not loaded
-    yet) and is read from ``reason``; every other reason is permanent until
-    the request or the configuration changes. ``retryable`` is the server's
-    own mark of the same class (``error.data.retryable``), when it sent one.
+    ``cause`` is an optional, open account-state name. An absent cause means
+    cause unknown, not that sign-in is required. Unknown strings are retained.
+    ``not_before`` is an absolute eligibility time, an RFC 3339 timestamp kept
+    as sent; it is not a countdown or a promise of recovery. ``None`` when no
+    time was reported, which does not say that none applies. A refusal whose
+    ``not_before`` is not a timestamp is not parsed, as in the typed server.
+
+    ``transient`` is true for ``supported_levels_unavailable`` unless the
+    known cause is ``new_sign_in_required``. Unknown or absent causes keep
+    the reason's historical class. ``retryable`` preserves the server's
+    explicit mark verbatim, even when it differs from ``transient``. Older
+    SDKs use only the reason and may report transient true beside retryable
+    false for a new-sign-in payload. Neither field schedules a retry.
     """
 
     requested: str
@@ -91,10 +108,15 @@ class ReasoningEffortRefusal:
     conflicting_param: str | None = None
     conflicting_level: str | None = None
     retryable: bool | None = None
+    cause: str | None = None
+    not_before: str | None = None
 
     @property
     def transient(self) -> bool:
-        return self.reason == _TRANSIENT_REASON
+        return (
+            self.reason == _TRANSIENT_REASON
+            and self.cause != REASONING_CAUSE_NEW_SIGN_IN_REQUIRED
+        )
 
 
 _UNREADABLE = object()
@@ -115,6 +137,32 @@ def _parse_route(value: Any) -> Any:
 
 def _is_level(value: Any) -> bool:
     return isinstance(value, str) and value in REASONING_EFFORT_LEVELS
+
+
+_TIMESTAMP = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.[0-9]+)?"
+    r"(?:[Zz]|[+-]([0-9]{2}):([0-9]{2}))"
+)
+
+
+def _is_timestamp(value: Any) -> bool:
+    """Whether a value is an RFC 3339 date-time: a calendar date, ``T`` or
+    ``t``, a time of day, and ``Z``, ``z`` or a numeric offset with a colon."""
+    if not isinstance(value, str):
+        return False
+    match = _TIMESTAMP.fullmatch(value)
+    if match is None:
+        return False
+    year, month, day, hour, minute, second = (int(match.group(index)) for index in range(1, 7))
+    offset_hour = int(match.group(7) or 0)
+    offset_minute = int(match.group(8) or 0)
+    if not 1 <= month <= 12 or hour > 23 or minute > 59 or second > 60:
+        return False
+    if offset_hour > 23 or offset_minute > 59:
+        return False
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[month - 1]
+    return 1 <= day <= days
 
 
 def parse_reasoning_effort_refusal(
@@ -156,6 +204,12 @@ def parse_reasoning_effort_refusal(
     conflicting_level = value.get("conflicting_level")
     if conflicting_level is not None and not _is_level(conflicting_level):
         return None
+    cause = value.get("cause")
+    if cause is not None and not isinstance(cause, str):
+        return None
+    not_before = value.get("not_before")
+    if not_before is not None and not _is_timestamp(not_before):
+        return None
     return ReasoningEffortRefusal(
         requested=requested,
         provider=provider,
@@ -167,6 +221,8 @@ def parse_reasoning_effort_refusal(
         conflicting_param=conflicting_param,
         conflicting_level=conflicting_level,
         retryable=retryable if isinstance(retryable, bool) else None,
+        cause=cause,
+        not_before=not_before,
     )
 
 

@@ -150,6 +150,10 @@ impl LlmClient for SelectedTargetClient {
         self.inner.reasoning_route()
     }
 
+    fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+        self.inner.on_reasoning_effort_unavailable()
+    }
+
     /// The route the wrapped client bound `projection` to.
     fn reasoning_route_of(
         &self,
@@ -426,9 +430,21 @@ mod tests {
     }
 
     /// A client that reports the route it was given, or none.
-    struct RouteReportingClient(Option<meerkat_core::ReasoningRouteObservation>);
+    struct RouteReportingClient(
+        Option<meerkat_core::ReasoningRouteObservation>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        chrono::DateTime<chrono::Utc>,
+    );
     #[async_trait]
     impl LlmClient for RouteReportingClient {
+        fn on_reasoning_effort_unavailable(&self) -> meerkat_core::ReasoningEffortUnavailable {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut facts = meerkat_core::ReasoningEffortUnavailable::default();
+            facts.cause = Some("fixture_unavailable".to_string());
+            facts.not_before = Some(self.2);
+            facts
+        }
+
         fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
             self.0.clone()
         }
@@ -448,13 +464,15 @@ mod tests {
     /// client), and none when that client reports none. A wrapper never
     /// hides the route its client serves.
     #[test]
-    fn the_selected_target_wrapper_reports_its_clients_route() {
+    fn the_selected_target_wrapper_reports_its_clients_route() -> Result<(), chrono::ParseError> {
         use meerkat_core::model_profile::capabilities::EffortLevel;
         use meerkat_core::provider_matrix::SelfHostedBackendKind;
 
-        let wrapped = |route: Option<meerkat_core::ReasoningRouteObservation>| {
+        let not_before = "2020-01-02T03:04:05Z".parse::<chrono::DateTime<chrono::Utc>>()?;
+        let wrapped = |route: Option<meerkat_core::ReasoningRouteObservation>,
+                       calls: Arc<std::sync::atomic::AtomicUsize>| {
             SelectedTargetClient::new(
-                Arc::new(RouteReportingClient(route)),
+                Arc::new(RouteReportingClient(route, calls, not_before)),
                 ResolvedModelAuthorizationTarget {
                     identity: Arc::new(SessionLlmIdentity {
                         model: "fixture".to_owned(),
@@ -485,11 +503,19 @@ mod tests {
             account: meerkat_core::AccountLevelStatement::NotApplicable,
             operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
         };
-        assert_eq!(
-            wrapped(Some(reported.clone())).reasoning_route(),
-            Some(reported)
-        );
-        assert_eq!(wrapped(None).reasoning_route(), None);
+        for route in [Some(reported), None] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let client = wrapped(route.clone(), Arc::clone(&calls));
+            assert_eq!(client.reasoning_route(), route);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            for expected in 1..=2 {
+                let facts = client.on_reasoning_effort_unavailable();
+                assert_eq!(facts.cause.as_deref(), Some("fixture_unavailable"));
+                assert_eq!(facts.not_before, Some(not_before));
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), expected);
+            }
+        }
+        Ok(())
     }
 
     /// A client whose route of a projection is not the route it reports

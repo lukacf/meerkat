@@ -2804,6 +2804,8 @@ mod tests {
     }
 
     struct ReturnedSummaryClient {
+        route: Option<crate::ReasoningRouteObservation>,
+        diagnostic_calls: std::sync::atomic::AtomicUsize,
         text: &'static str,
         stop_reason: StopReason,
         usage: Usage,
@@ -2813,6 +2815,8 @@ mod tests {
     impl ReturnedSummaryClient {
         fn new(text: &'static str, stop_reason: StopReason) -> Self {
             Self {
+                route: None,
+                diagnostic_calls: std::sync::atomic::AtomicUsize::new(0),
                 text,
                 stop_reason,
                 usage: Usage {
@@ -2831,6 +2835,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::agent::AgentLlmClient for ReturnedSummaryClient {
+        fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
+            self.route.clone()
+        }
+        fn on_reasoning_effort_unavailable(&self) -> crate::ReasoningEffortUnavailable {
+            self.diagnostic_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::ReasoningEffortUnavailable {
+                cause: Some("fixture_unavailable".to_string()),
+                not_before: Some("2020-01-02T03:04:05Z".parse().unwrap()),
+            }
+        }
+
         async fn stream_response(
             &self,
             _: &[Message],
@@ -3039,6 +3055,49 @@ mod tests {
         assert!(attempt.uncommitted_call.is_none());
         assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+
+        // An unavailable account list still uses the summary's pure resolver;
+        // this control would catch accidental unavailable-only enrichment.
+        let mut unavailable = ReturnedSummaryClient::new("A valid summary.", StopReason::EndTurn);
+        unavailable.route = Some(crate::ReasoningRouteObservation {
+            backend: crate::ReasoningBackend::OpenAi(
+                crate::provider_matrix::OpenAiBackendKind::Copilot,
+            ),
+            api: crate::ModelApi::Responses,
+            account: crate::AccountLevelStatement::ListUnavailable,
+            operator_levels: None,
+        });
+        let attempt = attempt_source_with_params(
+            &session,
+            &unavailable,
+            &compactor,
+            Some(params(Some(
+                crate::model_profile::capabilities::EffortLevel::High,
+            ))),
+        )
+        .await;
+        assert!(matches!(&attempt.result,
+            Err(CompactionError::LlmFailed(crate::error::AgentError::ReasoningEffortRefused(refusal)))
+                if refusal.reason == crate::ReasoningEffortRefusalReason::SupportedLevelsUnavailable
+                    && refusal.cause.is_none() && refusal.not_before.is_none()));
+        assert_eq!(
+            unavailable
+                .diagnostic_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            unavailable.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(attempt.uncommitted_call.is_none());
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+        assert_eq!(
+            client
+                .diagnostic_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
 
         // The same summary request without the level is served.
         let attempt =

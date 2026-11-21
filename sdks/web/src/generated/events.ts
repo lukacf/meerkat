@@ -772,10 +772,12 @@ export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "ma
 export type ReasoningEffortDecidedBy = "request" | "preference";
 
 export type ReasoningEffortRefusal = {
+  cause?: string | null;
   conflicting_level?: EffortLevel | null;
   conflicting_param?: string | null;
   facts: ReasoningFactsSource | null;
   model: string;
+  not_before?: string | null;
   provider: Provider;
   reason: ReasoningEffortRefusalReason;
   requested: EffortLevel;

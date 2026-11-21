@@ -804,9 +804,9 @@ impl SessionError {
     /// Structured-data `kind` of a refused `reasoning_effort` level
     /// ([`crate::error::AgentError::ReasoningEffortRefused`]) on the wire.
     /// The `reasoning_effort_refusal` member carries the typed refusal; the
-    /// advisory `retryable` member beside it is `true` only for the
-    /// transient reason
-    /// ([`crate::ReasoningEffortRefusalReason::is_transient`]).
+    /// advisory `retryable` member beside it follows the instance classifier
+    /// ([`crate::ReasoningEffortRefusal::is_retryable`]), including a known
+    /// cause that requires a new sign-in.
     pub const REASONING_EFFORT_REFUSED_KIND: &'static str = "reasoning_effort_refused";
 
     /// Return a stable error code string for wire formats.
@@ -887,7 +887,7 @@ impl SessionError {
             Self::Agent(crate::error::AgentError::ReasoningEffortRefused(refusal)) => {
                 Some(serde_json::json!({
                     "kind": Self::REASONING_EFFORT_REFUSED_KIND,
-                    "retryable": refusal.reason.is_transient(),
+                    "retryable": refusal.is_retryable(),
                     "reasoning_effort_refusal": refusal,
                 }))
             }
@@ -936,7 +936,8 @@ impl SessionError {
     /// Read a refused `reasoning_effort` level back off the wire: the typed
     /// refusal of the [`Self::REASONING_EFFORT_REFUSED_KIND`] projection
     /// [`Self::structured_data`] gives. The advisory `retryable` member is
-    /// not read: the refusal's reason states it. Other or malformed
+    /// not read: the refusal read back states it
+    /// ([`crate::ReasoningEffortRefusal::is_retryable`]). Other or malformed
     /// structured data fails closed as `None`.
     pub fn reasoning_effort_refusal_from_data(
         data: &serde_json::Value,

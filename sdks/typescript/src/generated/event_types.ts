@@ -255,18 +255,21 @@ export interface ReasoningRoute {
  *
  * `route`, `supported` and `facts` are always serialized, as `null` when
  * absent (`facts` is absent exactly when `supported` is). The two
- * `conflicting_*` fields are serialized only when present. The `Display`
- * text is for people and is not a contract; read the fields.
+ * `conflicting_*` fields and the optional `cause` and `not_before` diagnostics
+ * are serialized only when present. The `Display` text is for people and is
+ * not a contract; read the fields.
  *
  * Non-exhaustive: a later release can add a field, so code outside this
  * crate reads the fields and does not build the value with a struct
  * literal (a value is read from its wire form).
  */
 export type ReasoningEffortRefusal = {
+  cause?: string | null;
   conflicting_level?: EffortLevel | null;
   conflicting_param?: string | null;
   facts: ReasoningFactsSource | null;
   model: string;
+  not_before?: string | null;
   provider: Provider;
   reason: ReasoningEffortRefusalReason;
   requested: EffortLevel;

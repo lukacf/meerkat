@@ -492,7 +492,7 @@ it cannot honour is refused before any provider request with
 |---|---|
 | `unsupported_level` | The route's source states its levels and the requested one is not among them. `supported` lists them; an empty list means the route or the model takes no level. |
 | `supported_levels_unknown` | No source states the levels: a model id with no catalog row, a Copilot model whose list entry states none, a self-hosted model with none declared. `supported` and `facts` are `null`. |
-| `supported_levels_unavailable` | The source exists and cannot be read now: the Copilot account's model list is not loaded yet. The one transient reason: `retryable` is `true`, and the same request can succeed later with no configuration change. |
+| `supported_levels_unavailable` | The source exists and cannot be read now: the Copilot account's model list is not loaded yet. This is the only reason that can be retryable. A known `new_sign_in_required` cause makes this instance non-retryable; absent or unknown causes retain the reason's released retryability. |
 | `conflicting_provider_effort` | The request also sets a provider-specific effort with another level (`conflicting_param`, `conflicting_level`). An equal one is accepted. |
 | `conflicting_thinking_budget` | The request also sets a thinking budget: a budget and a level are two controls. |
 | `conflicting_thinking_type` | The request also sets a thinking type the model does not accept with the level on that route. |
@@ -510,6 +510,33 @@ source of `supported`: `catalog`,
 `account` or `operator`. The reason vocabulary is closed. The route names and
 `facts` may grow, so a client keeps a value it does not know. Read the fields,
 never the message text.
+
+A refusal can carry two optional diagnostics:
+
+- `cause` is an open string. `token_exchange_unavailable` identifies a held
+  transient token-exchange outage. `new_sign_in_required` identifies a device
+  sign-in lease that requires a new sign-in; a provider does not report it for
+  an operator-token source or infer it from an absent lease. Keep unknown values.
+- `not_before` is an absolute RFC3339 eligibility time already held by the
+  account, written in UTC. It is not a countdown or a promise that retrying
+  then will succeed. Absent means no time was reported, not that no deadline
+  applies. A refusal whose `not_before` is not an RFC3339 timestamp is
+  outside the documented shape: neither the typed reader nor an SDK parser
+  reads it.
+
+No built-in provider reports a cause yet: until one does, every refusal
+arrives without `cause` and `not_before`, and `retryable` keeps the released
+reason-based answer.
+
+An absent `cause` means **cause unknown**. Absence says nothing about
+whether sign-in is required. Compaction's level check does not call the
+diagnostic hook, and a level refused there is not delivered as a typed
+refusal: that compaction fails with a class and a message, and the run goes
+on. With an absent or unknown cause,
+retryability retains the released answer from `reason`; a known
+`new_sign_in_required` cause makes it false. Other reasons remain
+non-retryable. Read the server's `retryable` value as sent; Meerkat does not
+automatically retry a refused level.
 
 The refusal has the same shape wherever it is raised: when the session is
 created or resumed, on a turn that changes the level or the model, and before

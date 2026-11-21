@@ -496,6 +496,8 @@ fn refusal(
         facts: facts.source(),
         conflicting_param,
         conflicting_level,
+        cause: None,
+        not_before: None,
     }
 }
 
@@ -738,6 +740,8 @@ fn level_facts(
 /// on an OpenAI-family route, the request-local resolved marker), and the
 /// resolution's `level` equals `requested`. On refusal `params` is
 /// untouched.
+// Preserve the public value-typed refusal API; callers box at their own boundaries.
+#[allow(clippy::result_large_err)]
 pub fn resolve_reasoning_effort(
     input: ReasoningResolveInput<'_>,
     params: &mut Option<ProviderParamsOverride>,

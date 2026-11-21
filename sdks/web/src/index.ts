@@ -5,6 +5,8 @@ export { mobDestroyIncompleteReport } from './mob-destroy-report.js';
 export { MOB_QUARANTINED_KIND, MOB_QUARANTINE_CLASSES, mobQuarantined } from './mob-errors.js';
 export type { MobQuarantinedRefusal } from './mob-errors.js';
 export {
+  REASONING_CAUSE_NEW_SIGN_IN_REQUIRED,
+  REASONING_CAUSE_TOKEN_EXCHANGE_UNAVAILABLE,
   REASONING_EFFORT_LEVELS,
   REASONING_EFFORT_REFUSAL_REASONS,
   REASONING_EFFORT_REFUSED_KIND,

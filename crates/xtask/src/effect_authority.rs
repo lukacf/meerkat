@@ -144,6 +144,10 @@ const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
         "absence reports no route, so no source states the reasoning-effort levels it accepts",
     ),
     AgentLlmClientDefaultMethod::compatibility(
+        "on_reasoning_effort_unavailable",
+        "absence reports no cause and no time, so a refusal for unavailable levels keeps the released reason-based answer; decorators must forward the answer of the client they wrap",
+    ),
+    AgentLlmClientDefaultMethod::compatibility(
         "default_provider_tag",
         "absence reports no default tag; decorators must forward the tag of the client they wrap",
     ),

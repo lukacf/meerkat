@@ -203,6 +203,7 @@ const RUNTIME_ONLY: readonly string[] = [
   "lastGatewayTermination",
   "setRustHttpBase",
   "onDecisionNotice",
+  "onScheduleFire",
   "sseBridge",
   "mobHandle",
   "mob",

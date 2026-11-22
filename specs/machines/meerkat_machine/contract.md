@@ -601,8 +601,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverRevokedSupervisorReceipt`(peer_id: String, signing_public_key: String, epoch: u64)
 - `ModelRoutingStatus`(session_id: SessionId)
 - `SetModelRoutingBaseline`(baseline_model: String, realtime_capable: Bool)
-- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool)
-- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool)
+- `RequestFiniteSwitchTurn`(request_id: String, target_model: String, turns: u64, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool, target_reasoning_effort: Option<TargetReasoningEffortVerdict>, inspected_current_identity: Option<SessionLlmIdentity>)
+- `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool, target_carries_transcript: Bool, target_reasoning_effort: Option<TargetReasoningEffortVerdict>, inspected_current_identity: Option<SessionLlmIdentity>)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `ArchiveUnresolvedModelRoutingHandoff`(request_id: String, observed: ModelRoutingHandoffRecord, record: ModelRoutingHandoffRecord)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
@@ -2959,8 +2959,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnTranscriptUnsupportedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2968,8 +2969,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnTranscriptUnsupportedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2977,8 +2979,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnTranscriptUnsupportedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2986,8 +2989,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -2995,8 +2999,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3004,18 +3009,88 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_not_carried`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestFiniteSwitchTurnReasoningEffortRefusedIdle`
+- From: `Idle`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestFiniteSwitchTurnReasoningEffortRefusedAttached`
+- From: `Attached`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestFiniteSwitchTurnReasoningEffortRefusedRunning`
+- From: `Running`
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnReasoningEffortRefusedIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnReasoningEffortRefusedAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
+  - `request_not_pending`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnReasoningEffortRefusedRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
+- Guards:
+  - `inspection_identity_current`
+  - `transcript_carried`
+  - `held_effort_refused`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3024,9 +3099,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3035,9 +3113,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3046,9 +3127,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3057,9 +3141,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3068,9 +3155,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3079,9 +3169,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `scoped_conflict`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3089,9 +3182,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `scoped_conflict`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3099,9 +3195,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnScopedConflictRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `scoped_conflict`
   - `request_not_pending`
 - Emits: `SwitchTurnDenied`
@@ -3109,9 +3208,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3121,9 +3223,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3133,9 +3238,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestFiniteSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `positive_turns`
   - `approval_satisfied`
@@ -3145,9 +3253,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_satisfied`
   - `no_other_pending_switch`
@@ -3157,9 +3268,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_satisfied`
   - `no_other_pending_switch`
@@ -3169,9 +3283,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnAcceptedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_satisfied`
   - `no_other_pending_switch`
@@ -3181,9 +3298,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3192,9 +3312,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3203,9 +3326,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalUnavailableRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `baseline_known`
   - `approval_unavailable`
   - `request_not_pending`
@@ -3214,9 +3340,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3225,9 +3354,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3236,9 +3368,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_denied`
   - `approval_reason_present`
   - `request_not_pending`
@@ -3247,9 +3382,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnPendingConflictIdle`
 - From: `Idle`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_satisfied`
   - `pending_switch_conflict`
 - Emits: `SwitchTurnDenied`
@@ -3257,9 +3395,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnPendingConflictAttached`
 - From: `Attached`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_satisfied`
   - `pending_switch_conflict`
 - Emits: `SwitchTurnDenied`
@@ -3267,9 +3408,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestUntilChangedSwitchTurnPendingConflictRunning`
 - From: `Running`
-- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript, target_reasoning_effort, inspected_current_identity)
 - Guards:
+  - `inspection_identity_current`
   - `transcript_carried`
+  - `held_effort_inspected`
+  - `held_effort_not_refused`
   - `approval_satisfied`
   - `pending_switch_conflict`
 - Emits: `SwitchTurnDenied`

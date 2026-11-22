@@ -3416,6 +3416,26 @@ pub enum RoutingDenialReason {
     RealtimeTransportConflict,
 }
 
+/// What the host found when it looked, once, at the target of a switch for
+/// the reasoning effort level the session holds. It is evidence a switch
+/// request carries to the routing machine, which alone decides: `Refused`
+/// (the target's route definitely does not accept the level) ends the
+/// request Denied; every other value admits it. `LegacyUnverified` is a
+/// host's own acceptance through its older hooks, kept apart from
+/// `HeldEffortAccepted`, which is the route's answer. `LevelsUnreadable`
+/// is neither an acceptance nor a refusal: a client for the target can be
+/// built and the levels its route accepts could not be read at that
+/// moment, so the switch goes on as it did before the level was judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TargetReasoningEffortVerdict {
+    #[default]
+    NoHeldEffort,
+    HeldEffortAccepted,
+    LegacyUnverified,
+    Refused,
+    LevelsUnreadable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingSwitchApprovalReason {
     #[default]
@@ -5745,6 +5765,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             // where they stand, and its ordered instruction activations). A
             // target that cannot is a permanent refusal: the switch is
             // denied, never held.
+            // `target_reasoning_effort`: what the host found when it looked
+            // at the target for the reasoning effort level the session
+            // holds. `Refused` (the target's route definitely does not
+            // accept the level) is as permanent: the switch is denied. A
+            // target that carries the transcript is admitted on every other
+            // value, `LevelsUnreadable` among them (the target can be built
+            // and its levels could not be read at that moment: the switch
+            // goes on as it did before the level was judged); absent
+            // evidence admits nothing.
+            // `inspected_current_identity`: the session identity that
+            // evidence was taken on, where the host had to read one. It must
+            // still be the session's identity when the request is decided,
+            // or the request matches no arm. `None`: nothing was read (a
+            // target that cannot carry the transcript, a caller that holds
+            // the session's turn boundary, a runtime without a host).
             RequestFiniteSwitchTurn {
                 request_id: String,
                 target_model: String,
@@ -5756,6 +5791,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
                 target_carries_transcript: bool,
+                target_reasoning_effort: Option<Enum<TargetReasoningEffortVerdict>>,
+                inspected_current_identity: Option<SessionLlmIdentity>,
             },
             RequestUntilChangedSwitchTurn {
                 request_id: String,
@@ -5767,6 +5804,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
                 target_carries_transcript: bool,
+                target_reasoning_effort: Option<Enum<TargetReasoningEffortVerdict>>,
+                inspected_current_identity: Option<SessionLlmIdentity>,
             },
             CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
             AdmitModelRoutingAssistantTurn,
@@ -14317,7 +14356,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_not_carried" { !target_carries_transcript }
             // A request with the pending switch's id is never denied
@@ -14336,9 +14380,78 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_not_carried" { !target_carries_transcript }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
+        // A switch onto a target that definitely refuses the reasoning
+        // effort level the session holds is denied whatever else holds, as
+        // one onto a target that cannot carry the transcript is: no approval
+        // and no conflict makes the target accept the level, so no approval
+        // is asked or recorded for it. Every other arm of a target that
+        // carries the transcript requires evidence that is not a refusal, so
+        // this arm and each of them exclude one another. Evidence taken on
+        // an identity the session no longer holds decides nothing (the
+        // request matches no arm), and so does a request with the pending
+        // switch's id, which is never denied.
+        transition RequestFiniteSwitchTurnReasoningEffortRefused {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
+            }
+            guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_refused" {
+                target_reasoning_effort == Some(TargetReasoningEffortVerdict::Refused)
+            }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
+        transition RequestUntilChangedSwitchTurnReasoningEffortRefused {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
+            }
+            guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_refused" {
+                target_reasoning_effort == Some(TargetReasoningEffortVerdict::Refused)
+            }
             // A request with the pending switch's id is never denied
             // (RequestUntilChangedSwitchTurnPendingConflict).
             guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
@@ -14355,9 +14468,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
             // A request with the pending switch's id is never denied
@@ -14376,9 +14498,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
             // A request with the pending switch's id is never denied
@@ -14401,9 +14532,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "scoped_conflict" {
                 self.model_routing_turn_override_id != None
                 || self.model_routing_operation_override_id != None
@@ -14425,9 +14565,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
@@ -14458,9 +14607,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
             // A retry of the pending request itself stages it again, so a
@@ -14500,9 +14658,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
             // A request with the pending switch's id is never denied
@@ -14521,9 +14688,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
             // A request with the pending switch's id is never denied
@@ -14562,9 +14738,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed, target_carries_transcript
+                approval_reason, realtime_detach_allowed, target_carries_transcript,
+                target_reasoning_effort, inspected_current_identity
+            }
+            guard "inspection_identity_current" {
+                inspected_current_identity == None
+                || self.current_session_llm_identity == inspected_current_identity
             }
             guard "transcript_carried" { target_carries_transcript }
+            guard "held_effort_inspected" { target_reasoning_effort != None }
+            guard "held_effort_not_refused" {
+                target_reasoning_effort != Some(TargetReasoningEffortVerdict::Refused)
+            }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
             guard "pending_switch_conflict" {
                 self.model_routing_pending_switch_request_id != None

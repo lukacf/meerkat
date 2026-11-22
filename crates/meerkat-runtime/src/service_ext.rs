@@ -251,6 +251,21 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
 
     /// Switch a session's model, for a number of turns or until changed.
     ///
+    /// A session that holds a reasoning effort level has the target looked
+    /// at before the request is admitted
+    /// ([`SessionLlmReconfigureHost::inspect_target_session_llm_identity`](crate::SessionLlmReconfigureHost::inspect_target_session_llm_identity)):
+    /// a target that refuses the level is denied (`CapabilityPolicy`) and
+    /// the session keeps its model and its level; a target that cannot be
+    /// looked at fails the request with nothing staged and no denial
+    /// recorded. The request is decided only while the session still holds
+    /// the identity the target was judged against: if that identity changed
+    /// meanwhile the request fails with nothing recorded, and can be made
+    /// again. A finite request of a session whose identity the runtime does
+    /// not hold yet first waits for the host's turn-finalization boundary
+    /// and reads the identity under it; dropping that wait stages nothing.
+    /// A session that holds no level, and a runtime without a reconfigure
+    /// host, are admitted with no look at the target.
+    ///
     /// An until-changed switch stays pending while its LLM reconfigure runs,
     /// and a switch that reaches the session while another one is pending is
     /// denied (`ScopedOverrideConflict`). Dropping the returned future before
@@ -258,7 +273,8 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// denied until the same request (the same `request_id`) is retried or
     /// the session is reloaded. A request that reuses the pending switch's
     /// `request_id` and cannot be accepted (a finite request, or one that is
-    /// not approved or whose target cannot carry the session's transcript)
+    /// not approved, whose target cannot carry the session's transcript or
+    /// whose target refuses the level the session holds)
     /// fails with an error and leaves the pending switch as it is. A denied
     /// `request_id` stays denied: a retry with it is answered with the
     /// recorded denial and changes nothing, so a switch requested again after

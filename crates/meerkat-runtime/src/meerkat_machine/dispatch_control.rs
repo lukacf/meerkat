@@ -1623,6 +1623,16 @@ impl MeerkatMachine {
                 session_id,
                 request,
             } => crate::stack_relief::box_in_own_frame(|| async move {
+                // A recorded denial is the request's answer: it is read
+                // before anything looks at the target, so a retry of a
+                // denied request builds no client and cannot fail on a
+                // target that cannot be looked at now.
+                if let Some(denied) = self
+                    .recorded_switch_turn_result(&session_id, request.request_id)
+                    .await?
+                {
+                    return Ok(MeerkatMachineCommandResult::SwitchTurnControlResult(denied));
+                }
                 let target_carries_transcript = self
                     .switch_target_carries_session_transcript(
                         &session_id,
@@ -1630,11 +1640,28 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+                // A target that cannot carry the transcript is denied for
+                // that; nothing is built for it. One that can is looked at
+                // once for the level the session holds. A look that fails is
+                // the caller's error: nothing is staged and no denial is
+                // recorded, so a retry can succeed.
+                let evidence = if target_carries_transcript {
+                    self.inspect_direct_switch_target(
+                        &session_id,
+                        request.request_id,
+                        request.intent.target_model.as_str(),
+                    )
+                    .await
+                    .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?
+                } else {
+                    SwitchTargetEvidence::not_inspected()
+                };
                 Ok(MeerkatMachineCommandResult::SwitchTurnControlResult(
                     self.apply_switch_turn_request(
                         &session_id,
                         *request,
                         target_carries_transcript,
+                        evidence,
                     )
                     .await?,
                 ))
@@ -2062,6 +2089,30 @@ impl MeerkatMachine {
 }
 
 impl MeerkatMachine {
+    /// The recorded answer to a switch-turn request whose id holds a denial
+    /// in generated state, read under the session's mutation gate; `None`
+    /// when the id holds none.
+    ///
+    /// A denial is permanent under its id, so every road reads it before it
+    /// waits for the host or looks at the target: a retry of a denied
+    /// request builds no client, and a target that cannot be looked at now
+    /// cannot replace the answer. The apply reads it again under its own
+    /// gate.
+    pub(super) async fn recorded_switch_turn_result(
+        &self,
+        session_id: &SessionId,
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId,
+    ) -> Result<
+        Option<meerkat_core::image_generation::SwitchTurnControlResult>,
+        RuntimeControlPlaneError,
+    > {
+        let _mutation_guard = self
+            .lock_current_control_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let recorded = self.session_dsl_state(session_id).await?;
+        recorded_switch_turn_denial(&recorded, &switch_request_key(request_id), request_id)
+    }
+
     /// The complete switch-turn chain, with no boundary acquisition of its own.
     ///
     /// This is the single body behind both entry points. The public
@@ -2076,11 +2127,18 @@ impl MeerkatMachine {
     /// carry the session's transcript as it stands
     /// ([`SessionLlmReconfigureHost::switch_target_carries_session_transcript`]);
     /// generated authority denies a switch onto a target that cannot.
+    ///
+    /// `evidence` is what the caller found when it looked at the target for
+    /// the reasoning effort level the session holds
+    /// ([`SwitchTargetEvidence`]); generated authority denies a switch onto
+    /// a target that refuses the level, and admits nothing on evidence taken
+    /// on an identity the session no longer holds.
     async fn apply_switch_turn_request(
         &self,
         session_id: &SessionId,
         request: crate::meerkat_machine_types::SwitchTurnRequest,
         target_carries_transcript: bool,
+        evidence: SwitchTargetEvidence,
     ) -> Result<meerkat_core::image_generation::SwitchTurnControlResult, RuntimeControlPlaneError>
     {
         let mut _mutation_guard = Some(
@@ -2124,6 +2182,8 @@ impl MeerkatMachine {
                             .map(routing_switch_approval_reason),
                         realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
                         target_carries_transcript,
+                        target_reasoning_effort: evidence.verdict,
+                        inspected_current_identity: evidence.inspected_identity.clone(),
                     },
                     "RequestSwitchTurn",
                 )
@@ -2154,6 +2214,8 @@ impl MeerkatMachine {
                             .map(routing_switch_approval_reason),
                         realtime_detach_allowed: request.target_realtime.allow_realtime_detach,
                         target_carries_transcript,
+                        target_reasoning_effort: evidence.verdict,
+                        inspected_current_identity: evidence.inspected_identity.clone(),
                     },
                     "RequestSwitchTurn",
                 )
@@ -2722,6 +2784,22 @@ impl MeerkatMachine {
         let host = self
             .llm_reconfigure_host()
             .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+        // A denial generated authority already holds under this request's
+        // id is the request's answer: an earlier pass decided it and its
+        // durable record did not land. That record is written now and the
+        // target is not looked at again: a look that failed by now would
+        // hold a request that is already denied.
+        if let Some(meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+            reason,
+            ..
+        }) = self
+            .recorded_switch_turn_result(session_id, handoff.request_id)
+            .await?
+        {
+            return self
+                .finish_denied_model_routing_handoff(session_id, host.as_ref(), handoff, reason)
+                .await;
+        }
         let hydrated = host
             .hydrate_session_llm_state(session_id)
             .await
@@ -2776,19 +2854,69 @@ impl MeerkatMachine {
                 }
             }
         };
-        if !target_already_applied
-            && target_carries_transcript
-            && let Err(error) = host
-                .preflight_target_session_llm_identity(session_id, &resolved.target_identity)
+        // The target is looked at once, here: one answer says whether a
+        // client for it can be built now and whether it takes the level the
+        // session holds. A target that definitely refuses the level is
+        // evidence for generated authority, which denies the switch below. A
+        // target that can be built and whose levels cannot be read now is
+        // neither accepted nor refused: the switch is carried out on that
+        // evidence, as it was before the level was judged. A look that fails
+        // for any other reason decides nothing and holds the request, as
+        // before. A target that is already applied is not looked at: the
+        // switch has happened.
+        let evidence = if !target_already_applied && target_carries_transcript {
+            match self
+                .inspect_switch_target(
+                    session_id,
+                    handoff.request_id,
+                    host.as_ref(),
+                    &resolved.target_identity,
+                )
                 .await
-        {
-            return Ok(ModelRoutingHandoffRealization::Held {
-                reason: ModelRoutingHandoffHoldReason::TargetUnresolvable {
-                    target_model,
-                    detail: error.to_string(),
+            {
+                // The caller holds the session's turn boundary, so the
+                // identity this look was taken on is the one the request is
+                // decided on: it carries no witness.
+                Ok(verdict) => SwitchTargetEvidence {
+                    verdict: Some(verdict),
+                    inspected_identity: None,
                 },
-            });
-        }
+                // The host built the target's client and could not read the
+                // levels its route accepts. Holding the request here would
+                // stop the session's runtime for a condition that passes by
+                // itself, so the switch is carried out and the session goes
+                // on serving: each request is refused, typed and as
+                // retryable, by the check before every provider request,
+                // until the levels can be read.
+                Err(RuntimeDriverError::ReasoningEffortRefused(refusal))
+                    if refusal.reason.is_transient() =>
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        target_model = %target_model,
+                        refusal = %refusal,
+                        "the levels the target of a model switch accepts cannot be read now; \
+                         the switch is carried out and its requests are refused until they can be"
+                    );
+                    SwitchTargetEvidence {
+                        verdict: Some(
+                            crate::meerkat_machine::dsl::TargetReasoningEffortVerdict::LevelsUnreadable,
+                        ),
+                        inspected_identity: None,
+                    }
+                }
+                Err(error) => {
+                    return Ok(ModelRoutingHandoffRealization::Held {
+                        reason: ModelRoutingHandoffHoldReason::TargetUnresolvable {
+                            target_model,
+                            detail: error.to_string(),
+                        },
+                    });
+                }
+            }
+        } else {
+            SwitchTargetEvidence::not_inspected()
+        };
 
         let switch_result = if target_already_applied {
             // A prior attempt may have durably persisted the target identity and
@@ -2816,6 +2944,7 @@ impl MeerkatMachine {
                         approval_reason: None,
                     },
                     target_carries_transcript,
+                    evidence,
                 )
                 .await
             {
@@ -2873,47 +3002,8 @@ impl MeerkatMachine {
                 })
             }
             meerkat_core::image_generation::SwitchTurnControlResult::Denied { reason, .. } => {
-                // A denied request ends here; the session keeps serving on
-                // its current model. `CapabilityPolicy` covers a target that
-                // cannot carry the session's transcript.
-                tracing::warn!(
-                    session_id = %session_id,
-                    target_model = %target_model,
-                    reason = ?reason,
-                    "a committed model-routing request was denied; the session keeps its current model"
-                );
-                let record = meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
-                    request_id: handoff.request_id,
-                    originating_run_id: handoff.originating_run_id,
-                    intent: handoff.intent,
-                    reason: reason.clone(),
-                };
-                self.record_and_persist_model_routing_handoff_resolution(
-                    session_id,
-                    host.as_ref(),
-                    record,
-                )
-                .await?;
-                let _mutation_guard = self
-                    .lock_current_control_durability_ready_session_mutation_gate(session_id)
-                    .await?;
-                self.apply_session_dsl_input(
-                    session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::DenyModelRoutingHandoff {
-                        request_id: request_key,
-                        record: crate::meerkat_machine::dsl::ModelRoutingHandoffRecord::denied(
-                            run_key,
-                            target_model.to_string(),
-                            routing_denial_from_switch(&reason),
-                        )
-                        .map_err(handoff_record_error)?,
-                        observed,
-                    },
-                    "DenyModelRoutingHandoff",
-                )
-                .await
-                .map_err(RuntimeControlPlaneError::Internal)?;
-                Ok(ModelRoutingHandoffRealization::Denied { reason })
+                self.finish_denied_model_routing_handoff(session_id, host.as_ref(), handoff, reason)
+                    .await
             }
             // The realization request is minted with
             // `ModelRoutingApprovalDisposition::NotRequired`, so the generated
@@ -2955,6 +3045,219 @@ impl MeerkatMachine {
             .map_err(|error| RuntimeControlPlaneError::StoreError(error.to_string()))
     }
 
+    /// End a claimed committed handoff Denied: the durable record first,
+    /// then the generated terminal.
+    ///
+    /// A denied request ends here; the session keeps serving on its current
+    /// model. `CapabilityPolicy` covers a target that cannot carry the
+    /// session's transcript and one that refuses the reasoning effort level
+    /// the session holds.
+    async fn finish_denied_model_routing_handoff(
+        &self,
+        session_id: &SessionId,
+        host: &dyn SessionLlmReconfigureHost,
+        handoff: crate::meerkat_machine_types::CommittedModelRoutingHandoff,
+        reason: meerkat_core::image_generation::SwitchTurnDenialReason,
+    ) -> Result<
+        crate::meerkat_machine_types::ModelRoutingHandoffRealization,
+        RuntimeControlPlaneError,
+    > {
+        let request_key = switch_request_key(handoff.request_id);
+        let run_key = handoff.originating_run_id.to_string();
+        let target_model = handoff.intent.target_model.clone();
+        // The claimed record generated authority is holding right now: the
+        // terminal names it, so it is read before the durable append.
+        let observed = self
+            .observed_model_routing_handoff(session_id, &request_key)
+            .await?;
+        tracing::warn!(
+            session_id = %session_id,
+            target_model = %target_model,
+            reason = ?reason,
+            "a committed model-routing request was denied; the session keeps its current model"
+        );
+        let record = meerkat_core::session::model_routing_control::SessionModelRoutingControlRecord::ModelRoutingIntentDenied {
+            request_id: handoff.request_id,
+            originating_run_id: handoff.originating_run_id,
+            intent: handoff.intent,
+            reason: reason.clone(),
+        };
+        self.record_and_persist_model_routing_handoff_resolution(session_id, host, record)
+            .await?;
+        let _mutation_guard = self
+            .lock_current_control_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::DenyModelRoutingHandoff {
+                request_id: request_key,
+                record: crate::meerkat_machine::dsl::ModelRoutingHandoffRecord::denied(
+                    run_key,
+                    target_model.to_string(),
+                    routing_denial_from_switch(&reason),
+                )
+                .map_err(handoff_record_error)?,
+                observed,
+            },
+            "DenyModelRoutingHandoff",
+        )
+        .await
+        .map_err(RuntimeControlPlaneError::Internal)?;
+        Ok(crate::meerkat_machine_types::ModelRoutingHandoffRealization::Denied { reason })
+    }
+
+    /// Look at the target of a direct switch-turn request for the reasoning
+    /// effort level the session holds, before the request is admitted.
+    ///
+    /// The session's identity is read from generated state and travels with
+    /// the evidence: the request is decided only while the session still
+    /// holds that identity, so evidence that went stale decides nothing. A
+    /// session that holds no level resolves and builds nothing, as before. A
+    /// runtime without a reconfigure host cannot look at any target: its
+    /// finite requests keep their admission, said as the host's own trust.
+    async fn inspect_direct_switch_target(
+        &self,
+        session_id: &SessionId,
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId,
+        target_model: &str,
+    ) -> Result<SwitchTargetEvidence, RuntimeDriverError> {
+        use crate::meerkat_machine::dsl::TargetReasoningEffortVerdict;
+
+        let host = self
+            .llm_reconfigure_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(host) = host else {
+            self.note_legacy_host_trust(session_id).await;
+            return Ok(SwitchTargetEvidence {
+                verdict: Some(TargetReasoningEffortVerdict::LegacyUnverified),
+                inspected_identity: None,
+            });
+        };
+        let generated = self
+            .generated_current_session_llm_identity(session_id)
+            .await
+            .map_err(Self::driver_error_from_control_plane_error)?
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "the session's current LLM identity is not known, so the target of a \
+                         switch cannot be judged against it"
+                    .to_string(),
+            })?;
+        let current = meerkat_core::SessionLlmIdentity::try_from(generated.clone())
+            .map_err(RuntimeDriverError::Internal)?;
+        if current
+            .provider_params
+            .as_ref()
+            .is_none_or(|params| params.reasoning_effort.is_none())
+        {
+            return Ok(SwitchTargetEvidence {
+                verdict: Some(TargetReasoningEffortVerdict::NoHeldEffort),
+                inspected_identity: Some(generated),
+            });
+        }
+        let resolved = host
+            .resolve_target_session_llm_identity(
+                &crate::meerkat_machine_types::SessionLlmReconfigureRequest {
+                    model: Some(target_model.to_owned()),
+                    provider: None,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                    reasoning_effort: None,
+                },
+                &current,
+            )
+            .await?;
+        let verdict = self
+            .inspect_switch_target(
+                session_id,
+                request_id,
+                host.as_ref(),
+                &resolved.target_identity,
+            )
+            .await?;
+        Ok(SwitchTargetEvidence {
+            verdict: Some(verdict),
+            inspected_identity: Some(generated),
+        })
+    }
+
+    /// Ask the host, once, about the resolved target of a switch
+    /// ([`SessionLlmReconfigureHost::inspect_target_session_llm_identity`])
+    /// and turn its answer into the evidence the routing machine reads.
+    ///
+    /// Only a typed refusal of the level that is not transient becomes
+    /// `Refused`: it is what a caller's own set of that level on that target
+    /// is refused with. It is evidence, not a decision: generated authority
+    /// denies the request, or matches no arm when the request must not be
+    /// denied. Every other error is returned and decides nothing here: the
+    /// caller carries a committed switch out on the typed refusal that says
+    /// the levels cannot be read now, holds it on any other, and fails a
+    /// direct request on each.
+    async fn inspect_switch_target(
+        &self,
+        session_id: &SessionId,
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId,
+        host: &dyn SessionLlmReconfigureHost,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::meerkat_machine::dsl::TargetReasoningEffortVerdict, RuntimeDriverError> {
+        use crate::meerkat_machine::dsl::TargetReasoningEffortVerdict;
+        use crate::meerkat_machine_types::TargetSessionLlmInspection;
+
+        match host
+            .inspect_target_session_llm_identity(session_id, target_identity)
+            .await
+        {
+            Ok(TargetSessionLlmInspection::NoHeldEffort) => {
+                Ok(TargetReasoningEffortVerdict::NoHeldEffort)
+            }
+            Ok(TargetSessionLlmInspection::HeldEffortAccepted) => {
+                Ok(TargetReasoningEffortVerdict::HeldEffortAccepted)
+            }
+            Ok(TargetSessionLlmInspection::LegacyUnverified) => {
+                self.note_legacy_host_trust(session_id).await;
+                Ok(TargetReasoningEffortVerdict::LegacyUnverified)
+            }
+            Err(RuntimeDriverError::ReasoningEffortRefused(refusal))
+                if !refusal.reason.is_transient() =>
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    request_id = %request_id.0,
+                    target_model = %target_identity.model,
+                    reason = ?refusal.reason,
+                    refusal = %refusal,
+                    "the target of a model switch refuses the reasoning effort level the session holds"
+                );
+                Ok(TargetReasoningEffortVerdict::Refused)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Say once per session registration that a model switch went on
+    /// without the answer of the target's route about a reasoning effort
+    /// level: under the host's own acceptance of a held level, or, in a
+    /// runtime without a reconfigure host, with nobody to ask and whether or
+    /// not the session holds a level. The flag behind it deduplicates the
+    /// line and decides nothing.
+    async fn note_legacy_host_trust(&self, session_id: &SessionId) {
+        let sessions = self.sessions.read().await;
+        if let Some(entry) = sessions.get(session_id)
+            && !entry
+                .legacy_host_trust_noted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                "a model switch was admitted without the target's route being asked about a \
+                 reasoning effort level of the session: the reconfigure host does not implement \
+                 the target inspection, or the runtime has no reconfigure host"
+            );
+        }
+    }
+
     /// Whether a switch onto `target_model` can carry `session_id`'s
     /// transcript as it stands, as the reconfigure host decides it
     /// ([`SessionLlmReconfigureHost::switch_target_carries_session_transcript`])
@@ -2979,25 +3282,57 @@ impl MeerkatMachine {
         }
     }
 
-    async fn current_session_llm_identity(
+    pub(super) async fn current_session_llm_identity(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::SessionLlmIdentity>, RuntimeControlPlaneError> {
+        self.generated_current_session_llm_identity(session_id)
+            .await?
+            .map(meerkat_core::SessionLlmIdentity::try_from)
+            .transpose()
+            .map_err(RuntimeControlPlaneError::Internal)
+    }
+
+    /// The session's current LLM identity as generated state holds it, in
+    /// the machine's own form: the value a switch request names as the
+    /// identity its evidence was taken on.
+    async fn generated_current_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<crate::meerkat_machine::dsl::SessionLlmIdentity>, RuntimeControlPlaneError>
+    {
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id).ok_or_else(|| {
             RuntimeControlPlaneError::NotFound(Self::logical_runtime_id(session_id))
         })?;
-        let generated = {
-            let authority = entry
-                .dsl_authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state().current_session_llm_identity.clone()
-        };
-        generated
-            .map(meerkat_core::SessionLlmIdentity::try_from)
-            .transpose()
-            .map_err(RuntimeControlPlaneError::Internal)
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(authority.state().current_session_llm_identity.clone())
+    }
+}
+
+/// What a switch request carries to the routing machine about its target
+/// and the reasoning effort level the session holds.
+#[derive(Debug, Clone)]
+struct SwitchTargetEvidence {
+    /// What the look at the target found. `None`: nobody looked (a target
+    /// that cannot carry the transcript, which is denied for that, and a
+    /// target that is already applied, which is not decided again).
+    verdict: Option<crate::meerkat_machine::dsl::TargetReasoningEffortVerdict>,
+    /// The session's identity the look was taken on, as generated state
+    /// held it. `None` where no identity had to be read: the caller holds
+    /// the session's turn boundary, or the runtime has no reconfigure host.
+    inspected_identity: Option<crate::meerkat_machine::dsl::SessionLlmIdentity>,
+}
+
+impl SwitchTargetEvidence {
+    fn not_inspected() -> Self {
+        Self {
+            verdict: None,
+            inspected_identity: None,
+        }
     }
 }
 

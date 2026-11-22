@@ -311,10 +311,29 @@ interrupted, or hook-denied runs do not commit the switch, and later
 realization can still be denied or held. A staging result is not proof that
 the model has changed.
 
-The switch keeps the session's reasoning effort level and is not judged
-against it. After a `brain_swap` to a model whose route does not accept the
-session's level, each request is refused before it reaches the provider
-until the level is changed or cleared.
+The switch keeps the session's reasoning effort level, and is judged against
+it where it is decided, before the next input. A target whose route is known
+to refuse the level (alone, or together with the session's other reasoning
+settings) is denied: the request ends with the denial `CapabilityPolicy`, the
+session keeps its model and its level, and the next input runs on them. A
+target for which no source states the supported levels is denied in the same
+way. The denied switch is not applied later when the level is changed or
+cleared; ask for it again. Nothing in a later turn tells the agent that its
+switch was denied; the routing record and a warning in the host's log say so.
+
+When a source for the target's supported levels exists but cannot currently
+be read (an account's model list that is not loaded), a target whose client
+can be built can still be switched to without a compatibility verdict: the
+switch is carried out, as it was before the level was judged, and each
+request is refused as retryable until the levels can be read. If they then do
+not include the session's level, requests stay refused until the level or the
+model is changed. On the stock host, a target whose client cannot be built is
+held.
+
+A Rust host that implements `SessionLlmReconfigureHost` itself keeps its own
+hooks: for a session that holds a level its judge is asked where the switch
+is decided, and its acceptance is taken as the host's own word until it
+implements `inspect_target_session_llm_identity`.
 
 **Source:** `crates/meerkat-tools/src/builtin/brain_swap.rs`,
 `crates/meerkat-tools/src/builtin/composite.rs`,

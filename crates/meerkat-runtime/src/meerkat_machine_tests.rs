@@ -16823,6 +16823,8 @@ async fn until_changed_switch_turn_refuses_a_second_request_while_one_is_pending
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: true,
+                target_reasoning_effort: Some(mm_dsl::TargetReasoningEffortVerdict::NoHeldEffort),
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(approved request under a denied id)",
         )
@@ -17453,6 +17455,8 @@ async fn until_changed_switch_turn_refused_retry_of_a_pending_request_records_no
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: false,
+                target_reasoning_effort: None,
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(retry onto a target that cannot carry the transcript)",
         )
@@ -17642,6 +17646,8 @@ async fn finite_switch_turn_reusing_a_pending_until_changed_id_records_no_denial
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: false,
+                target_reasoning_effort: None,
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(finite request onto a target that cannot carry the transcript)",
         )
@@ -17940,6 +17946,8 @@ async fn finite_switch_turn_retry_of_a_denied_request_stays_denied() {
                 approval_reason: None,
                 realtime_detach_allowed: false,
                 target_carries_transcript: true,
+                target_reasoning_effort: Some(mm_dsl::TargetReasoningEffortVerdict::NoHeldEffort),
+                inspected_current_identity: None,
             },
             "RequestSwitchTurn(finite request under a denied id)",
         )
@@ -66319,5 +66327,1214 @@ async fn a_retire_over_a_pending_attachment_still_stops_the_recovered_inputs() {
         }),
         "a retire over a pending attachment stops the recovered prompt: {:?}",
         row.state.history
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A switch whose target is looked at for the reasoning effort level the
+// session holds
+// ---------------------------------------------------------------------------
+
+use mm_dsl::TargetReasoningEffortVerdict as EffortVerdict;
+
+const EVERY_EFFORT_VERDICT: [EffortVerdict; 5] = [
+    EffortVerdict::NoHeldEffort,
+    EffortVerdict::HeldEffortAccepted,
+    EffortVerdict::LegacyUnverified,
+    EffortVerdict::Refused,
+    EffortVerdict::LevelsUnreadable,
+];
+
+/// Whether the routing machine admits a target on this evidence. The arms
+/// name the refusing value, so a verdict added later would be admitted by
+/// them: this match has no wildcard, and a new verdict does not compile
+/// here until somebody says which side it is on.
+fn effort_verdict_admits(verdict: EffortVerdict) -> bool {
+    match verdict {
+        EffortVerdict::NoHeldEffort
+        | EffortVerdict::HeldEffortAccepted
+        | EffortVerdict::LegacyUnverified
+        // Unreadable levels are not a refusal: the switch goes on as it
+        // did before the level was judged.
+        | EffortVerdict::LevelsUnreadable => true,
+        EffortVerdict::Refused => false,
+    }
+}
+
+/// One switch request as the machine reads it.
+#[derive(Clone)]
+struct SwitchRow {
+    finite: bool,
+    request_id: &'static str,
+    requires_approval: bool,
+    approval_available: bool,
+    approval_denied: bool,
+    carries: bool,
+    verdict: Option<EffortVerdict>,
+    inspected: Option<mm_dsl::SessionLlmIdentity>,
+}
+
+impl SwitchRow {
+    /// A request that needs no approval, onto a target that carries the
+    /// transcript, with no identity witness.
+    fn plain(finite: bool, verdict: Option<EffortVerdict>) -> Self {
+        Self {
+            finite,
+            request_id: "row",
+            requires_approval: false,
+            approval_available: true,
+            approval_denied: false,
+            carries: true,
+            verdict,
+            inspected: None,
+        }
+    }
+
+    fn input(&self) -> mm_dsl::MeerkatMachineInput {
+        let approval_reason = self
+            .approval_denied
+            .then_some(mm_dsl::RoutingSwitchApprovalReason::CrossProvider);
+        if self.finite {
+            mm_dsl::MeerkatMachineInput::RequestFiniteSwitchTurn {
+                request_id: self.request_id.to_string(),
+                target_model: "target".to_string(),
+                turns: 1,
+                target_realtime_capable: false,
+                requires_approval: self.requires_approval,
+                approval_available: self.approval_available,
+                approval_denied: self.approval_denied,
+                approval_reason,
+                realtime_detach_allowed: false,
+                target_carries_transcript: self.carries,
+                target_reasoning_effort: self.verdict,
+                inspected_current_identity: self.inspected.clone(),
+            }
+        } else {
+            mm_dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                request_id: self.request_id.to_string(),
+                target_model: "target".to_string(),
+                target_realtime_capable: false,
+                requires_approval: self.requires_approval,
+                approval_available: self.approval_available,
+                approval_denied: self.approval_denied,
+                approval_reason,
+                realtime_detach_allowed: false,
+                target_carries_transcript: self.carries,
+                target_reasoning_effort: self.verdict,
+                inspected_current_identity: self.inspected.clone(),
+            }
+        }
+    }
+}
+
+async fn routing_machine_with_a_baseline() -> (MeerkatMachine, SessionId) {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &machine,
+        &session_id,
+        model("baseline"),
+        false,
+    )
+    .await
+    .expect("configure the routing baseline");
+    (machine, session_id)
+}
+
+/// The evidence a switch request carries decides it, for both durations: a
+/// target that carries the transcript is staged on each of the three
+/// admitting values, denied for its capability on a refusal, and matches no
+/// arm without evidence. A target that cannot carry the transcript is
+/// denied for that, whatever the evidence: nobody looked at it.
+#[tokio::test]
+async fn switch_turn_effort_evidence_decides_a_target_that_carries_the_transcript() {
+    for finite in [true, false] {
+        for verdict in EVERY_EFFORT_VERDICT.map(Some).into_iter().chain([None]) {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            let applied = machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow::plain(finite, verdict).input(),
+                    "RequestSwitchTurn(evidence row)",
+                )
+                .await;
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            let context = format!("finite={finite} verdict={verdict:?}: {applied:?}");
+            match verdict {
+                Some(verdict) if effort_verdict_admits(verdict) => {
+                    assert!(applied.is_ok(), "{context}");
+                    assert_eq!(
+                        state.model_routing_pending_switch_request_id.as_deref(),
+                        Some("row"),
+                        "{context}"
+                    );
+                    assert!(state.model_routing_switch_denials.is_empty(), "{context}");
+                }
+                Some(_) => {
+                    assert!(applied.is_ok(), "{context}");
+                    assert_eq!(
+                        state.model_routing_pending_switch_request_id, None,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        state.model_routing_switch_denials.get("row").copied(),
+                        Some(mm_dsl::RoutingDenialReason::CapabilityPolicy),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        state.model_routing_switch_terminal.get("row").copied(),
+                        Some(mm_dsl::RoutingSwitchTurnTerminal::Denied),
+                        "{context}"
+                    );
+                    assert!(state.model_routing_approval_phases.is_empty(), "{context}");
+                }
+                None => {
+                    assert!(
+                        applied.is_err(),
+                        "absent evidence admits nothing: {context}"
+                    );
+                    assert_eq!(
+                        state.model_routing_pending_switch_request_id, None,
+                        "{context}"
+                    );
+                    assert!(state.model_routing_switch_denials.is_empty(), "{context}");
+                    assert!(state.model_routing_switch_terminal.is_empty(), "{context}");
+                }
+            }
+        }
+
+        for verdict in [None, Some(EffortVerdict::NoHeldEffort)] {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        carries: false,
+                        ..SwitchRow::plain(finite, verdict)
+                    }
+                    .input(),
+                    "RequestSwitchTurn(target cannot carry the transcript)",
+                )
+                .await
+                .expect("a target that cannot carry the transcript is denied");
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_switch_denials.get("row").copied(),
+                Some(mm_dsl::RoutingDenialReason::CapabilityPolicy)
+            );
+            assert_eq!(state.model_routing_pending_switch_request_id, None);
+        }
+    }
+}
+
+/// A target that refuses the level is denied for its capability before an
+/// approval is asked for, recorded or refused and before a conflict with
+/// another switch is looked at: neither makes the target accept the level.
+/// On admitting evidence each of those requests meets its own refusal,
+/// which shows the row reaches those arms.
+#[tokio::test]
+async fn a_target_that_refuses_the_level_is_denied_before_approval_and_conflict() {
+    use mm_dsl::RoutingDenialReason as Reason;
+    // (case, finite, requires approval, approval available, approval
+    // denied, another switch is pending, the refusal on admitting evidence)
+    let cases = [
+        (
+            "finite, approval unavailable",
+            true,
+            true,
+            false,
+            false,
+            false,
+            Reason::ApprovalRequiredButUnavailable,
+        ),
+        (
+            "finite, approval denied",
+            true,
+            true,
+            true,
+            true,
+            false,
+            Reason::DeniedDuringApproval,
+        ),
+        (
+            "finite, another switch pending",
+            true,
+            false,
+            true,
+            false,
+            true,
+            Reason::ScopedOverrideConflict,
+        ),
+        (
+            "until-changed, approval unavailable",
+            false,
+            true,
+            false,
+            false,
+            false,
+            Reason::ApprovalRequiredButUnavailable,
+        ),
+        (
+            "until-changed, approval denied",
+            false,
+            true,
+            true,
+            true,
+            false,
+            Reason::DeniedDuringApproval,
+        ),
+        (
+            "until-changed, another switch pending",
+            false,
+            false,
+            true,
+            false,
+            true,
+            Reason::ScopedOverrideConflict,
+        ),
+    ];
+    for (case, finite, requires_approval, approval_available, approval_denied, other, own) in cases
+    {
+        for (verdict, expected) in [
+            (EffortVerdict::HeldEffortAccepted, own),
+            (EffortVerdict::Refused, Reason::CapabilityPolicy),
+        ] {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            if other {
+                machine
+                    .apply_session_dsl_input(
+                        &session_id,
+                        SwitchRow {
+                            request_id: "other",
+                            ..SwitchRow::plain(true, Some(EffortVerdict::NoHeldEffort))
+                        }
+                        .input(),
+                        "RequestSwitchTurn(another request, staged)",
+                    )
+                    .await
+                    .expect("another request is staged");
+            }
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        requires_approval,
+                        approval_available,
+                        approval_denied,
+                        ..SwitchRow::plain(finite, Some(verdict))
+                    }
+                    .input(),
+                    "RequestSwitchTurn(precedence row)",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{case}, {verdict:?}: {error}"));
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_switch_denials.get("row").copied(),
+                Some(expected),
+                "{case}, {verdict:?}"
+            );
+            assert_eq!(
+                state.model_routing_pending_switch_request_id.as_deref(),
+                other.then_some("other"),
+                "{case}, {verdict:?}: the denial stages nothing and replaces nothing"
+            );
+            let approval_recorded = state.model_routing_approval_phases.contains_key("row")
+                || state
+                    .model_routing_switch_approval_reasons
+                    .contains_key("row");
+            assert_eq!(
+                approval_recorded,
+                approval_denied && verdict != EffortVerdict::Refused,
+                "{case}, {verdict:?}: no approval is recorded for a target that refuses the level"
+            );
+        }
+    }
+}
+
+fn session_identity_holding(
+    level: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
+) -> meerkat_core::SessionLlmIdentity {
+    meerkat_core::SessionLlmIdentity {
+        model: "baseline".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: level.map(|level| {
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                reasoning_effort: Some(level),
+                ..Default::default()
+            }
+        }),
+        auth_binding: None,
+    }
+}
+
+/// Evidence names the session identity it was taken on, and is read only
+/// while the session still holds that identity. Evidence taken on another
+/// identity decides nothing in any arm: no request is staged, none is
+/// denied (a refusal included), and nothing is recorded. The same request
+/// on the identity the session holds is decided.
+#[tokio::test]
+async fn evidence_taken_on_another_identity_decides_nothing() {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let held = session_identity_holding(None);
+    let another = session_identity_holding(Some(EffortLevel::High));
+    // (case, the request, whether it is denied on the identity it names)
+    let rows = |finite: bool| {
+        [
+            (
+                "admitted, no level",
+                SwitchRow::plain(finite, Some(EffortVerdict::NoHeldEffort)),
+                false,
+            ),
+            (
+                "admitted, level accepted",
+                SwitchRow::plain(finite, Some(EffortVerdict::HeldEffortAccepted)),
+                false,
+            ),
+            (
+                "level refused",
+                SwitchRow::plain(finite, Some(EffortVerdict::Refused)),
+                true,
+            ),
+            (
+                "transcript not carried",
+                SwitchRow {
+                    carries: false,
+                    ..SwitchRow::plain(finite, None)
+                },
+                true,
+            ),
+            (
+                "approval unavailable",
+                SwitchRow {
+                    requires_approval: true,
+                    approval_available: false,
+                    ..SwitchRow::plain(finite, Some(EffortVerdict::NoHeldEffort))
+                },
+                true,
+            ),
+        ]
+    };
+    for finite in [true, false] {
+        for (case, row, denied) in rows(finite) {
+            let (machine, session_id) = routing_machine_with_a_baseline().await;
+            {
+                let _mutation_guard = machine
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await
+                    .expect("take the session's mutation gate");
+                machine
+                    .cache_hydrated_session_llm_state(
+                        &session_id,
+                        &HydratedSessionLlmState {
+                            current_identity: held.clone(),
+                            current_visibility_state: Default::default(),
+                            current_capability_surface: Some(test_llm_capability_surface(true)),
+                            capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                            base_tool_names: BTreeSet::new(),
+                        },
+                    )
+                    .await
+                    .expect("the machine holds the session's identity");
+            }
+            let context = format!("finite={finite}, {case}");
+
+            let stale = machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        inspected: Some(mm_dsl::SessionLlmIdentity::from_domain(&another)),
+                        ..row.clone()
+                    }
+                    .input(),
+                    "RequestSwitchTurn(evidence taken on another identity)",
+                )
+                .await;
+            assert!(stale.is_err(), "{context}: {stale:?}");
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_pending_switch_request_id, None,
+                "{context}"
+            );
+            assert!(state.model_routing_switch_denials.is_empty(), "{context}");
+            assert!(state.model_routing_switch_terminal.is_empty(), "{context}");
+            assert_eq!(
+                state.current_session_llm_identity,
+                Some(mm_dsl::SessionLlmIdentity::from_domain(&held)),
+                "{context}"
+            );
+
+            machine
+                .apply_session_dsl_input(
+                    &session_id,
+                    SwitchRow {
+                        inspected: Some(mm_dsl::SessionLlmIdentity::from_domain(&held)),
+                        ..row
+                    }
+                    .input(),
+                    "RequestSwitchTurn(evidence taken on the held identity)",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+            let state = machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("read the session state");
+            assert_eq!(
+                state.model_routing_switch_denials.contains_key("row"),
+                denied,
+                "{context}"
+            );
+            assert_eq!(
+                state.model_routing_pending_switch_request_id.is_some(),
+                !denied,
+                "{context}"
+            );
+        }
+    }
+
+    // A session whose identity the machine does not hold has nothing a
+    // witness can equal.
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    let unknown = machine
+        .apply_session_dsl_input(
+            &session_id,
+            SwitchRow {
+                inspected: Some(mm_dsl::SessionLlmIdentity::from_domain(&another)),
+                ..SwitchRow::plain(true, Some(EffortVerdict::NoHeldEffort))
+            }
+            .input(),
+            "RequestSwitchTurn(a witness, and no identity held)",
+        )
+        .await;
+    assert!(unknown.is_err(), "{unknown:?}");
+}
+
+/// A request with the pending switch's id is never denied, a refusal of the
+/// level included: the denial would answer the retry that finishes the
+/// switch as denied, and the switch would stay pending. Such a request
+/// matches no arm and records nothing, and the pending switch still
+/// completes.
+#[tokio::test]
+async fn a_refusal_under_the_pending_switchs_id_records_nothing_and_the_switch_still_completes() {
+    for finite_retry in [true, false] {
+        let (machine, session_id) = routing_machine_with_a_baseline().await;
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                SwitchRow::plain(false, Some(EffortVerdict::HeldEffortAccepted)).input(),
+                "RequestSwitchTurn(until-changed, staged)",
+            )
+            .await
+            .expect("the until-changed request is staged");
+
+        let refused = machine
+            .apply_session_dsl_input(
+                &session_id,
+                SwitchRow::plain(finite_retry, Some(EffortVerdict::Refused)).input(),
+                "RequestSwitchTurn(the pending id, level refused)",
+            )
+            .await;
+        assert!(refused.is_err(), "finite_retry={finite_retry}: {refused:?}");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(
+            state.model_routing_pending_switch_request_id.as_deref(),
+            Some("row")
+        );
+        assert!(state.model_routing_switch_denials.is_empty());
+        assert!(state.model_routing_switch_terminal.is_empty());
+
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                mm_dsl::MeerkatMachineInput::CompleteUntilChangedSwitchTurnReconfigure {
+                    request_id: "row".to_string(),
+                },
+                "CompleteUntilChangedSwitchTurnReconfigure",
+            )
+            .await
+            .expect("the pending switch completes");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(state.model_routing_pending_switch_request_id, None);
+        assert_eq!(
+            state.model_routing_switch_terminal.get("row").copied(),
+            Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+        );
+        assert!(state.model_routing_switch_denials.is_empty());
+    }
+}
+
+/// What a host's judge answers, scripted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptedLevelJudge {
+    Accepts,
+    RefusesTheLevel,
+    CannotReadTheLevelsNow,
+    FailsUntyped,
+}
+
+/// A reconfigure host that implements only the older hooks: a judge and a
+/// preflight, both recorded. Its resolution keeps the session's provider
+/// params, the level among them, as a model-only change does. Once
+/// `unreachable` is set every call about the session or the target fails.
+#[derive(Clone)]
+struct OlderHooksSwitchHost {
+    base: TestLlmReconfigureHost,
+    judge: Arc<std::sync::Mutex<ScriptedLevelJudge>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
+    calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl OlderHooksSwitchHost {
+    fn holding(level: Option<meerkat_core::model_profile::capabilities::EffortLevel>) -> Self {
+        let current = session_identity_holding(level);
+        Self {
+            base: TestLlmReconfigureHost {
+                current_identity: Arc::new(std::sync::Mutex::new(current.clone())),
+                current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+                target_identity: current,
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                target_capability_surface: test_llm_capability_surface(true),
+                base_tool_names: BTreeSet::new(),
+                fail_persist: false,
+            },
+            judge: Arc::new(std::sync::Mutex::new(ScriptedLevelJudge::Accepts)),
+            unreachable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn script_judge(&self, judge: ScriptedLevelJudge) {
+        *self
+            .judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = judge;
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn count(&self, wanted: &str) -> usize {
+        self.calls().iter().filter(|call| **call == wanted).count()
+    }
+
+    fn enter(&self, call: &'static str) -> Result<(), RuntimeDriverError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call);
+        if self.unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "the host cannot be reached ({call})"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionLlmReconfigureHost for OlderHooksSwitchHost {
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        self.enter("hydrate")?;
+        self.base.hydrate_session_llm_state(session_id).await
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        self.enter("resolve")?;
+        Ok(crate::ResolvedSessionLlmReconfigure {
+            target_identity: meerkat_core::SessionLlmIdentity {
+                model: request
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| current_identity.model.clone()),
+                ..current_identity.clone()
+            },
+            target_capability_surface: self.base.target_capability_surface.clone(),
+        })
+    }
+
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.enter("judge")?;
+        let judge = *self
+            .judge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match judge {
+            ScriptedLevelJudge::Accepts => Ok(()),
+            ScriptedLevelJudge::RefusesTheLevel => {
+                let refusal: meerkat_core::ReasoningEffortRefusal =
+                    serde_json::from_value(serde_json::json!({
+                        "requested": "high", "provider": "openai",
+                        "model": target_identity.model, "route": null,
+                        "reason": "unsupported_level", "supported": ["low"],
+                        "facts": "account",
+                    }))
+                    .expect("a refusal is read from its wire form");
+                Err(RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal,
+                )))
+            }
+            ScriptedLevelJudge::CannotReadTheLevelsNow => {
+                let refusal: meerkat_core::ReasoningEffortRefusal =
+                    serde_json::from_value(serde_json::json!({
+                        "requested": "high", "provider": "openai",
+                        "model": target_identity.model, "route": null,
+                        "reason": "supported_levels_unavailable", "supported": null,
+                        "facts": null,
+                    }))
+                    .expect("a refusal is read from its wire form");
+                Err(RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal,
+                )))
+            }
+            ScriptedLevelJudge::FailsUntyped => Err(RuntimeDriverError::Internal(
+                "the judge's backend is unreachable".to_string(),
+            )),
+        }
+    }
+
+    async fn preflight_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        _target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.enter("preflight")
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.enter("apply")?;
+        self.base
+            .apply_live_session_llm_identity(session_id, identity, capability_surface)
+            .await
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.base
+            .apply_live_session_tool_visibility_state(session_id, visibility_state)
+            .await
+    }
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.base.persist_live_session(session_id).await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.base.discard_live_session(session_id).await
+    }
+}
+
+async fn routing_adapter_with(host: &OlderHooksSwitchHost) -> (Arc<MeerkatMachine>, SessionId) {
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    machine.set_session_llm_reconfigure_host(Arc::new(host.clone()));
+    (Arc::new(machine), session_id)
+}
+
+fn direct_switch_request(finite: bool, n: u128) -> SwitchTurnRequest {
+    if finite {
+        finite_switch_request(
+            n,
+            "persistent-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    } else {
+        until_changed_switch_request(n)
+    }
+}
+
+/// A direct switch request of a session that holds a level, onto a target
+/// the host's judge refuses for that level: the request ends Denied for the
+/// target's capability, for both durations, and stages nothing. Its retry
+/// is answered with the recorded denial before the host is asked anything:
+/// a host that cannot be reached by then changes neither the answer nor the
+/// count of its calls.
+#[tokio::test]
+async fn a_direct_switch_request_onto_a_target_that_refuses_the_held_level_is_denied() {
+    use meerkat_core::image_generation::{SwitchTurnControlResult, SwitchTurnDenialReason};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    for (finite, n) in [(true, 9101), (false, 9102)] {
+        let host = OlderHooksSwitchHost::holding(Some(EffortLevel::High));
+        host.script_judge(ScriptedLevelJudge::RefusesTheLevel);
+        let (adapter, session_id) = routing_adapter_with(&host).await;
+        let key = uuid(n).to_string();
+
+        let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &adapter,
+            &session_id,
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect("a refused level is an answer, not a failure");
+        assert!(
+            matches!(
+                denied,
+                SwitchTurnControlResult::Denied {
+                    reason: SwitchTurnDenialReason::CapabilityPolicy,
+                    ..
+                }
+            ),
+            "finite={finite}: {denied:?}"
+        );
+        let state = adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(state.model_routing_pending_switch_request_id, None);
+        assert_eq!(
+            state.model_routing_switch_denials.get(&key).copied(),
+            Some(mm_dsl::RoutingDenialReason::CapabilityPolicy)
+        );
+        assert_eq!(host.count("judge"), 1, "{:?}", host.calls());
+        assert_eq!(
+            host.count("preflight"),
+            0,
+            "a refused target is not proven buildable: {:?}",
+            host.calls()
+        );
+        assert_eq!(host.count("apply"), 0);
+
+        host.unreachable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let calls_before = host.calls();
+        let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &adapter,
+            &session_id,
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect("the retry of a denied request is answered");
+        assert!(
+            matches!(
+                retried,
+                SwitchTurnControlResult::Denied {
+                    reason: SwitchTurnDenialReason::CapabilityPolicy,
+                    ..
+                }
+            ),
+            "finite={finite}: {retried:?}"
+        );
+        assert_eq!(
+            host.calls(),
+            calls_before,
+            "a recorded denial is answered before the host is asked anything"
+        );
+    }
+}
+
+/// A target that cannot be looked at is not a target that refuses the
+/// level: the request fails with the host's own words, stages nothing and
+/// records no denial, for both durations, so the same request can be made
+/// again and is admitted once the host answers. That holds for a host whose
+/// check fails and for one that cannot read the target's levels now: on
+/// this road, where a caller can ask again, unreadable levels admit nothing.
+#[tokio::test]
+async fn a_direct_switch_request_whose_target_cannot_be_looked_at_fails_and_records_nothing() {
+    use meerkat_core::image_generation::SwitchTurnControlResult;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    for (finite, n, judge, words) in [
+        (
+            true,
+            9111,
+            ScriptedLevelJudge::FailsUntyped,
+            "the judge's backend is unreachable",
+        ),
+        (
+            false,
+            9112,
+            ScriptedLevelJudge::FailsUntyped,
+            "the judge's backend is unreachable",
+        ),
+        (
+            true,
+            9113,
+            ScriptedLevelJudge::CannotReadTheLevelsNow,
+            "the account's model list is not loaded",
+        ),
+        (
+            false,
+            9114,
+            ScriptedLevelJudge::CannotReadTheLevelsNow,
+            "the account's model list is not loaded",
+        ),
+    ] {
+        let host = OlderHooksSwitchHost::holding(Some(EffortLevel::High));
+        host.script_judge(judge);
+        let (adapter, session_id) = routing_adapter_with(&host).await;
+
+        let error = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &adapter,
+            &session_id,
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect_err("a target that cannot be looked at fails the request");
+        assert!(
+            matches!(
+                &error,
+                RuntimeDriverError::Internal(message) if message.contains(words)
+            ),
+            "finite={finite}, {judge:?}: {error:?}"
+        );
+        // Unreadable levels are handed back only once the target is proven
+        // buildable; a failed check ends the look before the preflight.
+        let preflights = usize::from(judge == ScriptedLevelJudge::CannotReadTheLevelsNow);
+        assert_eq!(host.count("preflight"), preflights, "{:?}", host.calls());
+        let state = adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state");
+        assert_eq!(state.model_routing_pending_switch_request_id, None);
+        assert!(state.model_routing_switch_denials.is_empty());
+        assert!(state.model_routing_switch_terminal.is_empty());
+
+        if finite {
+            host.script_judge(ScriptedLevelJudge::Accepts);
+            let admitted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                direct_switch_request(finite, n),
+            )
+            .await
+            .expect("the same request is admitted once the host answers");
+            assert!(
+                matches!(admitted, SwitchTurnControlResult::Applied { .. }),
+                "{admitted:?}"
+            );
+            assert_eq!(
+                adapter
+                    .session_dsl_state(&session_id)
+                    .await
+                    .expect("read the session state")
+                    .model_routing_pending_switch_request_id,
+                Some(uuid(n).to_string())
+            );
+            assert_eq!(
+                host.count("preflight"),
+                preflights + 1,
+                "{:?}",
+                host.calls()
+            );
+        }
+    }
+}
+
+/// A session that holds no level is admitted as before: the host is asked
+/// nothing about the target (no resolution, no judge, no preflight).
+#[tokio::test]
+async fn a_direct_finite_request_of_a_session_without_a_level_asks_nothing_about_the_target() {
+    use meerkat_core::image_generation::SwitchTurnControlResult;
+
+    let host = OlderHooksSwitchHost::holding(None);
+    host.script_judge(ScriptedLevelJudge::RefusesTheLevel);
+    let (adapter, session_id) = routing_adapter_with(&host).await;
+
+    let admitted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        direct_switch_request(true, 9121),
+    )
+    .await
+    .expect("a session without a level is admitted");
+    assert!(
+        matches!(admitted, SwitchTurnControlResult::Applied { .. }),
+        "{admitted:?}"
+    );
+    for call in ["resolve", "judge", "preflight"] {
+        assert_eq!(host.count(call), 0, "{call}: {:?}", host.calls());
+    }
+}
+
+/// A runtime without a reconfigure host admits a finite request as before,
+/// and a request for a session it does not hold is still refused as not
+/// found.
+#[tokio::test]
+async fn a_hostless_finite_request_keeps_its_admission_and_an_absent_session_is_not_found() {
+    use meerkat_core::image_generation::SwitchTurnControlResult;
+
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    let admitted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &machine,
+        &session_id,
+        direct_switch_request(true, 9131),
+    )
+    .await
+    .expect("a hostless finite request is admitted");
+    assert!(
+        matches!(admitted, SwitchTurnControlResult::Applied { .. }),
+        "{admitted:?}"
+    );
+
+    let absent = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &machine,
+        &SessionId::new(),
+        direct_switch_request(true, 9132),
+    )
+    .await
+    .expect_err("an absent session is refused");
+    assert!(
+        matches!(absent, RuntimeDriverError::NotFound { .. }),
+        "{absent:?}"
+    );
+}
+
+/// With a reconfigure host too, a request for a session the machine does
+/// not hold is refused as not found, for both durations, before the host is
+/// asked anything.
+#[tokio::test]
+async fn a_host_backed_request_for_an_absent_session_is_not_found() {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    for (finite, n) in [(true, 9151), (false, 9152)] {
+        let host = OlderHooksSwitchHost::holding(Some(EffortLevel::High));
+        let machine = MeerkatMachine::ephemeral();
+        machine.set_session_llm_reconfigure_host(Arc::new(host.clone()));
+        let absent = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+            &machine,
+            &SessionId::new(),
+            direct_switch_request(finite, n),
+        )
+        .await
+        .expect_err("an absent session is refused");
+        assert!(
+            matches!(absent, RuntimeDriverError::NotFound { .. }),
+            "finite={finite}: {absent:?}"
+        );
+        assert!(host.calls().is_empty(), "{:?}", host.calls());
+    }
+}
+
+/// A reconfigure host whose turn-finalization boundary a row can hold, and
+/// whose session takes a level while a request waits for it.
+#[derive(Clone)]
+struct BoundaryHeldSwitchHost {
+    inner: OlderHooksSwitchHost,
+    boundary: Arc<tokio::sync::Mutex<()>>,
+    waiting: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl SessionLlmReconfigureHost for BoundaryHeldSwitchHost {
+    async fn acquire_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        RuntimeDriverError,
+    > {
+        self.waiting.notify_one();
+        Ok(Box::new(Arc::clone(&self.boundary).lock_owned().await))
+    }
+
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        self.inner.hydrate_session_llm_state(session_id).await
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        self.inner
+            .resolve_target_session_llm_identity(request, current_identity)
+            .await
+    }
+
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .judge_requested_target_session_llm_identity(session_id, target_identity)
+            .await
+    }
+
+    async fn preflight_target_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .preflight_target_session_llm_identity(session_id, target_identity)
+            .await
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .apply_live_session_llm_identity(session_id, identity, capability_surface)
+            .await
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner
+            .apply_live_session_tool_visibility_state(session_id, visibility_state)
+            .await
+    }
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.inner.persist_live_session(session_id).await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.inner.discard_live_session(session_id).await
+    }
+}
+
+/// A finite request of a session whose identity the machine does not hold
+/// yet waits for the host's turn-finalization boundary and reads the
+/// identity under it. A wait that is dropped stages nothing and has read
+/// nothing. The level the session holds when the boundary is free is the
+/// one the target is judged for: here the session takes a level the target
+/// refuses while the request waits, and the request ends Denied.
+#[tokio::test]
+async fn a_finite_request_of_a_session_whose_identity_is_not_held_waits_for_the_turn_boundary() {
+    use meerkat_core::image_generation::{SwitchTurnControlResult, SwitchTurnDenialReason};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let inner = OlderHooksSwitchHost::holding(None);
+    inner.script_judge(ScriptedLevelJudge::RefusesTheLevel);
+    let host = BoundaryHeldSwitchHost {
+        inner: inner.clone(),
+        boundary: Arc::new(tokio::sync::Mutex::new(())),
+        waiting: Arc::new(tokio::sync::Notify::new()),
+    };
+    let (machine, session_id) = routing_machine_with_a_baseline().await;
+    machine.set_session_llm_reconfigure_host(Arc::new(host.clone()));
+    let adapter = Arc::new(machine);
+    let held = Arc::clone(&host.boundary).lock_owned().await;
+    let request = |n: u128| {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                direct_switch_request(true, n),
+            )
+            .await
+        })
+    };
+
+    // A request whose wait is dropped.
+    let dropped = request(9141);
+    tokio::time::timeout(Duration::from_secs(5), host.waiting.notified())
+        .await
+        .expect("the request reaches the turn boundary");
+    dropped.abort();
+    assert!(
+        dropped
+            .await
+            .expect_err("the request was dropped")
+            .is_cancelled()
+    );
+    assert_eq!(inner.count("hydrate"), 0, "{:?}", inner.calls());
+    let state = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state");
+    assert_eq!(state.model_routing_pending_switch_request_id, None);
+    assert!(state.model_routing_switch_denials.is_empty());
+    assert_eq!(state.current_session_llm_identity, None);
+
+    // A request that waits; the session takes a level meanwhile.
+    let waiting = request(9142);
+    tokio::time::timeout(Duration::from_secs(5), host.waiting.notified())
+        .await
+        .expect("the request reaches the turn boundary");
+    assert_eq!(inner.count("hydrate"), 0, "{:?}", inner.calls());
+    *inner
+        .base
+        .current_identity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        session_identity_holding(Some(EffortLevel::High));
+    drop(held);
+    let answered = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the request ends once the boundary is free")
+        .expect("the request task ends")
+        .expect("a refused level is an answer");
+    assert!(
+        matches!(
+            answered,
+            SwitchTurnControlResult::Denied {
+                reason: SwitchTurnDenialReason::CapabilityPolicy,
+                ..
+            }
+        ),
+        "the level the session holds under the boundary is the one judged: {answered:?}"
+    );
+    assert_eq!(inner.count("hydrate"), 1, "{:?}", inner.calls());
+    assert_eq!(inner.count("judge"), 1, "{:?}", inner.calls());
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state")
+            .current_session_llm_identity,
+        Some(mm_dsl::SessionLlmIdentity::from_domain(
+            &session_identity_holding(Some(EffortLevel::High))
+        ))
     );
 }

@@ -1913,6 +1913,11 @@ struct RuntimeSessionEntry {
     /// The MCP adapter this registration's latest finished construction
     /// installed, for observation only. Every registration owns a fresh slot.
     mcp_observation: meerkat_core::McpObservationSlot,
+    /// Whether this registration has said, once, that a model switch went
+    /// on without the target's route being asked about the reasoning effort
+    /// level the session holds. It deduplicates a warning: nothing reads it
+    /// for a decision, and it is not stored.
+    legacy_host_trust_noted: std::sync::atomic::AtomicBool,
     /// This runtime owner's hosting claim for the session (#1813), taken
     /// before the registration's durable recovery and held exactly as long as
     /// this entry: unregister finalization, which removes the entry after

@@ -2499,6 +2499,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "TargetReasoningEffortVerdict",
+                &[
+                    "NoHeldEffort",
+                    "HeldEffortAccepted",
+                    "LegacyUnverified",
+                    "Refused",
+                    "LevelsUnreadable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RoutingSwitchApprovalReason",
                 &[
                     "CrossProvider",

@@ -211,7 +211,6 @@ resulting example locks, and commit them together with the relevant changes.
 | 019 | [mob-pipeline-rs](019-mob-pipeline-rs/) | Rust | Mob definition, validation, topology wiring, and manual lint/test dispatch |
 | 038 | [mob-control-py](038-mob-control-py/) | Python | Drive a mob over `rkat-rpc`: create, spawn, wire, send work, follow the members, stop one run and cancel the rest |
 | 039 | [mob-control-ts](039-mob-control-ts/) | TypeScript | The same mob driven from the TypeScript SDK |
-| 040 | [One scheduled follow-up](040-one-shot-follow-up-py/) | Python | An agent schedules one turn for itself; the host verifies delivery and the resulting assistant message separately |
 
 ### Expert — Production Patterns & Multi-Surface
 
@@ -234,6 +233,7 @@ resulting example locks, and commit them together with the relevant changes.
 | 035 | [mdm-tux-rs](035-mdm-tux-rs/) | Rust + TUI + Docker | Meerkat Device Manager: TUX terminal controller, kennel rendezvous, remote targets, hive coordination, peer comms, and scheduler wakeups |
 | 036 | [realtime-audio-py](036-realtime-audio-py/) | Python | Command-line OpenAI realtime audio app with live transcript, callback tools, inline mob skills, and helper sub-agents |
 | 037 | [live-webrtc-web](037-live-webrtc-web/) | Web + TypeScript | Browser WebRTC smoke-test cockpit with AEC microphone capture, live controls, note and text-pane callbacks, and real mob-mcp tools |
+| 040 | [One scheduled follow-up](040-one-shot-follow-up-py/) | Python | An agent schedules one turn for itself; the host verifies delivery and the resulting assistant message separately |
 
 ## Examples by Feature
 

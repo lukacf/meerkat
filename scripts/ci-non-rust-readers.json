@@ -2118,6 +2118,17 @@
         "sources": [
           "meta/crates/meerkat-meta/tests/console_route_auth.rs"
         ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "the_gateways_methods_of_the_host_and_member_words_are_the_contract_documents"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/console_hosted_mobs_tests.rs"
+        ]
       }
     ],
     "meta/examples/001-incident-command-center-pack/": [

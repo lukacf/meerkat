@@ -22,4 +22,4 @@ Rust callers must supply both fields when constructing either switch-request inp
 
 ### Known limitations
 
-A target whose client cannot be built is held. For a buildable target, **no source for supported levels** means the switch is denied. **An existing source that is temporarily unreadable** is different: the switch can take effect without a compatibility verdict. Requests on the target are then refused as retryable until the levels can be read. If the target does not support the held level, requests remain refused until the level or model changes.
+On the stock host, a target whose client cannot be built is held. For a buildable target, **no source for supported levels** means the switch is denied. **An existing source that is temporarily unreadable** is different: the switch can take effect without a compatibility verdict. Requests on the target are then refused as retryable until the levels can be read. If the target does not support the held level, requests remain refused until the level or model changes.

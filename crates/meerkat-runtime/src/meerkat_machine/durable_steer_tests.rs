@@ -719,6 +719,26 @@ impl DurableSteerRig {
         .unwrap_or_else(|_| panic!("expected {expected} applied durable appends"));
     }
 
+    /// Wait until the runner has recorded `expected` boundary takes, and
+    /// return them. The runner serves on threads of its own and records a
+    /// take's row after that take's appends, so right after
+    /// `wait_for_applied_durable` the newest row can still be the take
+    /// before. A test that reads what one boundary delivered waits for that
+    /// boundary's row.
+    async fn wait_for_boundary_takes(&self, expected: usize) -> Vec<Vec<(InputId, String)>> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let takes = self.script.boundary_takes();
+                if takes.len() >= expected {
+                    return takes;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("expected {expected} boundary takes"))
+    }
+
     /// Wait until `expected` applies are fully observable (their primitive
     /// recorded and their run inside `apply`), on the script's event, not a
     /// poll of the entry counter.

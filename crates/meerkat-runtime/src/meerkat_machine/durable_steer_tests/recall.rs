@@ -267,12 +267,25 @@ async fn recall_after_the_runner_parked_with_the_steer(rig: DurableSteerRig) {
         .store(true, Ordering::SeqCst);
 
     rig.wait_for_applied_durable(1).await;
+    // The run consumed two boundaries: the empty one before the steers were
+    // admitted, and the parked one. The parked boundary's row is waited
+    // for: the runner records it after the append, on a thread of its own.
+    let takes = rig.wait_for_boundary_takes(2).await;
     assert_eq!(
-        rig.script.boundary_takes().last().map(|take| take
+        takes.len(),
+        2,
+        "the boundary before the steers and the parked one: {takes:?}"
+    );
+    assert!(
+        takes[0].is_empty(),
+        "the boundary before the steers delivered nothing: {takes:?}"
+    );
+    assert_eq!(
+        takes[1]
             .iter()
             .map(|(input_id, _)| input_id.clone())
-            .collect::<Vec<_>>()),
-        Some(vec![second_id.clone()]),
+            .collect::<Vec<_>>(),
+        vec![second_id.clone()],
         "the parked boundary delivers the steer behind the recalled one"
     );
     rig.script.step(RunnerStep::Finish);

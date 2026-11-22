@@ -26,6 +26,7 @@ import {
   KitGlyph,
   Notice,
   agentDisplayName,
+  agentOpenable,
   cx,
   formatAbsoluteTime,
   formatDuration,
@@ -335,7 +336,7 @@ export function QuestionSetCard({ set, resourceStatus, readFailed = false, decis
   const sendable = editable && questionSetAnswersSendable(set, answers);
   const title = set.title || `Questions from ${agentName}`;
   const waiting = open && set.createdAtMs !== undefined ? formatDuration(Math.max(0, now - set.createdAtMs)) : "";
-  const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
+  const openChat = navigation?.openAgent && agentOpenable(identity, directory) ? () => navigation.openAgent?.(identity, "chat") : null;
   const change = (questionId: string, answer: QuestionAnswer | undefined) => setDraft((current) => {
     const { [questionId]: _previous, ...rest } = current;
     return answer ? { ...rest, [questionId]: answer } : rest;

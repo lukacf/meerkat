@@ -31,9 +31,9 @@ use super::native::{
     route_contradiction,
 };
 use super::sources::{
-    AdvanceSource, AnnouncementSource, AuditQuery, AuditRow, MemberFacts, PutSource,
-    RecordSourceFailure, RosterFacts, SourceAdvance, SourceChange, SourceQuery, SourceState,
-    SourceStream, UnhandledPolicy,
+    AdvanceSource, AnnouncementSource, AuditQuery, AuditRow, Coverage, MemberFacts, MemberPerson,
+    PutSource, RecordSourceFailure, RosterFacts, SourceAdvance, SourceChange, SourceQuery,
+    SourceState, SourceStream, UnhandledPolicy,
 };
 use super::store::{AnnouncementStore, SubmissionCheck};
 use super::types::{
@@ -101,6 +101,80 @@ fn member_problem(member: &Member, problem: MemberProblem) -> AnnouncementError 
         MemberProblem::UnusablePeer(detail) => AnnouncementError::UnusablePeer(detail),
         MemberProblem::Unavailable(detail) => AnnouncementError::NativeUnavailable(detail),
         MemberProblem::Ambiguous(_) => AnnouncementError::AmbiguousMob(member.mob_id.clone()),
+    }
+}
+
+/// The mobs whose roster one capture (an announcement, a source's step)
+/// could not read, each with the first reason given: reported once per mob,
+/// whatever the number of its members and role templates the capture asked
+/// about.
+struct UnreadRosters {
+    /// Whether the capture can reach a member. When it can, a mob that is
+    /// not loaded is loaded before its roster is read, and a roster that
+    /// stays unread is reported as a warning. A source's step that carries
+    /// nothing to capture loads nothing and loses nothing.
+    captures: bool,
+    mobs: BTreeMap<MobId, String>,
+}
+
+impl UnreadRosters {
+    /// For an announcement, which always can reach a member.
+    fn of_an_announcement() -> Self {
+        Self {
+            captures: true,
+            mobs: BTreeMap::new(),
+        }
+    }
+
+    /// For a source's step: it can reach a member when it carries an item,
+    /// or what makes a gap notice (a fresh baseline, or a final page that
+    /// cannot prove complete coverage).
+    fn of_a_step(step: &AdvanceSource) -> Self {
+        Self {
+            captures: !step.items.is_empty()
+                || step.rebaseline.is_some()
+                || matches!(step.coverage, Some(Coverage::Gap(_))),
+            mobs: BTreeMap::new(),
+        }
+    }
+
+    /// Whether a mob that is not loaded is loaded for this capture.
+    fn loads(&self) -> bool {
+        self.captures
+    }
+
+    /// Note that the roster of `mob_id` could not be read.
+    fn note(&mut self, mob_id: &MobId, error: &super::native::NativeUnavailable) {
+        self.mobs
+            .entry(mob_id.clone())
+            .or_insert_with(|| error.0.clone());
+    }
+
+    /// Report each mob noted, once: for `what`, captured into
+    /// `announced_in`.
+    fn report(self, what: &'static str, announced_in: &MobId) {
+        let Self { captures, mobs } = self;
+        for (mob_id, error) in mobs {
+            if captures {
+                tracing::warn!(
+                    mob = %mob_id,
+                    announced_in = %announced_in,
+                    capture = what,
+                    %error,
+                    "a mob's roster could not be read for a capture; its members that only a \
+                     role or a label covers are not captured for it, and its role templates \
+                     take no member for it"
+                );
+            } else {
+                tracing::debug!(
+                    mob = %mob_id,
+                    announced_in = %announced_in,
+                    capture = what,
+                    %error,
+                    "a mob's roster could not be read; the capture carried nothing for a member"
+                );
+            }
+        }
     }
 }
 
@@ -495,6 +569,12 @@ struct Walk {
     /// Members whose backlog failed to seal since it last sealed: reported
     /// once until it seals again or is gone.
     unsealed: BTreeSet<Member>,
+    /// Members whose last seal took nothing because the facts of a member
+    /// that announced to them could not be read, each with the clock
+    /// reading at which it is looked at again: the longest settle pause
+    /// after that seal. Until then it takes no place in the round's page of
+    /// members, so members that hold such an item cannot fill every page.
+    waiting: BTreeMap<Member, u64>,
 }
 
 impl Walk {
@@ -562,6 +642,17 @@ struct Inner {
     /// The last escalation event pushed to the host; read from the store at
     /// the first pass, so events from before a restart are not pushed again.
     pushed_cursor: std::sync::Mutex<Option<u64>>,
+    /// The members whose last seal left an item owed because the facts of
+    /// the member that announced it could not be read, each with the clock
+    /// reading of that seal: said once per member until a seal of it reads
+    /// every announcer. Nothing reads it to decide a seal; the round reads
+    /// it to say which members its own seals left waiting.
+    unread_announcers: std::sync::Mutex<BTreeMap<Member, u64>>,
+    /// The mobs held here that had no lineage record when a caller's view
+    /// was last judged and whose record this process has asked for: each
+    /// is asked for once, and again only after a read of its origin failed.
+    /// The reconcile of the lineage records does not read it.
+    lineage_asked: std::sync::Mutex<BTreeSet<MobId>>,
     /// Applies and reconciles of declarations pass one at a time, each
     /// reading the applied declarations and marks as they stand then, and
     /// holding the gate from the revision it records to the last record it
@@ -773,6 +864,8 @@ impl AnnouncementService {
                 marker_writes: std::sync::Mutex::new(BTreeMap::new()),
                 error_sink: std::sync::Mutex::new(None),
                 pushed_cursor: std::sync::Mutex::new(None),
+                unread_announcers: std::sync::Mutex::new(BTreeMap::new()),
+                lineage_asked: std::sync::Mutex::new(BTreeSet::new()),
                 declarations_gate: tokio::sync::Mutex::new(()),
                 declarations_calls: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
                 declarations_retry_after: AtomicU64::new(0),
@@ -805,6 +898,61 @@ impl AnnouncementService {
         .ok()?;
         here.insert(own);
         Some(here)
+    }
+
+    /// The mobs below this gateway's own mob, with it: the mobs its members
+    /// created and the mobs theirs created, by the live lineage records.
+    /// `held` is the mobs this gateway's runtime holds, as the caller
+    /// listed them. A mob among them that has no record yet is asked for
+    /// its record first, once in this process (a mob that does not run
+    /// answers none, and is not asked again here); one whose origin cannot
+    /// be read is left without a record, so it is not below, and the other
+    /// mobs are judged as their records show. A candidate launch records
+    /// nothing. `None` while the gateway names no mob of its own or the
+    /// records cannot be read: a caller then treats no other mob as one
+    /// below it.
+    pub(crate) async fn mobs_below_own(&self, held: &BTreeSet<MobId>) -> Option<BTreeSet<MobId>> {
+        let own = self.inner.native.own_mob()?;
+        let mut records = self.inner.store.lineage().await.ok()?;
+        if self.ensure_authoritative().is_ok() {
+            let missing = {
+                let mut asked = self
+                    .inner
+                    .lineage_asked
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                held.iter()
+                    .filter(|mob_id| {
+                        **mob_id != own && !records.iter().any(|record| record.mob_id == **mob_id)
+                    })
+                    .filter(|mob_id| asked.insert((*mob_id).clone()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let mut derived = false;
+            for mob_id in missing {
+                match self.derive_lineage(&mob_id, None).await {
+                    Ok(()) => derived = true,
+                    Err(error) => {
+                        tracing::debug!(
+                            mob = %mob_id,
+                            %error,
+                            "a held mob's origin could not be read; it is judged as a mob no \
+                             member created"
+                        );
+                        self.inner
+                            .lineage_asked
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&mob_id);
+                    }
+                }
+            }
+            if derived {
+                records = self.inner.store.lineage().await.ok()?;
+            }
+        }
+        Some(reach_from(&records, &own))
     }
 
     /// Whether `mob_id` is positively a mob on another gateway: one the
@@ -1287,20 +1435,25 @@ impl AnnouncementService {
             .role_templates(Some(&request.mob_id))
             .await?;
         templates.retain(|found| !found.template.topics.is_disjoint(&request.topics));
-        let (roles, admitted) = self.expand_roles(&templates).await;
+        // An announcement addresses the members it could reach: a mob of
+        // theirs that is not loaded is loaded for it.
+        let mut unread = UnreadRosters::of_an_announcement();
+        let (roles, admitted) = self.expand_roles(&templates, Some(&mut unread)).await;
         subscribers.extend(admitted);
-        // What a member announces is captured as its roster facts say: its
-        // own facts go to the store, and for a member private to a person
-        // the facts of every member whose subscription takes its topics, so
-        // the store can tell the members private to the same person. A
-        // roster that cannot be read now decides nothing: the announce is
-        // refused for now and nothing is recorded. Only a store that keeps
-        // the rule is given what a member announces that is private to a
-        // person, or that the roster does not name.
+        // What a member announces is captured as the facts it is judged by
+        // say: its own go to the store, and for a member private to a
+        // person those of every member whose subscription takes its topics,
+        // so the store can tell the members private to the same person. A
+        // roster or record that cannot be read now decides nothing: the
+        // announce is refused for now and nothing is recorded. Only a store
+        // that keeps the rule is given what a member announces that is
+        // private to a person, or that neither the roster nor the record
+        // names.
         let mut announcer = None;
+        let mut readers = BTreeSet::new();
         if let Announcer::Member { identity } = &request.announced_by {
             let member = Member::new(request.mob_id.clone(), identity.clone());
-            let found = self.announcer_facts(&member).await?;
+            let found = self.judged_facts(&member).await?;
             let shared = found
                 .as_ref()
                 .is_some_and(|found| crate::access::private_owner(&found.labels).is_none());
@@ -1312,15 +1465,23 @@ impl AnnouncementService {
             }
             if let Some(found) = found {
                 if !shared {
-                    subscribers.extend(
-                        self.topic_subscribers(&request.mob_id, &request.topics)
-                            .await?,
-                    );
+                    readers = self
+                        .topic_subscribers(&request.mob_id, &request.topics)
+                        .await?;
                 }
                 announcer = Some((member, found));
             }
         }
-        let mut facts = self.roster_facts(subscribers).await;
+        subscribers.retain(|member| !readers.contains(member));
+        let mut facts = self.addressed_roster_facts(subscribers, &mut unread).await;
+        unread.report("an announcement", &request.mob_id);
+        // A subscriber whose facts cannot be read now is handed none: the
+        // store owes it the item and its seal judges it.
+        for reader in readers {
+            if let Ok(Some(found)) = self.judged_facts(&reader).await {
+                facts.insert(reader, found);
+            }
+        }
         if let Some((member, found)) = announcer {
             facts.insert(member, found);
         }
@@ -1550,9 +1711,14 @@ impl AnnouncementService {
             .store
             .source_role_templates(&request.mob_id, &request.source_id)
             .await?;
-        let (roles, admitted) = self.expand_roles(&templates).await;
+        // A source's step addresses the members its items could reach: a
+        // mob of theirs that is not loaded is loaded for it. A step that
+        // carries nothing to capture loads nothing.
+        let mut unread = UnreadRosters::of_a_step(&request);
+        let (roles, admitted) = self.expand_roles(&templates, Some(&mut unread)).await;
         subscribers.extend(admitted);
-        let facts = self.roster_facts(subscribers).await;
+        let facts = self.addressed_roster_facts(subscribers, &mut unread).await;
+        unread.report("a source's step", &request.mob_id);
         let subject = EscalationSubject::Source {
             mob_id: request.mob_id.clone(),
             source_id: request.source_id.clone(),
@@ -1613,6 +1779,18 @@ impl AnnouncementService {
             // A declarations reconcile that stopped reads nothing more, and
             // logged its stop already.
             Err(_) if holder_stopped() => None,
+            // A mob that is not loaded sleeps until something addresses it:
+            // a read that loads nothing meets it at every pass, and there
+            // is nothing for an operator to do.
+            Err(error) if error.not_loaded_mob().is_some() => {
+                tracing::debug!(
+                    %member,
+                    error = %error.0,
+                    "a member's roster facts are not read while its mob is not loaded; a \
+                     member grant alone covers it"
+                );
+                None
+            }
             Err(error) => {
                 tracing::warn!(
                     %member,
@@ -1635,21 +1813,151 @@ impl AnnouncementService {
         facts
     }
 
-    /// The roster facts of a member whose announcement is judged, none
-    /// when its mob's roster names no such member, or the refusal for now
-    /// while the roster cannot be read: an unreadable roster never stands
-    /// for a member private to no one.
-    async fn announcer_facts(
+    /// The roster facts of `members` for a capture (an announcement, a
+    /// source's step), as far as they can be read. A capture that can reach
+    /// a member addresses it: a member whose roster cannot be read has its
+    /// mob loaded first when that mob is not loaded, and is read then. A mob
+    /// whose roster stays unread is noted in `unread`, once, and the store
+    /// covers its members by member grants alone.
+    async fn addressed_roster_facts(
         &self,
-        announcer: &Member,
-    ) -> Result<Option<MemberFacts>, AnnouncementError> {
-        let (native, asked) = (Arc::clone(&self.inner.native), announcer.clone());
+        members: BTreeSet<Member>,
+        unread: &mut UnreadRosters,
+    ) -> RosterFacts {
+        let mut facts = RosterFacts::default();
+        for member in members {
+            let read = if unread.loads() {
+                self.addressed_member_facts(&member).await
+            } else {
+                self.bounded_member_facts(&member).await
+            };
+            match read {
+                Ok(Some(found)) => facts.insert(member, found),
+                Ok(None) => {}
+                // A declarations reconcile that stopped reads nothing more,
+                // and logged its stop already.
+                Err(_) if holder_stopped() => {}
+                Err(error) => {
+                    tracing::debug!(
+                        %member,
+                        error = %error.0,
+                        "a member's roster facts could not be read; a member grant alone covers it"
+                    );
+                    unread.note(&member.mob_id, &error);
+                }
+            }
+        }
+        facts
+    }
+
+    /// A member's roster facts, read under the declarations gate's bound.
+    async fn bounded_member_facts(
+        &self,
+        member: &Member,
+    ) -> Result<Option<MemberFacts>, super::native::NativeUnavailable> {
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
         bounded_native(
             "member_facts",
             async move { native.member_facts(&asked).await },
         )
         .await
-        .map_err(|error| AnnouncementError::NativeUnavailable(error.0))
+    }
+
+    /// A member's roster facts for a flow that addresses the member: an
+    /// announcement or a source's step that can reach it, the seal of its
+    /// due backlog, the last check before a submission to it, the redelivery
+    /// of what a batch of its holds. When the roster cannot be read and the
+    /// member is kept for a mob a member created, that mob is loaded if it
+    /// is not loaded, and the roster is read again. The error of a roster
+    /// that stays unread comes back: an unreadable roster is never taken for
+    /// an uncovered member.
+    async fn addressed_member_facts(
+        &self,
+        member: &Member,
+    ) -> Result<Option<MemberFacts>, super::native::NativeUnavailable> {
+        let read = self.bounded_member_facts(member).await;
+        if read.is_ok() || holder_stopped() || !self.load_member_mob(member).await {
+            return read;
+        }
+        self.bounded_member_facts(member).await
+    }
+
+    /// Have the mob of a member kept for a mob a member created loaded, when
+    /// it is not: the native owner's preparation of a delivery to the member
+    /// does it, through the mob set's lookup of that mob by its id. Nothing
+    /// is ended and nothing is recorded here, whatever the preparation
+    /// answers: the read that follows says what holds. Returns whether the
+    /// member's mob is ready.
+    async fn load_member_mob(&self, member: &Member) -> bool {
+        if self.inner.native.own_mob().as_ref() == Some(&member.mob_id) {
+            return false;
+        }
+        let asked = member.clone();
+        let kept = self
+            .stored("member_route", move |store| async move {
+                store.member_route(&asked).await
+            })
+            .await;
+        if !matches!(kept, Ok(Some(kept)) if kept.route == MemberRoute::Child) {
+            return false;
+        }
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
+        bounded(
+            Waited::Native("prepare_member"),
+            async move { native.prepare_member(&asked, MemberRoute::Child).await },
+            |detail| Err(PrepareError::Unavailable(detail)),
+        )
+        .await
+        .is_ok()
+    }
+
+    /// The facts a member is judged by: its roster row, with the person the
+    /// record of who members are private to holds for it where the row
+    /// names none, and for a member the roster no longer names what that
+    /// record holds alone. None for a member neither names. The refusal for
+    /// now while the roster or the record cannot be read: neither then
+    /// stands for a member private to no one.
+    ///
+    /// The record gives a member a person here, a member that receives
+    /// included: the row this owner reads for a member of the gateway's own
+    /// mob is its registered row, which does not carry what a build added,
+    /// so the record is the witness of what the member's roster row holds.
+    /// The record keeps a name's newest build, so a later member of the
+    /// same name is judged as itself.
+    async fn judged_facts(
+        &self,
+        member: &Member,
+    ) -> Result<Option<MemberFacts>, AnnouncementError> {
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
+        let row = bounded_native(
+            "member_facts",
+            async move { native.member_facts(&asked).await },
+        )
+        .await
+        .map_err(|error| AnnouncementError::NativeUnavailable(error.0))?;
+        if row
+            .as_ref()
+            .is_some_and(|row| crate::access::private_owner(&row.labels).is_some())
+        {
+            return Ok(row);
+        }
+        let (native, asked) = (Arc::clone(&self.inner.native), member.clone());
+        let person = bounded_native("member_person", async move {
+            native.member_person(&asked).await
+        })
+        .await
+        .map_err(|error| AnnouncementError::NativeUnavailable(error.0))?;
+        Ok(match person {
+            MemberPerson::Private(person) => {
+                let mut facts = row.unwrap_or_default();
+                facts
+                    .labels
+                    .insert(crate::access::PRIVATE_TO_LABEL.to_string(), person);
+                Some(facts)
+            }
+            MemberPerson::Shared => Some(row.unwrap_or_default()),
+            MemberPerson::NotKnown => row,
+        })
     }
 
     /// Refuse `what` on a store that does not say it keeps the rule of who
@@ -1750,20 +2058,47 @@ impl AnnouncementService {
         // A topic a source owns takes the member only if its audience
         // covers it, as the member's roster facts say.
         let mut facts = RosterFacts::default();
-        if let Some(found) = self.member_facts(&request.member).await {
-            facts.insert(request.member.clone(), found);
-        }
         // An earlier start replays what a member announced as the
-        // announcer's roster facts say, read now; while one cannot be read
-        // the put is refused for now. Only a store that keeps the rule
-        // replays.
+        // announcer's roster facts say, read now. An announcer whose facts
+        // cannot be read is not counted as asked about: what it announced
+        // is owed to the subscription and judged when its batch is sealed.
+        // No mob is loaded for an announcer's facts. Only a store that
+        // keeps the rule replays.
         if matches!(request.start, super::types::StartFrontier::After { .. }) {
             self.store_judges_readers("a subscription that starts at an earlier frontier")?;
         }
+        let mut private_item = false;
         for announcer in self.inner.store.replay_announcers(&request).await? {
-            if let Some(found) = self.announcer_facts(&announcer).await? {
-                facts.insert(announcer, found);
+            match self.judged_facts(&announcer).await {
+                // Asked about, whatever is found: what another member
+                // announces from here on is owed and judged at the seal.
+                Ok(found) => {
+                    facts.mark_asked(announcer.clone());
+                    if let Some(found) = found {
+                        private_item |= crate::access::private_owner(&found.labels).is_some();
+                        facts.insert(announcer, found);
+                    }
+                }
+                Err(error) => tracing::debug!(
+                    member = %request.member,
+                    %announcer,
+                    %error,
+                    "the facts of a member whose announcement an earlier start replays could \
+                     not be read; it is owed and judged when its batch is sealed"
+                ),
             }
+        }
+        // The subscriber is read by its own roster row, as every put reads
+        // it. Where the replay holds a private member's announcement it is
+        // judged by the record too, and the put is refused for now while
+        // that cannot be read.
+        let subscriber = if private_item {
+            self.judged_facts(&request.member).await?
+        } else {
+            self.member_facts(&request.member).await
+        };
+        if let Some(found) = subscriber {
+            facts.insert(request.member.clone(), found);
         }
         let (operation, now) = (operation.clone(), self.now());
         let subscription = self
@@ -2069,11 +2404,22 @@ impl AnnouncementService {
                             why
                         }
                         Err(error) => {
-                            tracing::warn!(
-                                mob = %member.mob_id,
-                                error = %error,
-                                "member's mob not read; its members are reconciled later"
-                            );
+                            // A mob that is not loaded is not gone, and is
+                            // read once something loads it: no warning at
+                            // every reconcile while it sleeps.
+                            if error.not_loaded_mob().is_some() {
+                                tracing::debug!(
+                                    mob = %member.mob_id,
+                                    error = %error,
+                                    "member's mob is not loaded; its members are reconciled later"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    mob = %member.mob_id,
+                                    error = %error,
+                                    "member's mob not read; its members are reconciled later"
+                                );
+                            }
                             gone.insert(key, None);
                             None
                         }
@@ -2323,7 +2669,7 @@ impl AnnouncementService {
             .await?
             .ok_or(AnnouncementStoreError::UnknownBatch)?;
         let facts = self
-            .member_facts_read(&batch.member)
+            .addressed_member_facts(&batch.member)
             .await
             .map_err(|error| AnnouncementError::NativeUnavailable(error.0))?;
         let handling = self
@@ -2578,9 +2924,23 @@ impl AnnouncementService {
             tracing::warn!(%error, "held announcements were not checked this round");
         }
         let policy = config.policy;
-        let backlogs = self.inner.store.backlogs_at(ROUND_MEMBERS, now).await?;
-        walk.unsealed
-            .retain(|member| backlogs.iter().any(|backlog| backlog.member == *member));
+        // A member that waits on an announcer's facts is looked at again
+        // when its time has come, and the page reads past it until then.
+        walk.waiting.retain(|_, again| *again > now);
+        let past = walk.waiting.keys().cloned().collect::<BTreeSet<_>>();
+        let backlogs = self
+            .inner
+            .store
+            .backlogs_past(ROUND_MEMBERS, now, &past)
+            .await?;
+        // A full page may leave members behind it. Where a member of it
+        // begins to wait in this round, the next round follows at once: its
+        // page reads past that member and reaches the members after it.
+        let full_page = backlogs.len() >= ROUND_MEMBERS;
+        let mut began_to_wait = false;
+        walk.unsealed.retain(|member| {
+            past.contains(member) || backlogs.iter().any(|backlog| backlog.member == *member)
+        });
         for backlog in backlogs {
             match policy.due_at(&backlog) {
                 Some(due) if due <= now => {
@@ -2600,7 +2960,19 @@ impl AnnouncementService {
                                 }
                             }
                         }
-                        Ok(None) => {}
+                        // Nothing was taken. Where the facts of a member
+                        // that announced to it did not read at this seal,
+                        // the member is looked at again after the longest
+                        // settle pause.
+                        Ok(None) => {
+                            if self.waits_on_an_announcer(&backlog.member, now) {
+                                walk.waiting.insert(
+                                    backlog.member.clone(),
+                                    now.saturating_add(config.settle_check_max_ms),
+                                );
+                                began_to_wait = true;
+                            }
+                        }
                         Err(error) => {
                             // Reported once while it keeps failing: a mob
                             // held until its owner resolves fails every
@@ -2628,6 +3000,10 @@ impl AnnouncementService {
                 Some(due) => report.next_due_ms = min_due(report.next_due_ms, Some(due)),
                 None => {}
             }
+        }
+        report.next_due_ms = min_due(report.next_due_ms, walk.waiting.values().min().copied());
+        if full_page && began_to_wait {
+            report.next_due_ms = min_due(report.next_due_ms, Some(now));
         }
         self.escalation_pass(now).await;
         Ok(report)
@@ -2775,12 +3151,14 @@ impl AnnouncementService {
             .await?
             .map(|kept| kept.route);
         if route == Some(MemberRoute::Child) {
-            self.member_mob_ended(member, now).await?;
+            self.addressed_member_mob_ended(member, now).await?;
         }
         // The store checks what it seals, and what it holds, against the
         // member's coverage and routes as its roster says now. A roster
         // that cannot be read decides nothing: the seal waits for a read.
-        let facts = match self.member_facts_read(member).await {
+        // A due backlog addresses its member: a mob of its that is not
+        // loaded is loaded for the seal.
+        let facts = match self.addressed_member_facts(member).await {
             Ok(facts) => facts,
             Err(error) => {
                 tracing::warn!(
@@ -2792,30 +3170,109 @@ impl AnnouncementService {
             }
         };
         let mut roster = RosterFacts::default();
-        if let Some(found) = facts {
-            roster.insert(member.clone(), found);
-        }
-        // The store judges each owed item by its announcer's roster facts
-        // as they read now. One that cannot be read decides nothing either.
+        // The store judges each owed item by the facts its announcer is
+        // judged by now. An announcer whose facts cannot be read is not
+        // counted as asked about: the store judges nothing it announced,
+        // its items stay owed for a later seal, and the member's other
+        // items are sealed. No mob is loaded for an announcer's facts.
+        let mut private_item = false;
+        let mut unread = None;
         for announcer in self.inner.store.owed_announcers(member).await? {
-            match self.announcer_facts(&announcer).await {
-                Ok(Some(found)) => roster.insert(announcer, found),
-                Ok(None) => {}
+            match self.judged_facts(&announcer).await {
+                // Asked about, whatever is found: an item captured from
+                // here on by a member not listed stays owed for the next
+                // seal.
+                Ok(found) => {
+                    roster.mark_asked(announcer.clone());
+                    if let Some(found) = found {
+                        private_item |= crate::access::private_owner(&found.labels).is_some();
+                        roster.insert(announcer, found);
+                    }
+                }
+                Err(error) => {
+                    unread.get_or_insert((announcer, error));
+                }
+            }
+        }
+        self.report_unread_announcer(member, unread, now);
+        // The member itself is read by its own roster row, as every seal
+        // reads it. Where a private member's item is among the owed ones it
+        // is judged by the record too, and the seal waits while that cannot
+        // be read.
+        let own = if private_item {
+            match self.judged_facts(member).await {
+                Ok(own) => own,
                 Err(error) => {
                     tracing::warn!(
                         %member,
                         %error,
-                        "the roster of a member that announced could not be read; the seal waits"
+                        "who a member is private to could not be read; its seal waits"
                     );
                     return Ok(None);
                 }
             }
+        } else {
+            facts
+        };
+        if let Some(found) = own {
+            roster.insert(member.clone(), found);
         }
         Ok(self
             .inner
             .store
             .seal_batch_with_roster(member, id, policy, &roster, now)
             .await?)
+    }
+
+    /// Say, once per member while it lasts, that an item stays owed to
+    /// `member` because the facts of the member that announced it could
+    /// not be read at this seal, at the clock reading `now`; `None` when
+    /// every announcer read.
+    fn report_unread_announcer(
+        &self,
+        member: &Member,
+        unread: Option<(Member, AnnouncementError)>,
+        now: u64,
+    ) {
+        let mut reported = self
+            .inner
+            .unread_announcers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((announcer, error)) = unread else {
+            reported.remove(member);
+            return;
+        };
+        if reported.insert(member.clone(), now).is_none() {
+            tracing::warn!(
+                %member,
+                %announcer,
+                %error,
+                "the facts of a member that announced could not be read; what it announced \
+                 stays owed to this member until they read, and the member's other \
+                 announcements are delivered"
+            );
+        } else {
+            tracing::debug!(
+                %member,
+                %announcer,
+                %error,
+                "what a member announced still stays owed: its facts do not read"
+            );
+        }
+    }
+
+    /// Whether the seal of `member` at the clock reading `now` left an
+    /// item owed because the facts of the member that announced it could
+    /// not be read. A seal that ended earlier, at the member's own roster,
+    /// set no mark of its own: an older one does not count.
+    fn waits_on_an_announcer(&self, member: &Member, now: u64) -> bool {
+        self.inner
+            .unread_announcers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(member)
+            == Some(&now)
     }
 
     /// A member's roster facts, or the error that kept them from being
@@ -2856,6 +3313,14 @@ impl AnnouncementService {
                         );
                     }
                 }
+                // The held items of a member whose mob is not loaded wait
+                // as any unread member's do, and the check that is due at
+                // every round while the mob sleeps says so quietly.
+                Err(error) if error.not_loaded_mob().is_some() => tracing::debug!(
+                    %member,
+                    error = %error.0,
+                    "a member's mob is not loaded; its held items wait"
+                ),
                 Err(error) => tracing::warn!(
                     %member,
                     error = %error.0,
@@ -2893,14 +3358,16 @@ impl AnnouncementService {
     /// checked again against its member's coverage and routes. With
     /// `may_cancel`, a failing item cancels the batch (its failing items
     /// are held and the rest reopen); without it, the failure comes back
-    /// and nothing changes. A roster that cannot be read defers it.
+    /// and nothing changes. A roster that cannot be read defers it; the
+    /// submission addresses the member, so a mob of its that is not loaded
+    /// is loaded for the check.
     async fn last_check(
         &self,
         batch: &Batch,
         may_cancel: bool,
         now: u64,
     ) -> Result<LastCheck, AnnouncementError> {
-        let facts = match self.member_facts_read(&batch.member).await {
+        let facts = match self.addressed_member_facts(&batch.member).await {
             Ok(facts) => facts,
             Err(error) => {
                 tracing::warn!(
@@ -3262,6 +3729,24 @@ impl AnnouncementService {
         )))
     }
 
+    /// [`Self::member_mob_ended`] for a flow that addresses the member (the
+    /// seal of its due backlog, a submission to it): when the member's mob
+    /// cannot be read it is loaded if it is not loaded, and read again. A
+    /// mob that is not loaded did not end.
+    async fn addressed_member_mob_ended(
+        &self,
+        member: &Member,
+        now: u64,
+    ) -> Result<bool, AnnouncementError> {
+        let read = self.member_mob_ended(member, now).await;
+        if !matches!(read, Err(AnnouncementError::NativeUnavailable(_)))
+            || !self.load_member_mob(member).await
+        {
+            return read;
+        }
+        self.member_mob_ended(member, now).await
+    }
+
     /// For a member kept for a mob a member created: end its subscriptions
     /// made before that mob ended (destroyed, created again, completed or
     /// reset), read from the mob's own durable records; otherwise record how
@@ -3605,7 +4090,7 @@ impl AnnouncementService {
                         return Ok(owed_at);
                     }
                     if batch.route == MemberRoute::Child
-                        && self.member_mob_ended(&batch.member, now).await?
+                        && self.addressed_member_mob_ended(&batch.member, now).await?
                     {
                         batch = self.reload(&batch).await?;
                         continue;
@@ -3728,7 +4213,7 @@ impl AnnouncementService {
                                 return Ok(retry_at);
                             }
                             if batch.route == MemberRoute::Child
-                                && self.member_mob_ended(&batch.member, now).await?
+                                && self.addressed_member_mob_ended(&batch.member, now).await?
                             {
                                 batch = self.reload(&batch).await?;
                                 continue;

@@ -7770,6 +7770,76 @@ test("workgraph snapshot results hydrate the goal tree, parent depths, and atten
   assert.equal(card.attention[0].targetLabel, "sess-42");
 });
 
+test("a workgraph binding whose target names an owner key is labelled by the key's kind and id", () => {
+  const frames = workGraphToolFrames({
+    idPrefix: "wg-owner-key",
+    name: "workgraph_snapshot",
+    callArgs: {},
+    result: {
+      snapshot: {
+        realm_id: "realm-1",
+        all_namespaces: false,
+        captured_at: "2026-07-08T09:10:00Z",
+        items: [
+          workGraphItem({
+            id: "goal-1",
+            title: "Release 0.7.30",
+            status: "in_progress",
+            revision: 4,
+            createdAt: "2026-07-08T08:00:00Z",
+          }),
+        ],
+        edges: [],
+        attention: [
+          {
+            binding_id: "attention-owner",
+            work_ref: { realm_id: "realm-1", namespace: "default", item_id: "goal-1" },
+            target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "planner" } },
+            mode: "coordinate",
+            status: { state: "active" },
+            machine_state: { lifecycle_phase: "active", revision: 3 },
+            created_at: "2026-07-08T08:00:00Z",
+            updated_at: "2026-07-08T09:00:00Z",
+          },
+          {
+            // A key with a kind and no id is labelled by what it holds.
+            binding_id: "attention-kind-only",
+            work_ref: { realm_id: "realm-1", namespace: "default", item_id: "goal-1" },
+            target: { kind: "lowered_owner", owner_key: { kind: "agent" } },
+            mode: "pursue",
+            status: { state: "active" },
+            machine_state: { lifecycle_phase: "active", revision: 1 },
+            created_at: "2026-07-08T08:00:00Z",
+            updated_at: "2026-07-08T09:00:00Z",
+          },
+          {
+            // A target that names neither a session nor an owner key has no label.
+            binding_id: "attention-unnamed",
+            work_ref: { realm_id: "realm-1", namespace: "default", item_id: "goal-1" },
+            target: { kind: "lowered_owner", owner_key: "planner" },
+            mode: "pursue",
+            status: { state: "active" },
+            machine_state: { lifecycle_phase: "active", revision: 1 },
+            created_at: "2026-07-08T08:00:00Z",
+            updated_at: "2026-07-08T09:00:00Z",
+          },
+        ],
+        ready_item_ids: [],
+      },
+    },
+  });
+
+  const cards = mapFramesToTimelineEntries(WORKGRAPH_AGENT, frames).filter((entry) => entry.kind === "workgraph");
+  assert.equal(cards.length, 1);
+  const card = cards[0];
+  if (card.kind !== "workgraph") return;
+  // By binding id; a binding with no label carries none.
+  assert.deepEqual(
+    Object.fromEntries(card.attention.map((binding) => [binding.bindingId, binding.targetLabel ?? null])),
+    { "attention-owner": "agent:planner", "attention-kind-only": "agent", "attention-unnamed": null },
+  );
+});
+
 test("workgraph unrooted items in one interaction group into a single catch-all card", () => {
   const frames = [
     ...workGraphToolFrames({

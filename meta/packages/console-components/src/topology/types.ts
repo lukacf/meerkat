@@ -50,6 +50,8 @@ export interface ConsoleTopologyNode {
   subgroup?: string;
   addressable?: boolean;
   presentation?: ConsoleTopologyNodePresentation;
+  /** The mob of the node's member, when the row names it (`/console/experience` nodes do). */
+  mob_id?: string;
 }
 
 /**

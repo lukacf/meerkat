@@ -35,6 +35,7 @@ class MetaBuilderConfig:
     event_log: Any | None = None
     runtime_store: Any | None = None
     console_read_only: bool | None = None
+    console_list_nested_mobs: bool | None = None
     console_fetch_timeout_ms: int | None = None
     console_require_app_auth: bool | None = None
     console_config_path: str | None = None
@@ -678,6 +679,16 @@ class MetaBuilder:
         ``enabled=False`` is accepted for migration compatibility. The
         internal Rust engine remains available for validation, but the public
         SDK/gateway path has no supported activation or provider proof.
+
+        ``own_memory_only_profiles`` is a list of distinct profile names of
+        the launch mob. An agent of a listed profile, an agent it created
+        (and so on up the agents that created each other), and an agent whose
+        profile its own mob does not define, is listed the records of its
+        own memory only in the memory index of its build: none of its mob's
+        shared records and none of the realm's. It is a filter on what an
+        agent is listed, not a boundary between tenants, and it takes effect
+        at an agent's next new session. The gateway refuses the start when a
+        listed name is no profile of the launch mob.
         """
         if kwargs:
             if config is not True:
@@ -724,6 +735,8 @@ class MetaBuilder:
             "steward",
             "operator_scope",
             "operatorScope",
+            "own_memory_only_profiles",
+            "ownMemoryOnlyProfiles",
             "hygienist",
         }
         unknown = sorted(set(config) - known)
@@ -791,6 +804,19 @@ class MetaBuilder:
             wire["operator_scope"] = config["operator_scope"]
         elif "operatorScope" in config:
             wire["operator_scope"] = config["operatorScope"]
+        # Forwarded as given: the gateway checks the names against the
+        # launch mob's definition and refuses the start on one it lacks.
+        own_memory_only = config.get(
+            "own_memory_only_profiles", config.get("ownMemoryOnlyProfiles")
+        )
+        if own_memory_only is not None:
+            # A tuple is a list on the wire; anything else goes as given, for
+            # the gateway to judge.
+            wire["own_memory_only_profiles"] = (
+                list(own_memory_only)
+                if isinstance(own_memory_only, tuple)
+                else own_memory_only
+            )
         distiller = config.get("distiller")
         if distiller is not None:
             if isinstance(distiller, dict):
@@ -944,6 +970,20 @@ class MetaBuilder:
 
     def console_read_only(self, read_only: bool = True) -> MetaBuilder:
         self._config.console_read_only = bool(read_only)
+        return self
+
+    def console_list_nested_mobs(self, listed: bool) -> MetaBuilder:
+        """Set whether the console lists the mobs nested under the gateway's mob.
+
+        Emitted as ``runtime_options.console_list_nested_mobs``. The gateway
+        default lists them: the mobs a member of that mob created, and the
+        mobs made under those at any depth, with their members, to the
+        callers the access rules allow. Pass ``False`` to hide every nested
+        mob and its members on every console read, as releases before the
+        listing did. Mirrors the TypeScript builder's
+        ``consoleListNestedMobs``.
+        """
+        self._config.console_list_nested_mobs = bool(listed)
         return self
 
     def console_auth_required(self, required: bool) -> MetaBuilder:

@@ -4,6 +4,131 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `PersistedEvent` gains `mob_id` and `mob_incarnation` (both `None` by
+  default). `mob_id` names the event's mob when the event is of a mob of
+  the host other than the launch mob, or of a mob below such a mob;
+  `mob_incarnation` is the incarnation of that mob the event came from,
+  present where `mob_id` is. Both are `None` for an event of the launch
+  mob and of every mob below it, which is every event of a host of one
+  mob, and for an event an earlier gateway answers.
+
+- `GatingOrigin` keeps `mob_id`: the mob the origin's member is in, when it
+  is not the gateway's default mob; `None` for a member of the default mob,
+  so an origin from an earlier gateway reads as before.
+
+- `MetaRuntime.mob(mob_id)` returns the `MobHandle` of a mob of the host
+  named by its id: the same class `mob_handle()` returns, with
+  `handle.mob_id` set. Obtaining it sends nothing. Every call it makes
+  carries `mob_id`: in each JSON-RPC request, in the multipart upload, and
+  as `?mob_id=` on the two event stream URLs. A `mob_id` you pass to a
+  method that takes one (the announcement methods, an `EventQuery`) is sent
+  as given. `mob_handle()` is unchanged: its requests name no mob.
+
+- A named handle needs the gateway's `mob_addressing` feature capability
+  (`MOB_ADDRESSING`, `supports_mob_addressing`): an earlier gateway would
+  ignore `mob_id` and answer for its own mob, so without the capability
+  every call raises `CapabilityUnavailableError` and nothing else is sent.
+  The capability is read once per started gateway; the default handle reads
+  it only before an event query that names a mob.
+
+- `MetaRuntime.mobs` (`MobsHandle`): `create(mob_config)`, `list()` and
+  `get(mob_id)` call `meta/mobs/create`, `meta/mobs/list` and
+  `meta/mobs/get`. They need the `hosted_mobs` feature capability
+  (`HOSTED_MOBS`, `supports_hosted_mobs`) and ask the gateway on every call:
+  the SDK keeps no list of mobs. An entry is a `HostedMob` (`mob_id`,
+  `default`, `state`, and `provenance`, `failure`, `quarantine`, `revision`
+  when sent; `revision` is what a redefine is made against, carried by `get`
+  for a loaded mob and by the entry of a create, lifecycle or redefine
+  answer).
+  `HOSTED_MOB_STATES` is an open list: a state newer than the SDK is kept as
+  its text, with `known_state` false.
+
+- `MetaRuntime.mobs` also has `lifecycle(mob_id, action)` (`"stop"` or
+  `"resume"`), `redefine(mob_id, mob_config, expected_revision)` and
+  `destroy(mob_id)` for `meta/mobs/lifecycle`, `meta/mobs/redefine` and
+  `meta/mobs/destroy`. They return `MobLifecycleResult` (the entry and, for a
+  stop, the stop report), `MobRedefineResult` (the entry and a
+  `MobRedefineReceipt`) and `MobDestroyResult` (the mob's id and the destroy
+  report). Each names its mob itself: none has a default, and a call that
+  lacks what the wire requires (a negative `expected_revision` among them)
+  is refused before anything is sent, with a `TypeError` or a
+  `ValueError`. A destroy of the launch's own mob raises
+  `MobHostingRefusedError` (`default_mob`). An answer of a hosting call that
+  the SDK cannot read (no entry, no id, a receipt without a member, a stop
+  without its stop report, a report that is not an object) raises
+  `ContractMismatchError`: the request was sent.
+
+- `MobHostingRefusedError` (`MOB_HOSTING_REFUSED_CODE`, `-32059`) is the one
+  refusal error of the hosting calls: `kind`, `mob_id`, `retryable`,
+  `detail`, `details`, `known_kind`, and the `MobHostingRefusal` as
+  `refusal`. `MOB_HOSTING_REFUSAL_KINDS` is the closed vocabulary
+  (`mob_exists`, `invalid_mob_id`, `default_mob`, `mob_not_stopped`,
+  `mob_busy`; only `mob_busy` is retryable); a kind
+  newer than the SDK is still this error, with `known_kind` false. A mob the
+  host does not have stays a plain `RpcError` (`-32602`, data `kind`
+  `foreign_mob_target`).
+
+- The callbacks `customize_build`, `after_create` and `compute_edges` read
+  the top-level `mob_id` a host with more than one mob sends:
+  `AgentBuildContext.mob_id`, `SessionCreatedContext.mob_id`, and `mob_id`
+  in the context a topology provider is given. `None` (absent in the
+  topology context) when the host names none, which is its own mob. The two
+  new fields are keyword-only, so the contexts are built by position as
+  before and a subclass may add fields without defaults. A `mob_id` that is
+  not text is refused with `ContractMismatchError`.
+
+- Changed for a host with more than one mob: the callback tools a customizer
+  registers are kept per mob and identity, not per identity name, so a build
+  of a member in one mob no longer releases the tools of the member with the
+  same name in another. An SDK older than this keeps the earlier behaviour
+  under such a host.
+
+- `MobHandle.query_events` takes an optional `mob_id`: the mob whose events
+  are read, sent as given, as `query_mob_events` takes it in its query.
+  Without one the handle of a named mob sends its own id and the handle of
+  the launch's own mob names no mob, as before. A query that names a mob
+  first reads the gateway's `mob_addressing` feature capability, on the
+  handle of the launch's own mob too: against a gateway that does not list
+  it the call raises `CapabilityUnavailableError` and the query is not sent,
+  because such a gateway would answer the query without an error and for
+  its own mob. The keyword is new, so no earlier call changes:
+  `query_events` could name no mob before, and `query_mob_events` and
+  `subscribe_mob_events` with an `EventQuery.mob_id` are sent as before and
+  read no capability.
+
+- Compatibility of the mob on the customize callback, both ways. The
+  gateway names the member's mob as `mob_id` beside `scope_id` in the params
+  of `callback/agent_customizer/customize_build`, its launch mob included,
+  and leaves it out for a build that has none. With an earlier gateway
+  the callback names no mob: the key is the member name alone and a
+  host observes no change. An earlier SDK ignores `mob_id`: on
+  a gateway that hosts two mobs with a member of one name, the second mob's
+  build of that name releases the first mob's customizer tools for it until
+  the first mob builds it again (a call then fails with `no handler
+  registered for tool`, never with another mob's handler); the remedy is
+  this SDK. A `mob_id` that is the empty text is a mob of its own, and a
+  `mob_id` inside the context object is not read. An `AgentBuildContext`
+  the SDK builds for a named mob is not equal to one built without the mob.
+  Nothing is stored, and neither side states the versions of the other it
+  accepts, so no version pin moves.
+
+- A mob created under the id of a destroyed mob starts with none of that
+  mob's customizer tools. The gateway names the mob's incarnation as
+  `mob_incarnation` beside `mob_id` in the params of
+  `callback/agent_customizer/customize_build`; a build that names an
+  incarnation for the first time, for a mob id that was named by another,
+  releases every callback tool kept under that mob id before the
+  customizer is asked, whether or not that build registers a tool. A build
+  of an incarnation that a later one superseded (handled after the later
+  mob's build, or ended after it) releases nothing and registers none; its
+  customizer is still asked. The release is made at the later mob's first
+  member build, not at its create. Tools of other mobs, and of the builds
+  of one incarnation, are kept as before. A `mob_incarnation` that is
+  present and is not a non-empty text is refused with
+  `ContractMismatchError`. The
+  incarnation is not shown to the customizer: no public class changes.
+  With an earlier gateway, which names none, a host observes no change.
+
 ## 0.9.17
 
 - Added `Meta.builder().on_schedule_fire(name, handler)`: the handler for a

@@ -59,6 +59,8 @@ mod seat_comms_key;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod seat_lineage_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod shared_transport_key_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
@@ -96647,6 +96649,7 @@ fn summarize_mob_runtime_success(probe: MobRuntimeParityProbeInput, summary: &st
 fn summarize_mob_runtime_error(error: &MobError) -> String {
     match error {
         MobError::MobNotFound(_) => "mob_not_found".to_string(),
+        MobError::MobAlreadyExists(_) => "mob_already_exists".to_string(),
         MobError::ProfileNotFound(_) => "profile_not_found".to_string(),
         MobError::MemberNotFound(_) => "meerkat_not_found".to_string(),
         MobError::MemberSessionNotLive { .. } => "member_session_not_live".to_string(),

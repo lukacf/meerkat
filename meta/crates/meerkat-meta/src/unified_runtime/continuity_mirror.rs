@@ -1017,17 +1017,18 @@ impl super::UnifiedRuntime {
         sink: Arc<dyn ContinuityMirrorSink>,
         timings: ContinuityMirrorTimings,
     ) -> Result<(), String> {
-        if self.identity_first_context.is_none() {
+        if self.default_mob().identity_first_context.get().is_none() {
             return Err(
                 "this runtime is not identity-first, so it has no durable identity to copy"
                     .to_string(),
             );
         }
-        let bridge = self
-            .session_bridge
-            .clone()
-            .ok_or_else(|| "it needs an identity-first runtime (no session bridge)".to_string())?;
+        let bridge =
+            self.default_mob().session_bridge.clone().ok_or_else(|| {
+                "it needs an identity-first runtime (no session bridge)".to_string()
+            })?;
         let service = self
+            .default_mob()
             .mob_runtime
             .session_service()
             .cloned()
@@ -1037,14 +1038,15 @@ impl super::UnifiedRuntime {
             sink,
             timings,
         );
-        *self.continuity_mirror.lock().await = Some(mirror);
+        *self.default_mob().continuity_mirror.lock().await = Some(mirror);
         Ok(())
     }
 
     /// The installed continuity mirror's counts, or `None` without one (or
     /// once shutdown has stopped it).
     pub async fn continuity_mirror_counts(&self) -> Option<Arc<ContinuityMirrorCounts>> {
-        self.continuity_mirror
+        self.default_mob()
+            .continuity_mirror
             .lock()
             .await
             .as_ref()

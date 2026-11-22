@@ -24,6 +24,7 @@ const RULE_KEYS: &[&str] = &[
     "agents",
     "roles",
     "match_labels",
+    "mobs",
 ];
 /// The keys of [`super::model::AccessGroup`].
 const GROUP_KEYS: &[&str] = &["description", "members"];
@@ -661,6 +662,7 @@ subjects = ["dave"]
             agents: vec![text()],
             roles: vec![text()],
             match_labels: BTreeMap::from([(text(), text())]),
+            mobs: vec![text()],
         };
         let config = AccessControlConfig {
             enabled: true,

@@ -2415,7 +2415,29 @@ pub(super) struct ScriptedNative {
     /// Identities of this mob whose check answers, from now on, that the
     /// runtime does not know them, whatever `known` holds.
     unseated: Mutex<BTreeSet<String>>,
+    /// Mobs members created that the mob set knows and has not loaded: a
+    /// read of one is unavailable, and a call that addresses one loads it.
+    not_loaded: Mutex<BTreeSet<String>>,
+    /// Mobs whose load fails: the mob set then keeps the mob held.
+    failing_loads: Mutex<BTreeSet<String>>,
+    /// The mobs a call that addressed them loaded, in order.
+    loads: Mutex<Vec<String>>,
+    /// What the rosters of mobs members created record about their members,
+    /// by `(mob, identity)`.
+    child_facts: Mutex<BTreeMap<(String, String), RosterRow>>,
+    /// What the record of who members are private to holds for a member,
+    /// by identity: its person, or `None` for a member private to no one. A
+    /// member missing here is not known to it.
+    persons: Mutex<BTreeMap<String, Option<String>>>,
+    /// Whether that record's first read has not landed yet.
+    persons_unread: std::sync::atomic::AtomicBool,
+    /// What happens once while the roster facts of the member it names are
+    /// read: something a test makes happen between two reads of the owner.
+    during_facts_read: Mutex<Option<(String, FactsReadHook)>>,
 }
+
+/// What a test makes happen during one read of a member's roster facts.
+type FactsReadHook = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 /// A member's role and labels, as a scripted roster records them.
 type RosterRow = (String, BTreeMap<String, String>);
@@ -2453,7 +2475,81 @@ impl ScriptedNative {
             checks: Mutex::new(BTreeMap::new()),
             panicking: Mutex::new(BTreeSet::new()),
             unseated: Mutex::new(BTreeSet::new()),
+            not_loaded: Mutex::new(BTreeSet::new()),
+            failing_loads: Mutex::new(BTreeSet::new()),
+            loads: Mutex::new(Vec::new()),
+            child_facts: Mutex::new(BTreeMap::new()),
+            persons: Mutex::new(BTreeMap::new()),
+            persons_unread: std::sync::atomic::AtomicBool::new(false),
+            during_facts_read: Mutex::new(None),
         }
+    }
+
+    /// Put `identity` on the roster of the mob `mob_id` a member created,
+    /// with its role and labels.
+    fn seat_child_member(&self, mob_id: &str, identity: &str, role: &str, labels: &[(&str, &str)]) {
+        self.add_child_member(mob_id, identity);
+        self.child_facts.lock().unwrap().insert(
+            (mob_id.to_string(), identity.to_string()),
+            (
+                role.to_string(),
+                labels
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect(),
+            ),
+        );
+    }
+
+    /// Have the mob set unload the mob `mob_id` a member created: it knows
+    /// the mob and has not loaded it.
+    fn unload(&self, mob_id: &str) {
+        self.not_loaded.lock().unwrap().insert(mob_id.to_string());
+    }
+
+    /// Make every load of the mob `mob_id` fail.
+    fn fail_loads_of(&self, mob_id: &str) {
+        self.failing_loads
+            .lock()
+            .unwrap()
+            .insert(mob_id.to_string());
+    }
+
+    /// The mobs loaded by calls that addressed them, in order.
+    fn loads(&self) -> Vec<String> {
+        self.loads.lock().unwrap().clone()
+    }
+
+    /// Whether the mob set knows the mob and has not loaded it.
+    fn is_not_loaded(&self, mob_id: &MobId) -> bool {
+        self.not_loaded.lock().unwrap().contains(mob_id.as_str())
+    }
+
+    /// What a read of the roster or the log of the mob `mob_id` answers
+    /// while the mob does not run: unavailable while it is held, and while
+    /// it is not loaded. A read loads nothing, and such a mob is not gone.
+    fn unread_now(&self, mob_id: &MobId) -> std::result::Result<(), NativeUnavailable> {
+        if self.held(mob_id) {
+            return Err(NativeUnavailable::new(format!("{mob_id} is held")));
+        }
+        if self.is_not_loaded(mob_id) {
+            return Err(NativeUnavailable::mob_not_loaded(mob_id));
+        }
+        Ok(())
+    }
+
+    /// What a call that addresses the mob `mob_id` does first: a mob that
+    /// is not loaded is loaded. A load that fails leaves the mob held.
+    fn address(&self, mob_id: &MobId) -> std::result::Result<(), String> {
+        if !self.not_loaded.lock().unwrap().remove(mob_id.as_str()) {
+            return Ok(());
+        }
+        if self.failing_loads.lock().unwrap().contains(mob_id.as_str()) {
+            self.held.lock().unwrap().insert(mob_id.to_string());
+            return Err(format!("{mob_id} could not be loaded"));
+        }
+        self.loads.lock().unwrap().push(mob_id.to_string());
+        Ok(())
     }
 
     /// How many times the members of a role were read.
@@ -2491,6 +2587,29 @@ impl ScriptedNative {
     /// fails.
     fn panic_at_check(&self, identity: &str) {
         self.panicking.lock().unwrap().insert(identity.to_string());
+    }
+
+    /// The record of who members are private to holds `identity`: private
+    /// to `person`, or to no one.
+    fn record_person(&self, identity: &str, person: Option<&str>) {
+        self.persons
+            .lock()
+            .unwrap()
+            .insert(identity.to_string(), person.map(str::to_string));
+    }
+
+    /// Run `hook` once, during the next read of `identity`'s roster facts.
+    fn during_facts_read_of(
+        &self,
+        identity: &str,
+        hook: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        *self.during_facts_read.lock().unwrap() = Some((identity.to_string(), Box::pin(hook)));
+    }
+
+    /// The member `identity` has ended: its mob's roster names it no more.
+    fn end_member(&self, identity: &str) {
+        self.roster_facts.lock().unwrap().remove(identity);
     }
 
     /// Record `identity`'s role and labels on this mob's roster.
@@ -2595,7 +2714,27 @@ impl NativeDelivery for ScriptedNative {
         member: &Member,
     ) -> std::result::Result<Option<super::sources::MemberFacts>, NativeUnavailable> {
         if member.mob_id != mob(OWN_MOB) {
-            return Ok(None);
+            self.unread_now(&member.mob_id)?;
+            return Ok(self
+                .child_facts
+                .lock()
+                .unwrap()
+                .get(&(member.mob_id.to_string(), member.identity.to_string()))
+                .map(|(role, labels)| {
+                    super::sources::MemberFacts::new(role.as_str(), labels.clone())
+                }));
+        }
+        let hook = {
+            let mut slot = self.during_facts_read.lock().unwrap();
+            match slot.as_ref() {
+                Some((identity, _)) if identity == member.identity.as_str() => {
+                    slot.take().map(|(_, hook)| hook)
+                }
+                _ => None,
+            }
+        };
+        if let Some(hook) = hook {
+            hook.await;
         }
         if self
             .unreadable_facts
@@ -2603,7 +2742,7 @@ impl NativeDelivery for ScriptedNative {
             .unwrap()
             .contains(member.identity.as_str())
         {
-            return Err(NativeUnavailable("the roster cannot be read now".into()));
+            return Err(NativeUnavailable::new("the roster cannot be read now"));
         }
         Ok(self
             .roster_facts
@@ -2613,6 +2752,24 @@ impl NativeDelivery for ScriptedNative {
             .map(|(role, labels)| super::sources::MemberFacts::new(role.as_str(), labels.clone())))
     }
 
+    async fn member_person(
+        &self,
+        member: &Member,
+    ) -> std::result::Result<super::sources::MemberPerson, NativeUnavailable> {
+        use super::sources::MemberPerson;
+        if member.mob_id != mob(OWN_MOB) {
+            return Ok(MemberPerson::NotKnown);
+        }
+        match self.persons.lock().unwrap().get(member.identity.as_str()) {
+            Some(Some(person)) => Ok(MemberPerson::Private(person.clone())),
+            Some(None) => Ok(MemberPerson::Shared),
+            None if self.persons_unread.load(Ordering::SeqCst) => Err(NativeUnavailable::new(
+                "who the members are private to has not been read yet",
+            )),
+            None => Ok(MemberPerson::NotKnown),
+        }
+    }
+
     async fn members_with_role(
         &self,
         mob_id: &MobId,
@@ -2620,7 +2777,15 @@ impl NativeDelivery for ScriptedNative {
     ) -> std::result::Result<Vec<Member>, NativeUnavailable> {
         self.role_reads.fetch_add(1, Ordering::SeqCst);
         if *mob_id != mob(OWN_MOB) {
-            return Ok(Vec::new());
+            self.unread_now(mob_id)?;
+            return Ok(self
+                .child_facts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|((of, _), (held, _))| of == mob_id.as_str() && held == role)
+                .map(|((of, identity), _)| peer_member(identity, of))
+                .collect());
         }
         Ok(self
             .roster_facts
@@ -2658,6 +2823,9 @@ impl NativeDelivery for ScriptedNative {
         if self.held(&member.mob_id) {
             return Err(MemberProblem::Unavailable(format!("{mob_id} is held")));
         }
+        // The route of a member that is being subscribed addresses its mob.
+        self.address(&member.mob_id)
+            .map_err(MemberProblem::Unavailable)?;
         Ok(MemberRouteRecord {
             route: MemberRoute::Child,
             incarnation: Some(self.incarnation(mob_id)),
@@ -2712,9 +2880,7 @@ impl NativeDelivery for ScriptedNative {
             .unwrap()
             .contains(mob_id.as_str())
         {
-            return Err(NativeUnavailable(
-                "the session store is not reachable".into(),
-            ));
+            return Err(NativeUnavailable::new("the session store is not reachable"));
         }
         if !self.hosted(mob_id) {
             return Ok(None);
@@ -2746,6 +2912,12 @@ impl NativeDelivery for ScriptedNative {
                 .subscribe()
                 .wait_for(|identities| !identities.contains(identity))
                 .await;
+        }
+        if route == MemberRoute::Child {
+            // The check of a member that is being subscribed addresses its
+            // mob.
+            self.address(&member.mob_id)
+                .map_err(MemberProblem::Unavailable)?;
         }
         match route {
             MemberRoute::Local if self.unseated.lock().unwrap().contains(identity) => {
@@ -2797,6 +2969,9 @@ impl NativeDelivery for ScriptedNative {
                     why: "destroyed".into(),
                 }));
             }
+            // A delivery to a member addresses its mob.
+            self.address(&member.mob_id)
+                .map_err(PrepareError::Unavailable)?;
         }
         match self.waiting.lock().unwrap().get(member.identity.as_str()) {
             Some(cause) => Err(PrepareError::Suspended {
@@ -2811,6 +2986,8 @@ impl NativeDelivery for ScriptedNative {
         &self,
         mob_id: &MobId,
     ) -> std::result::Result<u64, NativeUnavailable> {
+        // The cursor read of a new subscription addresses the mob.
+        self.address(mob_id).map_err(NativeUnavailable::new)?;
         Ok(self
             .mob_events
             .lock()
@@ -2825,9 +3002,7 @@ impl NativeDelivery for ScriptedNative {
         mob_id: &MobId,
         incarnation: Option<&MobIncarnation>,
     ) -> std::result::Result<Option<MemberMobEnd>, NativeUnavailable> {
-        if self.held(mob_id) {
-            return Err(NativeUnavailable(format!("{mob_id} is held")));
-        }
+        self.unread_now(mob_id)?;
         let why = if !self.hosted(mob_id) {
             "destroyed"
         } else if incarnation
@@ -3116,10 +3291,16 @@ impl SurfaceOwner {
     pub(crate) const PEER_MOB: &'static str = "mob-b";
     /// A mob a member created, which this gateway holds.
     pub(crate) const HOSTED_MOB: &'static str = "builds";
+    /// A mob this gateway holds that no member created.
+    pub(crate) const SERVED_MOB: &'static str = "events";
 
     pub(crate) fn serving(members: &[&str]) -> Self {
         let mut native = ScriptedNative::new();
         native.known = members.iter().map(|member| (*member).to_string()).collect();
+        // [`Self::HOSTED_MOB`] is a mob a member of the owner's own mob
+        // created, by the records its origin is read from.
+        let created = native.created_by(OWN_MOB, "agent:a");
+        native.set_origin(Self::HOSTED_MOB, incarnation("builds-owner", 1), created);
         Self {
             harness: harness_with(native),
         }
@@ -3223,6 +3404,23 @@ impl SurfaceOwner {
         self.harness
             .native
             .add_child_member(Self::HOSTED_MOB, identity);
+    }
+
+    /// The origin of the mob `mob_id` cannot be read.
+    pub(crate) fn origin_does_not_read(&self, mob_id: &str) {
+        self.harness
+            .native
+            .unreadable_origins
+            .lock()
+            .unwrap()
+            .insert(mob_id.to_string());
+    }
+
+    /// `identity` is on the roster of [`Self::SERVED_MOB`].
+    pub(crate) fn seat_in_served_mob(&self, identity: &str) {
+        self.harness
+            .native
+            .add_child_member(Self::SERVED_MOB, identity);
     }
 
     /// [`Self::HOSTED_MOB`] has completed: it is held here and runs no more.
@@ -7089,6 +7287,11 @@ fn a_member_created_a_mob_only_when_all_three_records_agree() {
         origin_from(&parent_at(ParentRecord::Held)).is_err(),
         "a held parent may run again: nothing is final yet"
     );
+    assert!(
+        origin_from(&parent_at(ParentRecord::NotLoaded)).is_err(),
+        "a parent that is hosted and not loaded is not a parent that is gone: its child's \
+         origin is not answerable now, and no lineage is written from it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -7953,6 +8156,514 @@ async fn a_held_members_backlog_is_reported_once_while_it_waits() {
     assert_eq!(harness.native.submits(), 1);
 }
 
+// ---------------------------------------------------------------------------
+// A mob a member created that the mob set knows and has not loaded. It is
+// hosted here, not gone: nothing of it ends while it is not loaded. An
+// announcement, a source's step that carries something, and a due backlog
+// address the members they reach: the mob of such a member is loaded for
+// them. A pass that addresses no member loads nothing.
+// ---------------------------------------------------------------------------
+
+/// A native owner over the mob "builds" a member created, with three members
+/// on its roster: "worker-1" spawned from the profile "builder", "worker-2"
+/// from "tester" with the label team=release, and "worker-3" from "tester"
+/// with no label.
+fn native_with_seated_builds() -> ScriptedNative {
+    let native = child_native();
+    native.seat_child_member("builds", "worker-1", "builder", &[]);
+    native.seat_child_member("builds", "worker-2", "tester", &[("team", "release")]);
+    native.seat_child_member("builds", "worker-3", "tester", &[]);
+    native
+}
+
+/// `params` naming the mob "builds".
+fn in_builds(params: serde_json::Value) -> serde_json::Value {
+    with(params, "mob_id", serde_json::json!("builds"))
+}
+
+/// Declare the source "inbox" of the mob "builds" (topic "mail.received")
+/// and take its baseline: live at revision 1, version 1. Its audience is the
+/// role "builder" and the label team=release of that mob, and the one
+/// member "worker-3".
+async fn live_inbox_of_builds(service: &AnnouncementService) {
+    let audience = serde_json::json!([
+        { "kind": "role", "mob_id": "builds", "role": "builder" },
+        { "kind": "label", "mob_id": "builds", "key": "team", "value": "release" },
+        { "kind": "member", "member": { "mob_id": "builds", "identity": "worker-3" } },
+    ]);
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(with(
+            source_params("put-inbox", "inbox", "subject-1", &["mail.received"]),
+            "audience",
+            audience,
+        )),
+    )
+    .await
+    .unwrap();
+    try_host_call(
+        service,
+        SOURCES_ADVANCE,
+        in_builds(with(
+            advance_params("baseline", 1, 0, "c1"),
+            "coverage",
+            serde_json::json!("complete"),
+        )),
+    )
+    .await
+    .unwrap();
+}
+
+/// One item of the "inbox" of "builds", brought by its collector's next
+/// step.
+async fn inbox_of_builds_brings_an_item(
+    service: &AnnouncementService,
+) -> std::result::Result<serde_json::Value, crate::rpc::JsonRpcError> {
+    try_host_call(
+        service,
+        SOURCES_ADVANCE,
+        in_builds(with_items(
+            advance_params("run:v1", 1, 1, "c2"),
+            &[upsert("m-1", "v1", "an invoice arrived")],
+        )),
+    )
+    .await
+}
+
+/// Subscribe the member `identity` of "builds" to the topic of its mob's
+/// "inbox".
+async fn subscribe_to_inbox_of_builds(harness: &Harness, id: &str, identity: &str) {
+    harness
+        .service
+        .put_subscription(
+            &op(id),
+            put_for(id, peer_member(identity, "builds"), &["mail.received"]),
+        )
+        .await
+        .unwrap();
+}
+
+/// The batches made for the member `identity` of "builds".
+async fn batches_of_builds_member(harness: &Harness, identity: &str) -> Vec<Batch> {
+    harness
+        .service
+        .deliveries(&BatchQuery {
+            member: Some(peer_member(identity, "builds")),
+            limit: 10,
+            ..BatchQuery::default()
+        })
+        .await
+        .unwrap()
+}
+
+/// An item published while its subscribers' mob is not loaded reaches the
+/// members that only a role or only a label covers: the step loads their
+/// mob, once, reads their roster then, and each of them is delivered the
+/// item exactly once.
+#[tokio::test]
+async fn an_item_published_while_a_mob_is_not_loaded_reaches_its_members_a_role_or_a_label_covers()
+{
+    let harness = harness_with(native_with_seated_builds());
+    live_inbox_of_builds(&harness.service).await;
+    subscribe_to_inbox_of_builds(&harness, "w1", "worker-1").await;
+    subscribe_to_inbox_of_builds(&harness, "w2", "worker-2").await;
+    harness.native.unload("builds");
+
+    let advanced = inbox_of_builds_brings_an_item(&harness.service)
+        .await
+        .unwrap();
+    assert_eq!(
+        advanced["items"][0]["captured"],
+        serde_json::json!(2),
+        "the item is captured for the member the role covers and the member the label \
+         covers: {advanced}"
+    );
+    assert_eq!(
+        harness.native.loads(),
+        ["builds"],
+        "the step loaded the mob of the members it reaches, once"
+    );
+    harness.clock.store(10_000_000, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    for identity in ["worker-1", "worker-2"] {
+        let batches = batches_of_builds_member(&harness, identity).await;
+        assert_eq!(batches.len(), 1, "{identity}: {batches:?}");
+        assert_eq!(batches[0].route, MemberRoute::Child, "{identity}");
+    }
+    assert_eq!(harness.native.submits(), 2);
+    harness.round_after_pause().await;
+    assert_eq!(harness.native.submits(), 2, "each of them once");
+    assert_eq!(harness.native.loads(), ["builds"]);
+}
+
+/// A role template whose members are those of a mob that is not loaded
+/// takes them at an announcement on its topics: the announcement loads the
+/// mob, the member with the role gets its child, and the announcement is
+/// captured for it and delivered.
+#[tokio::test]
+async fn an_announcement_makes_the_child_of_a_role_template_whose_mob_is_not_loaded() {
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    harness.native.unload("builds");
+    try_host_call(
+        service,
+        SUBSCRIPTIONS_PUT,
+        serde_json::json!({
+            "operation_id": "put-builders",
+            "subscription_id": "builders",
+            "members": { "mob_id": "builds", "role": "builder" },
+            "topics": ["deploy.done"],
+        }),
+    )
+    .await
+    .unwrap();
+    harness.service.reconcile_mobs().await.unwrap();
+    assert!(
+        harness.native.loads().is_empty(),
+        "neither the template's put nor a reconcile loads its mob"
+    );
+
+    try_host_call(
+        service,
+        ANNOUNCE,
+        serde_json::json!({ "source_key": "deploy-1", "topics": ["deploy.done"], "body": "done" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        harness.native.loads(),
+        ["builds"],
+        "the announcement loaded the mob the template names, once"
+    );
+    harness.clock.store(10_000_000, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    let batches = batches_of_builds_member(&harness, "worker-1").await;
+    assert_eq!(batches.len(), 1, "the member with the role: {batches:?}");
+    assert_eq!(harness.native.submits(), 1, "and no other member");
+}
+
+/// What was captured for a member is delivered though its mob was unloaded
+/// since: the seal of its due backlog loads the mob, and the round delivers
+/// the batch with nothing else asking for the mob.
+#[tokio::test]
+async fn a_due_backlog_is_delivered_though_its_members_mob_was_unloaded_since() {
+    let harness = harness_with(child_native());
+    subscribe_worker(&harness, "w1").await.unwrap();
+    harness.announce_burst(1).await;
+    harness.native.unload("builds");
+    harness.clock.store(10_000_000, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    let batches = harness
+        .service
+        .deliveries(&worker_batches_query())
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    assert_eq!(batches[0].state.tag(), BatchStateTag::Delivered);
+    assert_eq!(harness.native.submits(), 1);
+    assert_eq!(
+        harness.native.loads(),
+        ["builds"],
+        "loaded once, by the seal"
+    );
+    let subscription = harness
+        .service
+        .subscription(&sid("w1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(subscription.state, SubscriptionState::Active);
+}
+
+/// A pass that addresses no member loads no mob and ends nothing of a mob
+/// that is not loaded: the reconcile of the mob set (the members of mobs
+/// that are gone, the role templates' children, the lineage), a dispatcher
+/// round with nothing due for its members, and a source's step that carries
+/// nothing to capture.
+#[tokio::test]
+async fn a_pass_that_addresses_no_member_loads_no_mob_and_ends_nothing_of_it() {
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    live_inbox_of_builds(service).await;
+    subscribe_to_inbox_of_builds(&harness, "w1", "worker-1").await;
+    try_host_call(
+        service,
+        SUBSCRIPTIONS_PUT,
+        serde_json::json!({
+            "operation_id": "put-builders",
+            "subscription_id": "builders",
+            "members": { "mob_id": "builds", "role": "builder" },
+            "topics": ["deploy.done"],
+        }),
+    )
+    .await
+    .unwrap();
+    harness.native.unload("builds");
+
+    harness.service.reconcile_mobs().await.unwrap();
+    harness.service.run_round().await.unwrap();
+    harness.round_after_pause().await;
+    // A step of the source that brings no item and no gap.
+    try_host_call(
+        service,
+        SOURCES_ADVANCE,
+        in_builds(advance_params("run:empty", 1, 1, "c2")),
+    )
+    .await
+    .unwrap();
+    harness.service.reconcile_mobs().await.unwrap();
+
+    assert!(
+        harness.native.loads().is_empty(),
+        "nothing addressed a member of the mob: {:?}",
+        harness.native.loads()
+    );
+    assert!(
+        harness.native.is_not_loaded(&mob("builds")),
+        "the mob is still not loaded"
+    );
+    let subscription = service.subscription(&sid("w1")).await.unwrap().unwrap();
+    assert_eq!(
+        (subscription.state, subscription.ended),
+        (SubscriptionState::Active, None),
+        "the subscription of a member of a mob that is not loaded stands"
+    );
+    let kept = harness
+        .store
+        .member_route(&peer_member("worker-1", "builds"))
+        .await
+        .unwrap();
+    assert_eq!(
+        kept.map(|kept| kept.route),
+        Some(MemberRoute::Child),
+        "and so does the member's kept route"
+    );
+    let template = service
+        .role_template(&sid("builders"))
+        .await
+        .unwrap()
+        .expect("the template");
+    assert_eq!(template.state, SubscriptionState::Active);
+}
+
+/// The one loss that stays: a mob whose load fails when an item is
+/// published. Its members that only a role or only a label covers are not
+/// captured for that item, the member a member grant names is, and the
+/// failure is reported once for the mob, as a warning. The same holds for a
+/// mob that is held until its owner resolves.
+#[tokio::test]
+async fn a_mob_whose_load_fails_at_an_item_is_reported_once_and_only_member_grants_cover_its_members()
+ {
+    let harness = harness_with(native_with_seated_builds());
+    live_inbox_of_builds(&harness.service).await;
+    for (id, identity) in [("w1", "worker-1"), ("w2", "worker-2"), ("w3", "worker-3")] {
+        subscribe_to_inbox_of_builds(&harness, id, identity).await;
+    }
+    harness.native.unload("builds");
+    harness.native.fail_loads_of("builds");
+
+    // A second registered dispatcher, so the interest in the warning's
+    // callsite is never decided by another test thread's empty default.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let (advanced, log) =
+        crate::test_diagnostics::capture_warnings(inbox_of_builds_brings_an_item(&harness.service))
+            .await;
+    let advanced = advanced.unwrap();
+    assert_eq!(
+        advanced["items"][0]["captured"],
+        serde_json::json!(1),
+        "the item is captured for the member a member grant names, and for no other: {advanced}"
+    );
+    assert_eq!(
+        log.matches("a mob's roster could not be read for a capture")
+            .count(),
+        1,
+        "one warning for the mob, not one per member: {log}"
+    );
+    assert!(harness.native.loads().is_empty(), "the load failed");
+    let rows = audit_rows(
+        &harness.service,
+        in_builds(serde_json::json!({ "source_id": "inbox" })),
+    )
+    .await;
+    let withheld = rows
+        .iter()
+        .filter(|row| row["reason"] == serde_json::json!("audience_not_covered"))
+        .map(|row| {
+            row["member"]["identity"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        withheld,
+        BTreeSet::from(["worker-1".to_string(), "worker-2".to_string()]),
+        "each member not captured is in the audit: {rows:?}"
+    );
+}
+
+/// The reconcile of the mobs reads whether the mob of each kept member is
+/// gone, and loads nothing for it. A mob held until its owner resolves is a
+/// warning: nothing addresses it on its own. A mob the mob set knows and
+/// has not loaded is none: it sleeps until something addresses it, and a
+/// warning at every reconcile would say nothing an operator can act on.
+#[tokio::test]
+async fn the_reconcile_of_mobs_warns_of_a_held_mob_and_not_of_one_that_is_not_loaded() {
+    const NOT_READ: &str = "member's mob not read; its members are reconciled later";
+    let harness = harness_with(child_native());
+    subscribe_worker(&harness, "w1").await.unwrap();
+
+    harness.native.held.lock().unwrap().insert("builds".into());
+    let (reconciled, log) =
+        crate::test_diagnostics::capture_warnings(harness.service.reconcile_mobs()).await;
+    reconciled.unwrap();
+    assert_eq!(
+        log.matches(NOT_READ).count(),
+        1,
+        "a held mob is a warning: {log}"
+    );
+
+    harness.native.held.lock().unwrap().clear();
+    harness.native.unload("builds");
+    let (reconciled, log) =
+        crate::test_diagnostics::capture_warnings(harness.service.reconcile_mobs()).await;
+    reconciled.unwrap();
+    assert_eq!(
+        log.matches(NOT_READ).count(),
+        0,
+        "a mob that is not loaded is no warning: {log}"
+    );
+    assert!(
+        harness.native.loads().is_empty() && harness.native.is_not_loaded(&mob("builds")),
+        "the reconcile loaded nothing: {:?}",
+        harness.native.loads()
+    );
+    let subscription = harness
+        .service
+        .subscription(&sid("w1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(subscription.ended, None, "and it ended nothing");
+}
+
+/// The count of the subscriptions that deliver into members private to a
+/// person reads each subscribed member's roster facts, and loads nothing
+/// for it. A member of a held mob is a warning; a member of a mob the mob
+/// set knows and has not loaded is none.
+#[tokio::test]
+async fn a_roster_read_warns_of_a_held_mob_and_not_of_one_that_is_not_loaded() {
+    const NOT_READ: &str = "a member's roster facts could not be read";
+    let harness = harness_with(child_native());
+    subscribe_worker(&harness, "w1").await.unwrap();
+
+    harness.native.held.lock().unwrap().insert("builds".into());
+    let (counted, log) =
+        crate::test_diagnostics::capture_warnings(harness.service.private_member_subscriptions())
+            .await;
+    assert!(counted.is_ok(), "the count stands without the member");
+    assert_eq!(
+        log.matches(NOT_READ).count(),
+        1,
+        "a held mob is a warning: {log}"
+    );
+
+    harness.native.held.lock().unwrap().clear();
+    harness.native.unload("builds");
+    let (counted, log) =
+        crate::test_diagnostics::capture_warnings(harness.service.private_member_subscriptions())
+            .await;
+    assert!(counted.is_ok(), "the count stands without the member");
+    assert_eq!(
+        log.matches(NOT_READ).count(),
+        0,
+        "a mob that is not loaded is no warning: {log}"
+    );
+    assert!(
+        harness.native.loads().is_empty() && harness.native.is_not_loaded(&mob("builds")),
+        "the count loaded nothing: {:?}",
+        harness.native.loads()
+    );
+}
+
+/// The check of a member's held items reads its roster facts at every
+/// round in which the check is due, and loads nothing for it. A member of a
+/// held mob is a warning at such a round; a member of a mob the mob set
+/// knows and has not loaded is none, and its held items wait all the same.
+#[tokio::test]
+async fn a_check_of_held_items_warns_of_a_held_mob_and_not_of_one_that_is_not_loaded() {
+    const WAITS: &str = "a member's roster could not be read; its held items wait";
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    live_inbox_of_builds(service).await;
+    subscribe_to_inbox_of_builds(&harness, "w1", "worker-1").await;
+    let advanced = inbox_of_builds_brings_an_item(service).await.unwrap();
+    assert_eq!(
+        advanced["items"][0]["captured"],
+        serde_json::json!(1),
+        "captured for the member its role covers: {advanced}"
+    );
+    // The role no longer passes: the member holds the item at its seal.
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(with(
+            with(
+                source_params("narrow", "inbox", "subject-1", &["mail.received"]),
+                "audience",
+                serde_json::json!([
+                    { "kind": "member", "member": { "mob_id": "builds", "identity": "worker-3" } },
+                ]),
+            ),
+            "expected_revision",
+            serde_json::json!(1),
+        )),
+    )
+    .await
+    .unwrap();
+    harness.clock.store(100_000, Ordering::SeqCst);
+    service.run_round().await.unwrap();
+    assert!(
+        batches_of_builds_member(&harness, "worker-1")
+            .await
+            .is_empty(),
+        "held at the seal"
+    );
+
+    harness.native.held.lock().unwrap().insert("builds".into());
+    harness
+        .clock
+        .store(100_000 + HOLD_RECHECK_BOUND_MS + 1, Ordering::SeqCst);
+    let (round, log) = crate::test_diagnostics::capture_warnings(service.run_round()).await;
+    round.unwrap();
+    assert_eq!(
+        log.matches(WAITS).count(),
+        1,
+        "a held mob is a warning: {log}"
+    );
+
+    harness.native.held.lock().unwrap().clear();
+    harness.native.unload("builds");
+    harness
+        .clock
+        .fetch_add(HOLD_RECHECK_BOUND_MS + 1, Ordering::SeqCst);
+    let (round, log) = crate::test_diagnostics::capture_warnings(service.run_round()).await;
+    round.unwrap();
+    assert_eq!(
+        log.matches(WAITS).count(),
+        0,
+        "a mob that is not loaded is no warning: {log}"
+    );
+    assert!(
+        batches_of_builds_member(&harness, "worker-1")
+            .await
+            .is_empty(),
+        "and the held item still waits"
+    );
+}
+
 #[tokio::test]
 async fn the_member_mob_log_is_read_on_from_the_last_read() {
     let harness = harness_with(child_native());
@@ -8324,6 +9035,9 @@ struct CoreListingState {
     managed: BTreeMap<String, meerkat_mob::MobState>,
     held: BTreeSet<String>,
     quarantined: BTreeSet<String>,
+    /// The mobs the mob set knows and has not loaded: stored here, with no
+    /// actor.
+    not_loaded: BTreeSet<String>,
     /// The quarantined mobs are restored (managed) right after the call so
     /// numbered.
     restore_quarantined_after_call: usize,
@@ -8343,8 +9057,15 @@ impl CoreListings {
             ]),
             held: BTreeSet::from(["child".to_string()]),
             quarantined: BTreeSet::new(),
+            not_loaded: BTreeSet::new(),
             restore_quarantined_after_call: usize::MAX,
         }))
+    }
+
+    /// The same listings with `mob_id` known to the mob set and not loaded.
+    fn with_not_loaded(self, mob_id: &str) -> Self {
+        self.0.lock().unwrap().not_loaded.insert(mob_id.to_string());
+        self
     }
 
     /// The same listings with `mob_id` kept quarantined, restored right
@@ -8472,10 +9193,79 @@ impl super::native::HostedListings for CoreListings {
         })
         .ok_or_else(restore_failed)
     }
+
+    async fn known_mobs(
+        &self,
+    ) -> std::result::Result<super::native::KnownMobs, meerkat_mob::MobError> {
+        self.call(|state| super::native::KnownMobs {
+            managed: state
+                .managed
+                .iter()
+                .map(|(mob_id, phase)| (meerkat_mob::MobId::from(mob_id.as_str()), *phase))
+                .collect(),
+            not_loaded: state
+                .not_loaded
+                .iter()
+                .map(|mob_id| meerkat_mob::MobId::from(mob_id.as_str()))
+                .collect(),
+        })
+        .ok_or_else(restore_failed)
+    }
 }
 
 fn listed(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(ToString::to_string).collect()
+}
+
+/// The creating mob of a mob, when the listings gave no handle of it: a
+/// mob the mob set knows is hosted here, loaded or not, and is never read
+/// as a parent that is gone. One the set knows and has not loaded, and one
+/// it manages whose handle is withheld for a moment, are not answerable
+/// now; a held one may run again; only a mob the set does not know, or
+/// knows as destroyed, is not hosted.
+#[tokio::test]
+async fn a_creating_mob_the_set_knows_without_a_handle_is_not_read_as_gone() {
+    use super::native::{ParentRecord, parent_without_a_handle};
+
+    let listings = CoreListings::new(usize::MAX, 0).with_not_loaded("asleep");
+    let (held, _running) = super::native::hosted_handles(&listings).await.unwrap();
+    let mut read = Vec::new();
+    for parent in ["asleep", "running", "child", "gone", "never-here"] {
+        read.push((
+            parent,
+            parent_without_a_handle(&listings, &held, parent)
+                .await
+                .unwrap(),
+        ));
+    }
+    assert_eq!(
+        read,
+        [
+            ("asleep", ParentRecord::NotLoaded),
+            ("running", ParentRecord::NotLoaded),
+            ("child", ParentRecord::Held),
+            ("gone", ParentRecord::NotHosted),
+            ("never-here", ParentRecord::NotHosted),
+        ]
+    );
+}
+
+/// A mob the mob set knows and has not loaded is hosted here: it is stored
+/// here and whatever addresses it loads it. It is in the hosted set, so it
+/// is never read as a mob that is gone.
+#[tokio::test]
+async fn a_mob_that_is_not_loaded_is_hosted_here() {
+    let listings = CoreListings::new(usize::MAX, 0).with_not_loaded("asleep");
+    assert_eq!(
+        super::native::hosted_set(&listings).await.unwrap(),
+        listed(&["asleep", "child", "root", "running"])
+    );
+    assert_eq!(
+        super::native::hosted_mob_ids_in(&listings, &mob("root"), &Mutex::new(BTreeSet::new()))
+            .await
+            .unwrap(),
+        BTreeSet::from([mob("asleep"), mob("child"), mob("running")])
+    );
 }
 
 /// The first call is the managed listing that finishes the restore, the
@@ -18857,6 +19647,971 @@ async fn a_candidate_owner_keeps_no_source_runner_schedule() {
     assert!(harness.service.runners_installed());
 }
 
+/// The family's default mob is the mob a request names, and the launch mob
+/// when it names none: a subscription put without `mobs` is for the
+/// announcements of the mob the request is for. The methods of the family
+/// that carry a mob of their own are not asked here: the family resolves
+/// that mob itself.
+///
+/// The family judges whether a mob is hosted here from the mob owner's own
+/// records. The second mob of this row is served by the runtime and is not
+/// in those records, so the family answers the request for it with its own
+/// refusal of a mob it does not host, naming the second mob: the request
+/// reached the family for the second mob, and no subscription was made for
+/// the launch mob's announcements in its place. On a host whose hosted set
+/// holds the second mob the same request answers the subscription.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_announcement_request_without_mobs_of_its_own_is_for_the_mob_the_request_names() {
+    const LAUNCH_MOB: &str = "mob-k-default-mob-launch";
+    const SECOND_MOB: &str = "mob-k-default-mob-second";
+    /// A role template of the launch mob's members, put by a request that
+    /// names `mob_id`, or no mob.
+    async fn put(
+        host: &crate::UnifiedRuntime,
+        subscription_id: &str,
+        mob_id: Option<&str>,
+    ) -> serde_json::Value {
+        let mut params = serde_json::json!({
+            "operation_id": format!("put-{subscription_id}"),
+            "subscription_id": subscription_id,
+            "members": { "mob_id": LAUNCH_MOB, "role": "personal" },
+            "topics": ["a.topic"],
+        });
+        if let Some(mob_id) = mob_id {
+            params["mob_id"] = serde_json::json!(mob_id);
+        }
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": SUBSCRIPTIONS_PUT,
+            "params": params,
+        })
+        .to_string();
+        let answer = crate::rpc::handle_unified_rpc_json(
+            host,
+            &request,
+            std::time::Duration::from_secs(30),
+            None,
+            None,
+        )
+        .await;
+        serde_json::from_str(&answer).expect("an answer")
+    }
+    let (state, second_state) = (
+        tempfile::tempdir().expect("state dir"),
+        tempfile::tempdir().expect("state dir"),
+    );
+    let host = Box::pin(
+        identity_first_test_builder(state.path(), LAUNCH_MOB, "")
+            .await
+            .mob_announcements(AnnouncementConfig::default())
+            .build(),
+    )
+    .await
+    .expect("the builder composes mob announcements");
+    let second = identity_first_test_runtime(second_state.path(), SECOND_MOB).await;
+    let second = host.serve_a_second_mob_in_tests(second);
+
+    let for_no_mob = put(&host, "of-the-launch-mob", None).await;
+    let for_the_launch_mob = put(&host, "of-the-launch-mob-by-its-id", Some(LAUNCH_MOB)).await;
+    let for_the_second = put(&host, "of-the-second-mob", Some(SECOND_MOB)).await;
+    host.shutdown().await;
+    second.shutdown().await;
+
+    assert_eq!(
+        for_no_mob["result"]["subscription"]["mobs"],
+        serde_json::json!([LAUNCH_MOB]),
+        "a request that names no mob takes the launch mob's announcements: {for_no_mob}"
+    );
+    assert_eq!(
+        for_the_launch_mob["result"]["subscription"]["mobs"],
+        serde_json::json!([LAUNCH_MOB]),
+        "a request that names the launch mob takes its announcements: {for_the_launch_mob}"
+    );
+    assert_eq!(
+        (
+            &for_the_second["error"]["data"]["kind"],
+            &for_the_second["error"]["data"]["mobs"],
+            &for_the_second["result"],
+        ),
+        (
+            &serde_json::json!("unknown_mob"),
+            &serde_json::json!([SECOND_MOB]),
+            &serde_json::Value::Null,
+        ),
+        "a request that names the second mob is the family's request for that mob, and makes no \
+         subscription for the launch mob's announcements: {for_the_second}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The release of what a mob left under an id. A mob is about to be created
+// under the id of a mob that was destroyed: nothing the earlier mob left
+// with the announcements is the new mob's, and what subscribers elsewhere
+// still awaited of it is told to them, not delivered.
+// ---------------------------------------------------------------------------
+
+/// Run `case` over a database file and over a host store realm's copy of
+/// the tables, as the conformance cases run.
+async fn over_both_stores<F, Fut>(name: &str, case: F)
+where
+    F: Fn(Arc<dyn AnnouncementStore>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    run_conformance(ConformanceBackend::Disk, name, &case).await;
+    run_conformance(ConformanceBackend::HostStore, name, &case).await;
+}
+
+/// A subscription of `to` to the topic "ios" of exactly `mobs`.
+fn naming(id: &str, to: &str, mobs: &[&str], start: StartFrontier) -> PutSubscription {
+    PutSubscription {
+        selector: Selector {
+            topics: topics(&["ios"]),
+            mobs: mobs.iter().map(|name| mob(name)).collect(),
+        },
+        ..put(id, to, &["ios"], start)
+    }
+}
+
+/// The announcements of the earlier mob go: no read by source key answers
+/// one, a key it used is free for the new mob, whose first announcement
+/// takes the next sequence, and nothing of the earlier log is replayed. A
+/// release asked again finds nothing, and another mob's log stands.
+#[tokio::test]
+async fn a_release_removes_a_mobs_announcements_and_frees_their_keys() {
+    over_both_stores("release: the log", |store| async move {
+        let store = store.as_ref();
+        let key = |value: &str| SourceKey::new(value).unwrap();
+        for (source_key, body) in [("k1", "one"), ("k2", "two")] {
+            store
+                .announce(announce_request("builds", source_key, &["ios"], body), 1)
+                .await
+                .unwrap();
+        }
+        store
+            .announce(announce_request("payments", "k1", &["ios"], "kept"), 1)
+            .await
+            .unwrap();
+
+        let released = store.release_mob(&mob("builds"), 2).await.unwrap();
+        assert_eq!(released.announcements, 2, "{released:?}");
+        for source_key in ["k1", "k2"] {
+            assert_eq!(
+                store
+                    .announcement(&mob("builds"), &key(source_key))
+                    .await
+                    .unwrap(),
+                None,
+                "no read by key answers an announcement of the earlier mob"
+            );
+        }
+        assert!(
+            store
+                .announcement(&mob("payments"), &key("k1"))
+                .await
+                .unwrap()
+                .is_some(),
+            "another mob's log stands"
+        );
+        assert!(
+            store
+                .release_mob(&mob("builds"), 2)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a release asked again finds nothing"
+        );
+
+        // A key the earlier mob used is free: another body under it is the
+        // new mob's announcement, neither a replay nor a conflict, and the
+        // numbering goes on, so no capture of it meets an earlier row.
+        let first = store
+            .announce(
+                announce_request("builds", "k1", &["ios"], "of the new mob"),
+                3,
+            )
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.announcement.body, "of the new mob");
+        assert_eq!(
+            first.announcement.sequence, 3,
+            "the new mob's first announcement takes the sequence after the earlier log's head"
+        );
+
+        // Nothing of the earlier mob is replayed: a frontier inside its log
+        // is a typed gap, and one at its head replays the new mob's only.
+        let after = |sequence: u64| StartFrontier::After {
+            frontier: [(mob("builds"), sequence)].into(),
+        };
+        assert_eq!(
+            store
+                .put_subscription(&op("o1"), naming("s1", "agent:a", &["builds"], after(0)), 4)
+                .await,
+            Err(AnnouncementStoreError::Gap {
+                mob_id: mob("builds"),
+                earliest_retained: 3,
+            })
+        );
+        store
+            .put_subscription(&op("o2"), naming("s2", "agent:a", &["builds"], after(2)), 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.backlogs(10).await.unwrap()[0].eligible_count,
+            1,
+            "only the new mob's announcement is replayed"
+        );
+    })
+    .await;
+}
+
+/// What a subscriber elsewhere still awaited of the earlier mob is told to
+/// it and not delivered: a sealed batch that holds such an announcement is
+/// cancelled and what else it held is owed again, the next batch carries a
+/// gap line for it and none of its body, and the mob leaves the
+/// subscriptions that named it, so nothing announced into the id later
+/// reaches them.
+#[tokio::test]
+async fn a_release_tells_what_was_still_owed_of_the_mob_and_delivers_none_of_it() {
+    over_both_stores("release: what was owed", |store| async move {
+        let store = store.as_ref();
+        let now = StartFrontier::Now;
+        // "agent:a" awaits both mobs, in one sealed batch; "agent:b" names
+        // the mob alone; "agent:c" names another mob only.
+        for (operation, request) in [
+            (
+                "o1",
+                naming("s1", "agent:a", &["payments", "builds"], now.clone()),
+            ),
+            ("o2", naming("s2", "agent:b", &["builds"], now.clone())),
+            ("o3", naming("s3", "agent:c", &["payments"], now.clone())),
+        ] {
+            store
+                .put_subscription(&op(operation), request, 1)
+                .await
+                .unwrap();
+        }
+        store
+            .announce(
+                announce_request("builds", "k1", &["ios"], "of the earlier mob"),
+                2,
+            )
+            .await
+            .unwrap();
+        store
+            .announce(announce_request("payments", "k1", &["ios"], "kept"), 2)
+            .await
+            .unwrap();
+        let sealed = store
+            .seal_batch(&member("agent:a"), &batch_id("b1"), &policy(), 1_002)
+            .await
+            .unwrap()
+            .expect("due after the delay");
+        assert_eq!(sealed.items.len(), 2);
+
+        let released = store.release_mob(&mob("builds"), 2_000).await.unwrap();
+        assert_eq!(released.subscriptions, vec![sid("s1"), sid("s2")]);
+
+        let s1 = store.subscription(&sid("s1")).await.unwrap().unwrap();
+        assert_eq!(s1.state, SubscriptionState::Active);
+        assert_eq!(s1.selector.mobs, [mob("payments")].into());
+        assert_eq!(s1.ended_mobs, [mob("builds")].into());
+        let s2 = store.subscription(&sid("s2")).await.unwrap().unwrap();
+        assert_eq!(s2.ended, Some(SubscriptionEnd::MobsEnded));
+        let s3 = store.subscription(&sid("s3")).await.unwrap().unwrap();
+        assert_eq!(
+            s3.revision, 1,
+            "a subscription that never named the mob stands"
+        );
+
+        assert_eq!(
+            store.batch(&batch_id("b1")).await.unwrap().unwrap().state,
+            BatchState::Cancelled,
+            "the sealed batch that held an announcement of the earlier mob is cancelled"
+        );
+        let next = store
+            .seal_batch(&member("agent:a"), &batch_id("b2"), &policy(), 9_000)
+            .await
+            .unwrap()
+            .expect("what the cancelled batch held of another mob is owed again");
+        assert_eq!(
+            next.items
+                .iter()
+                .map(|item| (item.mob_id.clone(), item.sequence))
+                .collect::<Vec<_>>(),
+            vec![(mob("payments"), 1)]
+        );
+        assert_eq!(
+            next.gaps,
+            vec![BatchGap {
+                mob_id: mob("builds"),
+                count: 1,
+                reason: GapReason::NotRetained,
+            }],
+            "the member is told of the announcement it does not receive"
+        );
+        assert!(
+            !next.body.contains("of the earlier mob"),
+            "and receives none of its body: {}",
+            next.body
+        );
+        assert_eq!(
+            store
+                .seal_batch(&member("agent:b"), &batch_id("b3"), &policy(), 9_000)
+                .await
+                .unwrap(),
+            None,
+            "nothing is owed to a member whose subscription named the mob alone"
+        );
+        let other = store
+            .seal_batch(&member("agent:c"), &batch_id("b4"), &policy(), 9_000)
+            .await
+            .unwrap()
+            .expect("another mob's announcement is delivered as before");
+        assert_eq!(other.items.len(), 1);
+        assert!(other.gaps.is_empty(), "{:?}", other.gaps);
+
+        let later = store
+            .announce(
+                announce_request("builds", "k9", &["ios"], "of the new mob"),
+                9_500,
+            )
+            .await
+            .unwrap();
+        assert!(
+            later.captured_for.is_empty(),
+            "nothing announced into the id later reaches a subscription that named the earlier mob"
+        );
+    })
+    .await;
+}
+
+/// The source "inbox" of the mob "builds", with a runner and the audience of
+/// [`live_inbox_of_builds`], and the source "own-inbox" of this gateway's
+/// mob, with a runner too.
+async fn two_mobs_sources_with_runners(service: &AnnouncementService) {
+    let audience = serde_json::json!([
+        { "kind": "role", "mob_id": "builds", "role": "builder" },
+    ]);
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(with(
+            with_runner(
+                source_params("put-inbox", "inbox", "subject-1", &["mail.received"]),
+                "mail-collector",
+                60,
+            ),
+            "audience",
+            audience,
+        )),
+    )
+    .await
+    .unwrap();
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        with_runner(
+            source_params("put-own", "own-inbox", "subject-2", &["own.received"]),
+            "mail-collector",
+            60,
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+/// The sources of the mob `mob_id` that are not ended.
+async fn live_sources_of(service: &AnnouncementService, mob_id: &str) -> Vec<String> {
+    service
+        .sources(&super::sources::SourceQuery {
+            mob_id: Some(mob(mob_id)),
+            after: None,
+            state: None,
+            limit: 16,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|source| source.state != super::sources::SourceState::Ended)
+        .map(|source| source.source_id.to_string())
+        .collect()
+}
+
+/// The earlier mob's sources end and their runners' schedules with them:
+/// none collects for the id any more, the topics they owned are free for a
+/// source of the new mob, and a source put again under an id the earlier
+/// mob used starts its next generation from no cursor. Another mob's source
+/// and its schedule stand.
+#[tokio::test]
+async fn a_release_ends_the_mobs_sources_and_their_runners_and_frees_their_topics() {
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    let schedules = install_runners(service).await;
+    two_mobs_sources_with_runners(service).await;
+    assert_eq!(runner_schedules(&schedules).await.len(), 2);
+
+    let released = service.release_mob(&mob("builds")).await.unwrap();
+    assert_eq!(
+        released
+            .sources
+            .iter()
+            .map(|source| (source.source_id.to_string(), source.state))
+            .collect::<Vec<_>>(),
+        vec![("inbox".to_string(), super::sources::SourceState::Ended)],
+        "{released:?}"
+    );
+    assert!(live_sources_of(service, "builds").await.is_empty());
+    assert_eq!(live_sources_of(service, OWN_MOB).await, ["own-inbox"]);
+    let kept = runner_schedules(&schedules).await;
+    assert_eq!(
+        kept.iter()
+            .map(|(_, params, ..)| params.clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!({ "mob_id": OWN_MOB, "source_id": "own-inbox" })],
+        "the schedule of the earlier mob's runner ended, and no other"
+    );
+
+    // The topic the earlier source owned is free: a source of the new mob
+    // under another id takes it.
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(with(
+            source_params("put-mail", "mail", "subject-3", &["mail.received"]),
+            "audience",
+            serde_json::json!([{ "kind": "role", "mob_id": "builds", "role": "builder" }]),
+        )),
+    )
+    .await
+    .expect("the topic of an ended source of the earlier mob is free");
+    // And the id of the earlier source starts its next generation, from no
+    // cursor.
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(with(
+            source_params("put-inbox-again", "inbox", "subject-1", &["mail.sorted"]),
+            "audience",
+            serde_json::json!([{ "kind": "role", "mob_id": "builds", "role": "builder" }]),
+        )),
+    )
+    .await
+    .unwrap();
+    let again = service
+        .source(&mob("builds"), &SourceId::new("inbox").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.state, super::sources::SourceState::Active);
+    assert_eq!(
+        again.generation, 2,
+        "its next generation, so nothing counted about the earlier one is counted to it"
+    );
+}
+
+/// The subscriptions of the earlier mob's members end, each as its mob
+/// created again, and their kept routes go: a member of the same name in
+/// the new mob is subscribed as a member never seen, and nothing captured
+/// for the earlier member reaches it.
+#[tokio::test]
+async fn a_release_ends_the_subscriptions_of_the_mobs_members_and_forgets_their_routes() {
+    let harness = harness_with(child_native());
+    subscribe_worker(&harness, "w1").await.unwrap();
+    harness
+        .service
+        .put_subscription(
+            &op("a1"),
+            put("a1", "agent:a", &["ios"], StartFrontier::Now),
+        )
+        .await
+        .unwrap();
+    harness.announce_burst(1).await;
+    assert!(
+        harness
+            .store
+            .member_route(&worker())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let released = harness.service.release_mob(&mob("builds")).await.unwrap();
+    assert_eq!(released.members, vec![worker()], "{released:?}");
+    assert_eq!(
+        released.subscriptions,
+        vec![sid("a1"), sid("w1")],
+        "the one that named the mob among others, and its member's: {released:?}"
+    );
+    let ended = harness
+        .service
+        .subscription(&sid("w1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ended.ended,
+        Some(SubscriptionEnd::MemberMobEnded {
+            why: "created again".into()
+        })
+    );
+    assert_eq!(
+        harness.store.member_route(&worker()).await.unwrap(),
+        None,
+        "the route kept for the earlier mob's member is forgotten"
+    );
+    let own = harness
+        .service
+        .subscription(&sid("a1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(own.state, SubscriptionState::Active);
+
+    harness.clock.store(10_000_000, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    assert!(
+        harness
+            .service
+            .deliveries(&worker_batches_query())
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing captured for the earlier mob's member is delivered under its name"
+    );
+    assert_eq!(
+        harness.native.submits(),
+        1,
+        "the member of another mob is delivered what it awaited"
+    );
+}
+
+/// A role template of the earlier mob's role is cancelled, and the child it
+/// made, a subscription of a member of that mob, ends with its member's
+/// mob; a template of another mob's role that captured from the mob no
+/// longer names it: no member of the new mob is given a child of the
+/// earlier template, and nothing announced into the id reaches the other
+/// template's children.
+#[tokio::test]
+async fn a_release_cancels_the_role_templates_of_the_mobs_roles() {
+    let harness = harness_with(native_with_seated_builds());
+    let service = &harness.service;
+    harness.native.set_roster_facts("agent:a", "reviewer", &[]);
+    try_host_call(
+        service,
+        SUBSCRIPTIONS_PUT,
+        serde_json::json!({
+            "operation_id": "put-builders",
+            "subscription_id": "builders",
+            "members": { "mob_id": "builds", "role": "builder" },
+            "topics": ["deploy.done"],
+        }),
+    )
+    .await
+    .unwrap();
+    try_host_call(
+        service,
+        SUBSCRIPTIONS_PUT,
+        serde_json::json!({
+            "operation_id": "put-reviewers",
+            "subscription_id": "reviewers",
+            "members": { "mob_id": OWN_MOB, "role": "reviewer" },
+            "topics": ["deploy.done"],
+            "mobs": [OWN_MOB, "builds"],
+        }),
+    )
+    .await
+    .unwrap();
+    try_host_call(
+        service,
+        ANNOUNCE,
+        serde_json::json!({ "source_key": "deploy-1", "topics": ["deploy.done"], "body": "done" }),
+    )
+    .await
+    .unwrap();
+    let children_of = |template: &str| {
+        let id = sid(template);
+        let store = Arc::clone(&harness.store);
+        async move {
+            store
+                .role_template_children(&id)
+                .await
+                .unwrap()
+                .map(|found| found.children)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(child, _)| child.subscription_id)
+                .collect::<Vec<_>>()
+        }
+    };
+    let builders = children_of("builders").await;
+    assert_eq!(
+        builders.len(),
+        1,
+        "the member of the earlier mob with the role"
+    );
+    let reviewers = children_of("reviewers").await;
+    assert_eq!(reviewers.len(), 1);
+
+    let released = service.release_mob(&mob("builds")).await.unwrap();
+    assert_eq!(
+        released.templates,
+        vec![sid("builders"), sid("reviewers")],
+        "{released:?}"
+    );
+    let cancelled = service
+        .role_template(&sid("builders"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.state, SubscriptionState::Cancelled);
+    let child = service.subscription(&builders[0]).await.unwrap().unwrap();
+    assert_eq!(
+        child.ended,
+        Some(SubscriptionEnd::MemberMobEnded {
+            why: "created again".into()
+        }),
+        "the child the earlier template made is its mob's member's: it ends as that member's \
+         subscriptions do, and captures nothing more"
+    );
+    assert!(
+        harness
+            .store
+            .role_template_children(&sid("builders"))
+            .await
+            .unwrap()
+            .is_none_or(|found| found.children.is_empty()),
+        "and the cancelled template keeps no child"
+    );
+    let kept = service
+        .role_template(&sid("reviewers"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.state, SubscriptionState::Active);
+    assert_eq!(
+        kept.mobs,
+        [mob(OWN_MOB)].into(),
+        "the other mob's template no longer captures from the id"
+    );
+    let reviewer = service.subscription(&reviewers[0]).await.unwrap().unwrap();
+    assert_eq!(reviewer.state, SubscriptionState::Active);
+    assert_eq!(reviewer.selector.mobs, [mob(OWN_MOB)].into());
+}
+
+/// A store that cannot release refuses, and the owner answers the error
+/// with nothing changed: the caller then refuses the create. A candidate
+/// launch's owner releases nothing either.
+#[tokio::test]
+async fn a_release_the_store_cannot_do_is_an_error_and_changes_nothing() {
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    let native = Arc::new(native_with_seated_builds());
+    let service = AnnouncementService::with_clock(
+        Arc::clone(&store) as Arc<dyn AnnouncementStore>,
+        Arc::clone(&native) as Arc<dyn NativeDelivery>,
+        AnnouncementConfig::default(),
+        Arc::new(|| 1_000),
+    )
+    .unwrap();
+    service
+        .put_subscription(
+            &op("a1"),
+            put("a1", "agent:a", &["ios"], StartFrontier::Now),
+        )
+        .await
+        .unwrap();
+
+    let refused = service.release_mob(&mob("builds")).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(AnnouncementError::Store(AnnouncementStoreError::Storage(detail)))
+                if detail.contains("cannot release")
+        ),
+        "{refused:?}"
+    );
+    let kept = service.subscription(&sid("a1")).await.unwrap().unwrap();
+    assert_eq!(
+        kept.revision, 1,
+        "a release that was refused changed nothing"
+    );
+    assert!(kept.selector.mobs.contains(&mob("builds")));
+
+    let harness = harness_with(native_with_seated_builds());
+    live_inbox_of_builds(&harness.service).await;
+    let candidate = candidate_owner(&harness);
+    assert!(matches!(
+        candidate.release_mob(&mob("builds")).await,
+        Err(AnnouncementError::CandidateLaunch)
+    ));
+    assert_eq!(live_sources_of(&harness.service, "builds").await, ["inbox"]);
+}
+
+/// The lineage record of the earlier mob ends: the new mob's record is made
+/// from its own proofs when it is created, and no mob is below or above the
+/// id by the earlier mob's record meanwhile. Another mob's record stands.
+#[tokio::test]
+async fn a_release_ends_the_mobs_lineage_record() {
+    over_both_stores("release: the lineage", |store| async move {
+        let store = store.as_ref();
+        let released = lineage_record("builds", Some("payments"), incarnation("s1", 10), 100);
+        let other = lineage_record("events", Some("payments"), incarnation("s2", 20), 100);
+        store.record_lineage(&released, 100).await.unwrap();
+        store.record_lineage(&other, 100).await.unwrap();
+
+        store.release_mob(&mob("builds"), 200).await.unwrap();
+        assert_eq!(
+            store.lineage().await.unwrap(),
+            vec![other],
+            "the earlier mob's record is no longer live, and another mob's is"
+        );
+    })
+    .await;
+}
+
+/// What the announcements kept about a member of the earlier mob beside
+/// its subscriptions goes with it: its marker, and the gap lines it was
+/// still owed. A member of the same name in the new mob has no marker, and
+/// its first batch tells it nothing of what the earlier member did not
+/// receive. A member of another mob keeps its marker.
+///
+/// This row came after the change it covers; the two mutants of its two
+/// assertions show that it fails without it.
+#[tokio::test]
+async fn a_release_forgets_the_marker_and_the_gap_lines_of_the_mobs_members() {
+    over_both_stores(
+        "release: the members' marker and gap lines",
+        |store| async move {
+            let store = store.as_ref();
+            let marker = super::availability::SuspendMarker {
+                cause: super::availability::SuspendCause::MemberUnknown,
+                evidence: super::availability::EvidenceClass::Local,
+                since_ms: 5,
+            };
+            let of_payments = |id: &str| PutSubscription {
+                selector: Selector {
+                    topics: topics(&["ios"]),
+                    mobs: BTreeSet::from([mob("payments")]),
+                },
+                ..put_for(id, worker(), &["ios"])
+            };
+            // The earlier mob's member waits past the window for one
+            // announcement: a gap line is owed to it. It has a marker too.
+            store
+                .put_subscription(&op("w1"), of_payments("w1"), 1_000)
+                .await
+                .unwrap();
+            store
+                .announce(announce_request("payments", "old", &["ios"], "old"), 1_000)
+                .await
+                .unwrap();
+            store.expire(1_000 + WINDOW, WINDOW, 0, 100).await.unwrap();
+            for member in [worker(), member("agent:a")] {
+                store
+                    .put_member_marker(&member, Some(marker.clone()), 1_000 + WINDOW)
+                    .await
+                    .unwrap();
+            }
+
+            let now = 1_000 + WINDOW + 10;
+            let released = store.release_mob(&mob("builds"), now).await.unwrap();
+            assert_eq!(released.members, vec![worker()], "{released:?}");
+            assert_eq!(
+                store
+                    .member_markers()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|(member, _)| member)
+                    .collect::<Vec<_>>(),
+                vec![member("agent:a")],
+                "the earlier mob's member has no marker any more, and another mob's keeps its own"
+            );
+
+            // A member of the same name in the new mob: its first batch carries
+            // the announcement made for it and no gap line of the earlier one.
+            store
+                .put_subscription(&op("w2"), of_payments("w2"), now)
+                .await
+                .unwrap();
+            store
+                .announce(announce_request("payments", "new", &["ios"], "new"), now)
+                .await
+                .unwrap();
+            let first = store
+                .seal_batch(&worker(), &batch_id("b1"), &policy(), now + 5_000)
+                .await
+                .unwrap()
+                .expect("due after the delay");
+            assert_eq!(first.items.len(), 1);
+            assert!(
+                first.gaps.is_empty(),
+                "no gap line of the earlier mob's member reaches the new one: {:?}",
+                first.gaps
+            );
+        },
+    )
+    .await;
+}
+
+/// The mob "builds" has the source "inbox", whose audience covers "agent:a"
+/// and "agent:b" of this gateway's mob. "agent:b" subscribed to it, captured
+/// one item while covered, lost its coverage, and the item is held from it
+/// (counted in the audit). Then what the mob left is released. "agent:b"
+/// also has a subscription of this gateway's own mob.
+async fn an_item_of_builds_held_from_b_and_then_the_release() -> Harness {
+    let mut native = native_with_seated_builds();
+    native.known.insert("agent:b".to_string());
+    let harness = harness_with(native);
+    let service = &harness.service;
+    let direct = || serde_json::json!([{ "kind": "direct" }]);
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(inbox_with(
+            "put",
+            serde_json::json!([member_grant("agent:a"), member_grant("agent:b")]),
+            direct(),
+        )),
+    )
+    .await
+    .unwrap();
+    try_host_call(
+        service,
+        SUBSCRIPTIONS_PUT,
+        serde_json::json!({
+            "operation_id": "subscribe-b-builds",
+            "subscription_id": "b-builds",
+            "member": agent_b(),
+            "topics": ["mail.received"],
+            "mobs": ["builds", OWN_MOB],
+        }),
+    )
+    .await
+    .unwrap();
+    service
+        .put_subscription(
+            &op("b-own"),
+            put("b-own", "agent:b", &["ios"], StartFrontier::Now),
+        )
+        .await
+        .unwrap();
+    try_host_call(
+        service,
+        SOURCES_ADVANCE,
+        in_builds(with(
+            advance_params("baseline", 1, 0, "c1"),
+            "coverage",
+            serde_json::json!("complete"),
+        )),
+    )
+    .await
+    .unwrap();
+    let advanced = try_host_call(
+        service,
+        SOURCES_ADVANCE,
+        in_builds(with_items(
+            advance_params("inbox:v1", 1, 1, "c2"),
+            &[upsert("m-1", "v1", "first")],
+        )),
+    )
+    .await
+    .unwrap();
+    assert_eq!(advanced["items"][0]["captured"], serde_json::json!(1));
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        in_builds(with(
+            inbox_with(
+                "narrow",
+                serde_json::json!([member_grant("agent:a")]),
+                direct(),
+            ),
+            "expected_revision",
+            serde_json::json!(1),
+        )),
+    )
+    .await
+    .unwrap();
+    harness.clock.store(100_000, Ordering::SeqCst);
+    service.run_round().await.unwrap();
+    let held = audit_rows(
+        service,
+        serde_json::json!({ "mob_id": "builds", "member": agent_b(), "action": "items_held" }),
+    )
+    .await;
+    assert_eq!(
+        held.len(),
+        1,
+        "the item is held from b before the release: {held:?}"
+    );
+    assert_eq!(
+        store_rows(&harness_db(&harness))["announcement_holds"].len(),
+        1
+    );
+
+    service.release_mob(&mob("builds")).await.unwrap();
+    harness
+}
+
+/// The holds of the earlier mob's announcements go with them: none is left
+/// for a later round to check against an announcement that no longer
+/// exists.
+///
+/// This row and the two after it came after the change they cover; one
+/// mutant each shows that it fails without it.
+#[tokio::test]
+async fn a_release_removes_the_holds_of_the_mobs_announcements() {
+    let harness = an_item_of_builds_held_from_b_and_then_the_release().await;
+    assert!(
+        store_rows(&harness_db(&harness))["announcement_holds"].is_empty(),
+        "no hold of the earlier mob's announcement is left"
+    );
+    harness.clock.store(200_000, Ordering::SeqCst);
+    harness
+        .service
+        .run_round()
+        .await
+        .expect("a round after the release checks no hold of the earlier mob");
+}
+
+/// What was counted about the earlier mob's sources goes: the audit lists
+/// nothing of them, for the member the item was held from or for anyone.
+#[tokio::test]
+async fn a_release_removes_what_was_counted_about_the_mobs_sources() {
+    let harness = an_item_of_builds_held_from_b_and_then_the_release().await;
+    let counted = audit_rows(&harness.service, serde_json::json!({ "mob_id": "builds" })).await;
+    assert!(counted.is_empty(), "{counted:?}");
+    let of_b = audit_rows(
+        &harness.service,
+        serde_json::json!({ "mob_id": "builds", "member": agent_b() }),
+    )
+    .await;
+    assert!(of_b.is_empty(), "{of_b:?}");
+}
+
+/// An item of the earlier mob that was held from its member goes without a
+/// word: the member's next batch carries what it awaits of another mob and
+/// no gap line, since it may not learn of what it may not receive.
+#[tokio::test]
+async fn a_release_tells_nothing_of_an_item_held_from_its_member() {
+    let harness = an_item_of_builds_held_from_b_and_then_the_release().await;
+    harness.announce_burst(1).await;
+    harness.clock.store(10_000_000, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    let batches = batches_of_b(&harness.service).await;
+    assert_eq!(batches.len(), 1, "{batches:?}");
+    assert_eq!(batches[0].items.len(), 1);
+    assert_eq!(batches[0].items[0].mob_id, mob(OWN_MOB));
+    assert!(
+        batches[0].gaps.is_empty(),
+        "the held item is not told: {:?}",
+        batches[0].gaps
+    );
+}
+
 /// What a member private to a person announces, in the rows below.
 const PERSONS_WORDS: &str = "the draft of the offer is ready";
 
@@ -19309,9 +21064,23 @@ async fn a_batch_sealed_earlier_is_delivered_as_it_stands() {
         announce_by(&harness, "agent:p", "k-early", PERSONS_WORDS)
             .await
             .unwrap();
+        // Sealed with the roster as it read then.
+        let mut then = super::sources::RosterFacts::default();
+        for identity in ["agent:a", "agent:p"] {
+            then.insert(
+                member(identity),
+                super::sources::MemberFacts::new("worker", BTreeMap::new()),
+            );
+        }
         let sealed = harness
             .store
-            .seal_batch(&member("agent:a"), &batch_id("b-early"), &policy(), 5_000)
+            .seal_batch_with_roster(
+                &member("agent:a"),
+                &batch_id("b-early"),
+                &policy(),
+                &then,
+                5_000,
+            )
             .await
             .unwrap()
             .expect("the backlog is due");
@@ -19357,11 +21126,14 @@ async fn a_batch_sealed_earlier_is_delivered_as_it_stands() {
     }
 }
 
-/// A subscriber whose roster facts do not read (the roster names no such
-/// member, or cannot be read now) takes nothing of what a member private to
-/// a person announces; it takes a shared member's announcement as before.
+/// A subscriber whose roster facts do not read when a member private to a
+/// person announces is owed the item and judged when its batch is sealed:
+/// one whose roster cannot be read waits and receives it once its roster
+/// reads it as the announcer's person's; one the roster does not name
+/// receives nothing of it. A shared member's announcement is captured for
+/// all of them as before.
 #[tokio::test]
-async fn a_subscriber_whose_roster_does_not_read_takes_no_private_members_announcement() {
+async fn a_subscriber_whose_roster_does_not_read_is_judged_at_the_seal() {
     let harness = audience_harness();
     // Private to the announcer's person, while its roster cannot be read.
     harness.native.set_roster_facts(
@@ -19383,9 +21155,36 @@ async fn a_subscriber_whose_roster_does_not_read_takes_no_private_members_announ
         .unwrap();
     assert_eq!(
         captured_ids(&private),
-        audience_subscriptions(&["agent:q"]),
-        "captured only where the subscriber's roster facts read"
+        audience_subscriptions(&["agent:n", "agent:u", "agent:q"]),
+        "owed where the subscriber's roster facts do not read"
     );
+    deliver_due(&harness).await;
+    assert!(
+        delivered_to(&harness, "agent:q")
+            .await
+            .contains(PERSONS_WORDS),
+        "its person's member receives it"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:n")),
+        vec![(1, Some("cancelled".to_string()))],
+        "a member the roster does not name receives nothing of it"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:u")),
+        vec![(1, None)],
+        "a member whose roster cannot be read waits"
+    );
+
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    harness.service.run_round().await.unwrap();
+    assert!(
+        delivered_to(&harness, "agent:u")
+            .await
+            .contains(PERSONS_WORDS),
+        "it receives it once its roster reads"
+    );
+
     let shared = announce_by(&harness, "agent:a", "k-shared", "the build is green")
         .await
         .unwrap();
@@ -19458,8 +21257,8 @@ async fn an_earlier_start_replays_nothing_of_a_member_that_has_since_ended() {
 }
 
 /// What a member announced before it ended is still delivered to the
-/// subscriptions that captured it: an item whose announcer the roster no
-/// longer names is not judged again when its batch is sealed.
+/// subscriptions that captured it, where the record of who members are
+/// private to knows the ended member as private to no one.
 #[tokio::test]
 async fn what_a_member_announced_before_it_ended_is_still_delivered() {
     let harness = audience_harness();
@@ -19468,13 +21267,10 @@ async fn what_a_member_announced_before_it_ended_is_still_delivered() {
         .await
         .unwrap();
     assert_eq!(captured_ids(&outcome), audience_subscriptions(&["agent:a"]));
-    // The member has ended: the roster names it no more.
-    harness
-        .native
-        .roster_facts
-        .lock()
-        .unwrap()
-        .remove("agent:b");
+    // The member has ended: the roster names it no more, and the record
+    // of who members are private to holds it.
+    harness.native.end_member("agent:b");
+    harness.native.record_person("agent:b", None);
     deliver_due(&harness).await;
     let delivered = delivered_to(&harness, "agent:a").await;
     assert!(
@@ -19493,11 +21289,11 @@ fn held_items(harness: &Harness) -> i64 {
     .unwrap()
 }
 
-/// The seal of a member waits while the roster of a member that announced
-/// one of its owed items cannot be read: nothing is sealed, the item stays
-/// owed, and it is delivered once the roster reads.
+/// While the roster of a member that announced one of a member's owed
+/// items cannot be read, the item stays owed and is in no batch; it is
+/// delivered once the roster reads.
 #[tokio::test]
-async fn a_seal_waits_while_an_announcers_roster_cannot_be_read() {
+async fn an_item_stays_owed_while_its_announcers_roster_cannot_be_read() {
     let harness = audience_harness();
     subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
     announce_by(&harness, "agent:b", "k-member", "the build is green")
@@ -19523,7 +21319,7 @@ async fn a_seal_waits_while_an_announcers_roster_cannot_be_read() {
     );
 
     harness.native.unreadable_facts.lock().unwrap().clear();
-    harness.service.run_round().await.unwrap();
+    deliver_due(&harness).await;
     let delivered = delivered_to(&harness, "agent:a").await;
     assert!(
         delivered.contains("the build is green"),
@@ -19531,13 +21327,20 @@ async fn a_seal_waits_while_an_announcers_roster_cannot_be_read() {
     );
 }
 
-/// A subscription that starts at an earlier frontier is refused for now,
-/// and not made, while the roster of a member that announced in the replay
-/// cannot be read; the same put is taken once the roster reads.
+/// A subscription that starts at an earlier frontier is made while the
+/// roster of a member that announced in the replay cannot be read. What
+/// that member announced is owed to the subscription and judged when its
+/// batch is sealed: it is not delivered while the roster does not read, and
+/// it is delivered at the first seal after it reads. What a member whose
+/// roster reads announced is replayed and delivered meanwhile.
 #[tokio::test]
-async fn an_earlier_start_waits_while_an_announcers_roster_cannot_be_read() {
+async fn an_earlier_start_owes_what_an_announcer_that_does_not_read_announced() {
     let harness = audience_harness();
-    announce_by(&harness, "agent:b", "k-member", "the build is green")
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    announce_by(&harness, "agent:b", "k-first", "the build is green")
+        .await
+        .unwrap();
+    announce_by(&harness, "agent:c", "k-second", "the second note")
         .await
         .unwrap();
     harness
@@ -19545,42 +21348,35 @@ async fn an_earlier_start_waits_while_an_announcers_roster_cannot_be_read() {
         .unreadable_facts
         .lock()
         .unwrap()
-        .insert("agent:b".to_string());
-    let early = || {
-        put(
-            "s-early",
-            "agent:a",
-            &["ios"],
-            StartFrontier::After {
-                frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
-            },
-        )
+        .insert("agent:c".to_string());
+    let start = StartFrontier::After {
+        frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
     };
-    let refused = harness
-        .service
-        .put_subscription(&op("s-early"), early())
-        .await;
+    subscribe_member(&harness, "agent:a", start).await;
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, None), (2, None)],
+        "both are owed to the new subscription"
+    );
+
+    deliver_due(&harness).await;
+    let first = delivered_to(&harness, "agent:a").await;
     assert!(
-        matches!(refused, Err(AnnouncementError::NativeUnavailable(_))),
-        "refused for now: {refused:?}"
+        first.contains("the build is green") && !first.contains("the second note"),
+        "what the member whose roster reads announced is delivered: {first}"
     );
     assert_eq!(
-        harness.store.subscription(&sid("s-early")).await.unwrap(),
-        None,
-        "the subscription is not made"
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("delivered".to_string())), (2, None)],
+        "the other stays owed"
     );
 
     harness.native.unreadable_facts.lock().unwrap().clear();
-    harness
-        .service
-        .put_subscription(&op("s-early"), early())
-        .await
-        .unwrap();
     deliver_due(&harness).await;
-    let delivered = delivered_to(&harness, "agent:a").await;
+    let both = delivered_to(&harness, "agent:a").await;
     assert!(
-        delivered.contains("the build is green"),
-        "replayed once the roster reads: {delivered}"
+        both.contains("the second note"),
+        "delivered at the first seal after the roster reads: {both}"
     );
 }
 
@@ -19837,6 +21633,12 @@ async fn a_gateways_own_roster_decides_who_receives_a_declared_agents_announceme
     let service = runtime
         .mob_announcements()
         .expect("the builder attached the owner to its runtime");
+    // The record of who the runtime's members are private to is read.
+    runtime
+        .mob_runtime()
+        .private_owners()
+        .first_attempts_settled(crate::private_owners::FIRST_READ_WAIT)
+        .await;
     for (id, identity) in [("sub-a", "agent:a"), ("sub-p", "agent:p")] {
         host_call(
             &service,
@@ -19881,4 +21683,1131 @@ async fn a_gateways_own_roster_decides_who_receives_a_declared_agents_announceme
         "a shared agent's announcement is captured for both"
     );
     runtime.shutdown().await;
+}
+
+/// An item owed from before, whose announcer has ended and is private to a
+/// person by the record of who members are private to, is settled when its
+/// batch is sealed and reaches no member of another person; a member
+/// private to the same person receives it.
+#[tokio::test]
+async fn an_owed_item_of_an_ended_private_member_is_settled_at_the_seal() {
+    let harness = audience_harness();
+    // The roster as it read when the item was captured.
+    harness.native.set_roster_facts("agent:p", "worker", &[]);
+    for identity in ["agent:a", "agent:q"] {
+        subscribe_member(&harness, identity, StartFrontier::Now).await;
+    }
+    let early = announce_by(&harness, "agent:p", "k-early", PERSONS_WORDS)
+        .await
+        .unwrap();
+    assert_eq!(
+        captured_ids(&early),
+        audience_subscriptions(&["agent:a", "agent:q"]),
+        "owed to both before the seal"
+    );
+    // The member has ended; the record holds who it was private to.
+    harness.native.end_member("agent:p");
+    harness.native.record_person("agent:p", Some("person-one"));
+    deliver_due(&harness).await;
+
+    let shared = delivered_to(&harness, "agent:a").await;
+    assert!(
+        !shared.contains(PERSONS_WORDS) && !shared.contains("agent:p"),
+        "the item is in no batch of the shared member: {shared}"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("cancelled".to_string()))]
+    );
+    let persons = delivered_to(&harness, "agent:q").await;
+    assert!(
+        persons.contains(PERSONS_WORDS),
+        "its person's member receives it: {persons}"
+    );
+}
+
+/// While the record of who members are private to has not been read, an
+/// ended member's item stays owed to a member and is in no batch. Once the
+/// record reads, the item is delivered where the record knows the ended
+/// member as private to no one.
+#[tokio::test]
+async fn an_item_stays_owed_while_the_record_of_persons_is_not_read() {
+    let harness = audience_harness();
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    announce_by(&harness, "agent:b", "k-member", "the build is green")
+        .await
+        .unwrap();
+    harness.native.end_member("agent:b");
+    harness.native.persons_unread.store(true, Ordering::SeqCst);
+    deliver_due(&harness).await;
+    assert_eq!(
+        harness.native.submits(),
+        0,
+        "nothing is delivered meanwhile"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, None)],
+        "the item stays owed"
+    );
+
+    harness.native.persons_unread.store(false, Ordering::SeqCst);
+    harness.native.record_person("agent:b", None);
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("the build is green"),
+        "delivered once the record reads: {delivered}"
+    );
+}
+
+/// What an ended member announced that the record of who members are
+/// private to does not know reaches no other member: the owed item is
+/// settled when its batch is sealed.
+#[tokio::test]
+async fn an_ended_member_the_record_does_not_know_reaches_no_other_member() {
+    let harness = audience_harness();
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    announce_by(&harness, "agent:b", "k-member", "the build is green")
+        .await
+        .unwrap();
+    harness.native.end_member("agent:b");
+    deliver_due(&harness).await;
+    assert_eq!(harness.native.submits(), 0, "nothing is delivered");
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("cancelled".to_string()))]
+    );
+}
+
+/// A subscription that starts at an earlier frontier replays what an ended
+/// member announced where the record of who members are private to knows
+/// that member as private to no one.
+#[tokio::test]
+async fn an_earlier_start_replays_what_an_ended_shared_member_announced() {
+    let harness = audience_harness();
+    announce_by(&harness, "agent:b", "k-member", "the build is green")
+        .await
+        .unwrap();
+    harness.native.end_member("agent:b");
+    harness.native.record_person("agent:b", None);
+    let start = StartFrontier::After {
+        frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
+    };
+    subscribe_member(&harness, "agent:a", start).await;
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("the build is green") && delivered.contains("by member \"agent:b\""),
+        "replayed with its announcer: {delivered}"
+    );
+}
+
+/// A member whose own roster row names no person, and that the record of
+/// who members are private to knows as private to a person, is judged by
+/// the record: what it announces reaches its person's members only, and it
+/// receives what a member private to the same person announces.
+#[tokio::test]
+async fn a_member_whose_person_only_the_record_names_is_judged_by_it() {
+    let harness = audience_harness();
+    // The roster row of agent:b names no person; the record does.
+    harness.native.record_person("agent:b", Some("person-one"));
+    for identity in ["agent:a", "agent:b", "agent:q"] {
+        subscribe_member(&harness, identity, StartFrontier::Now).await;
+    }
+    let by_recorded = announce_by(&harness, "agent:b", "k-recorded", PERSONS_WORDS)
+        .await
+        .unwrap();
+    assert_eq!(
+        captured_ids(&by_recorded),
+        audience_subscriptions(&["agent:b", "agent:q"]),
+        "captured for its person's members only"
+    );
+    let by_private = announce_by(&harness, "agent:p", "k-private", PERSONS_WORDS)
+        .await
+        .unwrap();
+    assert_eq!(
+        captured_ids(&by_private),
+        audience_subscriptions(&["agent:b", "agent:q"]),
+        "it receives what its person's member announces"
+    );
+    // The seal judges it by the record too: the item is delivered to it.
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:b").await;
+    assert!(
+        delivered.contains("key \"k-private\""),
+        "its person's member's announcement is delivered to it: {delivered}"
+    );
+}
+
+/// On a gateway's own runtime, with nothing scripted: once an agent was
+/// built to take a delivery, the record of who the runtime's members are
+/// private to holds it under the name the gateway's native seam asks by:
+/// the declared agent as private to its person, the shared agent as
+/// private to no one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateways_own_record_holds_the_agents_it_built() {
+    use super::sources::MemberPerson;
+    let state = tempfile::tempdir().expect("state dir");
+    let config = AnnouncementConfig {
+        policy: SealingPolicy {
+            max_count: 1,
+            max_bytes: 1_048_576,
+            max_delay_ms: 50,
+            min_wake_interval_ms: 0,
+        },
+        peer_request_window_ms: 1,
+        ..AnnouncementConfig::default()
+    };
+    let tools = format!("rust_bundles = [\"{}\"]", super::tools::TOOL_BUNDLE);
+    let runtime = Box::pin(
+        identity_first_test_builder(state.path(), "mob-k-record", &tools)
+            .await
+            .roster_provider(Arc::new(DeclaredPersonRoster))
+            .mob_announcements(config)
+            .build(),
+    )
+    .await
+    .expect("the builder composes mob announcements");
+    let own_mob = mob("mob-k-record");
+    let service = runtime
+        .mob_announcements()
+        .expect("the builder attached the owner to its runtime");
+    for (id, identity) in [("sub-a", "agent:a"), ("sub-p", "agent:p")] {
+        host_call(
+            &service,
+            &own_mob,
+            "meta/mob_announcements/subscriptions/put",
+            serde_json::json!({
+                "operation_id": format!("put-{id}"),
+                "subscription_id": id,
+                "member": { "mob_id": "mob-k-record", "identity": identity },
+                "topics": ["t"]
+            }),
+        )
+        .await;
+    }
+    let announced = host_call(
+        &service,
+        &own_mob,
+        "meta/mob_announcements/announce",
+        serde_json::json!({ "source_key": "k-1", "topics": ["t"], "body": "a note" }),
+    )
+    .await;
+    assert_eq!(announced["captured"], 2, "{announced}");
+    // Each agent is built to take its delivery.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    for identity in ["agent:a", "agent:p"] {
+        loop {
+            let listed = host_call(
+                &service,
+                &own_mob,
+                "meta/mob_announcements/deliveries/list",
+                serde_json::json!({
+                    "member": { "mob_id": "mob-k-record", "identity": identity }
+                }),
+            )
+            .await;
+            let state = &listed["deliveries"][0]["state"]["state"];
+            if state == "committed" || state == "delivered" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the delivery of {identity} was never committed natively: {listed}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    let delivery = super::local_delivery(&runtime).expect("the gateway's native seam");
+    let of = |identity: &str| Member::new(own_mob.clone(), MemberIdentity::new(identity).unwrap());
+    assert_eq!(
+        delivery.member_person(&of("agent:p")),
+        Ok(MemberPerson::Private("person-one".to_string()))
+    );
+    assert_eq!(
+        delivery.member_person(&of("agent:a")),
+        Ok(MemberPerson::Shared)
+    );
+    runtime.shutdown().await;
+}
+
+/// A subscription on a topic a source owns is admitted by its member's own
+/// roster row, also while the record of who members are private to has not
+/// been read: the admission asks the row and nothing else.
+#[tokio::test]
+async fn a_put_on_a_sources_topic_is_admitted_by_the_members_row_while_the_record_is_not_read() {
+    let native = native_serving(&["agent:d"]);
+    native.set_roster_facts("agent:d", "triage", &[]);
+    let harness = harness_with(native);
+    let service = &harness.service;
+    try_host_call(
+        service,
+        SOURCES_PUT,
+        inbox_with(
+            "put",
+            serde_json::json!([{ "kind": "role", "mob_id": OWN_MOB, "role": "triage" }]),
+            serde_json::json!([{ "kind": "direct" }]),
+        ),
+    )
+    .await
+    .unwrap();
+    harness.native.persons_unread.store(true, Ordering::SeqCst);
+    try_subscribe(service, "agent:d", "agent:d", &["mail.received"])
+        .await
+        .unwrap();
+}
+
+/// The seal of a member that is owed only the host's announcements does
+/// not wait on the record of who members are private to: its batch is
+/// sealed and delivered while that record has not been read.
+#[tokio::test]
+async fn a_seal_of_the_hosts_items_does_not_wait_on_the_record_of_persons() {
+    let harness = audience_harness();
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    harness
+        .service
+        .announce(announce_request(
+            OWN_MOB,
+            "k-host",
+            &["ios"],
+            "checkout recovered",
+        ))
+        .await
+        .unwrap();
+    harness.native.persons_unread.store(true, Ordering::SeqCst);
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("checkout recovered"),
+        "delivered while the record is not read: {delivered}"
+    );
+}
+
+/// A subscription that starts at an earlier frontier whose replay holds a
+/// private member's announcement is refused for now, and not made, while
+/// the record of who members are private to cannot say who the subscriber
+/// is private to; the same put is taken once the record reads.
+#[tokio::test]
+async fn an_earlier_start_waits_while_the_record_cannot_say_who_the_subscriber_is() {
+    let harness = audience_harness();
+    announce_by(&harness, "agent:p", "k-private", PERSONS_WORDS)
+        .await
+        .unwrap();
+    harness.native.persons_unread.store(true, Ordering::SeqCst);
+    let early = || {
+        put(
+            "s-early",
+            "agent:a",
+            &["ios"],
+            StartFrontier::After {
+                frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
+            },
+        )
+    };
+    let refused = harness
+        .service
+        .put_subscription(&op("s-early"), early())
+        .await;
+    assert!(
+        matches!(refused, Err(AnnouncementError::NativeUnavailable(_))),
+        "refused for now: {refused:?}"
+    );
+    assert_eq!(
+        harness.store.subscription(&sid("s-early")).await.unwrap(),
+        None,
+        "the subscription is not made"
+    );
+
+    harness.native.persons_unread.store(false, Ordering::SeqCst);
+    harness
+        .service
+        .put_subscription(&op("s-early"), early())
+        .await
+        .unwrap();
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        !delivered.contains(PERSONS_WORDS),
+        "nothing of the private member is replayed for the shared member: {delivered}"
+    );
+}
+
+/// On a gateway's own runtime, with nothing scripted: after an agent its
+/// host declares private to a person was built and its member has ended,
+/// the record of who the runtime's members are private to still holds it as
+/// private to that person.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gateways_own_record_keeps_the_person_of_an_agent_whose_member_ended() {
+    use super::sources::MemberPerson;
+    let state = tempfile::tempdir().expect("state dir");
+    let config = AnnouncementConfig {
+        policy: SealingPolicy {
+            max_count: 1,
+            max_bytes: 1_048_576,
+            max_delay_ms: 50,
+            min_wake_interval_ms: 0,
+        },
+        peer_request_window_ms: 1,
+        ..AnnouncementConfig::default()
+    };
+    let tools = format!("rust_bundles = [\"{}\"]", super::tools::TOOL_BUNDLE);
+    let runtime = Box::pin(
+        identity_first_test_builder(state.path(), "mob-k-ended", &tools)
+            .await
+            .roster_provider(Arc::new(DeclaredPersonRoster))
+            .mob_announcements(config)
+            .build(),
+    )
+    .await
+    .expect("the builder composes mob announcements");
+    let own_mob = mob("mob-k-ended");
+    let service = runtime
+        .mob_announcements()
+        .expect("the builder attached the owner to its runtime");
+    let declared = serde_json::json!({ "mob_id": "mob-k-ended", "identity": "agent:p" });
+    host_call(
+        &service,
+        &own_mob,
+        "meta/mob_announcements/subscriptions/put",
+        serde_json::json!({
+            "operation_id": "put-sub-p",
+            "subscription_id": "sub-p",
+            "member": declared.clone(),
+            "topics": ["t"]
+        }),
+    )
+    .await;
+    host_call(
+        &service,
+        &own_mob,
+        "meta/mob_announcements/announce",
+        serde_json::json!({ "source_key": "k-1", "topics": ["t"], "body": "a note" }),
+    )
+    .await;
+    // The agent is built to take its delivery.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let listed = host_call(
+            &service,
+            &own_mob,
+            "meta/mob_announcements/deliveries/list",
+            serde_json::json!({ "member": declared.clone() }),
+        )
+        .await;
+        let state = &listed["deliveries"][0]["state"]["state"];
+        if state == "committed" || state == "delivered" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the delivery was never committed natively: {listed}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Its member ends.
+    runtime
+        .mob_handle()
+        .retire(crate::member_comms_id::roster_member_id_for_identity(
+            "agent:p",
+        ))
+        .await
+        .expect("the member retires");
+    let delivery = super::local_delivery(&runtime).expect("the gateway's native seam");
+    let member = Member::new(own_mob.clone(), MemberIdentity::new("agent:p").unwrap());
+    assert_eq!(
+        delivery.member_person(&member),
+        Ok(MemberPerson::Private("person-one".to_string())),
+        "the record keeps the person of the ended member"
+    );
+    runtime.shutdown().await;
+}
+
+/// The announce of `identity` on the topic "ios" under `key`, as the store
+/// takes it with the announcer's own roster facts, private to no one.
+async fn store_takes_a_shared_members_announce(
+    store: &SqliteAnnouncementStore,
+    identity: &str,
+    key: &str,
+    body: &str,
+) {
+    let mut facts = super::sources::RosterFacts::default();
+    facts.insert(
+        member(identity),
+        super::sources::MemberFacts::new("worker", BTreeMap::new()),
+    );
+    store
+        .announce_with_facts(
+            AnnounceRequest {
+                mob_id: mob(OWN_MOB),
+                announced_by: Announcer::Member {
+                    identity: MemberIdentity::new(identity).unwrap(),
+                },
+                source_key: SourceKey::new(key).unwrap(),
+                topics: topics(&["ios"]),
+                body: body.to_string(),
+                correlation_id: None,
+                causes: Vec::new(),
+            },
+            &facts,
+            1_500,
+        )
+        .await
+        .unwrap();
+}
+
+/// An item captured while a round reads the facts for a member's seal,
+/// whose announcer that round did not ask about, stays owed: it is in no
+/// batch of that seal, it is not settled, and the next seal delivers it.
+#[tokio::test]
+async fn an_item_captured_while_a_seal_reads_its_facts_is_delivered_at_the_next_seal() {
+    let harness = audience_harness();
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    announce_by(&harness, "agent:b", "k-first", "the build is green")
+        .await
+        .unwrap();
+    // While the seal reads the first announcer's facts, another member
+    // announces.
+    let store = Arc::clone(&harness.store);
+    harness.native.during_facts_read_of("agent:b", async move {
+        store_takes_a_shared_members_announce(&store, "agent:c", "k-second", "the second note")
+            .await;
+    });
+    deliver_due(&harness).await;
+    let first = delivered_to(&harness, "agent:a").await;
+    assert!(
+        first.contains("the build is green") && !first.contains("the second note"),
+        "the first seal delivers what its round asked about: {first}"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("delivered".to_string())), (2, None)],
+        "the item captured meanwhile stays owed"
+    );
+
+    deliver_due(&harness).await;
+    let both = delivered_to(&harness, "agent:a").await;
+    assert!(
+        both.contains("the second note"),
+        "the next seal delivers it: {both}"
+    );
+}
+
+/// An announcement made while a subscription with an earlier start reads
+/// the facts of its replay's announcers, by a member that read did not ask
+/// about, is owed to the subscription and judged when its batch is sealed.
+#[tokio::test]
+async fn an_item_announced_while_an_earlier_start_reads_its_facts_is_owed_and_delivered() {
+    let harness = audience_harness();
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    announce_by(&harness, "agent:b", "k-first", "the build is green")
+        .await
+        .unwrap();
+    // While the put reads the first announcer's facts, another member
+    // announces.
+    let store = Arc::clone(&harness.store);
+    harness.native.during_facts_read_of("agent:b", async move {
+        store_takes_a_shared_members_announce(&store, "agent:c", "k-second", "the second note")
+            .await;
+    });
+    let start = StartFrontier::After {
+        frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
+    };
+    subscribe_member(&harness, "agent:a", start).await;
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("the build is green") && delivered.contains("the second note"),
+        "both are replayed and delivered: {delivered}"
+    );
+}
+
+/// The seal of a member that is owed a private member's item waits while
+/// the record of who members are private to cannot say who that member is
+/// private to: the item stays owed and is judged once the record reads.
+#[tokio::test]
+async fn a_seal_waits_on_the_record_for_a_member_owed_a_private_members_item() {
+    let harness = audience_harness();
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    // The member's roster cannot be read at the announce: it is owed the
+    // item.
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:a".to_string());
+    let outcome = announce_by(&harness, "agent:p", "k-private", PERSONS_WORDS)
+        .await
+        .unwrap();
+    assert_eq!(captured_ids(&outcome), audience_subscriptions(&["agent:a"]));
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    harness.native.persons_unread.store(true, Ordering::SeqCst);
+    deliver_due(&harness).await;
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, None)],
+        "the item stays owed while the record is not read"
+    );
+
+    harness.native.persons_unread.store(false, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("cancelled".to_string()))],
+        "judged once the record reads: a shared member receives nothing of it"
+    );
+    assert_eq!(harness.native.submits(), 0);
+}
+
+/// Every construction of the gateway's native seam in the product hands
+/// it the record of who the runtime's members are private to.
+#[test]
+fn every_construction_of_the_gateways_seam_is_handed_the_record() {
+    const BUILT: &str = "MobNativeDelivery::new(";
+    let mut found = 0;
+    for (file, source) in [
+        ("mod.rs", include_str!("mod.rs")),
+        ("remote.rs", include_str!("remote.rs")),
+    ] {
+        let mut rest = source;
+        while let Some(at) = rest.find(BUILT) {
+            let built = &rest[at..];
+            let statement: String = built.chars().take(400).collect();
+            assert!(
+                statement.contains(".with_members_apart("),
+                "{file}: a seam is built without the record: {statement}"
+            );
+            found += 1;
+            rest = &built[BUILT.len()..];
+        }
+    }
+    assert!(found >= 1, "the product builds the gateway's seam");
+}
+
+/// The stock store's forms that are handed no announcer's facts judge
+/// nothing another member announced: an earlier start through them owes
+/// such an announcement to the subscription, and a seal through them leaves
+/// it owed, in no batch. The seal that is handed the announcer's facts
+/// judges it and takes it.
+#[tokio::test]
+async fn the_stock_stores_forms_without_announcer_facts_leave_a_members_item_owed() {
+    let harness = audience_harness();
+    announce_by(&harness, "agent:b", "k-first", "the build is green")
+        .await
+        .unwrap();
+    let id = audience_subscription("agent:a");
+    let start = StartFrontier::After {
+        frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
+    };
+    let now = harness.clock.load(Ordering::SeqCst);
+    harness
+        .store
+        .put_subscription(&op(&id), put(&id, "agent:a", &["ios"], start), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        owed_settlements(&harness, &id),
+        vec![(1, None)],
+        "the plain put owes what another member announced"
+    );
+
+    let due = harness.clock.fetch_add(60_001, Ordering::SeqCst) + 60_001;
+    let plain = harness
+        .store
+        .seal_batch(&member("agent:a"), &batch_id("b-plain"), &policy(), due)
+        .await
+        .unwrap();
+    assert_eq!(plain, None, "the plain seal takes no such item");
+    let own = super::sources::MemberFacts::new("worker", BTreeMap::new());
+    let with_own_facts = harness
+        .store
+        .seal_batch_with_facts(
+            &member("agent:a"),
+            &batch_id("b-own"),
+            &policy(),
+            Some(own),
+            due,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        with_own_facts, None,
+        "nor does the seal with the member's own facts"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &id),
+        vec![(1, None)],
+        "both leave it owed"
+    );
+
+    let mut roster = super::sources::RosterFacts::default();
+    for identity in ["agent:a", "agent:b"] {
+        roster.insert(
+            member(identity),
+            super::sources::MemberFacts::new("worker", BTreeMap::new()),
+        );
+    }
+    let batch = harness
+        .store
+        .seal_batch_with_roster(
+            &member("agent:a"),
+            &batch_id("b-roster"),
+            &policy(),
+            &roster,
+            due,
+        )
+        .await
+        .unwrap()
+        .expect("the seal that is handed the announcer's facts takes it");
+    assert_eq!(batch.items.len(), 1);
+    assert!(
+        batch.body.contains("the build is green"),
+        "the item is in the batch: {}",
+        batch.body
+    );
+}
+
+/// While the facts of a member that announced one of a member's owed items
+/// cannot be read, that item stays owed and enters no batch, and the
+/// member's other items are sealed and delivered: the host's, and those of
+/// members whose facts read, newer ones too, at this seal and at a later
+/// one. The item is delivered at the first seal after its announcer's facts
+/// read, and nothing is delivered twice.
+#[tokio::test]
+async fn an_item_whose_announcer_does_not_read_stays_owed_and_the_members_other_items_are_delivered()
+ {
+    let harness = audience_harness();
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    announce_by(&harness, "agent:b", "k-first", "the build is green")
+        .await
+        .unwrap();
+    announce_by(&harness, "agent:c", "k-second", "the second note")
+        .await
+        .unwrap();
+    announce_by(&harness, "agent:b", "k-third", "the third note")
+        .await
+        .unwrap();
+    harness
+        .service
+        .announce(announce_request(
+            OWN_MOB,
+            "k-host",
+            &["ios"],
+            "checkout recovered",
+        ))
+        .await
+        .unwrap();
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:c".to_string());
+    let delivered = || Some("delivered".to_string());
+    let subscription = audience_subscription("agent:a");
+
+    deliver_due(&harness).await;
+    let first = delivered_to(&harness, "agent:a").await;
+    assert!(
+        first.contains("the build is green")
+            && first.contains("the third note")
+            && first.contains("checkout recovered"),
+        "the member's other items are delivered: {first}"
+    );
+    assert!(
+        !first.contains("the second note"),
+        "what the member whose facts do not read announced is not: {first}"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &subscription),
+        vec![
+            (1, delivered()),
+            (2, None),
+            (3, delivered()),
+            (4, delivered())
+        ],
+        "the one item stays owed behind newer ones that are delivered"
+    );
+
+    // A later seal while the facts still do not read: a new item goes, the
+    // item stays owed.
+    announce_by(&harness, "agent:b", "k-fifth", "the fifth note")
+        .await
+        .unwrap();
+    deliver_due(&harness).await;
+    assert_eq!(
+        owed_settlements(&harness, &subscription),
+        vec![
+            (1, delivered()),
+            (2, None),
+            (3, delivered()),
+            (4, delivered()),
+            (5, delivered()),
+        ],
+        "a later seal passes it and leaves it owed"
+    );
+
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    deliver_due(&harness).await;
+    assert_eq!(
+        owed_settlements(&harness, &subscription),
+        vec![
+            (1, delivered()),
+            (2, delivered()),
+            (3, delivered()),
+            (4, delivered()),
+            (5, delivered()),
+        ],
+        "delivered at the first seal after its announcer's facts read"
+    );
+    let all = delivered_to(&harness, "agent:a").await;
+    for words in [
+        "the build is green",
+        "the second note",
+        "the third note",
+        "checkout recovered",
+        "the fifth note",
+    ] {
+        assert_eq!(
+            all.matches(words).count(),
+            1,
+            "{words:?} is delivered once: {all}"
+        );
+    }
+}
+
+/// Beside an item whose announcer's facts cannot be read, an item whose
+/// announcer's facts read is judged as ever: what a member private to a
+/// person announced is settled for a member that is not its person's, not
+/// left owed. The other item stays owed, is not delivered meanwhile, and is
+/// delivered once its announcer's facts read.
+#[tokio::test]
+async fn an_item_whose_announcer_reads_is_judged_beside_one_whose_announcer_does_not() {
+    let harness = audience_harness();
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    // The member's own roster cannot be read at the announce: it is owed
+    // the private member's item.
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:a".to_string());
+    let outcome = announce_by(&harness, "agent:p", "k-private", PERSONS_WORDS)
+        .await
+        .unwrap();
+    assert_eq!(captured_ids(&outcome), audience_subscriptions(&["agent:a"]));
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    announce_by(&harness, "agent:c", "k-second", "the second note")
+        .await
+        .unwrap();
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:c".to_string());
+
+    deliver_due(&harness).await;
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("cancelled".to_string())), (2, None)],
+        "the private member's item is settled; the other stays owed"
+    );
+    assert_eq!(harness.native.submits(), 0, "neither is delivered");
+
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    deliver_due(&harness).await;
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("the second note") && !delivered.contains(PERSONS_WORDS),
+        "only the shared member's item is delivered: {delivered}"
+    );
+}
+
+/// What a member private to a person announced, owed to a subscription with
+/// an earlier start because its announcer's roster did not read at the put,
+/// is judged at the seal: it stays owed while the roster does not read and
+/// is settled, not delivered, for a member that is not its person's once it
+/// reads.
+#[tokio::test]
+async fn an_earlier_starts_owed_item_of_a_private_member_is_judged_at_the_seal() {
+    let harness = audience_harness();
+    announce_by(&harness, "agent:p", "k-private", PERSONS_WORDS)
+        .await
+        .unwrap();
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:p".to_string());
+    let start = StartFrontier::After {
+        frontier: BTreeMap::from([(mob(OWN_MOB), 0)]),
+    };
+    subscribe_member(&harness, "agent:a", start).await;
+    deliver_due(&harness).await;
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, None)],
+        "owed, and not judged while the roster does not read"
+    );
+
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    deliver_due(&harness).await;
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, Some("cancelled".to_string()))],
+        "judged once it reads: a shared member receives nothing of it"
+    );
+    assert_eq!(harness.native.submits(), 0);
+}
+
+/// Members that each hold only an item whose announcer's facts cannot be
+/// read do not fill the round's page of members: with as many of them as a
+/// round looks at, the backlog of a member after them is sealed and
+/// delivered in the next round.
+#[tokio::test]
+async fn members_that_wait_on_an_announcers_facts_leave_the_rounds_page_to_the_members_after_them()
+{
+    let waiting: Vec<String> = (0..super::owner::ROUND_MEMBERS)
+        .map(|at| format!("agent:m{at:02}"))
+        .collect();
+    let mut native = ScriptedNative::new();
+    native.known = waiting
+        .iter()
+        .cloned()
+        .chain(["agent:c".to_string(), "agent:z".to_string()])
+        .collect();
+    let harness = harness_with(native);
+    for identity in waiting
+        .iter()
+        .map(String::as_str)
+        .chain(["agent:c", "agent:z"])
+    {
+        harness.native.set_roster_facts(identity, "worker", &[]);
+    }
+    for identity in &waiting {
+        subscribe_member(&harness, identity, StartFrontier::Now).await;
+    }
+    harness
+        .service
+        .put_subscription(
+            &op("s-z"),
+            put("s-z", "agent:z", &["android"], StartFrontier::Now),
+        )
+        .await
+        .unwrap();
+    // One announcement for every waiting member, then, later, one for the
+    // member after them.
+    announce_by(&harness, "agent:c", "k-held", "the second note")
+        .await
+        .unwrap();
+    harness.clock.fetch_add(1, Ordering::SeqCst);
+    harness
+        .service
+        .announce(announce_request(
+            OWN_MOB,
+            "k-host",
+            &["android"],
+            "checkout recovered",
+        ))
+        .await
+        .unwrap();
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:c".to_string());
+
+    // The first round looks at the members whose backlog is oldest: every
+    // one of them holds only the item whose announcer does not read.
+    harness.clock.fetch_add(60_001, Ordering::SeqCst);
+    let mut report = harness.service.run_round().await.unwrap();
+    assert_eq!(harness.native.submits(), 0, "the first round seals nothing");
+
+    // The rounds that follow run when the round before says the next is
+    // due, and at no other time: the member after them is reached by them.
+    let mut rounds = 0;
+    while !delivered_to(&harness, "agent:z")
+        .await
+        .contains("checkout recovered")
+    {
+        rounds += 1;
+        assert!(
+            rounds <= 3,
+            "the member after them is delivered its item by the rounds the round itself calls for"
+        );
+        let due = report
+            .next_due_ms
+            .expect("a round that leaves members waiting names its next time");
+        harness.clock.fetch_max(due, Ordering::SeqCst);
+        report = harness.service.run_round().await.unwrap();
+    }
+    assert_eq!(rounds, 1, "the very next round reaches it");
+    assert_eq!(
+        harness.clock.load(Ordering::SeqCst),
+        61_002,
+        "and it follows at once: the clock has not moved"
+    );
+}
+
+/// A member that holds only an item whose announcer's facts cannot be read
+/// takes no place in the round's page until it is looked at again, after
+/// the longest settle pause: it then receives what a member whose facts
+/// read announced meanwhile, and the item stays owed.
+#[tokio::test]
+async fn a_member_that_waits_on_an_announcers_facts_is_looked_at_again_after_the_settle_pause() {
+    let harness = audience_harness();
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    announce_by(&harness, "agent:c", "k-held", "the second note")
+        .await
+        .unwrap();
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:c".to_string());
+    deliver_due(&harness).await;
+    assert_eq!(harness.native.submits(), 0);
+
+    announce_by(&harness, "agent:b", "k-next", "the build is green")
+        .await
+        .unwrap();
+    harness.service.run_round().await.unwrap();
+    assert_eq!(
+        harness.native.submits(),
+        0,
+        "the member is not looked at before the pause is over"
+    );
+
+    harness.clock.fetch_add(
+        AnnouncementConfig::default().settle_check_max_ms,
+        Ordering::SeqCst,
+    );
+    harness.service.run_round().await.unwrap();
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("the build is green") && !delivered.contains("the second note"),
+        "looked at again after the pause: {delivered}"
+    );
+    assert_eq!(
+        owed_settlements(&harness, &audience_subscription("agent:a")),
+        vec![(1, None), (2, Some("delivered".to_string()))],
+        "the item whose announcer does not read stays owed"
+    );
+}
+
+/// A member is set waiting only by a seal that left an item owed because an
+/// announcer's facts did not read. A later seal that ends earlier, at the
+/// member's own roster, does not set it waiting again: the member is in the
+/// next round's page and receives the item once every roster reads.
+#[tokio::test]
+async fn a_seal_that_ends_at_the_members_own_roster_does_not_set_the_member_waiting() {
+    let harness = audience_harness();
+    harness.native.set_roster_facts("agent:c", "worker", &[]);
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    announce_by(&harness, "agent:c", "k-held", "the second note")
+        .await
+        .unwrap();
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:c".to_string());
+    deliver_due(&harness).await;
+    assert_eq!(harness.native.submits(), 0);
+
+    // The member is looked at again after the pause; this time its own
+    // roster does not read, and its seal ends there.
+    harness.clock.fetch_add(
+        AnnouncementConfig::default().settle_check_max_ms,
+        Ordering::SeqCst,
+    );
+    harness
+        .native
+        .unreadable_facts
+        .lock()
+        .unwrap()
+        .insert("agent:a".to_string());
+    harness.service.run_round().await.unwrap();
+    assert_eq!(harness.native.submits(), 0);
+
+    harness.native.unreadable_facts.lock().unwrap().clear();
+    harness.clock.fetch_add(1, Ordering::SeqCst);
+    harness.service.run_round().await.unwrap();
+    let delivered = delivered_to(&harness, "agent:a").await;
+    assert!(
+        delivered.contains("the second note"),
+        "the member is in the next round's page: {delivered}"
+    );
+}
+
+/// What a member of a mob that is hosted here and not loaded announced
+/// stays owed to a member of another mob, and no mob is loaded to judge it:
+/// the member's other announcements are delivered meanwhile. Once the
+/// announcer's mob is loaded again the announcement is delivered.
+#[tokio::test]
+async fn an_item_of_a_member_of_a_mob_that_is_not_loaded_stays_owed_and_loads_no_mob() {
+    let harness = harness_with(native_with_seated_builds());
+    harness.native.set_roster_facts("agent:a", "worker", &[]);
+    subscribe_member(&harness, "agent:a", StartFrontier::Now).await;
+    // A member of the mob "builds" announces into its own mob, and the host
+    // announces into the gateway's own mob.
+    harness
+        .service
+        .announce(AnnounceRequest {
+            mob_id: mob("builds"),
+            announced_by: Announcer::Member {
+                identity: MemberIdentity::new("worker-1").unwrap(),
+            },
+            source_key: SourceKey::new("k-builds").unwrap(),
+            topics: topics(&["ios"]),
+            body: "the build is green".to_string(),
+            correlation_id: None,
+            causes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    harness
+        .service
+        .announce(announce_request(
+            OWN_MOB,
+            "k-host",
+            &["ios"],
+            "checkout recovered",
+        ))
+        .await
+        .unwrap();
+    harness.native.unload("builds");
+
+    deliver_due(&harness).await;
+    let first = delivered_to(&harness, "agent:a").await;
+    assert!(
+        first.contains("checkout recovered") && !first.contains("the build is green"),
+        "the host's announcement is delivered, the other stays owed: {first}"
+    );
+    assert!(
+        harness.native.loads().is_empty(),
+        "no mob is loaded for the facts of a member that announced: {:?}",
+        harness.native.loads()
+    );
+
+    // The mob is loaded again, by whatever addresses it.
+    harness.native.not_loaded.lock().unwrap().clear();
+    deliver_due(&harness).await;
+    let all = delivered_to(&harness, "agent:a").await;
+    assert!(
+        all.contains("the build is green"),
+        "delivered once the announcer's mob is loaded: {all}"
+    );
+    assert!(harness.native.loads().is_empty());
 }

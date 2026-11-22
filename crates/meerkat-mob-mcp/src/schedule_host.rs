@@ -67,18 +67,21 @@ impl MobMcpState {
     }
 
     /// The handle of the mob `mob_id` when this state manages it now and it
-    /// is not destroyed. Unlike [`Self::handle_for`] it restores nothing and
-    /// re-attempts no quarantined store: a name in an agent's schedule
-    /// target must not move a mob.
+    /// is not destroyed. Unlike [`Self::handle_for`] it restores nothing,
+    /// loads nothing and re-attempts no quarantined store: a name in an
+    /// agent's schedule target must not move a mob. A mob that is known and
+    /// not loaded, one whose idle unload is admitted, a held child and a
+    /// quarantined mob are not managed now.
     async fn managed_mob_as_it_stands(&self, mob_id: &MobId) -> Option<meerkat_mob::MobHandle> {
-        self.mobs
+        self.hosted
             .read()
             .await
-            .get(mob_id)
-            .filter(|managed| {
-                managed.handle.status_observation_snapshot() != meerkat_mob::MobState::Destroyed
+            .managed(mob_id)
+            .and_then(crate::hosted_set::HostedStore::handle)
+            .filter(|handle| {
+                handle.status_observation_snapshot() != meerkat_mob::MobState::Destroyed
             })
-            .map(|managed| managed.handle.clone())
+            .cloned()
     }
 
     /// Whether the member holding `writer_session`, a member of mob
@@ -86,8 +89,13 @@ impl MobMcpState {
     /// `target_mob` (spawn a helper there, run one of its flows): in its own
     /// mob, and in a mob whose durable creation record names that session's
     /// member as the creator of its own create (the rule the agent mob tools
-    /// re-derive a creator's grant from). A mob this state does not manage
-    /// now answers `false`, and nothing is restored for the question.
+    /// re-derive a creator's grant from).
+    ///
+    /// The creation record is read whatever the target mob's load state,
+    /// and the target mob is neither loaded nor restored for the question:
+    /// a mob that is not loaded has its record read from its store's file.
+    /// A mob that is destroyed, held before activation or quarantined
+    /// answers `false`, and so does a mob this state does not know.
     pub async fn member_may_schedule_in_mob(
         &self,
         writer_mob: &MobId,
@@ -97,10 +105,8 @@ impl MobMcpState {
         if writer_mob == target_mob {
             return true;
         }
-        match self.managed_mob_as_it_stands(target_mob).await {
-            Some(mob) => self.session_is_recorded_creator(&mob, writer_session).await,
-            None => false,
-        }
+        self.hosted_mob_recorded_creator(target_mob, writer_session)
+            .await
     }
 
     /// This host's judgement of a schedule create or update the turn of the
@@ -505,17 +511,20 @@ impl ScheduleMobRuntime for MobMcpState {
         prompt: String,
         options: HelperOptions,
     ) -> Result<(), MobError> {
-        self.mob_spawn_helper(
-            mob_id,
-            identity,
-            prompt,
-            options,
-            "scheduled_spawn_helper_result",
-            meerkat_mob::DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|error| MobError::Internal(error.to_string()))
+        // The handle's entry for a schedule's fire: the helper's seat record
+        // says a schedule seated it.
+        self.handle_for(mob_id)
+            .await?
+            .spawn_scheduled_helper(
+                identity,
+                prompt,
+                options,
+                "scheduled_spawn_helper_result",
+                meerkat_mob::DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| MobError::Internal(error.to_string()))
     }
 
     async fn fork_helper(
@@ -527,19 +536,20 @@ impl ScheduleMobRuntime for MobMcpState {
         fork_context: ForkContext,
         options: HelperOptions,
     ) -> Result<(), MobError> {
-        self.mob_fork_helper(
-            mob_id,
-            source_identity,
-            identity,
-            prompt,
-            fork_context,
-            options,
-            "scheduled_fork_helper_result",
-            meerkat_mob::DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|error| MobError::Internal(error.to_string()))
+        self.handle_for(mob_id)
+            .await?
+            .fork_scheduled_helper(
+                source_identity,
+                identity,
+                prompt,
+                fork_context,
+                options,
+                "scheduled_fork_helper_result",
+                meerkat_mob::DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| MobError::Internal(error.to_string()))
     }
 }
 

@@ -2104,14 +2104,16 @@
         ]
       }
     ],
-    "meta/docs/rct/console-rest-sse-contract-v0.5.0.json": [
+    "meta/docs/rct/console-rest-sse-contract-v0.6.0.json": [
       {
         "package": "meerkat-meta",
         "target": "test:console_route_auth",
         "scope": "target",
         "tests": [
+          "console_contract_names_the_mob_of_a_request_on_every_door",
           "console_contract_requests_take_no_interaction_or_frame_ids",
-          "phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced"
+          "phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced",
+          "the_experience_names_the_version_of_the_checked_in_contract_document"
         ],
         "sources": [
           "meta/crates/meerkat-meta/tests/console_route_auth.rs"

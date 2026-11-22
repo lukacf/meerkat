@@ -55,6 +55,73 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to the release after 0.9.17
+
+The release after 0.9.17 is not published yet; what is said here describes
+the coming release.
+
+This section is for systems running 0.9.17. The full list of changes is in
+the CHANGELOG under `## [Unreleased]`.
+
+### Meta after 0.9.17
+
+The full list is in `meta/CHANGELOG.md` under `## [Unreleased]`.
+
+- Console: the console the stock gateways serve now lists the mobs nested
+  under the gateway's own mob (the mobs its agents create with the mob
+  tools) with their members.
+  Through 0.9.17 it hid every member of every such mob. After the upgrade
+  those members are listed, and can be inspected, read and sent to, by
+  every caller the access rules let see them: every caller of a console
+  with no access configuration (a member private to a person stays
+  private to that person), an access admin, and under a configuration any
+  caller a rule allows. A nested member is decided as an agent of its
+  own: by its identity `<mob id>/<name>`, its role in its mob, its labels
+  (`source_mob_id` names its mob) and its spawn ancestors. So an allow
+  rule that matches by role, by label, by `"*"` or on the member that
+  spawned it now also shows the nested members it matches, and a deny
+  rule hides them the same way. **Do:** before the upgrade, read the
+  allow rules that match by role, by label or by `"*"`; to grant one
+  nested mob's members alone, select them with `match_labels = {
+  source_mob_id = "<mob id>" }`, a label only the console writes. To
+  keep nested mobs hidden as in 0.9.17, launch `rpc_gateway` with
+  `runtime_options.console_list_nested_mobs = false` (Python
+  `.console_list_nested_mobs(False)`, TypeScript
+  `.consoleListNestedMobs(false)`), or `meta_gateway` with the
+  `meta/init` param `console_list_nested_mobs: false` or the environment
+  variable `META_CONSOLE_LIST_NESTED_MOBS=false`. A Rust host that builds
+  the stock console itself passes
+  `stock_console_visibility_policy(NestedMobListing::Hidden)`; the
+  Upgrade section of `meta/CHANGELOG.md` names each call.
+- Spawns into a mob an agent created: Meta refuses a spawn while it cannot
+  say for certain who that mob is private to. The caller (an agent's spawn
+  tool, an SDK or RPC spawn, a schedule delivery) gets the spawn's wiring
+  error. When nothing says for certain who the agent that
+  created the mob is private to (its own mob did not restore and is
+  quarantined, say), the error reads `who mob '<id>' is private to is not
+  known: nothing says for certain who the member that created it is private
+  to (its mob cannot be read here, or that mob's records no longer name the
+  member); the spawn can be made again once they do`. It clears when Meta
+  can read that agent's mob again and its records name the agent, with no
+  restart: Meta then reads the created mob again by itself, and a spawn
+  made after that read is seated. A spawn Meta refuses with `who mob
+  '<id>' is private to is not known yet (the private-owner record is
+  still being read); retry the spawn` is made again. **Do:** bring the mob
+  of the agent that created the mob back (`meta/status` lists a mob that
+  did not restore), then make the spawn again, and once more if it is
+  still refused.
+  When the mob of the agent that created it will not be hosted again,
+  destroy the created mob and create it again.
+- The upgrade relabels no member: a member of a mob an agent created keeps
+  the `console.private_to` label it was seated with, or none, and the
+  label is decided only for spawns made after the upgrade. Where the agent
+  that created a mob carries the label and a member of the mob does not,
+  the Console lists that member to the mob's owner and the access admins
+  only: a member of a mob that is private to a person is that person's on
+  the Console, whatever its own row says. **Do:** to have a member's label
+  decided anew, retire it and have it spawned again, or destroy the mob
+  and have it created again.
+
 ## Unreleased
 
 ### Gemini provider default: Argon to Neon

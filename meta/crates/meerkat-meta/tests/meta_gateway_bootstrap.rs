@@ -567,6 +567,145 @@ fn persistent_http_restarts_identity_with_voice() {
     assert_persistent_http_restart(true, true);
 }
 
+/// Every file and directory under `root`, by its path from `root`, a
+/// directory with a trailing slash.
+#[cfg(unix)]
+fn tree(root: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        for entry in std::fs::read_dir(dir).expect("read the directory") {
+            let path = entry.expect("directory entry").path();
+            let name = path
+                .strip_prefix(root)
+                .expect("a path under the root")
+                .to_string_lossy()
+                .into_owned();
+            if path.is_dir() {
+                out.insert(format!("{name}/"));
+                walk(root, &path, out);
+            } else {
+                out.insert(name);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// A fresh launch of the console gateway over a state directory that is
+/// served and then stopped leaves exactly these files in it. Two things
+/// vary from run to run and are named by their kind: the write-ahead
+/// sidecars of the SQLite stores (`-wal`, `-shm`), which a stop may or may
+/// not leave, are not listed, and the hosting lock carries the launch's id.
+#[cfg(unix)]
+#[test]
+fn a_fresh_persistent_console_launch_leaves_exactly_these_files() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = workspace.path().join("store");
+    RestartGateway::start(workspace.path(), &store, false, false).stop();
+    let left: std::collections::BTreeSet<String> = tree(&store)
+        .into_iter()
+        .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+        .map(|name| {
+            if name.starts_with("meta/hosting/") && name.ends_with(".lock") {
+                "meta/hosting/<launch>.lock".to_string()
+            } else {
+                name
+            }
+        })
+        .collect();
+    let expected: std::collections::BTreeSet<String> = [
+        "blobs/",
+        "council.sqlite3",
+        "council.sqlite3.mfence",
+        "event_log.sqlite3",
+        "event_log.sqlite3.composition.json",
+        "event_log.sqlite3.incarnation-custody",
+        "event_log.sqlite3.mfence",
+        "meta-runtime.lock",
+        "meta/",
+        "meta/delivery/",
+        "meta/delivery/cold-delivery.lock",
+        "meta/hosting/",
+        "meta/hosting/<launch>.lock",
+        "meta/jobs.sqlite3",
+        "meta/jobs.sqlite3.mfence",
+        "meta_console.sqlite3",
+        "meta_console.sqlite3.mfence",
+        "meta_metadata.sqlite3",
+        "meta_metadata.sqlite3.mfence",
+        "mobs/",
+        "mobs/child-mobs.lock",
+        "mobs/realm_profiles.db",
+        "mobs/realm_profiles.db.mfence",
+        "runtime.sqlite",
+        "runtime.sqlite.execution-custody",
+        "runtime.sqlite.execution-custody-admission",
+        "runtime.sqlite.mfence",
+        "runtime.sqlite.mpresence",
+        "schedule.sqlite",
+        "schedule.sqlite.mfence",
+        "workgraph.sqlite3",
+        "workgraph.sqlite3.mfence",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(left, expected);
+}
+
+/// A launch store that passes the check of the state directory before
+/// startup and cannot then be opened fails the launch with this answer: no
+/// request id, the internal error code, and the text of the store's own
+/// error. The store here is the one a first launch left, made read-only: the
+/// check reads it, and opening it for the launch's mob has to write. The
+/// row runs in every ordinary run. As root the permission does not bind and
+/// the store opens all the same, so there the row says that it was not
+/// exercised and asserts nothing.
+#[cfg(unix)]
+#[test]
+fn a_launch_store_that_cannot_be_opened_fails_the_launch_with_its_code_and_text() {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = TempDir::new().expect("workspace");
+    let store = workspace.path().join("store");
+    let layout = meerkat_meta::storage_layout::MetaStorageLayout::standalone_from_store_path(
+        &store,
+        workspace.path().join("xdg-state"),
+    );
+    RestartGateway::start(workspace.path(), &store, false, false).stop();
+    std::fs::set_permissions(
+        layout.event_log_db(),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .expect("a read-only store");
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(layout.event_log_db())
+        .is_ok()
+    {
+        eprintln!("NOT EXERCISED: running as root");
+        return;
+    }
+
+    let refused = init_at(
+        workspace.path(),
+        &store,
+        json!({ "persistent_sessions": true, "identity_first": false }),
+        Duration::from_secs(45),
+    );
+    assert_eq!(
+        refused,
+        json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": -32603,
+                "message": "storage error: Internal error: attempt to write a readonly database",
+            },
+        }),
+    );
+}
+
 /// Both gateway binaries must self-identify via `--version` (name + version),
 /// so operators can tell which of the two they have without hashing the file —
 /// the gap that turned a mislabeled binary into a multi-day investigation.

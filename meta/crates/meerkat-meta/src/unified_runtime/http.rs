@@ -11,17 +11,16 @@ use futures::StreamExt;
 use meerkat_core::comms::EventStream;
 
 use crate::console_aggregator::{
-    ConsoleVisibilityPolicy, HideImplicitDelegateMembersConsoleVisibilityPolicy,
-    MetaConsoleAggregator,
+    ConsoleVisibilityPolicy, MetaConsoleAggregator, NestedMobListing,
+    stock_console_visibility_policy,
 };
 use crate::http_console::{
     console_frontend_router, console_json_router_with_runtime_events_and_policy,
 };
 use crate::http_flow_editor::protected_flow_editor_router_with_runtime_catalog;
 use crate::http_sse::{
-    agent_events_sse_router_with_access_and_priming, mob_events_sse_router_with_access_and_priming,
-    mob_structural_events_sse_router_with_access_and_priming,
-    workgraph_facts_sse_router_under_session_fences,
+    agent_events_sse_router_of_resolved_mobs, mob_events_sse_router_of_resolved_mobs,
+    mob_structural_events_sse_router_of_resolved_mobs, workgraph_facts_sse_router_of_resolved_mobs,
 };
 use crate::runtime::RuntimeDecisionState;
 use tokio::sync::Semaphore;
@@ -415,17 +414,45 @@ impl UnifiedRuntime {
         }
         // The runtime's own projection is a back-edge: it holds the observer
         // mob runtime and the non-owning identity runtime.
-        let aggregator = MetaConsoleAggregator::new(self.console_log_store());
+        let store = self.console_log_store();
+        // The store is told the host's default mob before it is given a
+        // frame: the launch's mob, which the runtime holds without loading
+        // any mob. A store that was told reads that mob's id as no mob, the
+        // second line behind the rule that the default mob's frames are
+        // named with no mob. A store that cannot be told, or was told
+        // another mob, keeps a frame under the mob the frame names: said
+        // once, loudly, with both mobs in the store's own words.
+        let default_mob = crate::member_key::DefaultMob::new(self.default_mob().mob_id().clone());
+        if let Err(error) = store.bind_default_mob(&default_mob) {
+            tracing::warn!(
+                default_mob = %default_mob.mob_id(),
+                %error,
+                "the console log store was not told the host's default mob: it reads that \
+                 mob's id as another mob's, and the default mob's frames keep one key only \
+                 because they are named with no mob"
+            );
+        }
+        let payload_policy: Arc<dyn ConsoleVisibilityPolicy> = Arc::new(HostPayloadPolicy(policy));
+        let aggregator = MetaConsoleAggregator::new(store);
+        // The console is told the host's default mob too: a send that names
+        // that mob by its id is the default mob's send.
+        aggregator.tell_default_mob(default_mob);
         aggregator.register_runtime_handles_with_policy(
             "default",
             "",
-            self.mob_runtime.clone(),
-            self.identity_first_context
-                .as_ref()
+            self.default_mob().mob_runtime.clone(),
+            self.default_mob()
+                .identity_first_context
+                .get()
                 .map(|context| Arc::clone(&context.runtime)),
             self.console_events(),
-            Arc::new(HostPayloadPolicy(policy)),
+            Arc::clone(&payload_policy),
         );
+        // The console events of the mobs the host serves beside its default
+        // mob are frames of the same log, each under its mob: the entries
+        // the table holds register now, each later one when it is made.
+        self.other_mobs()
+            .console_projection_built(aggregator.clone(), payload_policy);
         aggregator
     }
 
@@ -465,7 +492,7 @@ impl UnifiedRuntime {
     pub fn build_console_json_router(&self, decisions: RuntimeDecisionState) -> Router {
         self.build_console_json_router_with_policy(
             decisions,
-            Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+            stock_console_visibility_policy(NestedMobListing::default()),
         )
     }
 
@@ -488,7 +515,7 @@ impl UnifiedRuntime {
         self.console_schedule_doors().install(Arc::new(
             crate::http_console::schedules::ConsoleSendDoor {
                 decisions: decisions.clone(),
-                runtime: self.mob_runtime.clone(),
+                runtime: self.default_mob().mob_runtime.clone(),
                 aggregator: view.clone(),
                 access: self.access_controller().cloned(),
                 identity_runtime: self.identity_runtime_ref().cloned(),
@@ -525,6 +552,9 @@ impl UnifiedRuntime {
             self.console_audit_log(),
             self.console_attention(),
         )
+        // The console's request doors resolve the mob a request addresses
+        // with this resolver: they hold no runtime.
+        .layer(axum::Extension(self.mob_resolver()))
     }
 
     /// Resolves Console viewers for host routes served beside the console,
@@ -562,20 +592,26 @@ impl UnifiedRuntime {
     }
 
     pub fn build_reference_app_router(&self, decisions: RuntimeDecisionState) -> Router {
-        self.reference_app_router_under(decisions, &ReferenceAppRequestBound::default())
+        self.reference_app_router_under(
+            decisions,
+            &ReferenceAppRequestBound::default(),
+            NestedMobListing::default(),
+        )
     }
 
     /// [`Self::build_reference_app_router`] under `bound`, for a caller that
-    /// merges more routes into the same app (see [`ReferenceAppRequestBound`]).
+    /// merges more routes into the same app (see [`ReferenceAppRequestBound`]),
+    /// with the stock console listing nested mobs or not as `nested_mobs`
+    /// says.
     pub(crate) fn reference_app_router_under(
         &self,
         decisions: RuntimeDecisionState,
         bound: &ReferenceAppRequestBound,
+        nested_mobs: NestedMobListing,
     ) -> Router {
-        bound.apply(self.reference_app_routes(
-            decisions,
-            Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
-        ))
+        bound.apply(
+            self.reference_app_routes(decisions, stock_console_visibility_policy(nested_mobs)),
+        )
     }
 
     /// The reference router plus the live doors the builder registered.
@@ -607,7 +643,8 @@ impl UnifiedRuntime {
             return Err(super::live_compose::LiveComposeError::ConsoleVoiceRequiresAppAuth);
         }
         let bound = ReferenceAppRequestBound::default();
-        let router = self.reference_app_router_under(decisions, &bound);
+        let router =
+            self.reference_app_router_under(decisions, &bound, NestedMobListing::default());
         let Some(composition) = composition else {
             return Ok(router);
         };
@@ -641,10 +678,8 @@ impl UnifiedRuntime {
         decisions: RuntimeDecisionState,
         visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     ) -> Router {
-        // The router is returned to the host: it holds the public owners.
-        let agent_runtime = self.mob_runtime().clone();
-        let agent_identity_runtime = self.identity_runtime();
-        let mob_runtime = self.mob_runtime().clone();
+        // The router is returned to the host: the resolver layered over
+        // the stream routes holds the launch mob's public owner.
         // Every SSE route shares the same `RuntimeDecisionState` the
         // console RPC route uses: when `require_app_auth` is on, requests
         // must carry a valid bearer / auth_token. Pre-fix, only the
@@ -671,7 +706,7 @@ impl UnifiedRuntime {
         let health_runtime = self.mob_runtime().clone();
         // Late-bound: a gateway installs its identity runtime after the
         // router is built.
-        let health_identity_runtime = Arc::clone(&self.implicit_delegate_identity_runtime);
+        let health_identity_runtime = Arc::clone(self.default_mob().identity_plane.slot());
         let health: Router = Router::new().route(
             "/healthz",
             get(move |headers: HeaderMap| {
@@ -721,10 +756,14 @@ impl UnifiedRuntime {
                 self.has_explicit_provider_credentials(),
                 self.console_audit_log(),
             ))
-            .merge(agent_events_sse_router_with_access_and_priming(
-                Arc::new(move |agent_id, cursor| {
-                    let runtime = agent_runtime.clone();
-                    let identity_runtime = agent_identity_runtime.clone();
+            // The four event streams read the mob a request names: each
+            // route resolves it with the resolver layered below and reads
+            // that mob's handles, so nothing here is captured for the
+            // launch mob.
+            .merge(agent_events_sse_router_of_resolved_mobs(
+                Arc::new(move |resolved, agent_id, cursor| {
+                    let runtime = resolved.mob_runtime().clone();
+                    let identity_runtime = resolved.identity_runtime();
                     Box::pin(async move {
                         let agent_id =
                             crate::member_comms_id::runtime_alias_str(&agent_id).into_owned();
@@ -818,39 +857,34 @@ impl UnifiedRuntime {
                 }),
                 Some(sse_decisions_a),
                 access.clone(),
-                Some(self.mob_runtime().clone()),
-                self.identity_runtime_ref().cloned(),
                 agent_sse_visibility_policy,
                 self.console_session_fences().clone(),
             ))
-            .merge(mob_events_sse_router_with_access_and_priming(
-                Arc::new(move || {
-                    let mob_runtime = mob_runtime.clone();
-                    Box::pin(async move { mob_runtime.handle().subscribe_mob_events().await })
-                }),
+            .merge(mob_events_sse_router_of_resolved_mobs(
                 Some(sse_decisions_b),
                 access.clone(),
-                Some(self.mob_runtime().clone()),
                 mob_sse_visibility_policy,
                 self.console_session_fences().clone(),
             ))
-            .merge(mob_structural_events_sse_router_with_access_and_priming(
-                self.mob_handle(),
-                self.mob_events_store(),
+            .merge(mob_structural_events_sse_router_of_resolved_mobs(
                 Some(sse_decisions_c),
                 access.clone(),
-                Some(self.mob_runtime().clone()),
                 structural_sse_visibility_policy,
                 self.console_session_fences().clone(),
             ))
-            .merge(self.workgraph_fact_hub().map_or_else(Router::new, |hub| {
-                workgraph_facts_sse_router_under_session_fences(
-                    hub,
+            // The WorkGraph fact stream is mounted for a host whose launch
+            // mob has a WorkGraph, as before; it then reads the fact hub of
+            // the mob a request names.
+            .merge(self.workgraph_fact_hub().map_or_else(Router::new, |_hub| {
+                workgraph_facts_sse_router_of_resolved_mobs(
                     Some(sse_decisions_d),
                     access,
                     self.console_session_fences().clone(),
                 )
-            }));
+            }))
+            // The stream routes resolve the mob a request addresses with
+            // this resolver: they hold no runtime.
+            .layer(axum::Extension(self.mob_resolver()));
         health
             .merge(self.build_console_json_router_with_policy(decisions, visibility_policy))
             .merge(crate::http_console::served_hosts_only(
@@ -1453,7 +1487,11 @@ model = "gpt-5.5"
         let bound = ReferenceAppRequestBound::new(LIMIT);
         let held = HeldRequests::new();
         let app = runtime
-            .reference_app_router_under(decisions, &bound)
+            .reference_app_router_under(
+                decisions,
+                &bound,
+                crate::console_aggregator::NestedMobListing::default(),
+            )
             .merge(bound.apply(held.routes("/test/held/plain", "/test/held/with-state")));
         let (address, server) = serve(app).await;
 
@@ -2269,3 +2307,8 @@ comms = true
         let _ = mob.stop().await;
     }
 }
+
+/// Rows of the event streams on a host of more than one mob.
+#[cfg(test)]
+#[path = "mob_event_streams_tests.rs"]
+pub(super) mod mob_event_streams_tests;

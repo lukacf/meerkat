@@ -4762,6 +4762,171 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
     fixture.teardown().await;
 }
 
+/// A fork child of `forker` that finished in this process and whose outcome
+/// was never delivered, as if the process had died right after the child's
+/// turn: the job is bound to the forker's session and no custodian runs.
+async fn a_finished_fork_child_never_delivered(
+    fixture: &CouncilFixture,
+    owner: &meerkat_core::SessionId,
+    child: &str,
+    job_id: &str,
+) {
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("the source mob's handle");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.to_string(),
+                owner_session_id: owner.clone(),
+                retained_work: None,
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    assert_eq!(completion_records(fixture, owner, job_id).await, 0);
+}
+
+/// The re-link delivered the outcome of job `job_id` to `owner` once: the
+/// record is in the forker's transcript with the child's reply, an explicit
+/// pass finds it delivered, and no second record follows.
+async fn assert_relinked_exactly_once(
+    fixture: &CouncilFixture,
+    restarted: &Arc<meerkat_mob_mcp::MobMcpState>,
+    owner: &meerkat_core::SessionId,
+    job_id: &str,
+) {
+    await_completion_record(fixture, owner, job_id).await;
+    assert!(
+        completion_record_text(fixture, owner, job_id)
+            .await
+            .contains(CHILD_REPLY)
+    );
+    let reports = restarted.relink_restored_fork_children().await;
+    assert_eq!(
+        reports
+            .iter()
+            .find(|report| report.job_id == job_id)
+            .map(|report| report.action.clone()),
+        Some(ForkRelinkAction::AlreadyDelivered)
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        completion_records(fixture, owner, job_id).await,
+        1,
+        "delivered exactly once"
+    );
+}
+
+/// A host that restores its mobs on demand loads a mob when something
+/// addresses it. That load is the mob's restore in this process, so it gets
+/// the fork_off re-link a restore gives: the outcome of a child that
+/// finished in the earlier process reaches its forker, once. The census
+/// before it loads nothing and re-links nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_on_demand_load_relinks_the_fork_children_of_the_mob_it_loads() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let source = fixture.source_mob_id();
+    let job_id = "job-finished-before-an-on-demand-load";
+    a_finished_fork_child_never_delivered(&fixture, &owner, "on-demand-child", job_id).await;
+
+    // The process dies; the restarted host restores on demand.
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = fixture.restart_state_on_demand();
+    let inventory = restarted.mob_inventory().await.expect("the census");
+    assert!(
+        inventory.dormant.contains(&source),
+        "the forker's mob is known and not loaded after the restart: managed {:?}",
+        inventory.managed
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await,
+        0,
+        "the census loads no mob and re-links nothing"
+    );
+
+    // Something addresses the mob: it is loaded, and the load re-links it.
+    restarted.mob_status(&source).await.expect("load the mob");
+    assert_relinked_exactly_once(&fixture, &restarted, &owner, job_id).await;
+    fixture.teardown().await;
+}
+
+/// A mob whose restore failed because its store could not serve then, and
+/// that a re-attempt restores later, gets the fork_off re-link at that
+/// re-attempt: it is the mob's restore in this process. The first restore
+/// is failed once through the state's test door, which quarantines the
+/// store as one that cannot serve now and re-links nothing; the door fails
+/// one restore only, so the explicit re-attempt restores the mob, and the
+/// outcome of a child that finished in the earlier process reaches its
+/// forker, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_attempt_relinks_the_fork_children_of_the_mob_it_restores() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let source = fixture.source_mob_id();
+    let job_id = "job-finished-before-a-failed-restore";
+    a_finished_fork_child_never_delivered(&fixture, &owner, "re-attempt-child", job_id).await;
+
+    // The process dies; the restarted host's first restore of the mob's
+    // store meets a store that cannot serve now.
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = fixture.restart_state();
+    restarted.fail_next_store_restore_for_tests();
+    let quarantined = restarted
+        .quarantined_mobs()
+        .await
+        .expect("the restore goes on past the store that could not serve");
+    assert_eq!(
+        quarantined
+            .iter()
+            .map(|row| (row.mob_id.clone(), row.class))
+            .collect::<Vec<_>>(),
+        vec![(
+            source.clone(),
+            meerkat_mob::MobQuarantineClass::StoreUnavailable
+        )],
+        "the mob whose restore was failed is quarantined as one whose store could not serve"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await,
+        0,
+        "a mob that is not restored is not re-linked"
+    );
+
+    // The re-attempt is not failed: the door failed one restore only.
+    assert_eq!(
+        restarted
+            .mob_restore_retry(&source)
+            .await
+            .expect("the re-attempt restores the mob"),
+        meerkat_mob_mcp::MobRestoreRetryOutcome::Restored
+    );
+    assert_relinked_exactly_once(&fixture, &restarted, &owner, job_id).await;
+    fixture.teardown().await;
+}
+
 /// Seat `owner` in a second mob of the fixture, which the restarted state
 /// will not manage: to the re-link its session is a plain session (the
 /// test's owner hook revives it through this mob). Returns the mob's handle
@@ -6140,5 +6305,246 @@ async fn session_create_on_a_worker_scenario() {
     .await
     .expect("the destroy task")
     .expect("destroy the mob");
+    fixture.teardown().await;
+}
+
+/// A fresh id for a host's default mob.
+fn fresh_launch_id() -> meerkat_mob::MobId {
+    meerkat_mob::MobId::from(format!(
+        "fork-launch-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    ))
+}
+
+/// Declare `launch` as the host's default mob, its store a file beside the
+/// fixture's state root.
+fn declare_launch(
+    state: meerkat_mob_mcp::MobMcpState,
+    state_root: &std::path::Path,
+    launch: &meerkat_mob::MobId,
+) -> meerkat_mob_mcp::MobMcpState {
+    state
+        .with_default_mob(meerkat_mob_mcp::DefaultMobDeclaration::persistent(
+            launch.clone(),
+            state_root
+                .parent()
+                .expect("the fixture root")
+                .join("launch.sqlite3"),
+        ))
+        .expect("the default mob is declared once")
+}
+
+/// A host whose launch served its default mob `launch`, with a forker
+/// seated in it and one fork child that finished: its result (job `job_id`)
+/// was observed and never delivered, as if the process had died right after
+/// the child's turn. The fixture and the forker's session.
+async fn a_default_mob_fork_result_never_delivered(
+    launch: &meerkat_mob::MobId,
+    job_id: &str,
+) -> (CouncilFixture, meerkat_core::SessionId) {
+    let fixture = {
+        let launch = launch.clone();
+        CouncilFixture::new_with(
+            |_| ScriptedTurn::Text(CHILD_REPLY.to_string()),
+            move |state, state_root| declare_launch(state, state_root, &launch),
+        )
+    };
+    fixture
+        .state
+        .serve_default_mob(support::council_definition(launch.as_str()))
+        .await
+        .expect("the launch creates its default mob");
+    fixture
+        .state
+        .mob_spawn(
+            launch,
+            ProfileName::from("participant"),
+            AgentIdentity::from("forker"),
+            Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+            Some(meerkat_mob::MobBackendKind::Session),
+            None,
+        )
+        .await
+        .expect("spawn the forker");
+    let handle = fixture
+        .state
+        .handle_for(launch)
+        .await
+        .expect("the default mob");
+    let owner = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("forker"))
+        .await
+        .expect("the forker's session");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("relink-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.to_string(),
+                owner_session_id: owner.clone(),
+                retained_work: None,
+            }),
+        )
+        .await
+        .expect("fork");
+    // No custodian: the outcome is observed here and never delivered.
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    assert_eq!(completion_records(&fixture, &owner, job_id).await, 0);
+    (fixture, owner)
+}
+
+/// A fork_off result owed to a member of the host's default mob when the
+/// process died is re-linked by the set alone, once, after the launch's
+/// serve: the set's own pass at the first verb finds no default mob (it
+/// awaits its serve), and the load the serve makes re-links the mob's fork
+/// children. A host that also runs the re-link itself after its serve adds
+/// nothing: the result is delivered exactly once, as the member's.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_delivers_a_default_mob_members_fork_result_once_after_the_launchs_serve() {
+    let launch = fresh_launch_id();
+    let job_id = "job-of-a-default-mob-member".to_string();
+    let (fixture, owner) = a_default_mob_fork_result_never_delivered(&launch, &job_id).await;
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let restarted =
+        fixture.restart_state_with(|state, state_root| declare_launch(state, state_root, &launch));
+    restarted
+        .mob_inventory()
+        .await
+        .expect("the first verb of the restarted set");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, &job_id).await,
+        0,
+        "nothing is re-linked before the launch's serve"
+    );
+    restarted
+        .serve_default_mob(support::council_definition(launch.as_str()))
+        .await
+        .expect("the launch serves its default mob");
+    await_completion_record(&fixture, &owner, &job_id).await;
+
+    // The host runs the re-link itself after its serve, as a host that
+    // inserted its mob's handle used to: nothing more is recorded.
+    for report in restarted.relink_restored_fork_children().await {
+        if report.job_id == job_id {
+            assert_eq!(report.action, ForkRelinkAction::AlreadyDelivered);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, &job_id).await,
+        1,
+        "the result is delivered exactly once"
+    );
+    let key = meerkat::ContinuationKey::new(format!("fork_off:{job_id}")).expect("key");
+    let status = |owner: meerkat::ContinuationOwner| {
+        let (restarted, key) = (Arc::clone(&restarted), key.clone());
+        async move {
+            restarted
+                .continuation_service()
+                .expect("the state binds its continuation service")
+                .continuation_status(&owner, &key)
+                .await
+                .expect("the continuation's status")
+        }
+    };
+    assert!(
+        !matches!(
+            status(meerkat::ContinuationOwner::Member {
+                mob_id: launch.to_string(),
+                identity: "forker".to_string(),
+            })
+            .await,
+            meerkat::ContinuationStatus::NotCommitted
+        ),
+        "the result is committed for the member"
+    );
+    assert!(
+        matches!(
+            status(meerkat::ContinuationOwner::Session {
+                session_id: owner.clone(),
+            })
+            .await,
+            meerkat::ContinuationStatus::NotCommitted
+        ),
+        "and not for its session as a plain session"
+    );
+    for (_, handle) in restarted.mob_handles_snapshot().await.unwrap_or_default() {
+        let _ = handle.shutdown().await;
+    }
+    fixture.teardown().await;
+}
+
+/// A default store that the launch's first serve could not restore (the
+/// store could not serve then, failed once through the state's test door)
+/// is quarantined and re-links nothing. The launch's next serve re-attempts
+/// it, and that re-attempt is the default mob's restore in this process: it
+/// gets the fork_off re-link, and the result of a child that finished in
+/// the earlier process reaches its forker, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_serves_re_attempt_relinks_the_default_mobs_fork_children() {
+    let launch = fresh_launch_id();
+    let job_id = "job-of-a-default-mob-member-re-attempted";
+    let (fixture, owner) = a_default_mob_fork_result_never_delivered(&launch, job_id).await;
+    fixture.shut_down_predecessor().await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let restarted =
+        fixture.restart_state_with(|state, state_root| declare_launch(state, state_root, &launch));
+    restarted
+        .mob_inventory()
+        .await
+        .expect("the first verb of the restarted set");
+    // The first serve's restore of the default store meets a store that
+    // cannot serve now.
+    restarted.fail_next_store_restore_for_tests();
+    assert!(
+        restarted
+            .serve_default_mob(support::council_definition(launch.as_str()))
+            .await
+            .is_err(),
+        "the first serve does not restore the default mob"
+    );
+    assert_eq!(
+        restarted
+            .quarantined_mobs()
+            .await
+            .expect("the quarantined mobs")
+            .iter()
+            .map(|row| (row.mob_id.clone(), row.class))
+            .collect::<Vec<_>>(),
+        vec![(
+            launch.clone(),
+            meerkat_mob::MobQuarantineClass::StoreUnavailable
+        )],
+        "the default store is quarantined under the default mob's id as one that could not serve"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await,
+        0,
+        "a default mob that is not restored is not re-linked"
+    );
+
+    // The door failed one restore only: the next serve re-attempts the
+    // store and restores the mob.
+    restarted
+        .serve_default_mob(support::council_definition(launch.as_str()))
+        .await
+        .expect("the next serve re-attempts the default store");
+    assert_relinked_exactly_once(&fixture, &restarted, &owner, job_id).await;
+    for (_, handle) in restarted.mob_handles_snapshot().await.unwrap_or_default() {
+        let _ = handle.shutdown().await;
+    }
     fixture.teardown().await;
 }

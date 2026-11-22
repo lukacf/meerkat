@@ -50,6 +50,16 @@
   .topo__view-option > span { display: none; }
 }
 
+/* The mob choice in the More actions menu: what tells a mob apart from
+   another of its name, muted after the name. A long list of mobs scrolls
+   in its own group, so the menu's other actions stay in reach. */
+.topo__mob-option-detail { color: var(--_cc-foreground-meta); }
+.cc-menu__group:has(.topo__mob-option) {
+  max-height: min(24vh, 156px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* The map: the graph canvas full bleed, its notices over it. */
 .topo__map {
   position: absolute;

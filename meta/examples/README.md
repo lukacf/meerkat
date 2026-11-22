@@ -25,6 +25,7 @@ Host programs:
 - `008-typescript-quickstart` (a TypeScript project to copy: one agent, a question, its answer; no console; a provider key for the question)
 - `009-mob-announcements` (Python and TypeScript; no console; a provider key for the steps in which agents run)
 - `010-ask-the-user` (Python and TypeScript; an agent asks a person and goes on with the answer; no console; needs a provider key)
+- `011-cross-gateway-peers` (Python; two local gateways, a signed peer message and reply; requires a provider key)
 - [TypeScript host runnable](../sdk/typescript/examples/README.md)
   (a durable source-runner schedule and its callback; no provider key)
 

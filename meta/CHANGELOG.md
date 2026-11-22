@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.18] - 2026-11-22
+
 Records that name a member carry the member's mob, so that one host can keep
 the records of several mobs apart: two mobs may each have a member of the same
 name. A record that names no mob is the default mob's (the mob the launch

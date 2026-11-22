@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.18
+
 - `PersistedEvent` gains `mobId` and `mobIncarnation` (`string | null`).
   `mobId` is the event's mob when the event is of a mob of the host other
   than the launch mob, or of a mob below such a mob; `mobIncarnation` is

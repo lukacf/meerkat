@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.18
+
 - `PersistedEvent` gains `mob_id` and `mob_incarnation` (both `None` by
   default). `mob_id` names the event's mob when the event is of a mob of
   the host other than the launch mob, or of a mob below such a mob;

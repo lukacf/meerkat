@@ -599,6 +599,80 @@ class TestDispatchInput:
         assert restored.content[0].text == "Hi"
 
 
+class TestConnectorDispatchInput:
+    """The convenience constructor preserves a complete delivery identity."""
+
+    def test_default_neither_omits_keys(self):
+        dispatch = DispatchInput.connector("event from connector")
+
+        assert dispatch.to_dict() == {
+            "content": "event from connector",
+            "origin": "connector",
+        }
+
+    def test_explicit_neither_omits_keys(self):
+        dispatch = DispatchInput.connector(
+            "event from connector", correlation_id=None, idempotency_key=None
+        )
+
+        assert dispatch.to_dict() == {
+            "content": "event from connector",
+            "origin": "connector",
+        }
+
+    @pytest.mark.parametrize(
+        "correlation_id", ["source-thread-7", "7c2d9a4b-3e18-4b7a-8f55-1a9e0c6b2d10"]
+    )
+    def test_preserves_explicit_pair_and_roundtrip(self, correlation_id):
+        dispatch = DispatchInput.connector(
+            "first line\nsecond line",
+            correlation_id=correlation_id,
+            idempotency_key="source-event-42",
+        )
+
+        expected = {
+            "content": "first line\nsecond line",
+            "origin": "connector",
+            "correlation_id": correlation_id,
+            "idempotency_key": "source-event-42",
+        }
+        assert dispatch.to_dict() == expected
+        assert DispatchInput.from_dict(expected) == dispatch
+
+    @pytest.mark.parametrize(
+        "keys", [{"correlation_id": "source-thread-7"}, {"idempotency_key": "source-event-42"}]
+    )
+    def test_rejects_half_pair(self, keys):
+        with pytest.raises(ValueError, match="correlation_id.*idempotency_key"):
+            DispatchInput.connector("event from connector", **keys)
+
+    def test_shared_correlation_preserves_distinct_delivery_keys(self):
+        first = DispatchInput.connector(
+            "first event", correlation_id="source-thread-7", idempotency_key="event-1"
+        )
+        second = DispatchInput.connector(
+            "second event", correlation_id="source-thread-7", idempotency_key="event-2"
+        )
+
+        assert first.correlation_id == second.correlation_id == "source-thread-7"
+        assert first.to_dict()["idempotency_key"] == "event-1"
+        assert second.to_dict()["idempotency_key"] == "event-2"
+
+    @pytest.mark.parametrize(
+        "keys", [{"correlation_id": "source-thread-7"}, {"idempotency_key": "source-event-42"}]
+    )
+    def test_full_constructor_still_builds_half_pair(self, keys):
+        # Only the helper refuses a half pair where the input is built. The
+        # constructor builds one as before; the gateway refuses it at dispatch.
+        dispatch = DispatchInput(content="event from connector", origin="connector", **keys)
+
+        assert dispatch.to_dict() == {
+            "content": "event from connector",
+            "origin": "connector",
+            **keys,
+        }
+
+
 class TestManagedPeerEdge:
     """REQ-43a: ManagedPeerEdge dataclass."""
 

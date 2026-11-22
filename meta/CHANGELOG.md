@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Meta Python SDK: `DispatchInput.connector(content, correlation_id=cid)` now raises `ValueError` when constructing the input. Previously the helper returned an input; dispatch with only a correlation ID was refused later. Code that handled only the dispatch refusal must now handle the error at construction. The gateway key-pair rule and wire format are unchanged.
+
+### Upgrade
+
+- For a keyed connector input, use `DispatchInput.connector(content, correlation_id=cid, idempotency_key=key)`. For an unkeyed input, use `DispatchInput.connector(content)`. Supply both values or neither. The old helper had no `idempotency_key` parameter; passing only that new parameter raises `ValueError` in the updated helper. Existing paired inputs built with the full `DispatchInput` constructor need no change.
+
 ## [0.9.18] - 2026-11-22
 
 Records that name a member carry the member's mob, so that one host can keep

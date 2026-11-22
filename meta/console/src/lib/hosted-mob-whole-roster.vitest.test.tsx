@@ -157,4 +157,3 @@ describe("a console whose roster of every mob comes to carry no list of mobs", (
     expect(await screen.findByTestId("sidebar-agent:planner")).toBeTruthy();
   }, 30_000);
 });
-

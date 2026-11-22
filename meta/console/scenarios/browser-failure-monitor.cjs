@@ -12,15 +12,28 @@ const aborted = "net::ERR_ABORTED";
 // start: a read or stream of the same subscription that began later than it,
 // in the same action. The browser reports that later start before or after
 // the cancellation; either way it must be there by the end of the action.
-// Two starts may be replaced in one action and no third; a cancellation that
-// no later start follows is a failed replacement.
+// Two starts may be replaced in one action and no third, and the second only
+// by a start that asks for every mob: a gateway that lists no mob addressing
+// replaces one. A cancellation that no later start follows is a failed
+// replacement.
+//
+// An initializing action ends on the console's own last initializing start,
+// as the browser's requests show it, whatever the action itself awaited: the
+// answer to the capabilities read the console made in it and, where that
+// answer lists mob addressing, the answer to the experience read for every
+// mob and then the next unscoped read. A start replaced before that is
+// inside the action and judged by the rule above; a cancellation after it is
+// outside and unexpected. An action that saw no capabilities read under a
+// prefix waits for nothing there. The wait is bounded: an action whose
+// witness does not come fails and names what is missing.
 const replacedStarts = 2;
+const mobAddressing = "mob_addressing";
 // The unscoped stream: no query, or the one that asks for every mob.
 const unscopedStreamQueries = ["", "?mobs=*"];
 
 // Observe the context so popup requests are included from their first request.
 // Expected failures name exact Playwright Request objects, never URL wildcards.
-function browserFailureMonitor(context, { origin, initializationPrefixes = [""] }) {
+function browserFailureMonitor(context, { origin, initializationPrefixes = [""], initializationTimeoutMs = 20_000 }) {
   const authority = new URL(origin).origin;
   assert(initializationPrefixes.length && initializationPrefixes.every(prefix => prefix === "" || /^\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(prefix)), "initialization prefixes must be explicit paths");
   const configuredPrefixes = new Set(initializationPrefixes);
@@ -31,7 +44,10 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
   }
   const errors = [], expected = [], failures = [];
   const active = new Map(), allowances = new Map(), actions = new Map(), pages = new Set();
-  let popupAction = null;
+  // The console's capabilities reads and every-mob experience reads of an
+  // initializing action, by request, and the order in which they answered.
+  const lifecycle = new Map();
+  let popupAction = null, order = 0;
   const requestPage = request => { try { return request.frame().page(); } catch { return null; } };
   // The prefix whose unscoped subscription the request belongs to: its
   // recent-page read or its stream, for one mob or for every mob.
@@ -51,6 +67,66 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
         && !Object.hasOwn(body.params, "mob_id") && (!Object.hasOwn(body.params, "mobs") || body.params.mobs === "*")
         && !Object.hasOwn(body.params, "before") && !Object.hasOwn(body.params, "after") ? prefix : undefined;
     } catch { return undefined; }
+  }
+  const asksEveryMob = request => {
+    if (request.method() === "GET") return new URL(request.url()).search === "?mobs=*";
+    try { return JSON.parse(request.postData() || "{}").params?.mobs === "*"; } catch { return false; }
+  };
+  // The console's capabilities read or its experience read for every mob, under a selected prefix.
+  function lifecycleRequest(request, prefixes) {
+    const url = new URL(request.url());
+    if (url.origin !== authority) return undefined;
+    if (request.method() === "GET") {
+      const prefix = prefixes.find(item => url.pathname === `${item}/console/experience`);
+      return prefix !== undefined && url.search === "?mobs=*" ? { prefix, kind: "experience" } : undefined;
+    }
+    const prefix = prefixes.find(item => url.pathname === `${item}/console/rpc`);
+    if (prefix === undefined || request.method() !== "POST") return undefined;
+    try {
+      return JSON.parse(request.postData() || "{}").method === "meta/capabilities" ? { prefix, kind: "capabilities" } : undefined;
+    } catch { return undefined; }
+  }
+  function lifeOf(action, prefix) {
+    if (!action.life.has(prefix)) action.life.set(prefix, { capabilities: [], experiences: [], reads: [] });
+    return action.life.get(prefix);
+  }
+  // What the action has not yet seen of the console's last initializing start under the prefix.
+  function missingWitness(action, prefix) {
+    const life = action.life.get(prefix);
+    if (!life || !life.capabilities.length) return null;
+    if (life.capabilities.some(entry => entry.lists === undefined)) return "the answer to its capabilities read";
+    if (!life.capabilities.some(entry => entry.lists)) return null;
+    const answered = life.experiences.map(entry => entry.answered).filter(Number.isFinite);
+    if (!answered.length) return "the answer to its experience read for every mob";
+    const first = Math.min(...answered);
+    return life.reads.some(began => began > first) ? null : "the unscoped read that follows its experience read for every mob";
+  }
+  function settleLifecycle(request, finished) {
+    const item = lifecycle.get(request);
+    if (!item) return;
+    lifecycle.delete(request);
+    if (item.kind === "experience") { item.entry.answered = ++order; item.action.settle?.(); return; }
+    const conclude = lists => { item.entry.lists = lists; item.action.settle?.(); };
+    if (!finished) { conclude(false); return; }
+    Promise.resolve().then(() => request.response()).then(response => response?.ok() ? response.json() : null).then(
+      body => conclude(Array.isArray(body?.result?.feature_capabilities) && body.result.feature_capabilities.includes(mobAddressing)),
+      () => conclude(false),
+    );
+  }
+  async function initialized(action) {
+    const missing = () => action.prefixes.map(prefix => [prefix, missingWitness(action, prefix)]).filter(([, what]) => what);
+    if (!missing().length) return;
+    let timer;
+    try {
+      await new Promise((resolve, reject) => {
+        action.settle = () => { if (!missing().length) resolve(); };
+        timer = setTimeout(() => {
+          const [prefix, what] = missing()[0] || [];
+          if (!what) resolve();
+          else reject(new Error(`${action.reason}: the console's last initializing start was not seen${prefix ? ` under ${prefix}` : ""}: missing ${what}`));
+        }, initializationTimeoutMs);
+      });
+    } finally { clearTimeout(timer); action.settle = null; }
   }
   // `subscription` names the prefix whose unscoped subscription the request
   // belongs to and its place among that subscription's requests in the
@@ -79,22 +155,44 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
       } else if (!document.fenced) document.candidates.add(request);
     }
     if (!action?.prefixes.length) return;
+    // In a navigation only the new document's requests tell of its initialization.
+    const fresh = !document || document.fenced;
+    const lifecycleOf = fresh ? lifecycleRequest(request, action.prefixes) : undefined;
+    if (lifecycleOf) {
+      const entry = lifecycleOf.kind === "experience" ? { answered: undefined } : { lists: undefined };
+      lifeOf(action, lifecycleOf.prefix)[lifecycleOf.kind === "experience" ? "experiences" : "capabilities"].push(entry);
+      lifecycle.set(request, { action, kind: lifecycleOf.kind, entry });
+      return;
+    }
     const prefix = subscriptionPrefix(request, action.prefixes);
     if (prefix === undefined) return;
-    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, begun: 0, cancelled: [] });
+    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, begun: 0, everyMob: 0, cancelled: [] });
     const start = action.starts.get(prefix);
+    const everyMob = asksEveryMob(request);
     start.begun += 1;
-    // This request is the successor of the starts cancelled before it.
-    for (const record of start.cancelled.splice(0)) accept(record, `${action.reason}: authority initialization`);
+    if (everyMob) start.everyMob = start.begun;
+    // This request is the successor of the starts cancelled before it; of the
+    // second replaced start only when it asks for every mob.
+    start.cancelled = start.cancelled.filter(item => {
+      if (item.second && !everyMob) return true;
+      accept(item.record, `${action.reason}: authority initialization`);
+      return false;
+    });
     bind(request, `${action.reason}: authority initialization`, aborted, action, false, { prefix, order: start.begun });
+    if (fresh && request.method() === "POST") {
+      lifeOf(action, prefix).reads.push(++order);
+      action.settle?.();
+    }
   }
   function observeFinished(request) {
+    settleLifecycle(request, true);
     active.delete(request);
     for (const action of actions.values()) action.document?.candidates.delete(request);
     if (!allowances.get(request)?.required) allowances.delete(request);
   }
   const errorText = failure => `${failure.method} ${failure.url}: ${failure.error} ${failure.postData || ""}`;
   function observeFailure(request) {
+    settleLifecycle(request, false);
     const allowance = allowances.get(request);
     const failure = { method: request.method(), url: request.url(), postData: request.postData(), error: request.failure()?.errorText };
     const matches = Boolean(allowance && failure.error === allowance.error);
@@ -108,8 +206,10 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     else if (start && start.replaced < replacedStarts) {
       start.replaced += 1;
       // Its successor has begun already, or the cancellation waits for it.
-      if (start.begun > allowance.subscription.order) accept(record, allowance.reason);
-      else start.cancelled.push(record);
+      // The second replaced start is the capability's: its successor asks for every mob.
+      const second = start.replaced === replacedStarts;
+      if ((second ? start.everyMob : start.begun) > allowance.subscription.order) accept(record, allowance.reason);
+      else start.cancelled.push({ record, second });
     }
     else if (!allowance && failure.error === aborted && document?.request && document.candidates.has(request)) document.failures.push(record);
     else errors.push(errorText(failure));
@@ -155,7 +255,8 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
       }
     }
     // No successor began in the action: a failed replacement.
-    for (const start of action.starts.values()) for (const record of start.cancelled.splice(0)) errors.push(errorText(record));
+    for (const start of action.starts.values()) for (const item of start.cancelled.splice(0)) errors.push(errorText(item.record));
+    for (const [request, item] of lifecycle) if (item.action === action) lifecycle.delete(request);
     for (const [request, allowance] of allowances) if (allowance.action === action) allowances.delete(request);
     for (const [page, value] of actions) if (value === action) actions.delete(page);
   }
@@ -168,7 +269,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     },
     async during(page, reason, action, { priorRequests = () => true, initialize = false, documentNavigation = false } = {}) {
       assert(!actions.has(page), "failure action scopes must not overlap on a page");
-      const scope = { reason, prefixes: actionPrefixes(initialize), starts: new Map() };
+      const scope = { reason, prefixes: actionPrefixes(initialize), starts: new Map(), life: new Map(), settle: null };
       if (documentNavigation) {
         // Requests can begin after the action snapshot while the old document
         // is still running, even after navigation begins. Stop collecting at
@@ -189,6 +290,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
           bind(request, `${reason}: prior document request`, aborted, scope);
         }
         response = await action();
+        await initialized(scope);
         return response;
       } finally { finishAction(scope, response); }
     },
@@ -197,9 +299,13 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     },
     async popup(reason, action) {
       assert.equal(popupAction, null, "popup action scopes must not overlap");
-      const scope = { reason, prefixes: actionPrefixes(true), starts: new Map(), page: null };
+      const scope = { reason, prefixes: actionPrefixes(true), starts: new Map(), life: new Map(), settle: null, page: null };
       popupAction = scope;
-      try { return await action(); } finally { popupAction = null; finishAction(scope); }
+      try {
+        const opened = await action();
+        await initialized(scope);
+        return opened;
+      } finally { popupAction = null; finishAction(scope); }
     },
     assertClean() {
       assert([...actions.values()].every(action => !action.document?.failures.length), "navigation cancellation evidence is still pending");

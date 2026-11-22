@@ -20,6 +20,7 @@ function setup(options = {}) {
     frame: () => options.frame || (options.page ? { page: () => options.page } : frame),
     isNavigationRequest: () => Boolean(options.navigation),
     redirectedFrom: () => options.redirectedFrom || null,
+    response: async () => options.answer === undefined ? null : { ok: () => true, json: async () => options.answer },
   });
   const start = item => { context.emit("request", item); return item; };
   const fail = item => context.emit("requestfailed", item);
@@ -409,6 +410,139 @@ test("a request under another prefix is no successor", async () => {
   assert.equal(s.monitor.errors.length, 1);
 });
 
+test("a second replaced start needs a successor that asks for every mob: a gateway that lists no mob addressing replaces one", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    s.fail(s.start(seedOf(s)));
+    s.fail(s.start(seedOf(s)));
+    s.start(seedOf(s));
+  });
+  assert.equal(s.monitor.expected.length, 1);
+  assert.equal(s.monitor.errors.length, 1);
+});
+
+// An initializing action ends on the console's own last initializing start,
+// as the browser's requests show it, and then no earlier: the answer to its
+// capabilities read; where that lists mob addressing, the answer to the
+// experience read for every mob and the unscoped read that follows it.
+const capabilitiesOf = (s, answer, prefix = "") => s.request({
+  method: "POST", url: `${origin}${prefix}/console/rpc`, body: { method: "meta/capabilities", params: {} }, answer,
+});
+const listsMobAddressing = { result: { feature_capabilities: ["mob_addressing"] } };
+const everyMobExperienceOf = (s, prefix = "") => s.request({ url: `${origin}${prefix}/console/experience?mobs=*` });
+const finish = (s, item) => s.context.emit("requestfinished", item);
+const turns = () => new Promise(resolve => setImmediate(resolve));
+
+test("on a gateway that lists mob addressing an initializing action ends on the read after the every-mob experience read", async () => {
+  const s = setup();
+  const capabilities = capabilitiesOf(s, listsMobAddressing);
+  const experience = everyMobExperienceOf(s);
+  let stream; let ended = false;
+  const action = s.monitor.navigation(s.page, "initial host", async () => {
+    s.commit();
+    s.start(capabilities);
+    s.start(seedOf(s));
+    stream = s.start(streamOf(s));
+  }).then(() => { ended = true; });
+  await turns();
+  assert.equal(ended, false, "the capabilities answer is still out");
+  finish(s, capabilities); await turns();
+  assert.equal(ended, false, "the experience read for every mob is still out");
+  s.start(experience); s.start(seedOf(s)); await turns();
+  assert.equal(ended, false, "a read before that answer is not the last start");
+  finish(s, experience); await turns();
+  assert.equal(ended, false, "the read after it has not begun");
+  // What the action awaited is long there; the console now replaces its start.
+  s.fail(stream);
+  s.start(seedOf(s, { body: everyMobSeed })); await turns();
+  await action;
+  assert.equal(ended, true);
+  s.monitor.assertClean();
+  assert.equal(s.monitor.expected.length, 1, "the start replaced before the witness is inside the action");
+});
+
+test("on a gateway that lists no mob addressing, or whose capabilities read fails, the action ends on that answer", async () => {
+  for (const answer of [{ result: { feature_capabilities: ["other"] } }, { result: {} }, { error: { code: -32601, message: "Method not found" } }, "failed"]) {
+    const s = setup();
+    const capabilities = capabilitiesOf(s, answer === "failed" ? undefined : answer);
+    let ended = false;
+    const action = s.monitor.during(s.page, "initial host", async () => {
+      s.start(capabilities);
+      s.start(seedOf(s));
+    }, { priorRequests: () => false, initialize: true }).then(() => { ended = true; });
+    await turns();
+    assert.equal(ended, false, "the capabilities answer is still out");
+    if (answer === "failed") s.fail(capabilities); else finish(s, capabilities);
+    await action;
+    assert.equal(s.monitor.errors.length, answer === "failed" ? 1 : 0);
+  }
+});
+
+test("an action that never sees the console's last initializing start fails and names what is missing", async () => {
+  for (const [until, missing] of [
+    ["nothing", /initial host: the console's last initializing start was not seen: missing the answer to its capabilities read/],
+    ["capabilities", /missing the answer to its experience read for every mob/],
+    ["experience", /missing the unscoped read that follows its experience read for every mob/],
+  ]) {
+    const s = setup({ initializationTimeoutMs: 20 });
+    const capabilities = capabilitiesOf(s, listsMobAddressing);
+    const experience = everyMobExperienceOf(s);
+    await assert.rejects(s.monitor.during(s.page, "initial host", async () => {
+      s.start(capabilities); s.start(experience); s.start(seedOf(s));
+      if (until !== "nothing") finish(s, capabilities);
+      if (until === "experience") finish(s, experience);
+    }, { priorRequests: () => false, initialize: true }), missing);
+    // The action is over: its scope is released and nothing of it is forgiven later.
+    await s.monitor.during(s.page, "later action", async () => {}, { priorRequests: () => false });
+  }
+  const prefixed = setup({ initializationPrefixes: ["/scope-a", "/scope-b"], initializationTimeoutMs: 20 });
+  await assert.rejects(prefixed.monitor.during(prefixed.page, "switch to B", async () => {
+    prefixed.start(capabilitiesOf(prefixed, listsMobAddressing, "/scope-b"));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] }), /not seen under \/scope-b: missing the answer to its capabilities read/);
+});
+
+test("a cancellation after the witness is outside the action and unexpected; one before it with no successor fails the action", async () => {
+  const after = setup();
+  const capabilities = capabilitiesOf(after, listsMobAddressing);
+  const experience = everyMobExperienceOf(after);
+  let last;
+  await after.monitor.during(after.page, "initial host", async () => {
+    after.start(capabilities); after.start(experience); after.start(seedOf(after));
+    finish(after, capabilities); finish(after, experience);
+    last = after.start(seedOf(after, { body: everyMobSeed }));
+  }, { priorRequests: () => false, initialize: true });
+  after.fail(last);
+  after.start(seedOf(after, { body: everyMobSeed }));
+  assert.equal(after.monitor.expected.length, 0);
+  assert.equal(after.monitor.errors.length, 1);
+
+  const before = setup({ initializationTimeoutMs: 20 });
+  const asked = capabilitiesOf(before, listsMobAddressing);
+  const read = everyMobExperienceOf(before);
+  await assert.rejects(before.monitor.during(before.page, "initial host", async () => {
+    before.start(asked); before.start(read);
+    const stream = before.start(streamOf(before, { query: "?mobs=*" }));
+    finish(before, asked); finish(before, read);
+    before.fail(stream);
+  }, { priorRequests: () => false, initialize: true }), /missing the unscoped read that follows its experience read for every mob/);
+  assert.equal(before.monitor.expected.length, 0);
+  assert.equal(before.monitor.errors.length, 1, "the stream nothing replaced is a failed replacement");
+});
+
+test("a navigation counts the new document's requests only, and an action that saw no capabilities read waits for nothing", async () => {
+  const s = setup({ initializationTimeoutMs: 20 });
+  await s.monitor.navigation(s.page, "reload", async () => {
+    // The old document asks its capabilities once more before the new one commits.
+    s.start(capabilitiesOf(s, listsMobAddressing));
+    s.commit();
+    s.start(seedOf(s));
+  });
+  await s.monitor.during(s.page, "another prefix", async () => {
+    s.start(capabilitiesOf(s, listsMobAddressing, "/elsewhere"));
+  }, { priorRequests: () => false, initialize: true });
+  s.monitor.assertClean();
+});
+
 test("initialization allowance ends with its action even for the same request", async () => {
   const s = setup(); let late;
   await s.monitor.navigation(s.page, "initial host", async () => {
@@ -482,7 +616,7 @@ test("a popup request before the page event binds only that first known page", a
     s.context.emit("page", popup);
     s.fail(s.start(s.request({ page: popup, method: "POST", url: `${origin}/console/rpc`, body: seed })));
     s.fail(s.start(s.request({ page: unrelated, url: `${origin}/console/timeline/stream` })));
-    s.start(streamOf(s, { page: popup }));
+    s.start(streamOf(s, { page: popup, query: "?mobs=*" }));
   });
   assert.equal(s.monitor.expected.length, 2);
   assert.equal(s.monitor.errors.length, 1);

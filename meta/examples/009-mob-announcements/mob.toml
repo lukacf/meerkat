@@ -1,0 +1,17 @@
+# One profile for the two agents of this example. The agents are declared in
+# the roster of the program (ops and support).
+[mob]
+id = "announcements"
+
+[profiles.listener]
+model = "gpt-6-astra"
+# A turn_driven agent runs when something is delivered to it: a batch of
+# announcements, or a message of the host.
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.listener.tools]
+comms = true
+# The tools an agent announces and subscribes with for itself: mob_announce
+# and mob_subscription. Without this line only the host can do both.
+rust_bundles = ["mob_announcements"]

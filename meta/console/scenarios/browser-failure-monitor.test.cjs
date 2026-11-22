@@ -254,86 +254,115 @@ test("finished requests and allowances from completed actions cannot hide later 
   assert.equal(s.monitor.errors.length, 2);
 });
 
-test("initialization allows one exact same-origin unscoped seed and stream request", async () => {
-  const s = setup();
-  await s.monitor.navigation(s.page, "initial host", async () => {
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/console/rpc`, body: seed })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream` })));
-  });
-  s.monitor.assertClean();
-  assert.equal(s.monitor.expected.length, 2);
-  assert(s.monitor.expected.every(item => item.reason === "initial host: authority initialization"));
+// While a document initializes the console cancels its own unscoped
+// subscription (a recent-page read, then the stream) and starts it again:
+// when the experience names its scope and, on a gateway whose capabilities
+// list mob addressing, once more after it has read the experience for every
+// mob; from then on the read and the stream ask for every mob (`mobs=*`).
+// A cancelled read or stream is the console's own only when the next read or
+// stream of that subscription begins after it, in the same action.
+const everyMobSeed = { ...seed, params: { ...seed.params, mobs: "*" } };
+const seedOf = (s, options = {}) => s.request({
+  method: "POST", url: `${origin}${options.prefix || ""}/console/rpc`, body: options.body || seed,
+  ...(options.page ? { page: options.page } : {}),
+});
+const streamOf = (s, options = {}) => s.request({
+  url: `${origin}${options.prefix || ""}/console/timeline/stream${options.query || ""}`,
+  ...(options.page ? { page: options.page } : {}), ...(options.error ? { error: options.error } : {}),
 });
 
-test("initialization cannot forgive a third seed, scoped reads, writes, foreign origins, or wrong failures", async () => {
-  const s = setup();
-  await s.monitor.navigation(s.page, "initial host", async () => {
-    const options = { method: "POST", url: `${origin}/console/rpc`, body: seed };
-    s.fail(s.start(s.request(options)));
-    s.fail(s.start(s.request(options)));
-    s.fail(s.start(s.request(options)));
-    s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, identity: "router:main" } } })));
-    s.fail(s.start(s.request({ ...options, body: { method: "meta/console/send", params: { content: "do not hide" } } })));
-    s.fail(s.start(s.request({ ...options, url: "http://foreign.test/console/rpc" })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream`, error: "net::ERR_FAILED" })));
-  });
-  assert.equal(s.monitor.expected.length, 2);
-  assert.equal(s.monitor.errors.length, 5);
-});
-
-// While a document initializes the console starts its one unscoped
-// subscription up to three times: at load, again when the experience names
-// its scope, and again when the gateway's capabilities first list mob
-// addressing. From then on its read and its stream ask for every mob
-// (`mobs=*`). Each later start cancels the read or the stream then in flight.
-test("initialization allows the cancelled stream of each of its two earlier starts, for one mob or for every mob", async () => {
-  for (const second of ["", "?mobs=*"]) {
+test("initialization allows a cancelled seed or stream once the subscription's next request replaces it", async () => {
+  for (const [first, second] of [
+    [s => seedOf(s), s => streamOf(s)],
+    [s => streamOf(s), s => streamOf(s, { query: "?mobs=*" })],
+    [s => streamOf(s, { query: "?mobs=*" }), s => streamOf(s, { query: "?mobs=*" })],
+    [s => seedOf(s), s => seedOf(s, { body: everyMobSeed })],
+  ]) {
     const s = setup();
     await s.monitor.navigation(s.page, "initial host", async () => {
-      s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream${second}` })));
-      s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?mobs=*` })));
+      s.fail(s.start(first(s)));
+      assert.equal(s.monitor.expected.length, 0, "a cancelled start is the console's own only once its successor begins");
+      assert.throws(() => s.monitor.assertClean(), /replacement evidence is still pending/);
+      s.fail(s.start(second(s)));
+      assert.equal(s.monitor.expected.length, 1);
+      s.start(seedOf(s, { body: everyMobSeed }));
+      assert.equal(s.monitor.expected.length, 2);
     });
     s.monitor.assertClean();
-    assert.equal(s.monitor.expected.length, 2);
-    assert(s.monitor.expected.every(item => item.reason === "initial host: authority initialization"));
+    assert(s.monitor.failures.every(item => item.expected === true && item.reason === "initial host: authority initialization"));
   }
 });
 
-test("initialization allows the cancelled seed of each of its two earlier starts, for one mob or for every mob", async () => {
+test("a cancelled seed or stream that no successor follows in its action is a failed replacement", async () => {
   const s = setup();
   await s.monitor.navigation(s.page, "initial host", async () => {
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/console/rpc`, body: seed })));
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/console/rpc`, body: { ...seed, params: { ...seed.params, mobs: "*" } } })));
+    s.fail(s.start(seedOf(s)));
+    s.fail(s.start(streamOf(s, { query: "?mobs=*" })));
   });
-  s.monitor.assertClean();
-  assert.equal(s.monitor.expected.length, 2);
+  // The stream replaced the seed; nothing replaced the stream.
+  assert.equal(s.monitor.expected.length, 1);
+  assert.equal(s.monitor.errors.length, 1);
+  assert.match(s.monitor.errors[0], /timeline\/stream\?mobs=\*: net::ERR_ABORTED/);
+  assert.throws(() => s.monitor.assertClean(), /unexpected browser/);
+  // A successor that begins after the action proves nothing.
+  s.start(seedOf(s));
+  assert.equal(s.monitor.expected.length, 1);
+  assert.equal(s.monitor.errors.length, 1);
 });
 
-test("initialization cannot forgive a third stream, a stream that names a mob or a member, or a seed that names a mob", async () => {
+test("initialization cannot forgive a third cancelled start even when a successor follows it", async () => {
   const s = setup();
   await s.monitor.navigation(s.page, "initial host", async () => {
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream` })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?mobs=*` })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?mobs=*` })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?mobs=support` })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?mobs=*&identity=router%3Amain` })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?identity=router%3Amain` })));
-    s.fail(s.start(s.request({ url: `${origin}/console/timeline/stream?mob_id=support` })));
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/console/rpc`, body: { ...seed, params: { ...seed.params, mobs: "support" } } })));
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/console/rpc`, body: { ...seed, params: { ...seed.params, mob_id: "support" } } })));
+    s.fail(s.start(seedOf(s)));
+    s.fail(s.start(streamOf(s)));
+    s.fail(s.start(streamOf(s, { query: "?mobs=*" })));
+    s.start(seedOf(s, { body: everyMobSeed }));
   });
   assert.equal(s.monitor.expected.length, 2);
-  assert.equal(s.monitor.errors.length, 7);
+  assert.equal(s.monitor.errors.length, 1);
+  assert.match(s.monitor.errors[0], /timeline\/stream\?mobs=\*: net::ERR_ABORTED/);
 });
 
-test("prefixed initialization allows a second start of the selected authority alone", async () => {
+test("a successor cannot forgive scoped reads, writes, foreign origins, streams that name a mob or a member, or wrong failures", async () => {
+  const s = setup();
+  await s.monitor.navigation(s.page, "initial host", async () => {
+    const options = { method: "POST", url: `${origin}/console/rpc`, body: seed };
+    s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, identity: "router:main" } } })));
+    s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, mobs: "support" } } })));
+    s.fail(s.start(s.request({ ...options, body: { ...seed, params: { ...seed.params, mob_id: "support" } } })));
+    s.fail(s.start(s.request({ ...options, body: { method: "meta/console/send", params: { content: "do not hide" } } })));
+    s.fail(s.start(s.request({ ...options, url: "http://foreign.test/console/rpc" })));
+    s.fail(s.start(streamOf(s, { query: "?mobs=support" })));
+    s.fail(s.start(streamOf(s, { query: "?mobs=*&identity=router%3Amain" })));
+    s.fail(s.start(streamOf(s, { query: "?identity=router%3Amain" })));
+    s.fail(s.start(streamOf(s, { query: "?mob_id=support" })));
+    s.fail(s.start(streamOf(s, { error: "net::ERR_FAILED" })));
+    s.start(seedOf(s));
+  });
+  assert.equal(s.monitor.expected.length, 0);
+  assert.equal(s.monitor.errors.length, 10);
+});
+
+test("prefixed initialization only allows a replaced start of the explicitly selected next authority", async () => {
   const s = setup({ initializationPrefixes: ["/scope-a", "/scope-b"] });
   await s.monitor.during(s.page, "switch to B", async () => {
-    s.fail(s.start(s.request({ url: `${origin}/scope-b/console/timeline/stream` })));
-    s.fail(s.start(s.request({ url: `${origin}/scope-b/console/timeline/stream?mobs=*` })));
-    s.fail(s.start(s.request({ url: `${origin}/scope-a/console/timeline/stream?mobs=*` })));
+    s.fail(s.start(streamOf(s, { prefix: "/scope-b" })));
+    s.fail(s.start(seedOf(s, { prefix: "/scope-b" })));
+    s.fail(s.start(streamOf(s, { prefix: "/scope-a" })));
+    s.fail(s.start(streamOf(s, { prefix: "/scope-b-extra" })));
+    s.start(seedOf(s, { prefix: "/scope-b", body: everyMobSeed }));
   }, { priorRequests: () => false, initialize: ["/scope-b"] });
   assert.equal(s.monitor.expected.length, 2);
+  assert.equal(s.monitor.errors.length, 2);
+});
+
+test("a request under another prefix is no successor", async () => {
+  const s = setup({ initializationPrefixes: ["/scope-a", "/scope-b"] });
+  await s.monitor.during(s.page, "switch to B", async () => {
+    s.fail(s.start(streamOf(s, { prefix: "/scope-b", query: "?mobs=*" })));
+    s.start(seedOf(s, { prefix: "/scope-a" }));
+  }, { priorRequests: () => false, initialize: ["/scope-b"] });
+  assert.equal(s.monitor.expected.length, 0);
   assert.equal(s.monitor.errors.length, 1);
 });
 
@@ -391,7 +420,8 @@ test("new popup initialization is bounded to one page and records that page's er
   const s = setup(); const popup = new EventEmitter();
   const returned = await s.monitor.popup("explicit clone", async () => {
     s.context.emit("page", popup);
-    s.fail(s.start(s.request({ page: popup, url: `${origin}/console/timeline/stream` })));
+    s.fail(s.start(streamOf(s, { page: popup })));
+    s.start(seedOf(s, { page: popup }));
     return popup;
   });
   assert.equal(returned, popup);
@@ -409,6 +439,7 @@ test("a popup request before the page event binds only that first known page", a
     s.context.emit("page", popup);
     s.fail(s.start(s.request({ page: popup, method: "POST", url: `${origin}/console/rpc`, body: seed })));
     s.fail(s.start(s.request({ page: unrelated, url: `${origin}/console/timeline/stream` })));
+    s.start(streamOf(s, { page: popup }));
   });
   assert.equal(s.monitor.expected.length, 2);
   assert.equal(s.monitor.errors.length, 1);
@@ -423,6 +454,7 @@ test("a frame-unavailable popup request remains unexpected", async () => {
     s.fail(s.start(unknown));
     s.context.emit("page", popup);
     s.fail(s.start(s.request({ page: popup, url: `${origin}/console/timeline/stream` })));
+    s.start(seedOf(s, { page: popup }));
   });
   assert.equal(s.monitor.errors.length, 1);
   assert.equal(s.monitor.expected.length, 1);
@@ -461,18 +493,6 @@ test("stop removes listeners before explicit browser teardown", () => {
   assert.equal(s.monitor.errors.length, 0);
   assert.equal(s.context.listenerCount("requestfailed"), 0);
   assert.equal(s.context.listenerCount("weberror"), 0);
-});
-
-test("prefixed initialization only allows the explicitly selected next authority", async () => {
-  const s = setup({ initializationPrefixes: ["/scope-a", "/scope-b"] });
-  await s.monitor.during(s.page, "switch to B", async () => {
-    s.fail(s.start(s.request({ url: `${origin}/scope-b/console/timeline/stream` })));
-    s.fail(s.start(s.request({ method: "POST", url: `${origin}/scope-b/console/rpc`, body: seed })));
-    s.fail(s.start(s.request({ url: `${origin}/scope-a/console/timeline/stream` })));
-    s.fail(s.start(s.request({ url: `${origin}/scope-b-extra/console/timeline/stream` })));
-  }, { priorRequests: () => false, initialize: ["/scope-b"] });
-  assert.equal(s.monitor.expected.length, 2);
-  assert.equal(s.monitor.errors.length, 2);
 });
 
 test("unconfigured initialization authority cannot open an allowance", async () => {

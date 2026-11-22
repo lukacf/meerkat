@@ -4,13 +4,15 @@ const assert = require("node:assert/strict");
 const pageMonitors = new WeakMap();
 const aborted = "net::ERR_ABORTED";
 
-// While a document initializes the console starts its one unscoped
-// subscription (a recent-page read, then the stream) up to three times: at
-// load, again when the experience names its scope, and again when the
-// gateway's capabilities first list mob addressing. Each later start cancels
-// the read or the stream then in flight, so the first two of each may be
-// cancelled and no third.
-const initializationStarts = 2;
+// While a document initializes the console cancels its own unscoped
+// subscription (a recent-page read, then the stream) and starts it again:
+// when the experience names its scope and, on a gateway whose capabilities
+// list mob addressing, once more after it has read the experience for every
+// mob. A cancelled read or stream is the console's own only as a replaced
+// start: the next read or stream of the same subscription begins after it,
+// in the same action. Two starts may be replaced in one action and no third;
+// a cancellation that no successor follows is a failed replacement.
+const replacedStarts = 2;
 // The unscoped stream: no query, or the one that asks for every mob.
 const unscopedStreamQueries = ["", "?mobs=*"];
 
@@ -29,26 +31,36 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
   const active = new Map(), allowances = new Map(), actions = new Map(), pages = new Set();
   let popupAction = null;
   const requestPage = request => { try { return request.frame().page(); } catch { return null; } };
-  function initializationKind(request, prefixes) {
+  // The prefix whose unscoped subscription the request belongs to: its
+  // recent-page read or its stream, for one mob or for every mob.
+  function subscriptionPrefix(request, prefixes) {
     const url = new URL(request.url());
-    if (url.origin !== authority) return null;
+    if (url.origin !== authority) return undefined;
     const prefix = prefixes.find(item => url.pathname === `${item}/console/timeline/stream` || url.pathname === `${item}/console/rpc`);
-    if (prefix === undefined) return null;
+    if (prefix === undefined) return undefined;
     if (request.method() === "GET" && url.pathname === `${prefix}/console/timeline/stream`) {
-      return unscopedStreamQueries.includes(url.search) ? `${prefix}:stream` : null;
+      return unscopedStreamQueries.includes(url.search) ? prefix : undefined;
     }
-    if (request.method() !== "POST" || url.pathname !== `${prefix}/console/rpc`) return null;
+    if (request.method() !== "POST" || url.pathname !== `${prefix}/console/rpc`) return undefined;
     try {
       const body = JSON.parse(request.postData() || "{}");
       return body.method === "meta/console/query_timeline" && body.params?.mode === "recent"
         && body.params?.limit === 200 && !Object.hasOwn(body.params, "identity")
         && !Object.hasOwn(body.params, "mob_id") && (!Object.hasOwn(body.params, "mobs") || body.params.mobs === "*")
-        && !Object.hasOwn(body.params, "before") && !Object.hasOwn(body.params, "after") ? `${prefix}:seed` : null;
-    } catch { return null; }
+        && !Object.hasOwn(body.params, "before") && !Object.hasOwn(body.params, "after") ? prefix : undefined;
+    } catch { return undefined; }
   }
-  function bind(request, reason, error, action, required = false) {
+  // `subscription` names the prefix whose unscoped subscription the request
+  // belongs to: its cancellation counts only as a replaced start.
+  function bind(request, reason, error, action, required = false, subscription = undefined) {
     assert(!allowances.has(request), "a request cannot have overlapping failure allowances");
-    allowances.set(request, { reason, error, action, required });
+    allowances.set(request, { reason, error, action, required, subscription });
+  }
+  function accept(record, reason) {
+    record.expected = true;
+    record.reason = reason;
+    const { expected: ignored, ...evidence } = record;
+    expected.push(evidence);
   }
   function observeRequest(request) {
     const page = requestPage(request);
@@ -64,11 +76,12 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
       } else if (!document.fenced) document.candidates.add(request);
     }
     if (!action?.prefixes.length) return;
-    const kind = initializationKind(request, action.prefixes);
-    const started = kind ? action.initial.get(kind) || 0 : initializationStarts;
-    if (started >= initializationStarts) return;
-    action.initial.set(kind, started + 1);
-    bind(request, `${action.reason}: authority initialization`, aborted, action);
+    const prefix = subscriptionPrefix(request, action.prefixes);
+    if (prefix === undefined) return;
+    if (!action.starts.has(prefix)) action.starts.set(prefix, { replaced: 0, cancelled: [] });
+    // This request is the successor of the starts cancelled before it.
+    for (const record of action.starts.get(prefix).cancelled.splice(0)) accept(record, `${action.reason}: authority initialization`);
+    bind(request, `${action.reason}: authority initialization`, aborted, action, false, prefix);
   }
   function observeFinished(request) {
     active.delete(request);
@@ -79,11 +92,15 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
   function observeFailure(request) {
     const allowance = allowances.get(request);
     const failure = { method: request.method(), url: request.url(), postData: request.postData(), error: request.failure()?.errorText };
-    const accepted = Boolean(allowance && failure.error === allowance.error);
+    const matches = Boolean(allowance && failure.error === allowance.error);
+    // A cancelled start waits for its successor; an action replaces no third.
+    const start = matches && allowance.subscription !== undefined ? allowance.action.starts.get(allowance.subscription) : undefined;
+    const accepted = matches && !start;
     const record = { ...failure, expected: accepted, ...(accepted ? { reason: allowance.reason } : {}) };
     failures.push(record);
     const document = actions.get(active.get(request))?.document;
     if (accepted) expected.push({ ...failure, reason: allowance.reason });
+    else if (start && start.replaced < replacedStarts) { start.replaced += 1; start.cancelled.push(record); }
     else if (!allowance && failure.error === aborted && document?.request && document.candidates.has(request)) document.failures.push(record);
     else errors.push(errorText(failure));
     document?.candidates.delete(request);
@@ -127,6 +144,8 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
         } else errors.push(errorText(failure));
       }
     }
+    // No successor began in the action: a failed replacement.
+    for (const start of action.starts.values()) for (const record of start.cancelled.splice(0)) errors.push(errorText(record));
     for (const [request, allowance] of allowances) if (allowance.action === action) allowances.delete(request);
     for (const [page, value] of actions) if (value === action) actions.delete(page);
   }
@@ -139,7 +158,7 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     },
     async during(page, reason, action, { priorRequests = () => true, initialize = false, documentNavigation = false } = {}) {
       assert(!actions.has(page), "failure action scopes must not overlap on a page");
-      const scope = { reason, prefixes: actionPrefixes(initialize), initial: new Map() };
+      const scope = { reason, prefixes: actionPrefixes(initialize), starts: new Map() };
       if (documentNavigation) {
         // Requests can begin after the action snapshot while the old document
         // is still running, even after navigation begins. Stop collecting at
@@ -168,12 +187,14 @@ function browserFailureMonitor(context, { origin, initializationPrefixes = [""] 
     },
     async popup(reason, action) {
       assert.equal(popupAction, null, "popup action scopes must not overlap");
-      const scope = { reason, prefixes: actionPrefixes(true), initial: new Map(), page: null };
+      const scope = { reason, prefixes: actionPrefixes(true), starts: new Map(), page: null };
       popupAction = scope;
       try { return await action(); } finally { popupAction = null; finishAction(scope); }
     },
     assertClean() {
       assert([...actions.values()].every(action => !action.document?.failures.length), "navigation cancellation evidence is still pending");
+      assert([...actions.values(), ...(popupAction ? [popupAction] : [])].every(action => ![...action.starts.values()].some(start => start.cancelled.length)),
+        "initialization replacement evidence is still pending");
       assert.deepEqual(errors, [], "no unexpected browser exceptions or failed requests");
       const missing = [...allowances].filter(([, allowance]) => allowance.required).map(([request, allowance]) => ({
         method: request.method(), url: request.url(), reason: allowance.reason,
